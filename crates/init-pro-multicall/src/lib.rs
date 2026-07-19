@@ -226,4 +226,36 @@ mod tests {
         assert!(!Action::Server.is_external());
         assert!(!Action::InitPro.is_external());
     }
+
+    #[test]
+    fn as_str_returns_canonical_name_for_each_variant() {
+        // Every variant must map to its canonical reexec name; a cross-wire
+        // here would break reexec_as and the help banner.
+        assert_eq!(Action::InitPro.as_str(), "init-pro");
+        assert_eq!(Action::Server.as_str(), "server");
+        assert_eq!(Action::Agent.as_str(), "agent");
+        assert_eq!(Action::Kubectl.as_str(), "kubectl");
+        assert_eq!(Action::Ctr.as_str(), "ctr");
+        assert_eq!(Action::Crictl.as_str(), "crictl");
+        assert_eq!(Action::Containerd.as_str(), "containerd");
+        assert_eq!(Action::Etcd.as_str(), "etcd");
+    }
+
+    #[test]
+    fn each_alias_maps_to_its_expected_action() {
+        // Guard against a cross-wire typo in ALIASES (e.g. "ctr" -> Etcd),
+        // which the prior is_some()-only test would have missed.
+        for (name, expected) in ALIASES {
+            assert_eq!(
+                resolve(name),
+                Some(*expected),
+                "alias {name:?} must resolve to {expected:?}"
+            );
+        }
+        // Explicit spot-checks for the previously under-asserted peers.
+        assert_eq!(resolve("ctr"), Some(Action::Ctr));
+        assert_eq!(resolve("crictl"), Some(Action::Crictl));
+        assert_eq!(resolve("containerd"), Some(Action::Containerd));
+        assert_eq!(resolve("etcd"), Some(Action::Etcd));
+    }
 }

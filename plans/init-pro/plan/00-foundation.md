@@ -33,7 +33,7 @@ that every later TODO must keep green.
   - Unit test asserting dispatch table is exhaustive over the alias set.
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `cargo build --release` -> single `target/release/init-pro`; `scripts/multicall-selftest.sh` all OK; `init-pro-multicall` dispatch-table unit tests green.
+- **证据 / Evidence** — `cargo build --release` -> single `target/release/init-pro`; `scripts/multicall-selftest.sh` all OK; `init-pro-multicall` unit tests green (alias resolution incl. cross-wire guard, `Action::as_str` round-trip, exhaustive dispatch-table); `init-pro` integration test covers `external_stub` help branch (exit success + banner) and no-help branch (exit `2` + stderr) via real `argv[0]` dispatch.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — —
 
@@ -92,7 +92,7 @@ that every later TODO must keep green.
     a deadline.
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `init-pro-infra` crate: `config` (5 precedence tests), `signal` (`Shutdown` + `install`), `logging` (`tracing` + `--debug`); `scripts/graceful-shutdown-test.sh` asserts server drains on SIGTERM within a deadline.
+- **证据 / Evidence** — `init-pro-infra` crate: `config` (5 precedence tests), `signal` (`Shutdown` + `install`), `logging` (`tracing` + `--debug`; 4 idempotency/env tests asserting no-panic across debug true/false + `RUST_LOG` set/unset); `scripts/graceful-shutdown-test.sh` asserts server drains on SIGTERM within a deadline.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T0.1
 
