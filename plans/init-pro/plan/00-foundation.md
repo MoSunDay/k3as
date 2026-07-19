@@ -32,8 +32,8 @@ that every later TODO must keep green.
     do ln -sf init-pro $a; ./$a --help >/dev/null && echo OK $a; done` — all OK.
   - Unit test asserting dispatch table is exhaustive over the alias set.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — done
+- **证据 / Evidence** — `cargo build --release` -> single `target/release/init-pro`; `scripts/multicall-selftest.sh` all OK; `init-pro-multicall` dispatch-table unit tests green.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — —
 
@@ -91,8 +91,8 @@ that every later TODO must keep green.
   - Integration test: send SIGTERM, assert all spawned tasks drain within
     a deadline.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — done
+- **证据 / Evidence** — `init-pro-infra` crate: `config` (5 precedence tests), `signal` (`Shutdown` + `install`), `logging` (`tracing` + `--debug`); `scripts/graceful-shutdown-test.sh` asserts server drains on SIGTERM within a deadline.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T0.1
 

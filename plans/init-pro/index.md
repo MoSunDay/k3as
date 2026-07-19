@@ -10,9 +10,9 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 
 | ID | Layer | Title | Status | Depends on |
 |----|-------|-------|--------|------------|
-| T0.1 | 0 | 单一二进制 multicall crate 骨架 | not-started | — |
+| T0.1 | 0 | 单一二进制 multicall crate 骨架 | done | — |
 | T0.2 | 0 | 构建与 bundling pipeline | not-started | T0.1 |
-| T0.3 | 0 | 公共基础设施 crate (log/config/signal) | not-started | T0.1 |
+| T0.3 | 0 | 公共基础设施 crate (log/config/signal) | done | T0.1 |
 | T0.4 | 0 | CLI: multicall + k3s 兼容 flag | not-started | T0.1, T0.3 |
 | T0.5 | 0 | 规划体系与文档中枢 | done | — |
 | T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | not-started | T0.1 |
