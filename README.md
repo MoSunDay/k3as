@@ -18,11 +18,16 @@ for the sprint breakdown.
 ## Build & verify
 
 ```
-cargo build                      # single binary: target/debug/init-pro
-cargo test                       # unit tests across all crates
+cargo build --locked             # single binary: target/debug/init-pro
+cargo test --locked              # unit + integration tests across all crates
 scripts/multicall-selftest.sh    # every alias answers --help (T0.1)
 scripts/graceful-shutdown-test.sh # server drains on SIGTERM (T0.3)
 ```
+
+> `--locked` pins to `Cargo.lock` so CI/release builds don't silently pick up
+> new patch versions of dependencies (deps are caret-only). The selftest
+> scripts run a **pre-built** binary, so build with `cargo build --locked`
+> before invoking them.
 
 ## Layout
 
