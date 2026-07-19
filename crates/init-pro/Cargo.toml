@@ -1,0 +1,16 @@
+[package]
+name = "init-pro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "init-pro"
+path = "src/main.rs"
+
+[dependencies]
+init-pro-multicall = { workspace = true }
+init-pro-cli = { workspace = true }

@@ -1,0 +1,43 @@
+# init-pro — single multicall binary, k3s-compatible Kubernetes distro.
+# See plans/init-pro/ for the SSOT.
+[workspace]
+resolver = "2"
+members = [
+    "crates/init-pro",
+    "crates/init-pro-core",
+    "crates/init-pro-multicall",
+    "crates/init-pro-cli",
+    "crates/init-pro-infra",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+authors = ["init-pro"]
+repository = "https://example.invalid/init-pro"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+init-pro-core = { path = "crates/init-pro-core" }
+init-pro-multicall = { path = "crates/init-pro-multicall" }
+init-pro-cli = { path = "crates/init-pro-cli" }
+init-pro-infra = { path = "crates/init-pro-infra" }
+
+# External
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env", "help"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Build profile: small, fast binaries (single-binary constraint, Q1).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

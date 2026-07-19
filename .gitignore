@@ -43,3 +43,6 @@ __pycache__/
 .cargo
 .opencode
 .opencoder
+
+# T0.2 vendored peer binaries
+/vendor/

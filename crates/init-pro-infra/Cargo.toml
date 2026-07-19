@@ -1,0 +1,25 @@
+[package]
+name = "init-pro-infra"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Per-layer feature flags so the M1 spike build can exclude heavy layers.
+layer-api = []
+layer-storage = []
+layer-control-plane = []
+layer-node = []
+layer-router = []
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
