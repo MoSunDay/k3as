@@ -70,6 +70,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 2 (T0.2 + T0.4) blockers resolved (Q6–Q9):** status remains `not-started` for both, but the open `待定` items are now decisions — T0.2 packaging = **Q6**, licensing/SBOM/size = **Q7**; T0.4 config pre-scan = **Q8**, flag posture/matrix = **Q9** + `plan/00-foundation-flag-matrix.md`. Full 7-field detail for T0.2/T0.4 lives in `plan/00-foundation.md`. See `decisions.md` for ADR rationale.
 
 ---
 
