@@ -27,12 +27,39 @@ API/etcd 用最小桩实现，只为给 Router 喂 Ingress。
 - 交付：`cargo build` 产出单一 `init-pro`；`scripts/multicall-selftest.sh` 全绿
 - **状态：done** — commit `T0.1 + T0.3(spike)`
 
-### Sprint 2 — CLI + bundling 管线（T0.2 + T0.4）
-- clap k3s 兼容 flag（`--data-dir/-d`、`--disable`、`--disable-*`、`--debug`、
-  `--prefer-bundled-bin`）；冲突校验对齐 k3s
-- `build.rs` 拉取/固定 containerd·etcd·CNI 到 `vendor/bin/`（gitignored），SHA256 记录，
-  gzip 嵌入，`stage()` 运行时解包
-- 交付：`init-pro stage --dry-run` 列清单 + 哈希；SBOM 决策定稿
+### Sprint 2 — CLI + bundling 管线（T0.4 先行 → T0.2）
+> **Sprint 内重排：T0.4 先于 T0.2。** 理由：T0.4 无需外部下载，立即解除 T0.6
+> 验收脚本（`scripts/cli-flag-parity-test.sh`）的 flag 基线阻塞；T0.2 依赖
+> vendored 获取与网络/离线策略（Q6）。**M0 退出标准与 DAG 关键路径不变**；
+> 仅 Sprint 内次序调整（风险 R-ordering，见下）。Q6–Q9 已在本轮锁定（见
+> `decisions.md`）。
+
+**T0.4 先行 — k3s 兼容 CLI（decision Q8 / Q9）：**
+- 预 clap 层移植 k3s `configfilearg`（`--config/-c` + `INIT_PRO_CONFIG_FILE`
+  + 默认 `<data-dir>/config.yaml` + `key+` 追加；`.d/` dropins / http-config
+  延后并注明）；server 做无效标志剥离，agent 透传（k3s parity）
+- clap-derive server/agent flag 组；accept-wired（Phase-1 子集）/
+  accept-no-op-warn（其余，每进程去重 WARN）/ fatal（冲突规则）三分法，矩阵
+  冻结于 `plan/00-foundation-flag-matrix.md`
+- `--disable` 校验 `DisableItems`（coredns / servicelb / traefik /
+  local-storage / metrics-server / runtimes）；冲突规则逐条移植
+  （`--disable-apiserver`·`--disable-etcd` ✗ `--datastore-endpoint`；
+  `--cluster-reset-restore-path` 需 `--cluster-reset`；`--disable-etcd` 需
+  `--server`；agent 需 `--token`/`--server`）
+- 交付：`scripts/cli-flag-parity-test.sh` 全绿（accept/no-op/fatal 三类）；
+  `init-pro server/agent --help` 冻结基线
+
+**T0.2 次之 — 打包管线（decision Q6 / Q7）：**
+- `build.rs` 下载固定版本（containerd / runc / CNI multicall，均 Apache-2.0）
+  到 gitignored `vendor/bin/`，SHA256 校验；`INIT_PRO_OFFLINE=1` 走预填
+  `vendor/bin/` 离线后备（禁网）
+- 许可允许列表门 + SPDX SBOM + `LICENSES/`（Q7）；GPL `k3s-root` 工具 v1 排除
+- 按文件 zstd（目标 19）→ 生成 `assets.rs`；`stage()` 镜像 k3s `extract()`
+  （flock → tmp → `dataverify`（`.sha256sums`+`.links`）→ 原子 rename →
+  `data/current` 符号链接 → child PATH：CNI 优先、`--prefer-bundled-bin` 翻转）
+- **etcd 不在此打包**（k3s 内 etcd 为进程内 Go 库；FFI 调查 = T2.1）
+- 交付：`init-pro stage --dry-run` 列每个工件 + SHA256；`scripts/stage-fresh-dir-test.sh`
+  全绿（字节级重算比对、`data/current` 指向、PATH 次序、幂等）；SBOM 生成 + 许可门绿
 
 ### Sprint 3 — Conformance 金线门（T0.6）
 - 测试 driver：起 `init-pro server`，跑真 `kubectl`/`kube-rs`，断言 wire-level；

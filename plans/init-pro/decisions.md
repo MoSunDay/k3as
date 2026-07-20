@@ -131,3 +131,195 @@ unknown first.
 - `−` Inverts the natural dependency order; M1 is allowed to stub Layers 1–4
   just enough to feed an Ingress to the Router.
 - → Milestone table (README §3) reflects this ordering.
+
+---
+
+## Q6 — Packaging topology (T0.2)
+
+**Context.** k3s ships all foreign binaries as a single zstd-compressed
+tarball embedded via `//go:embed`, content-addressed by its own SHA-256
+(`link_repos/k3s/scripts/package-cli:57-74`; zstd `-16 --long=25`; runtime
+`extract()` in `cmd/k3s/main.go:259-375`). The embedded tree is `bin/`
+(k3s multicall + containerd/runc/CNI multicall) and `bin/aux/` (host
+utilities). **Critical audit finding:** etcd is *not* a bundled binary in
+k3s — it is linked as an in-process Go library
+(`pkg/executor/embed/etcd/etcd.go`, `go.etcd.io/etcd/server/v3/embed`).
+T0.2 therefore bundles only subprocess binaries (containerd, runc, CNI
+multicall); etcd embed/FFI is T2.1's concern.
+
+**Options.**
+- A) Mirror k3s exactly: one `tar.zst` blob embedded whole; runtime
+  untar + verify.
+- B) **Per-file zstd embed** — `build.rs` fetches pinned artifacts,
+  compresses each file independently, and generates an `assets.rs` (Rust
+  `go:embed` equivalent via `include_bytes!`); runtime `stage()` writes
+  per-file and verifies a ported `.sha256sums` + `.links` manifest.
+- C) `rust-embed` crate at compile time over a `vendor/bin/` directory.
+
+**Decision: B.** Subprocess bundling only (no etcd FFI in T0.2 — deferred
+to T2.1). `build.rs` downloads pinned versions (SHA-256-gated) into a
+gitignored `vendor/bin/`, emits `.sha256sums` + `.links` manifests (ported
+from `pkg/dataverify/dataverify.go`), compresses each file with zstd, and
+generates `assets.rs`. An `INIT_PRO_OFFLINE=1` env var forbids network and
+requires a pre-populated `vendor/bin/` (the offline fallback). Runtime
+`stage()` mirrors k3s `extract()`: flock → write-to-tmp → `dataverify` →
+atomic rename → set child `PATH` (CNI dir first, then host PATH vs
+`bin/aux` toggled by `--prefer-bundled-bin`, `cmd/k3s/main.go:218-237`).
+
+**Consequences.**
+- `+` Per-file embed simplifies `stage()` and gives per-artifact
+  integrity; matches the `init-pro stage --dry-run` contract (list each
+  artifact + SHA-256).
+- `+` Offline fallback (`vendor/bin/` + `INIT_PRO_OFFLINE=1`) keeps
+  CI/air-gap builds deterministic (cf. risk R-vendor-network).
+- `−` Per-file zstd loses k3s's cross-file long-distance matching
+  (`--long=25` exploits that many similar statically-linked ELFs share
+  code blobs); expect a larger compressed payload than k3s's single
+  tarball. Mitigation: target zstd level 19 and a soft size budget (Q7);
+  revisit a single-tarball mode only if the budget busts.
+- `−` `build.rs` doing network I/O complicates reproducible builds;
+  mitigated by the offline fallback and `--locked`.
+- → **T0.2** owns this pipeline; **T2.1** owns etcd embed/FFI/subprocess
+  bundling separately.
+
+---
+
+## Q7 — Licensing, SBOM, and size budget (T0.2)
+
+**Context.** k3s ships only its own Apache-2.0 `LICENSE` and performs **no**
+SBOM or third-party notice aggregation (audit: no `LICENSES/`, no `NOTICE`,
+zero `spdx|syft|sbom|cyclonedx` matches in tree). The v1 bundled set —
+containerd, runc, CNI multicall — is **Apache-2.0** upstream (confirmed).
+**Audit warning:** k3s's `k3s-root` host utilities (iptables, socat,
+ebtables, ethtool, busybox multicall) are largely **GPL-2.0**; bundling
+those triggers GPL notice/redistribution obligations that k3s handles
+implicitly via its separate air-gap tarball. k3s caps its final multicall
+binary at **80 MiB** (`scripts/binary_size_check.sh:14-17`), but that
+excludes the unpacked foreign binaries (they live under
+`<data-dir>/data/<HASH>/bin/` only after first run).
+
+**Options.**
+- A) Match k3s: ship only init-pro's own LICENSE; ignore component notices.
+- B) **Per-build auto-generated SPDX SBOM + `LICENSES/` notice tree +
+  license allow-list gate.**
+- C) Hand-maintained `THIRD_PARTY` file.
+
+**Decision: B.** Each build (a) collects every vendored component's
+upstream `LICENSE`/`NOTICE` into a `LICENSES/` tree and a generated
+SPDX-2.3 SBOM, and (b) enforces a **license allow-list gate** — any
+artifact whose license is not on the cleared list (Apache-2.0, BSD-2/3,
+MIT, ISC) **fails the build**. The v1 bundled set is Apache-2.0 (cleared).
+**GPL-2.0 host utilities (k3s-root) are explicitly excluded from the v1
+bundle** and deferred; if later needed they require additional GPL notice
+handling under this same gate. **Size budget:** soft — track total
+compressed-blob size per Q6 (zstd-19 target); warn past 80 MiB parity,
+fail past a hard cap to be set when the real v1 bundle is first measured.
+
+**Consequences.**
+- `+` Compliance surface is explicit and automated; no silent GPL
+  inheritance.
+- `+` Reproducibility: SBOM + `--locked` + pinned SHA-256 = auditable
+  provenance.
+- `−` Adds a build step (license fetch + SBOM generation); each new
+  vendored artifact must clear the gate before bundling.
+- `−` Excluding k3s-root means init-pro v1 does **not** ship bundled
+  iptables/socat; it relies on the host for those (documented; T4.3
+  networking may revisit).
+- → **T0.2** acceptance includes "SBOM generated + license gate green";
+  `init-pro stage --dry-run` prints the SBOM reference.
+
+---
+
+## Q8 — Config-file pre-scan (T0.4)
+
+**Context.** k3s pre-scans `--config`/`-c`/`K3S_CONFIG_FILE` **before**
+the CLI parser runs (`pkg/configfilearg/`, esp. `parser.go`,
+`defaultparser.go`). Resolution order: env `K3S_CONFIG_FILE` → CLI
+`--config/-c` → default `/etc/rancher/k3s/config.yaml`. Config-file values
+are injected right after the command word so **CLI flags override**; slice
+flags **append**. A `key+` suffix means "append to slice"
+(`parser.go:279-294`). Per-command invalid-flag stripping applies only to
+commands in a `ValidFlags` map (`server`, `etcd-snapshot` — notably **not**
+`agent`). `.d/` dropin directories merge after the base file.
+`MustFindString` short-circuits on `--help/-h/--version/-v`.
+
+**Options.**
+- A) Port the full `configfilearg` machinery (files + env + dropins + http
+  configs + `key+` + per-command stripping) in v1.
+- B) **v1 = file + env + `--config/-c` + `key+` + per-command invalid-flag
+  stripping; defer `.d/` dropins and http-config sources.**
+- C) No config-file pre-scan in v1; flags only.
+
+**Decision: B.** Port `configfilearg` semantics to a **pre-clap layer** in
+`init-pro-cli`: resolution order env `INIT_PRO_CONFIG_FILE` →
+`--config`/`-c` → default `<data-dir>/config.yaml`; injected after the
+command word so CLI wins; slice flags append; `key+` = append-to-slice;
+per-command invalid-flag stripping (ported `stripInvalidFlags`, applied to
+`server` — agent left pass-through as in k3s); `--help/-h/--version/-v`
+short-circuit. **`.d/` dropins and http-config sources are explicitly
+deferred** to a later T0.4 point-release, with rationale: they add
+filesystem-walking and HTTP fetch to the pre-parse path and are not on the
+Phase-1 critical path.
+
+**Consequences.**
+- `+` Existing k3s `config.yaml` files keep working for the supported
+  subset; operator scripts don't break (Q2).
+- `+` Pre-clap layer keeps clap-derive clean (Q9 matrix is the clap
+  surface; config is a separate concern).
+- `−` Dropin/http users must consolidate to a single file in v1 —
+  documented, single-line deferral.
+- `−` Must mirror k3s's "agent does not strip invalid flags" quirk exactly
+  or operators hit surprising errors.
+- → **T0.4** owns the pre-scan + clap surface; flag categorization lives
+  in Q9 / `plan/00-foundation-flag-matrix.md`.
+
+---
+
+## Q9 — Flag v1 posture & matrix (T0.4)
+
+**Context.** k3s `server` exposes ~88 flag entries and `agent` ~45 (audit:
+`pkg/cli/cmds/server.go:190`, `agent.go:269`), many shared via reused flag
+vars. Q2 mandates wire compatibility; scripts and operators will pass the
+full k3s flag vocabulary. A reimplementation that fatals on every
+unimplemented flag breaks the compatibility promise; one that silently
+ignores them hides configuration that does nothing.
+
+**Options.**
+- A) **Max compatibility: accept everything k3s accepts; Phase-1 subset is
+  wired, the rest no-op-with-warning, only contradictions of Phase-1
+  behavior are fatal.**
+- B) Phase-1 subset only; fatal on all others.
+- C) Accept everything silently.
+
+**Decision: A.** Every k3s `server`/`agent` flag is categorized (see
+`plan/00-foundation-flag-matrix.md`, frozen as the
+`init-pro server --help` / `init-pro agent --help` diff baseline) into
+exactly one of:
+- **accept-wired** — Phase-1 subset, parsed and honored: `--data-dir/-d`,
+  `--debug`, `--config/-c`, `--disable` (+ `DisableItems` validation:
+  `coredns, servicelb, traefik, local-storage, metrics-server, runtimes`),
+  `--disable-{etcd,apiserver,agent,controller-manager,scheduler,
+  cloud-controller,kube-proxy,network-policy,helm-controller}`,
+  `--datastore-endpoint`, `--prefer-bundled-bin`, `--token/-t`,
+  `--server/-s`, `--cluster-init`.
+- **accept-no-op-warn** — accepted, parsed, then logged once at WARN:
+  *"flag `<f>` accepted but not yet implemented; no-op"* (deduped per
+  process). Covers all remaining flags so operator scripts keep working.
+- **fatal** — only when a flag value contradicts Phase-1 behavior or trips
+  a k3s conflict rule (ported verbatim): e.g. `--disable-apiserver` ✗
+  `--datastore-endpoint`, `--disable-etcd` ✗ `--datastore-endpoint`,
+  `--cluster-reset-restore-path` without `--cluster-reset`, `--disable-etcd`
+  without `--server` (audit: `pkg/cli/server/server.go:245-265`).
+
+**Consequences.**
+- `+` Maximum compatibility (Q2): k3s scripts run unmodified against
+  init-pro for the wired subset and degrade gracefully elsewhere.
+- `+` Operators get an explicit signal for no-op flags (not silent
+  misconfiguration).
+- `−` The matrix is large (~130 flags); mitigate with one-line-per-category
+  entries and an automated parity test (`scripts/cli-flag-parity-test.sh`).
+- `−` No-op warnings can be noisy; mitigate by deduping per process and
+  honoring log level / `--quiet`.
+- → **T0.4** implements clap-derive server/agent flag groups + the pre-scan
+  (Q8) + `DisableItems` validation + conflict rules; the matrix is the
+  frozen baseline; `scripts/cli-flag-parity-test.sh` enforces it.

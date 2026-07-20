@@ -36,6 +36,10 @@ global platform configuration variable.
 | Q3 | **AI Agent workloads = Phase 2, Layer 7.** Not in the critical path of Layers 0–6. |
 | Q4 | **openresty Rust port = the built-in Router (first-class internal component, NOT an addon).** Lua is that Router's config/runtime DSL; Ingress compiles to Lua routes. |
 | Q5 | **First vertical slice = built-in Router + Lua** (highest risk first, de-risked before everything else). |
+| Q6 | **Packaging topology:** subprocess bundling + per-file zstd embed (`build.rs` → `assets.rs`); offline `vendor/bin/` fallback. etcd FFI deferred to T2.1. |
+| Q7 | **Licensing/SBOM/size:** per-build SPDX SBOM + `LICENSES/` + license allow-list gate; GPL `k3s-root` excluded in v1; soft size budget. |
+| Q8 | **Config-file pre-scan:** ported `configfilearg` (`--config`/`-c` + env + default + `key+`); `.d/` dropins & http-config deferred. |
+| Q9 | **Flag v1 posture:** max compatibility — accept-wired (Phase-1 subset) / accept-no-op-warn (rest) / fatal (conflicts). Matrix in `plan/00-foundation-flag-matrix.md`. |
 
 ---
 
@@ -71,10 +75,12 @@ If M1 fails, Q4 is re-evaluated before Layers 1–4 are built on top.
 ## 5. Reading order
 
 1. **`index.md`** — the SSOT. All 33 TODOs, 7 fields each, status table, DAG.
-2. **`decisions.md`** — Q1–Q5 ADR-style rationale.
+2. **`decisions.md`** — Q1–Q9 ADR-style rationale (Q1–Q5 strategic; Q6–Q9 T0.2/T0.4 implementation-level).
 3. **`template/TODO.md`** — the 7-field schema every TODO obeys.
 4. **`plan/00-foundation.md` … `plan/07-agent-scheduling.md`** — per-layer
    detail (TODO IDs strictly mirror `index.md`; maintain both in lock-step).
+5. **`plan/00-foundation-flag-matrix.md`** — the frozen k3s flag → init-pro v1
+   behavior matrix (Q9 baseline for `init-pro server/agent --help`).
 
 ---
 

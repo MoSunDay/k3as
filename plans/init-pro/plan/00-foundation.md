@@ -42,30 +42,68 @@ that every later TODO must keep green.
 ## T0.2 — 构建与 bundling pipeline
 
 - **目标 / Goal**
-  Embed foreign binaries (containerd, etcd, CNI plugins) into the single
-  `init-pro` binary and stage them to a data dir at runtime — k3s `//go:embed`
-  equivalent (`link_repos/k3s/pkg/data/data.go`, `pkg/deploy/stage.go`).
+  Embed foreign subprocess binaries (containerd, runc, CNI multicall) into
+  the single `init-pro` binary and stage them to a data dir at runtime —
+  k3s `//go:embed` + `extract()` equivalent
+  (`link_repos/k3s/pkg/data/data.go`, `cmd/k3s/main.go:259-375`). **Scope
+  note (Q6):** etcd is *not* bundled here — in k3s it is an in-process Go
+  library (`pkg/executor/embed/etcd/`); init-pro's etcd embed/FFI is T2.1.
 
 - **核心实现 / Core implementation**
-  - `build.rs` downloads/pins upstream artifacts (containerd, etcd, CNI)
-    into a vendored `vendor/bin/` (gitignored), hashes recorded.
-  - Embed as compressed blobs (`include_bytes!` via a generated `assets.rs`,
-    or `rust-embed`); k3s uses tar staging — init-pro uses per-file gzip to
-    dedupe and keep image smaller.
-  - Runtime: `stage()` writes blobs to `<data-dir>/bin/{,aux}` and sets
-    `PATH` for child processes (k3s `stageAndRun` parity).
-  - Reproducible builds: pin versions, `--locked`, record SBOM.
+  - **Acquire (`build.rs`):** download pinned upstream artifacts with
+    recorded SHA-256 into a gitignored `vendor/bin/` (containerd, runc, CNI
+    multicall — Apache-2.0 per Q7). Versions pinned in a checked-in
+    manifest (e.g. `vendor/versions.toml`); each download verified by
+    `sha256sum -c` (k3s `scripts/download:30` parity).
+    `INIT_PRO_OFFLINE=1` forbids all network and requires a pre-populated
+    `vendor/bin/` (the CI/air-gap fallback, cf. risk R-vendor-network).
+  - **Manifest + license gate (Q7):** emit `.sha256sums` and `.links`
+    manifests (ported from `pkg/dataverify/dataverify.go`); collect each
+    component's upstream `LICENSE`/`NOTICE` into `LICENSES/`, generate a
+    SPDX-2.3 SBOM, and run the license allow-list gate
+    (Apache-2.0/BSD/MIT/ISC) — any non-cleared artifact fails the build.
+    GPL `k3s-root` utilities are **excluded** in v1.
+  - **Embed:** per-file zstd compression (Q6; target level 19) → generated
+    `assets.rs` via `include_bytes!` (Rust `go:embed` equivalent). One
+    content-addressed blob per file, keyed by SHA-256.
+  - **Stage (runtime, `stage()`):** mirror k3s `extract()`
+    (`cmd/k3s/main.go:259-375`): flock `<data-dir>/data/.lock` → write
+    blobs to `<data-dir>/data/<HASH>/`-tmp → `dataverify` (recompute
+    `.sha256sums` + `.links`) → atomic rename → symlink
+    `data/current -> <HASH>` (+ `data/previous` rollback). Writes
+    `<data-dir>/bin/` and `<data-dir>/bin/aux/`; clones CNI-plugin
+    symlinks into a stable `<data-dir>/data/cni/` (never overwriting user
+    plugins — k3s `main.go:357-364` parity).
+  - **PATH (k3s `cmd/k3s/main.go:218-237` parity):** CNI dir first;
+    default = host PATH then `bin/aux`; `--prefer-bundled-bin` flips
+    `bin/aux` ahead of host PATH. Child processes reexec the same binary
+    (T0.1 `reexec`).
+  - **Dry-run contract:** `init-pro stage --dry-run` prints one line per
+    artifact (path, size, SHA-256, compression) + the SBOM reference;
+    performs no writes.
 
 - **验收手段 / Acceptance**
-  - `cargo build --release` produces one binary embedding all artifacts.
-  - `init-pro stage --dry-run` lists every embedded artifact + SHA256.
-  - Fresh-dir test: copy binary elsewhere, run `init-pro stage`, assert staged
-    tree matches recorded hashes.
+  - `cargo build --release` produces one `init-pro` binary embedding all
+    artifacts; build emits `LICENSES/` + SPDX SBOM and the license gate is
+    green.
+  - `INIT_PRO_OFFLINE=1 cargo build` succeeds against a pre-populated
+    `vendor/bin/` with no network.
+  - `init-pro stage --dry-run` lists every embedded artifact + SHA-256
+    (matches `.sha256sums`).
+  - **`scripts/stage-fresh-dir-test.sh`** (specified here, implemented in
+    act mode): copy the binary into an empty dir, run `init-pro stage`
+    against a fresh `<data-dir>`, then assert the staged `<data-dir>/bin/`
+    tree matches `.sha256sums` and `.links` byte-for-byte (recompute +
+    compare), `data/current` points at the new `<HASH>`, and child `PATH`
+    includes the CNI dir first. Re-running is idempotent (fast path:
+    `bin/init-pro` exists -> no rewrite).
 
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
-- **卡点 / Blockers** — Licensing/SBOM for bundled Go binaries (Apache-2.0
-  notices); size budget target TBD.
+- **卡点 / Blockers** — none (Q6 resolves packaging topology; Q7 resolves
+    licensing/SBOM/size; deferred items are intentional: etcd FFI = T2.1,
+    `k3s-root` GPL host utilities = later point-release, hard size-cap
+    value = set when the real v1 bundle is first measured).
 - **依赖 / Depends on** — T0.1
 
 ---
@@ -101,32 +139,57 @@ that every later TODO must keep green.
 ## T0.4 — CLI: multicall + k3s 兼容 flag
 
 - **目标 / Goal**
-  A k3s-compatible CLI surface (Q2): `server`, `agent`, `kubectl`, `ctr`,
-  plus flags `--data-dir/-d`, `--disable`, `--disable-etcd`,
-  `--disable-apiserver`, `--disable-agent`, `--datastore-endpoint`,
-  `--prefer-bundled-bin`, `--debug` — matching k3s `pkg/cli/cmds/*.go`.
+  A k3s-compatible CLI surface (Q2): `init-pro server`/`agent` accept the
+  full k3s flag vocabulary. The Phase-1 subset is wired; the rest is
+  accepted with a deduped WARN; only contradictions are fatal (decision
+  **Q9**; matrix in `plan/00-foundation-flag-matrix.md`).
 
 - **核心实现 / Core implementation**
-  - `clap` derive; top-level `init-pro` with subcommands `server`/`agent`;
-    multicall aliases dispatch to wrapped external CLIs (T0.1).
-  - `--disable` accepts k3s set: `coredns, servicelb, traefik,
-    local-storage, metrics-server, runtimes` (k3s `DisableItems`,
-    `link_repos/k3s/pkg/cli/cmds/stage.go`).
-  - Flag validation parity: e.g. `--disable-apiserver` conflicts with
-    `--datastore-endpoint` (k3s `pkg/cli/server/server.go:261`).
-  - Config-file pre-scan for `--data-dir`/`--debug` before clap parse (k3s
-    `configfilearg.MustFindString`).
+  - **Pre-clap config pre-scan (Q8):** port k3s `pkg/configfilearg`
+    (`parser.go`, `defaultparser.go`) to a layer that runs before clap
+    parse. Resolution: env `INIT_PRO_CONFIG_FILE` -> `--config`/`-c` ->
+    default `<data-dir>/config.yaml`; config values injected after the
+    command word so CLI wins; slice flags append; `key+` = append-to-slice;
+    per-command invalid-flag stripping applied to `server` (agent left
+    pass-through, k3s parity); `--help/-h/--version/-v` short-circuit.
+    `.d/` dropins and http-config sources **deferred** (documented, not
+    Phase-1).
+  - **clap-derive flag groups:** `ServerCmd` and `AgentCmd` define the
+    full server/agent flag set from the matrix; each flag is tagged
+    `accept-wired` (honored), `accept-no-op-warn` (logged once per
+    process, deduped), or subject to a `fatal` conflict rule. Env-var
+    parity uses `INIT_PRO_*` (matrix "Env-var parity" section).
+  - **`--disable` validation (`DisableItems`,
+    `pkg/cli/cmds/stage.go:9`):** accept only `coredns, servicelb,
+    traefik, local-storage, metrics-server, runtimes`; unknown token ->
+    fatal *"unknown disable item `<x>`"*. v1 validates the set and records
+    the selection (manifest controllers = T6.x).
+  - **Conflict rules (ported verbatim from
+    `pkg/cli/server/server.go:245-265`):** `--cluster-reset-restore-path`
+    requires `--cluster-reset`; `--disable-apiserver` conflicts
+    `--datastore-endpoint`; `--disable-etcd` conflicts
+    `--datastore-endpoint`; `--disable-etcd` requires `--server`; agent
+    requires `--token` (without cert) and `--server`. See matrix Table B.
+  - **Multicall (T0.1):** external aliases (`kubectl`/`ctr`/`crictl`/
+    `containerd`) bypass the flag groups and reexec the bundled binary.
 
 - **验收手段 / Acceptance**
-  - Snapshot test: `init-pro server --help` text diff against a frozen
-    k3s-`server --help` baseline (whitelist cosmetic deltas).
-  - Property test: every k3s documented flag is accepted or explicitly
-    rejected-with-clear-error by init-pro.
+  - **`scripts/cli-flag-parity-test.sh`** (specified here, implemented in
+    act mode): asserts (1) every flag in the matrix is accepted without
+    "unknown flag" error given a type-correct value; (2) each accept-wired
+    flag is honored (e.g. `--data-dir` changes the resolved dir,
+    `--disable coredns` is recorded); (3) each fatal rule exits non-zero
+    with the k3s-parity message; (4) accept-no-op-warn flags emit the
+    deduped WARN and exit zero; (5) unknown `K3S_*` env vars are ignored.
+  - Snapshot baseline: `init-pro server --help` and `init-pro agent --help`
+    output diffed against a frozen file (cosmetic deltas whitelisted); the
+    matrix is the authoritative behavior spec.
 
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
-- **卡点 / Blockers** — Must decide which k3s flags are no-ops vs fatal in
-    v1 (track in a matrix under this TODO).
+- **卡点 / Blockers** — none (Q8 resolves config pre-scan scope; Q9 +
+    `plan/00-foundation-flag-matrix.md` resolve the flag posture; `.d/`
+    dropins & http-config are an intentional documented deferral).
 - **依赖 / Depends on** — T0.1, T0.3
 
 ---
