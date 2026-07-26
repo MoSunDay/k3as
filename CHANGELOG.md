@@ -7,6 +7,47 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 5 (T5.2 Scope A)
+
+### Added
+- **T5.2 Scope A — content phase pipeline + cosocket over a real HTTP data
+  plane.** Extends the `router` crate from the T5.1 spike into a working
+  openresty-style content phase: a Lua `content_by_lua` function runs per
+  request, drives `ngx.req`/`ngx.header`/`ngx.status`/`ngx.say`/`ngx.print`/
+  `ngx.exit`, and can open a cosocket (`ngx.socket.tcp`) to upstream services —
+  all observed by a **real TCP HTTP/1.1 client**.
+  - **Decision Q13 (per-request coroutine-local binding).** Each in-flight
+    request's Lua coroutine gets its own `RequestContext` via an explicit
+    `Lua::create_thread` + `Thread::into_async` coroutine, keyed in a
+    `ContextStore` (in VM `app_data`) by `Lua::current_thread().to_pointer()`.
+    A spike proved `Function::call_async`'s implicit coroutine collapses to the
+    root thread (one key for all requests) — unusable; the explicit-thread path
+    is distinct and stable under interleaving. Binding/lookup is `Rc`-based (no
+    locking, `!Send`-consistent with Q12).
+  - **Data-plane server = raw TCP, not axum.** axum's `Send` handler bound is
+    incompatible with the `!Send` Lua VM, so the Router data plane is a small
+    raw-TCP HTTP/1.1 loop (`serve.rs`) on the worker `LocalSet`. This supersedes
+    the data-plane portion of Q11/Q12 (the apiserver keeps axum).
+  - **Cosocket** (`cosocket.rs`): `ngx.socket.tcp` with `connect`/`send`/
+    `receive`/`settimeout`/`close`; `send` takes Lua strings (binary-safe via
+    `LuaString`), `receive` returns a Lua string (fixed-size and line modes).
+  - **Real-client tests:** `tests/content_phase.rs` (8) — status/header/body
+    emission, `ngx.exit` short-circuit, and **concurrent requests keep distinct
+    contexts** over real TCP; `tests/cosocket_echo.rs` (3) — echo roundtrip,
+    line-mode receive, latency baseline (~50us/rt for 64B). **11 new tests**;
+    workspace total **210 green** (was 199); `cargo clippy --workspace
+    --all-targets -- -D warnings` clean; all router files <=262 lines.
+
+### Changed
+- **T5.1 -> done:** the feasibility spike is closed (kill-criterion passed in
+  Sprint 4); no further work owed by T5.1. **T5.2 -> in-progress** (Scope A
+  complete; full phase chain + `ngx.var`/`ngx.shared.DICT`/`ngx.exec`/
+  `ngx.redirect` are Scope B+).
+- **Workspace deps:** `router` gained `http`, `bytes`, `tracing`.
+- **`decisions.md`:** added **Q13** ADR. **`index.md`** T5.1 -> `done`,
+  T5.2 -> `in-progress`; **`plan/05-ingress-lua.md`** T5.1/T5.2 status/evidence
+  updated.
+
 ## [Unreleased] — Phase 1, Sprint 4 (T5.1)
 
 ### Added

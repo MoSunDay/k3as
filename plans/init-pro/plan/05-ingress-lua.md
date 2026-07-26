@@ -38,7 +38,7 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
     served concurrently).
   - Microbench: cosocket echo at parity-ish latency vs openresty baseline.
 
-- **状态 / Status** — in-progress (spike: coroutine<->async bridge PROVEN;
+- **状态 / Status** — done (coroutine<->async bridge PROVEN; spike closed.
     cosocket / HTTP phase pipeline / Ingress compilation are T5.2-T5.4)
 - **证据 / Evidence** — new crate `router` (`lib.rs`/`vm.rs`/`ngx.rs`,
     each <=44 lines; depends only on `mlua` + `tokio`). **Kill-criterion PASSED**
@@ -78,9 +78,22 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
   - Integration: a Lua `content_by_lua` writes a body + status; a
     `header_filter_by_lua` mutates headers; both observed by a real client.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **状态 / Status** — in-progress (**Scope A complete**; full phase chain +
+    `ngx.var`/`ngx.shared.DICT`/`ngx.exec`/`ngx.redirect` are Scope B+)
+- **证据 / Evidence** — **Scope A**: content-phase pipeline + cosocket over a
+    raw-TCP HTTP/1.1 data plane (`router` crate: `context.rs`/`ngx.rs`/
+    `pipeline.rs`/`serve.rs`/`cosocket.rs`). Coroutine-local per-request
+    binding (**ADR Q13**) keeps N concurrent requests' `ngx.req`/`ngx.header`/
+    `ngx.status` distinct. Real-client tests PASS: `tests/content_phase.rs`
+    (8) — `real_client_observes_content_phase_over_tcp`,
+    `real_client_concurrent_requests_stay_distinct_over_tcp`;
+    `tests/cosocket_echo.rs` (3) — echo roundtrip, line-mode receive, latency
+    baseline (~50us/rt for 64B over TCP). Workspace total **210 green**;
+    `cargo clippy --workspace --all-targets -- -D warnings` clean; all router
+    files <=262 lines.
+- **卡点 / Blockers** — none. axum's `Send` bound is incompatible with the
+    `!Send` Lua VM, so the data plane uses raw TCP (supersedes the data-plane
+    portion of Q11/Q12; the apiserver keeps axum).
 - **依赖 / Depends on** — T5.1
 
 ---
