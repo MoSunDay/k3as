@@ -44,5 +44,6 @@ __pycache__/
 .opencode
 .opencoder
 
-# T0.2 vendored peer binaries
-/vendor/
+# T0.2 vendored peer binaries (versions.toml is checked in)
+/vendor/bin/
+/vendor/cache/

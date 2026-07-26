@@ -98,8 +98,8 @@ that every later TODO must keep green.
     includes the CNI dir first. Re-running is idempotent (fast path:
     `bin/init-pro` exists -> no rewrite).
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — in-progress (B1 done)
+- **证据 / Evidence** — `init-pro-vendor` crate (acquire/manifest/digest), `crates/init-pro/build.rs`, `vendor/versions.toml` (containerd 1.7.20 / runc 1.1.13 / CNI 1.5.1, Apache-2.0); e2e acquire verified (download + SHA-256 gate + stage into `vendor/bin/`). Embed/stage/SBOM (B2–B5) pending.
 - **卡点 / Blockers** — none (Q6 resolves packaging topology; Q7 resolves
     licensing/SBOM/size; deferred items are intentional: etcd FFI = T2.1,
     `k3s-root` GPL host utilities = later point-release, hard size-cap

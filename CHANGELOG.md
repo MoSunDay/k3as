@@ -39,8 +39,28 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     unknown `K3S_*` ignored). Frozen `server`/`agent --help` snapshots in
     `tests/snapshots/` gate the wired-flag surface.
 
+- **T0.2 — packaging pipeline (in progress; B1 done, embed/stage/SBOM next).**
+  - **B1 — pinned artifact acquire (Q6).** New `init-pro-vendor` crate
+    (build-dependency of `init-pro`) reads `vendor/versions.toml` and acquires
+    pinned upstream artifacts with SHA-256 verification (k3s `sha256sum -c`
+    parity) into the gitignored `vendor/cache/` + `vendor/bin/`.
+    - **Manifest** (`vendor/versions.toml`): containerd 1.7.20, runc 1.1.13,
+      CNI plugins 1.5.1 — all Apache-2.0 (Q7 allow-list enforced at parse
+      time; GPL `k3s-root` host utilities excluded from v1).
+    - **Three acquire modes** (precedence OFFLINE > VENDOR > AUTO):
+      `INIT_PRO_VENDOR=1` downloads missing artifacts; `INIT_PRO_OFFLINE=1`
+      forbids network and requires a pre-populated cache (air-gap); the
+      default Auto mode uses the cache if present else skips (so `cargo build`/
+      `cargo test` stay network-free and fast). Pure `plan()` + offline
+      contract covered by unit + integration tests.
+    - **`crates/init-pro/build.rs`** drives acquire via the vendor crate and
+      emits `cargo:rerun-if-{changed,env-changed}` directives.
+    - Verified end-to-end: `INIT_PRO_VENDOR=1 cargo build` downloads + verifies
+      + stages all three (containerd+runc→`vendor/bin/`, CNI→`vendor/bin/aux/`);
+      a corrupt partial download was correctly rejected by the SHA-256 gate.
+
 ### Tests
-- `cargo test --locked --workspace` → **81 passed; 0 failed** (fresh; up from 23).
+- `cargo test --locked --workspace` → **101 passed; 0 failed** (fresh; up from 23 → 81 → 101).
   - `init-pro-cli` unit: +58 (config-file parse/resolve_path/scalar/slice/key+
     append; config_scan; strip_noop incl. short/value/dedup; conflicts ×7;
     help-parity surface).
@@ -53,6 +73,11 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
   signal / manifest print) — real Layers 1–4 arrive from Phase 2.
 - Config-file layer is read but not yet surfaced to `--dry-run` beyond
   `data-dir`; structured fields land with the layers that consume them.
+- **T0.2 remaining:** B1 acquires only — the per-file zstd embed (`assets.rs`),
+  the `.sha256sums`/`.links` runtime manifest (B3), the SPDX SBOM + license
+  notice tree (B4, Q7), and the runtime `stage()` / `extract()` (B5) land in
+  subsequent commits. `vendor/bin/` + `vendor/cache/` are gitignored build
+  outputs, not committed.
 
 ## [Unreleased] — Phase 1, Sprint 1
 

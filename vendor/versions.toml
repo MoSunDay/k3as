@@ -1,0 +1,39 @@
+# Pinned upstream artifacts for init-pro (T0.2, Q6/Q7).
+#
+# Checked into the repo. The downloaded binaries land in the gitignored
+# vendor/bin/ and vendor/cache/ (acquired by `crates/init-pro/build.rs`).
+#
+# Acquire modes:
+#   INIT_PRO_VENDOR=1 cargo build   # download missing artifacts
+#   INIT_PRO_OFFLINE=1 cargo build  # forbid network; require pre-populated cache
+#   cargo build                     # auto: use cache if present, else skip
+#
+# All v1 artifacts are Apache-2.0 (cleared by the Q7 allow-list). GPL host
+# utilities (k3s-root) are intentionally excluded from v1.
+
+[[artifact]]
+name = "containerd"
+version = "1.7.20"
+license = "Apache-2.0"
+url = "https://github.com/containerd/containerd/releases/download/v1.7.20/containerd-1.7.20-linux-amd64.tar.gz"
+sha256 = "e09410787b6f392748959177a84e024424f75d7aff33ea1c5b783f2260edce67"
+type = "tar"
+strip = 1
+
+[[artifact]]
+name = "runc"
+version = "1.1.13"
+license = "Apache-2.0"
+url = "https://github.com/opencontainers/runc/releases/download/v1.1.13/runc.amd64"
+sha256 = "bcfc299c1ab255e9d045ffaf2e324c0abaf58f599831a7c2c4a80b33f795de94"
+type = "bin"
+install_as = "runc"
+
+[[artifact]]
+name = "cni-plugins"
+version = "1.5.1"
+license = "Apache-2.0"
+url = "https://github.com/containernetworking/plugins/releases/download/v1.5.1/cni-plugins-linux-amd64-v1.5.1.tgz"
+sha256 = "77baa2f669980a82255ffa2f2717de823992480271ee778aa51a9c60ae89ff9b"
+type = "tar"
+into = "aux"
