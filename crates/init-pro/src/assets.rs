@@ -1,8 +1,11 @@
-//! Generated asset registry — spliced from `build.rs` output (T0.2 B2).
+//! Generated asset registry — spliced from `build.rs` output (T0.2 B2/B3).
 //!
 //! `build.rs` always writes `$OUT_DIR/assets.rs` (full when `INIT_PRO_EMBED=1`,
-//! empty otherwise). We include it here and re-export the function so `main.rs`
-//! can pass the `&'static` slice into the CLI driver.
+//! empty otherwise). We include it here so `main.rs` and `runtime.rs` can
+//! access:
+//! - [`embedded_assets`] — the `&[EmbeddedAsset]` slice
+//! - [`SHA256_SUMS`] — the `.sha256sums` manifest (k3s dataverify parity)
+//! - [`DATA_LINKS`] — the `.links` manifest
 
 #![forbid(unsafe_code)]
 
