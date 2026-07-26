@@ -58,9 +58,34 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     - Verified end-to-end: `INIT_PRO_VENDOR=1 cargo build` downloads + verifies
       + stages all three (containerd+runc→`vendor/bin/`, CNI→`vendor/bin/aux/`);
       a corrupt partial download was correctly rejected by the SHA-256 gate.
+  - **B2 — zstd embed codegen (Q6).** `init-pro-vendor` compresses each acquired
+    artifact per-file with zstd level 19 and emits a content-addressed
+    `assets.rs` (one `include_bytes!` blob per file, keyed by SHA-256). Build
+    embeds the blobs into the single binary; verified via `init-pro stage
+    --dry-run` listing every artifact with its SHA-256.
+  - **B3 — dataverify manifests.** Emits `.sha256sums` + `.links` (ported from
+    k3s `pkg/dataverify/dataverify.go`) so runtime staging can recompute +
+    compare byte-for-byte; the manifest doubles as the single source for
+    expected sizes/links.
+  - **B4 — Q7 license gate + SPDX-2.3 SBOM.** `build.rs` collects each
+    component's upstream `LICENSE`/`NOTICE` into `LICENSES/`, runs the
+    allow-list gate (Apache-2.0/BSD/MIT/ISC — non-cleared artifact fails the
+    build), and generates a SPDX-2.3 SBOM referenced by `stage --dry-run`.
+  - **B5 — runtime stage() (k3s `extract()` parity).**
+    `crates/init-pro-cli/src/stage.rs` mirrors k3s `cmd/k3s/main.go:259-375`:
+    flock `<data-dir>/data/.lock` → write blobs to `<data-dir>/data/<HASH>/`-tmp
+    → `dataverify` (recompute `.sha256sums`/`.links`) → atomic rename → symlink
+    `data/current` → `<HASH>` (+ `data/previous` rollback); writes `bin/` +
+    `bin/aux/` and clones CNI-plugin symlinks into a stable `data/cni/`.
+  - **B6 — acceptance harness.** `scripts/stage-fresh-dir-test.sh` copies the
+    binary into an empty dir, runs `init-pro stage` against a fresh
+    `<data-dir>`, and asserts the staged tree matches `.sha256sums`/`.links`
+    byte-for-byte, `data/current` points at the new `<HASH>`, child `PATH`
+    leads with the CNI dir, and a re-run is idempotent — **8/8 assertions
+    green**.
 
 ### Tests
-- `cargo test --locked --workspace` → **101 passed; 0 failed** (fresh; up from 23 → 81 → 101).
+- `cargo test --locked --workspace` → **141 passed; 0 failed** (fresh; up from 23 → 81 → 101 → 141).
   - `init-pro-cli` unit: +58 (config-file parse/resolve_path/scalar/slice/key+
     append; config_scan; strip_noop incl. short/value/dedup; conflicts ×7;
     help-parity surface).
