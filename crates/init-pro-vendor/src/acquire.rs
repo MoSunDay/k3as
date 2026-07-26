@@ -293,6 +293,9 @@ impl std::error::Error for AcquireError {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     use super::*;
 
     #[test]
@@ -326,6 +329,7 @@ mod tests {
 
     #[test]
     fn mode_precedence_offline_over_vendor() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("INIT_PRO_OFFLINE", "1");
         std::env::set_var("INIT_PRO_VENDOR", "1");
         assert_eq!(mode_from_env(), Mode::Offline);
@@ -335,6 +339,7 @@ mod tests {
 
     #[test]
     fn mode_default_auto() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("INIT_PRO_OFFLINE");
         std::env::remove_var("INIT_PRO_VENDOR");
         assert_eq!(mode_from_env(), Mode::Auto);
