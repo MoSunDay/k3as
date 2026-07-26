@@ -7,6 +7,293 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 8 (T5.4 — the M1 data plane → in-progress)
+
+### Added
+- **T5.4 — the Ingress→route compiler, round-robin balancer, Rust reverse
+  proxy, TLS termination, and hot reload.** The built-in Router's control +
+  data plane: Kubernetes `networking/v1` Ingress objects compile down to a
+  flat, specificity-ordered route table, a Rust round-robin balancer selects a
+  peer per request, and a Rust HTTP reverse proxy forwards traffic to upstream
+  Services over real TCP. This is the **M1 vertical slice** de-risked in Q5 —
+  the highest-risk bet. **Scope A** proves end-to-end routing (two hosts → two
+  distinct upstream echo servers); **Scope B** extends the same data plane to
+  **HTTPS termination** (`rustls` + SNI) and **no-restart route-table hot
+  reload** — completing the M1 gate. (A live `kube-rs` informer and dynamic
+  Lua-driven cert issuance remain **T5.5** / Phase 2.)
+  - **`route.rs` — compiled route table.** `RouteTable` maps host × path to an
+    `UpstreamRef` (Service name + numeric/named `PortRef`). Matching honours
+    Kubernetes semantics: exact host, wildcard host (`*.example.com`,
+    single-label `*` rejected), `pathType` `Prefix`/`Exact`, with specificity
+    ordering (most-specific first). `finalise()` sorts the table once; the proxy
+    does a first-match scan. 296 lines.
+  - **`ingress.rs` — the Ingress→route compiler (`compile_ingress`).** Walks
+    `k8s-openapi` `networking/v1::Ingress` objects: `host` rules, `pathType`,
+    per-path `Service` backends (name + port), and the optional
+    `defaultBackend`. Only `Service` backends are routed (a `resource` backend
+    is skipped — nothing to proxy to). Merges multiple Ingresses into one table.
+    227 lines.
+  - **`balancer.rs` — round-robin `Balancer` + `UpstreamResolver`.** The
+    resolver trait (`UpstreamResolver`) expands an `UpstreamRef` to live peer
+    `SocketAddr`s; Scope A ships `StaticResolver` (an in-process map) so the data
+    plane is exercised with no etcd/watch. `Balancer` keeps one rotating index
+    per upstream key (round-robin); `least-conn`/pluggable strategies are Scope
+    B. The free fn `pick_peer` ties them together. 124 lines.
+  - **`proxy.rs` — the Rust HTTP reverse proxy (`serve_proxy`).** Accepts on a
+    `TcpListener`, matches the request against the `RouteTable`, asks the
+    `Balancer` for a peer, forwards over a fresh TCP connection (`Connection:
+    close`), and relays the upstream response. Hop-by-hop headers are stripped
+    both ways (RFC 7230); `X-Forwarded-For`/`X-Forwarded-Proto` are added. When
+    no route matches and no default exists, an optional Lua `Pipeline` serves
+    the request (the T5.2 content path); otherwise 404. The pluggable parts
+    (balancer/resolver/pipeline/`tls`/`reload`) are grouped into a `ProxyOptions`
+    struct (under clippy's arg-count limit). **TLS:** when `opts.tls` is set the
+    stream is wrapped via `TlsAcceptor` (SNI selects the cert), else plaintext.
+    **Hot reload:** a `reload` receiver swaps each incoming `RouteTable` into a
+    `RouteStore` between requests; each connection takes an `Rc` snapshot at
+    accept time, so a swap never disturbs an in-flight request. 388 lines.
+  - **`conn.rs` — shared HTTP/1.1 connection I/O.** Request parsing (head + body
+    framing) and response serialisation extracted here so the Lua data plane
+    (`serve`) and the reverse proxy reuse one implementation. Also parses
+    *upstream* response heads (the proxy reads upstreams). The three request
+    parse tests previously inline in `serve.rs` were consolidated here
+    (preserved, not dropped). 346 lines.
+  - **`tls.rs` — TLS termination config (Scope B, ADR Q16).** Builds a rustls
+    `ServerConfig` with an SNI cert resolver (`SniCertResolver`: ClientHello SNI
+    → pre-loaded `CertifiedKey`, case-insensitive; empty SNI → default cert);
+    ALPN advertises `http/1.1`. Cert/key material is **injected** as PEM bytes
+    (no secrets hardcoded, R5). The shared `build_client_config(verify)` backs
+    both the cosocket `sslhandshake` and `resty.http` (`verify=true` → Mozilla
+    `webpki-roots`; `verify=false` → a `NoVerify` accept-anything verifier). The
+    `ring` crypto provider is used everywhere. 195 lines.
+  - **`config.rs` — hot-reloadable route config (Scope B / T5.5 seam).**
+    `RouteStore` holds the live table as `Rc<RefCell<Rc<RouteTable>>>` so the
+    single-threaded VM (Q12) swaps the whole table between requests with a cheap
+    `Rc` clone — the "generation swap on the request boundary" model.
+    `ConfigSource` is the seam the kube-rs informer (T5.5) will satisfy;
+    `reload_channel()` is the M1 in-process stub (allowed by Q5/R4). 91 lines.
+  - **`Phase::Balancer` in the phase pipeline.** The openresty `balancer_by_lua`
+    phase is wired: a `Balancer` variant is added to `Phase` (with its `label()`
+    arm + `.balancer(src)` builder convenience) and asserted *non-generative*
+    (it may override a peer selection, not produce content). Rust round-robin is
+    the Scope A default; Lua peer-override via the phase is a Scope B refinement.
+  - **`lib.rs` exports are a strict superset** of the Sprint 7 surface: added
+    `compile_ingress`, `serve_proxy`, `pick_peer`, `Balancer`,
+    `StaticResolver`/`UpstreamResolver`, and the route types
+    (`RouteTable`/`RouteRule`/`HostMatcher`/`PathMatcher`/`PortRef`/
+    `UpstreamRef`). Scope B adds `ProxyOptions`, the hot-reload surface
+    (`RouteStore`/`reload_channel`/`ConfigSource`/`StaticConfigSource`), and the
+    TLS surface (`build_server_config`/`CertKey`/`SniCertResolver`). No public
+    symbol was removed.
+  - **Dependencies:** `k8s-openapi` was already a workspace + `api`/`apiserver`
+    dependency (locked in `Cargo.lock`); the router now reads it directly to
+    compile `Ingress`. Scope B adds TLS deps — `rustls`/`tokio-rustls` (the
+    `ring` provider), `rustls-pemfile`, `webpki-roots` — and test-only `rcgen`
+    (a dev-dependency, never shipped; R5).
+- **THE M1 GATES: routing, TLS routing, and hot reload over real TCP.**
+  Routing: two Ingresses compile to a table; `serve_proxy` accepts real
+  connections; a GET to host A reaches upstream echo A, host B reaches upstream
+  echo B. TLS routing: an HTTPS listener with SNI selects the cert per host and
+  routes `https://a`→A, `https://b`→B over a real TLS handshake. Hot reload:
+  pushing a 2nd Ingress through `reload_channel()` makes host B routable
+  **without a restart**, while host A keeps working (full superset). All proven
+  over ephemeral OS-assigned `127.0.0.1:0` sockets — no etcd or LLM in the loop.
+
+### Tests
+- `cargo test --workspace` → **283 passed; 0 failed; 0 ignored** (fresh).
+  **+34 net-new** over the Sprint 7 baseline of 262.
+  - `route.rs` unit (5) — prefix matching element-wise, prefix-root matches all,
+    wildcard single-label rejection, exact host with port stripped, table orders
+    most-specific first.
+  - `ingress.rs` unit (4) — compiles host + paths, default backend used on no
+    match, `resource` backend skipped, multiple Ingresses merged + ordered.
+  - `balancer.rs` unit (3) — round-robin cycles peers, empty pool yields `None`,
+    `StaticResolver` returns registered peers.
+  - `proxy.rs` unit (4) — upstream request strips hop-by-hop + sets
+    `Content-Length`, client response drops hop-by-hop, `X-Forwarded-*` present,
+    path used only for routing.
+  - `conn.rs` unit (3) — request parse specs, upstream response body framing,
+    hop-by-hop header detection (moved here from `serve.rs`).
+  - `tests/proxy_routing.rs` integration (5) — **the gate**:
+    `ingress_routes_each_host_to_its_upstream`, `round_robin_spreads_across_peers`
+    (observes the 1,2,1,2 peer sequence), `default_backend_serves_unmatched_requests`,
+    `no_peers_returns_503`, `forwards_xff_header_upstream`.
+  - `tests/tls_routing.rs` integration (5) — **the TLS gate**: SNI selects the
+    cert and routes each host to its upstream over a real TLS handshake; unknown
+    SNI falls to the default backend (or 404); the TLS listener rejects raw
+    plaintext; ALPN negotiates `http/1.1`.
+  - `tests/hot_reload.rs` integration (3) — **the hot-reload gate**: a 2nd
+    Ingress pushed via `reload_channel` becomes routable without a restart;
+    `RouteStore` generations increment monotonically; a snapshot taken before a
+    swap is unaffected by it.
+- `cargo clippy --workspace --all-targets -- -D warnings` → **0 warnings**.
+- `cargo build --workspace` → clean (`Finished dev profile`).
+- New source files all ≤400 lines (route 306, ingress 227, balancer 124, proxy
+  388, conn 346, config 91, tls 195); `tests/proxy_routing.rs` 287,
+  `tests/tls_routing.rs` 291, `tests/hot_reload.rs` 201, and `tests/resty_stdlib/`
+  split into ≤181-line modules.
+
+### Changed
+- **T5.4 → in-progress (Scope A+B / M1 data plane done).** Meets the M1
+  acceptance: Ingress → route table → `serve_proxy` → upstream, two hosts → two
+  distinct upstreams over real TCP; **TLS routing** (SNI→cert, HTTPS to two
+  upstreams) and **hot reload** (a 2nd Ingress routable without a restart) are
+  proven. Remaining: the live `kube-rs` informer config source and dynamic
+  Lua-driven cert issuance (T5.5 / Phase 2).
+- **`serve.rs` refactored** onto the shared `conn.rs` (private parse/serialise
+  functions moved out); the public API (`serve()`/`ephemeral_listener()`) is
+  unchanged in shape and behavior.
+- **`index.md`** T5.3/T5.4 status updated; **`plan/05-ingress-lua.md`** T5.3/T5.4
+  evidence refreshed (T5.5/6/7 copy-paste status bugs fixed back to
+  `not-started`); **ADR Q16** (`ring` crypto provider) added to `decisions.md`.
+  Workspace total **296**.
+
+## [Unreleased] — Phase 1, Sprint 7 (T5.3 — `resty.*` core → in-progress)
+
+### Added
+- **T5.3 — the `resty.*` standard library + `ngx.shared.DICT`.** The
+  openresty per-worker shared-state layer: a Rust-backed reimplementation of the
+  `resty::*` libraries plus the worker-global shared-dict zone that unblocks
+  T5.4 (Q14 handoff). Covers `resty.lrucache`, `ngx.shared.DICT`,
+  `resty.random`, and `resty.string`/`resty.sha256` (Scope A), plus
+  `resty.http` and `resty.lock` (Scope B — now landed; their TLS path depended
+  on cosocket TLS → T5.4 Scope B / Q16). Remaining: the extra digests
+  (md5/sha1/sha512).
+  - **`ngx.shared.DICT` (ADR Q15).** Worker-global, cross-request-persistent
+    dictionaries auto-created on first access (`local d = ngx.shared.dogs`) —
+    there is no `lua_shared_dict` config yet (Ingress config = T5.4), so a named
+    dict is lazily created with a default entry capacity. The zone store lives
+    in the VM's `app_data` (`RefCell<HashMap<..>>`, `!Send`, Q12 — no
+    `DashMap`), so successive requests on the same worker observe the same
+    entries. API: `get`/`set`/`add`/`replace`/`incr`/`delete`/`flush_all`/
+    `get_keys`/`get_all`; values are scalars (openresty's own restriction).
+    `incr`/`add`/`replace` are synchronous Lua calls → naturally atomic.
+  - **THE T5.3 GATE: cross-request persistence.** Two real HTTP requests on one
+    worker VM share a `ngx.shared.DICT` entry — request A `set`s, request B
+    `get`s and observes the value. Verified both in-process and over a real TCP
+    socket (`shared_dict_persists_across_requests_*`), mirroring the T5.2 §6
+    gate style.
+  - **`resty.lrucache`.** Per-instance, capacity-bounded LRU
+    (`new(size)`/`get`/`set`/`delete`/`flush_all`/`count`/`get_keys`). Hand-
+    written (no `lru` dependency — ADR Q4 minimalism); arbitrary Lua values
+    (tables included) survive across calls via Lua registry keys. `get` touches
+    recency; eviction is LRU (oldest evicted over capacity).
+  - **`resty.random`** — `bytes(n)`/`token(n)` backed by `getrandom` (token is
+    URL-safe base64, no padding).
+  - **`resty.string` + `resty.sha256`** — `encode_base64`/`decode_base64`/
+    `to_hex`/`from_hex` plus a `sha256:new()`/`:update()`/`:final()` digest
+    chain (`sha2`); `:final()` returns lowercase hex (collapses lua-resty-
+    string's binary+to_hex step). The hex codec is hand-written (~30 lines, no
+    `hex` dep).
+  - **`resty.http` (Scope B).** `request_uri(uri, opts)` — single-shot HTTP
+    request over TCP, TLS-upgraded when the URI is `https://` via the shared
+    `build_client_config` (`ring` provider; `verify=false` accepts self-signed,
+    parity with cosocket `sslhandshake`). Returns `{ status, headers, body }`.
+    Backed by the cosocket-style async dialer (no `reqwest`/hyper dep). 230
+    lines.
+  - **`resty.lock` (Scope B).** Expiring-key mutual-exclusion locks
+    (lua-resty-lock parity). A worker-global `LockRegistry` in `app_data` keyed
+    by `(dict, key)`; `lock()` acquires (yielding to other coroutines until free
+    or timeout), `unlock()` releases, and locks auto-expire after `exptime` so a
+    crashed holder cannot deadlock. The cross-coroutine exclusion gate is the
+    T5.3 acceptance test. 133 lines.
+  - **Cosocket TLS (`sslhandshake`, Scope B).** `ngx.socket.tcp:sslhandshake`
+    upgrades a connected plaintext cosocket to TLS using the shared
+    `build_client_config`; the `ConnStream` enum now boxes its `Tls` variant
+    (clippy: `large_enum_variant`) and delegates `AsyncRead`/`AsyncWrite`, so
+    every cosocket method works unchanged after the handshake.
+  - **Module layout (`resty/` dir).** `mod.rs` (register + `ngx.shared` install
+    onto the `ngx` global), `lrucache.rs`, `shared_dict.rs`, `random.rs`,
+    `string.rs`, plus Scope B `http.rs` and `lock.rs`. Wired via
+    `resty::register(&Lua)` after `ngx::register` in `worker_vm()`. Every router
+    source file ≤290 lines.
+  - **Dependencies:** promoted three *transitive* deps to direct router deps —
+    `sha2` (workspace), `base64`, `getrandom` — no truly-new crate added; the
+    LRU/hex codecs are hand-written (zero new algorithm deps).
+  - **Tests:** `tests/resty_stdlib/` (24, split into ≤181-line modules) — the **T5.3 gate** (logical +
+    real-TCP cross-request shared-dict persistence), lrucache
+    set/get/evict/recency/count/keys/delete/flush + table values, shared-dict
+    `incr`/`add`/`replace` atomic semantics, random bytes/token, sha256 known
+    vectors, base64/hex round-trips; +9 router unit tests (capacity, sha256
+    vectors, hex/base64, fill). **33 new tests**; workspace total **296 green**
+    (was 234 incl. T5.4 Scope B); `cargo clippy --workspace --all-targets -- -D warnings` clean.
+
+### Changed
+- **T5.3 → in-progress (Scope A done; Scope B = Sprint 8).** Meets the Scope A
+  acceptance: shared dicts persist across requests and the `resty.*` core is
+  usable from Lua. Unblocks **T5.4** (the M1 Ingress spike), which needs
+  `ngx.shared.DICT` + `resty.lrucache` (Q14).
+- **Sprint renumber:** the nominal plan (`phase-1-implementation.md`) read
+  `S5=T5.2+T5.3, S6=T5.4`; actual execution is `S5=T5.2 Scope A`, `S6=T5.2
+  Scope B`, `S7=T5.3`. A reconciliation note was added; the CHANGELOG cadence
+  (already on the actual rhythm) is unchanged.
+- **`decisions.md`:** added **Q15** ADR (auto-created shared dicts).
+  **`index.md`** T5.3 → `in-progress`, deps `T5.1, T5.2`;
+  **`plan/05-ingress-lua.md`** T5.3 status/evidence updated.
+
+## [Unreleased] — Phase 1, Sprint 6 (T5.2 Scope B → done)
+
+### Added
+- **T5.2 Scope B — the full openresty phase chain + request body + `ngx.*`
+  surface.** Completes T5.2: the ordered phase pipeline
+  (`init_worker`→`rewrite`→`access`→`content`→`header_filter`→`body_filter`→
+  `log`), request-body reading, and the remaining `ngx.*` API. The T5.2
+  acceptance gate (§6: *a `header_filter_by_lua` mutates response headers,
+  observed by a real client*) is now met.
+  - **Phase pipeline (`pipeline/` module dir).** `Pipeline::build()` builder with
+    `.phase(Phase::X, src)` setters (convenience aliases `.rewrite()`/`
+    .content()`/`.header_filter()`/...); `Pipeline::new(src)` kept as the
+    content-only convenience. Generative phases (`rewrite`→`access`→`content`)
+    short-circuit on `ngx.exit`; filter phases (`header_filter`→`body_filter`)
+    always run, even after a short-circuit; `log` is fire-and-forget (response
+    captured before it runs). `init_worker_by_lua` runs once at boot via
+    `Pipeline::boot()` (called by `serve()`).
+  - **Decision Q14 (per-phase coroutines).** Each phase runs as its **own**
+    explicit Lua `Thread` sharing one `Rc<RefCell<RequestContext>>` (distinct
+    threads → distinct Q13 pointers, one shared context). Chosen over a single
+    long-lived driver coroutine because `ngx.exit`/`ngx.exec`/`ngx.redirect`
+    unwind via a sentinel error — clean per-phase propagation beats catch-and-
+    continue, and phases stay isolated. `ngx.exec` re-dispatches (re-runs the
+    generative phases for the new URI) with a loop guard (`MAX_EXEC_REDIRECTS`).
+  - **Request body (`serve.rs` + `ngx.req`).** The data plane now buffers the
+    request body (honouring `Content-Length` **or** `Transfer-Encoding: chunked`,
+    capped at 1 MiB → 413 on overflow) instead of draining/discarding. New APIs:
+    `ngx.req.read_body()` / `get_body_data()` / `get_post_args()` /
+    `get_query_args()`. **Known limitation:** buffered (not true streaming) —
+    matches openresty's small-body mode; streaming `body_filter` is T5.6.
+  - **`ngx.var`** — request-scoped variable table (metatable proxy): the
+    essential set (`uri`/`args`/`request_method`/`scheme`/`host`/`request_uri`)
+    computed live, plus settable user vars. **`ngx.arg`** — the `body_filter`
+    chunk carrier (`ngx.arg[1]` = body, `ngx.arg[2]` = eof). **`ngx.exec`** /
+    **`ngx.redirect`** — internal redirect / external redirect. **Time helpers:**
+    `ngx.now()` / `ngx.time()` / `ngx.update_time()` (per-worker cached clock).
+  - **Module split (`ngx/` + `pipeline/` dirs).** `ngx.rs` (271 lines) →
+    `ngx/{mod,output,req,header,var}.rs`; `pipeline.rs` (152 lines) →
+    `pipeline/{mod,phase,outcome}.rs`. Pure refactor first; all prior behaviour
+    preserved. **Every router source file ≤359 lines.**
+  - **`body_filter` = buffered whole-body transform.** `ngx.arg[1]` is primed
+    with the assembled body, the filter mutates it, committed back — openresty's
+    buffered mode, not true chunked streaming (flagged in Q14).
+  - **Scope decisions:** `ngx.shared.DICT` deferred to **T5.3** (it belongs with
+    `resty.lrucache`); `balancer_by_lua` deferred to **T5.4** (needs upstream
+    pools) — but the phase-hook mechanism is generic so T5.4 can register one;
+    `ngx.re` deferred (would pull a regex dep).
+  - **Tests:** `tests/phase_chain.rs` (15) — the **T5.2 gate** over real TCP
+    (`real_client_observes_header_filter_mutation`), plus rewrite/access
+    short-circuit, `body_filter` transform, POST body round-trip (Content-Length
+    **and** chunked), `ngx.var`, `ngx.exec` internal redirect, `ngx.redirect`,
+    `init_worker`, time helpers; +8 router unit tests (url-decode, body-spec
+    parsing, phase enum, exit-sentinel framing). **24 new tests**; workspace
+    total **234 green** (was 210); `cargo clippy --workspace --all-targets --
+    -D warnings` clean.
+
+### Changed
+- **T5.2 -> done:** meets `验收手段` (content + header_filter observed by a real
+  client). Unblocks **T5.4** (the M1 Ingress spike) once T5.3 lands.
+- **`decisions.md`:** added **Q14** ADR (phase-chain mechanism + buffered body).
+  **`index.md`** T5.2 -> `done`; **`plan/05-ingress-lua.md`** T5.2 status/evidence
+  updated to Scope B.
+
 ## [Unreleased] — Phase 1, Sprint 5 (T5.2 Scope A)
 
 ### Added

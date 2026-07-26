@@ -115,3 +115,5 @@ S1 T0.1+T0.3 ─┬─> S2 T0.2+T0.4 ─┐
               ├─> S3 T0.6 (gate) ┘
               └─> S4 T5.1 ─> S5 T5.2+T5.3 ─> S6 T5.4  (M1 验收)
 ```
+
+> **执行节奏对齐 / Sprint cadence reconciliation.** 上图为名义计划（nominal）。实际执行中 T5.2 因 phase 链 + body 缓冲的复杂度拆为两刀：**S5 = T5.2 Scope A**（content + cosocket）、**S6 = T5.2 Scope B**（完整 phase 链 / body / `ngx.var`·`ngx.arg`·`ngx.exec`·`ngx.redirect`，见 Q14）、**S7 = T5.3 Scope A**（`resty::*` 标准库 + `ngx.shared.DICT`，见 Q15）。T5.3 Scope B（resty.http/lock，受 cosocket TLS 阻塞）与 **T5.4（M1 Ingress spike 验收）**顺延至 **S8**。关键路径 DAG 不变，仅 sprint 编号偏移。

@@ -78,19 +78,26 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
   - Integration: a Lua `content_by_lua` writes a body + status; a
     `header_filter_by_lua` mutates headers; both observed by a real client.
 
-- **状态 / Status** — in-progress (**Scope A complete**; full phase chain +
-    `ngx.var`/`ngx.shared.DICT`/`ngx.exec`/`ngx.redirect` are Scope B+)
-- **证据 / Evidence** — **Scope A**: content-phase pipeline + cosocket over a
-    raw-TCP HTTP/1.1 data plane (`router` crate: `context.rs`/`ngx.rs`/
-    `pipeline.rs`/`serve.rs`/`cosocket.rs`). Coroutine-local per-request
-    binding (**ADR Q13**) keeps N concurrent requests' `ngx.req`/`ngx.header`/
-    `ngx.status` distinct. Real-client tests PASS: `tests/content_phase.rs`
-    (8) — `real_client_observes_content_phase_over_tcp`,
-    `real_client_concurrent_requests_stay_distinct_over_tcp`;
-    `tests/cosocket_echo.rs` (3) — echo roundtrip, line-mode receive, latency
-    baseline (~50us/rt for 64B over TCP). Workspace total **210 green**;
+- **状态 / Status** — done (Scope A + Scope B complete).
+- **证据 / Evidence** — **Scope A** (Sprint 5): content-phase pipeline +
+    cosocket over a raw-TCP HTTP/1.1 data plane; coroutine-local per-request
+    binding (**ADR Q13**) keeps N concurrent requests distinct. **Scope B**
+    (Sprint 6): the full ordered phase chain (`init_worker`→`rewrite`→
+    `access`→`content`→`header_filter`→`body_filter`→`log`) via
+    `Pipeline::build()` (**ADR Q14**: each phase = its own Lua `Thread`
+    sharing one `Rc<RefCell<RequestContext>>`; generative phases short-circuit
+    on `ngx.exit`, filters always run, `ngx.exec` re-dispatches loop-guarded);
+    request-body buffering (`Content-Length` **and** `Transfer-Encoding:
+    chunked`, capped 1 MiB → 413) with `ngx.req.read_body`/`get_body_data`/
+    `get_post_args`/`get_query_args` (**buffered, not streaming** — flagged in
+    Q14); `ngx.var` proxy, `ngx.arg` body-filter carrier, `ngx.exec`/
+    `ngx.redirect`, `ngx.now`/`time`/`update_time`. Module split:
+    `ngx/{mod,output,req,header,var}.rs` + `pipeline/{mod,phase,outcome}.rs`.
+    Real-client tests PASS: `tests/phase_chain.rs` (15) including the §6 gate
+    `real_client_observes_header_filter_mutation`, plus `content_phase.rs`
+    (8) + `cosocket_echo.rs` (3). Workspace total **234 green**;
     `cargo clippy --workspace --all-targets -- -D warnings` clean; all router
-    files <=262 lines.
+    source files <=359 lines.
 - **卡点 / Blockers** — none. axum's `Send` bound is incompatible with the
     `!Send` Lua VM, so the data plane uses raw TCP (supersedes the data-plane
     portion of Q11/Q12; the apiserver keeps axum).
@@ -116,11 +123,11 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
   - Port a sample of lua-resty-core / lua-resty-http tests; pass rate
     recorded as the v1 baseline.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — in-progress (Scope A+B core done: resty.lrucache + ngx.shared.DICT + resty.random + resty.string/sha256 + resty.http + resty.lock + cosocket sslhandshake; remaining digests md5/sha1/sha512 deferred)
+- **证据 / Evidence** — Sprint 7/8: `crates/router/src/resty/` (lrucache/shared_dict/random/string/http/lock); `resty::register` wired in `worker_vm()`; cosocket TLS (`sslhandshake`, ring provider — Q16); `tests/resty_stdlib/` (24) incl. the T5.3 gate (request A `set`s into `ngx.shared.DICT`, request B `get`s the value over real TCP — `shared_dict_persists_across_requests_real_tcp`). Workspace 296 green; clippy clean.
 - **卡点 / Blockers** — Licensing of upstream test fixtures; vendor only
     what's redistributable.
-- **依赖 / Depends on** — T5.1
+- **依赖 / Depends on** — T5.1, T5.2
 
 ---
 
@@ -146,9 +153,33 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
     with no restart.
   - Pinned in T0.6 golden.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **Scope split (Sprint 8a/8b).** T5.4 is large (5 subsystems from zero);
+  split to control risk:
+  - **Scope A (Sprint 8a) — HTTP routing + proxy pathway** (DONE):
+    Ingress→`RouteTable` compiler, Rust round-robin balancer + upstream
+    resolver, Rust HTTP reverse proxy (`serve_proxy`), stub in-process config
+    source, `Phase::Balancer` wired. Acceptance: compile Ingress → `curl` host →
+    traffic reaches the right upstream echo server → second host routes to a
+    different upstream (PROVEN over real TCP).
+  - **Scope B (Sprint 8b) — TLS + hot reload**, completes the M1 gate:
+    `rustls` + SNI termination (`ssl_certificate_by_lua`), informer/watch
+    config source → atomic route-table swap (T5.5).
+
+- **状态 / Status** — in-progress (Scope A+B / M1 data plane done: route compiler + round-robin balancer + Rust reverse proxy + rustls/SNI TLS termination + no-restart hot reload; remaining: live kube-rs informer + dynamic Lua cert issuance → T5.5/Phase 2)
+- **证据 / Evidence** — Sprint 8: `route.rs` (`RouteTable`, host/wildcard +
+  Prefix/Exact path matching, specificity ordering), `ingress.rs`
+  (`compile_ingress` over `k8s-openapi` `networking/v1::Ingress`), `balancer.rs`
+  (round-robin `Balancer` + `UpstreamResolver`/`StaticResolver`), `proxy.rs`
+  (Rust reverse proxy `serve_proxy` w/ `ProxyOptions`: route→balance→forward→
+  relay, hop-by-hop stripping, XFF, TLS accept, hot-reload `RouteStore` swap),
+  `conn.rs` (shared HTTP/1.1 I/O), `config.rs` (`RouteStore` generation swap +
+  `reload_channel` stub), `tls.rs` (`build_server_config` + `SniCertResolver`,
+  ring provider — Q16), `Phase::Balancer` in `pipeline/phase.rs`. `tests/`
+  proxy_routing (5) + tls_routing (5) + hot_reload (3): the M1 gates — two hosts
+  → two distinct upstreams over real TCP (HTTP + HTTPS/SNI), and a 2nd Ingress
+  becomes routable without a restart. Workspace 296 green; clippy clean.
+- **卡点 / Blockers** — Full no-restart reload needs the live `kube-rs` informer
+    config source (T5.5); dynamic Lua-driven cert issuance is deferred.
 - **依赖 / Depends on** — T5.2, T5.3, T1.1
 
 ---

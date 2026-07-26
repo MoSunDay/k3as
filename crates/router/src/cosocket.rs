@@ -1,20 +1,16 @@
-//! Cosocket: `ngx.socket.tcp` — async TCP from Lua (TODO **T5.2b**).
+//! Cosocket: `ngx.socket.tcp` — async TCP from Lua (T5.2b), with TLS upgrade
+//! (T5.3 Scope B `sslhandshake`).
 //!
 //! A cosocket is a coroutine-friendly TCP socket: `connect`/`send`/`receive`
 //! yield at Rust `await` points, so other requests' coroutines run while a
-//! socket blocks — the openresty model. It is the foundation for
-//! `resty.http` (T5.3) and upstream proxying (T5.4).
+//! socket blocks — the openresty model. `sslhandshake` upgrades a plaintext
+//! connection to TLS (client side); it is the foundation for `resty.http` over
+//! HTTPS.
 //!
 //! # Binding
 //! Unlike `ngx.req`/`ngx.header` (read via the global `ngx` table and so
 //! needing the Q13 coroutine-local store), a cosocket is a Lua **value** held
 //! in a phase-local — it is naturally per-request. No app-data wiring needed.
-//!
-//! # Minimal subset (openresty parity deferred to backlog)
-//! `connect(host, port)`, `send(s)`, `receive(n)` (exact bytes) /
-//! `receive("*l"|nil)` (one line), `settimeout(ms)`, `close()`. Errors raise a
-//! Lua error rather than returning `nil, err` (openresty's multi-return); the
-//! `setoption`/`sslhandshake`/`receiveuntil` surface is T5.2+ backlog.
 //!
 //! # Borrow discipline
 //! Each I/O method **takes the stream out** of its `RefCell`, awaits, then
@@ -22,11 +18,53 @@
 //! would either deadlock or violate the `'static` future bound).
 
 use std::cell::RefCell;
+use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use mlua::{Lua, UserData, UserDataMethods, UserDataRef};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
+
+/// The underlying byte stream of a cosocket: plaintext TCP or a TLS session
+/// layered over TCP. Both implement [`AsyncRead`] + [`AsyncWrite`]; the enum
+/// delegates, so every cosocket method works unchanged after `sslhandshake`.
+enum ConnStream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for ConnStream {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            ConnStream::Tls(s) => Pin::new(&mut **s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ConnStream {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            ConnStream::Tls(s) => Pin::new(&mut **s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            ConnStream::Tls(s) => Pin::new(&mut **s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            ConnStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            ConnStream::Tls(s) => Pin::new(&mut **s).poll_shutdown(cx),
+        }
+    }
+}
 
 /// The Lua-visible cosocket userdata.
 pub struct Cosocket {
@@ -34,7 +72,7 @@ pub struct Cosocket {
 }
 
 struct Inner {
-    stream: Option<TcpStream>,
+    stream: Option<ConnStream>,
     timeout_ms: Option<u64>,
     closed: bool,
 }
@@ -57,6 +95,7 @@ impl UserData for Cosocket {
         methods.add_async_method("send", send);
         methods.add_async_method("receive", receive);
         methods.add_async_method("settimeout", settimeout);
+        methods.add_async_method("sslhandshake", sslhandshake);
         // Minimal no-op stubs: keepalive pooling is T5.4 backlog.
         methods.add_async_method("setkeepalive", |_, _, _: Option<u64>| async { Ok(1) });
         methods.add_async_method("close", close);
@@ -73,7 +112,7 @@ async fn connect(_lua: Lua, this: UserDataRef<Cosocket>, (host, port): (String, 
         if g.closed {
             return Err(runtime("cosocket closed"));
         }
-        g.stream = Some(stream);
+        g.stream = Some(ConnStream::Plain(stream));
     }
     Ok(1)
 }
@@ -114,11 +153,59 @@ async fn settimeout(_lua: Lua, this: UserDataRef<Cosocket>, ms: Option<u64>) -> 
     Ok(1)
 }
 
+/// Parsed `sslhandshake` options table.
+struct SslOpts {
+    server_name: String,
+    verify: bool,
+}
+
+impl mlua::FromLua for SslOpts {
+    fn from_lua(value: mlua::Value, _lua: &Lua) -> mlua::Result<Self> {
+        match value {
+            mlua::Value::Table(t) => {
+                let server_name: String = t.get("server_name")?;
+                let verify: bool = t.get("verify").unwrap_or(true);
+                Ok(SslOpts { server_name, verify })
+            }
+            mlua::Value::String(s) => Ok(SslOpts { server_name: s.to_str()?.to_owned(), verify: true }),
+            mlua::Value::Nil => Err(runtime("sslhandshake: server_name required")),
+            other => Err(runtime(format!("sslhandshake: expected table/string, got {other:?}"))),
+        }
+    }
+}
+
+/// `sock:sslhandshake(opts)` -> `true`. `opts` is a table with `server_name`
+/// (string, required) and `verify` (bool, default true). Upgrades the existing
+/// plaintext connection to TLS (client side). openresty's `reuse_session` arg
+/// is accepted-but-ignored (session resumption is backlog).
+async fn sslhandshake(_lua: Lua, this: UserDataRef<Cosocket>, opts: SslOpts) -> mlua::Result<bool> {
+    let stream = take_stream(&this)?;
+    let plain = match stream {
+        ConnStream::Plain(t) => t,
+        ConnStream::Tls(_) => {
+            put_back(&this, stream);
+            return Err(runtime("cosocket already in TLS"));
+        }
+    };
+    let cfg = crate::tls::build_client_config(opts.verify)
+        .map_err(|e| runtime(format!("sslhandshake: client config: {e}")))?;
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let name = rustls::pki_types::ServerName::try_from(opts.server_name.clone())
+        .map_err(|e| runtime(format!("sslhandshake: bad server name {0:?}: {e}", opts.server_name)))?;
+    match connector.connect(name, plain).await {
+        Ok(tls) => {
+            put_back(&this, ConnStream::Tls(Box::new(tls)));
+            Ok(true)
+        }
+        Err(e) => Err(runtime(format!("sslhandshake: {e}"))),
+    }
+}
+
 /// `sock:close()` -> `1`.
 async fn close(_lua: Lua, this: UserDataRef<Cosocket>, (): ()) -> mlua::Result<i64> {
     let mut g = this.inner.borrow_mut();
     g.closed = true;
-    g.stream = None; // dropping the TcpStream closes it
+    g.stream = None; // dropping the stream closes it
     Ok(1)
 }
 
@@ -182,7 +269,7 @@ impl mlua::FromLua for ReceiveSpec {
     }
 }
 
-fn take_stream(this: &UserDataRef<Cosocket>) -> mlua::Result<TcpStream> {
+fn take_stream(this: &UserDataRef<Cosocket>) -> mlua::Result<ConnStream> {
     let mut g = this.inner.borrow_mut();
     if g.closed {
         return Err(runtime("cosocket closed"));
@@ -192,7 +279,7 @@ fn take_stream(this: &UserDataRef<Cosocket>) -> mlua::Result<TcpStream> {
         .ok_or_else(|| runtime("cosocket not connected"))
 }
 
-fn put_back(this: &UserDataRef<Cosocket>, stream: TcpStream) {
+fn put_back(this: &UserDataRef<Cosocket>, stream: ConnStream) {
     this.inner.borrow_mut().stream = Some(stream);
 }
 
