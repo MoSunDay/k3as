@@ -417,3 +417,67 @@ is the deferred acceptance gate of **T1.2b**.
 - → **T1.2a** ships axum-backed discovery on plain HTTP; **T1.2b** adds the
   store trait + CRUD/watch (needs T2.2); **T1.3** adds TLS (rustls) + auth so
   kubectl interop becomes the acceptance gate.
+
+---
+
+## Q12 — Router VM model & the coroutine↔async bridge (T5.1)
+
+**Context.** Q4 makes the built-in Router an openresty Rust port whose data
+plane is driven by **Lua**. The single highest-risk unknown of the whole
+project (per Q5's de-risk-first stance) is: **can a Lua coroutine yield at a
+Rust `await` point on the Tokio runtime, letting another coroutine run
+concurrently without blocking the worker thread?** If not, Q4 is infeasible and
+must be re-evaluated before the platform is built on top of it. `mlua` 0.12
+exposes `LuaJIT` (Lua 5.1 semantics, matching openresty's LuaJIT 2.1) with an
+`async` feature and `create_async_function`/`call_async` APIs that park a Lua
+coroutine while a Rust future is polled and resume it on completion.
+
+**Options.**
+- A) **Per-request VM on a multi-thread executor** (mlua `send` feature): each
+  request gets its own `Send` Lua VM on a tokio thread pool. Parallelism comes
+  from threads, like a classic HTTP server. But this diverges hard from the
+  openresty model (one VM per worker, coroutine-level concurrency), forfeits
+  shared VM state/caches, and pays full VM init cost per request.
+- B) **Worker-wide VM + per-coroutine Lua threads on a single-thread async
+  runtime** (`tokio::task::LocalSet`): one LuaJIT VM per worker; each request
+  is a Lua coroutine driven as a Rust future via `call_async`; coroutines
+  interleave cooperatively at `await` points — a faithful reproduction of
+  openresty's per-worker coroutine scheduler.
+- C) **Abandon Lua** — write the Router in pure Rust (no Ingress→Lua, no
+  `resty::*` ecosystem). This discards Q4 entirely.
+
+**Decision: B.** The Router VM is a **worker-wide LuaJIT VM** (built from source
+via `mlua`'s `vendored` + `luajit` features, offline-friendly) carrying
+**per-coroutine Lua threads**, driven on a **`tokio::task::LocalSet`**
+(single-thread async runtime). The coroutine↔async bridge is `mlua`'s
+`create_async_function` (registers a Rust async fn callable from Lua) +
+`Function::call_async` (drives a Lua function as a coroutine, parking it at
+each inner `await` and resuming on completion). Concurrency is **cooperative
+yielding at `await` points**, exactly like openresty — there is one VM per
+thread, so the `Lua: !Send` constraint is a non-issue (no cross-thread VM
+sharing). `luajit52` is deliberately **off** (openresty = LuaJIT 2.1 = Lua 5.1,
+not 5.2 extensions).
+
+**Consequences.**
+- `+` Faithful to openresty's worker model — ported `resty::*` libraries and
+  phase hooks (T5.2/T5.3) land in familiar territory, and a worker-wide VM
+  amortises compilation/state across requests.
+- `+` **The bridge is proven real.** The T5.1 kill-criterion
+  (`init-pro-router/tests/concurrency.rs`) shows coroutine B starting and
+  finishing **inside** coroutine A's `ngx.sleep(50ms)` window (order
+  `A_start < B_start < B_end < A_end`), total wall ≈ max ≈ 50ms (not the serial
+  sum); 10 coroutines × 20ms complete in ~21ms. `ngx.sleep(10ms)` round-trip is
+  ~11ms. Q4 is de-risked; no Q4 re-evaluation needed.
+- `+` One VM per thread sidesteps `!Send` without the per-request VM cost; the
+  shared axum/tokio substrate (Q11) hosts both the data plane and the apiserver.
+- `−` Parallelism is per-worker (one thread), not per-coroutine — a single
+  worker is bounded by one core for Lua work. Mitigated: the Router runs
+  multiple workers (one per core), exactly like openresty's `worker_processes`;
+  CPU-light proxying streams bodies via hyper (T5.2) off the Lua path.
+- `−` LuaJIT is built from source (`luajit-src`) on first compile (~25s); needs
+  `gcc`/`make`. Mitigated: `vendored` makes it offline-reproducible and is
+  consistent with the Q7 air-gap posture.
+- → **T5.1** ships the spike (VM + `ngx.sleep` + concurrency/latency proof) as
+  an independent crate, **not** wired into `init-pro server`. **T5.2** adds the
+  HTTP phase pipeline + cosocket; **T5.3** the `resty::*` stdlib; **T5.4**
+  Ingress→Lua route compilation (M1).

@@ -38,10 +38,22 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
     served concurrently).
   - Microbench: cosocket echo at parity-ish latency vs openresty baseline.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — This is the make-or-break of Q4; if a clean bridge
-    isn't feasible, escalate before T5.2.
+- **状态 / Status** — in-progress (spike: coroutine<->async bridge PROVEN;
+    cosocket / HTTP phase pipeline / Ingress compilation are T5.2-T5.4)
+- **证据 / Evidence** — new crate `init-pro-router` (`lib.rs`/`vm.rs`/`ngx.rs`,
+    each <=44 lines; depends only on `mlua` + `tokio`). **Kill-criterion PASSED**
+    (`tests/concurrency.rs`): coroutine B starts and finishes *inside* coroutine
+    A's `ngx.sleep(50ms)` window (order `A_start < B_start < B_end < A_end`),
+    total wall ~= max(50,5)=51ms (not the serial ~55ms sum); 10 coroutines x
+    `ngx.sleep(20ms)` complete in ~21ms (scales to ~max, not ~sum). Latency
+    baseline (`tests/sleep_latency.rs`): `ngx.sleep(10ms)` round-trip ~= 11ms.
+    VM model + bridge mechanism documented in ADR **Q12**. Workspace total
+    **199 green** (195 + 4 new); `cargo clippy --all-targets -- -D warnings`
+    clean; `scripts/router-coroutine-selftest.sh` green. Not yet wired into
+    `init-pro server` (kept an independent spike).
+- **卡点 / Blockers** — none. The Q4 make-or-break is resolved: the coroutine
+    bridge is real and non-blocking (no Q4 re-evaluation triggered). Remaining
+    scope (cosocket, phase hooks, `resty::*`, Ingress->Lua) is T5.2/T5.3/T5.4.
 - **依赖 / Depends on** — T0.3
 
 ---

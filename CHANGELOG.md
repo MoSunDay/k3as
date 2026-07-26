@@ -7,6 +7,50 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 4 (T5.1)
+
+### Added
+- **T5.1 — mlua coroutine<->async bridge (feasibility spike).** Proves the
+  single highest-risk unknown of Q4 (a Lua-driven Router): a Lua coroutine
+  **yields at a Rust `await` point** on the Tokio runtime, letting another
+  coroutine run concurrently on the same worker VM without blocking. Delivered
+  as a self-contained crate, deliberately **not** wired into `init-pro server`
+  — this round is a kill-criterion spike, not production wiring. Cosocket, the
+  HTTP phase pipeline, and Ingress->Lua compilation are T5.2-T5.4.
+  - **Decision Q12 (Router VM model).** Faithful openresty worker model: **one
+    worker-wide LuaJIT VM** carrying **per-coroutine Lua threads**, driven on a
+    single-thread `tokio::task::LocalSet`. Concurrency is cooperative yielding
+    at `await` points (one VM per thread), so the `Lua: !Send` constraint is a
+    non-issue. The bridge is `mlua`'s `create_async_function` (Rust async fn
+    callable from Lua) + `Function::call_async` (drives a Lua function as a
+    coroutine, parking it at each inner `await`). `luajit52` is OFF (openresty =
+    LuaJIT 2.1 = Lua 5.1).
+  - **New crate `init-pro-router`** (`lib.rs`/`vm.rs`/`ngx.rs`, each <=44 lines)
+    depending only on `mlua` + `tokio` (no api/apiserver coupling). `ngx.sleep`
+    maps to `tokio::time::sleep`; the VM is built by `worker_vm()`.
+  - **Kill-criterion PASSED** (`tests/concurrency.rs`): coroutine B starts and
+    finishes *inside* coroutine A's `ngx.sleep(50ms)` window (order
+    `A_start < B_start < B_end < A_end`), total wall ~= 51ms ~= max(50,5) (not
+    the serial ~55ms sum); 10 coroutines x `ngx.sleep(20ms)` complete in ~21ms
+    (scales to ~max, not ~sum). **Q4 is de-risked; no Q4 re-evaluation.**
+  - **Latency baseline** (`tests/sleep_latency.rs`): `ngx.sleep(10ms)` round-trip
+    ~= 11ms (~1ms bridge overhead). v1 number recorded per plan; cosocket
+    microbench is T5.2.
+  - **4 tests** in `init-pro-router` (1 vm unit + 2 concurrency + 1 latency);
+    **1 self-test script** (`scripts/router-coroutine-selftest.sh`). Workspace
+    total **199 green** (was 195); `cargo clippy --all-targets -- -D warnings`
+    clean; `cargo build --release -p init-pro` completes; all new files <=154
+    lines; pure additive diff (no `#[ignore]`, no deleted tests).
+
+### Changed
+- **Workspace deps:** added `mlua` 0.12 (`luajit`,`vendored`,`async`,
+  `error-send`, `default-features = false`); LuaJIT is built from source via
+  `luajit-src` on first compile (~25s, offline-reproducible, Q7-consistent).
+  Added `init-pro-router` to members + internal deps.
+- **`decisions.md`:** added **Q12** ADR. **`index.md`** T5.1 -> `in-progress`;
+  **`plan/05-ingress-lua.md`** T5.1 status/evidence/blockers updated with the
+  measured numbers.
+
 ## [Unreleased] — Phase 1, Sprint 3 (T1.2a)
 
 ### Added
