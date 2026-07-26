@@ -6,6 +6,7 @@
 //! - [`run_forced`] — used by the multicall dispatcher when a symlinked alias
 //!   (`server`, `agent`, ...) selects a known init-pro subcommand.
 
+mod cmd;
 mod config_scan;
 mod runtime;
 
@@ -39,9 +40,9 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run the control-plane server.
-    Server,
+    Server(cmd::ServerCmd),
     /// Run the node agent.
-    Agent,
+    Agent(cmd::AgentCmd),
     /// Stage bundled peer binaries to the data dir.
     Stage {
         /// List the embedded manifest + hashes without writing anything.
@@ -94,8 +95,14 @@ where
     tracing::debug!(target: "init-pro", data_dir = ?cfg.data_dir, is_debug = cfg.debug, "config resolved");
 
     match cli.command {
-        Some(Command::Server) => runtime::run_server(cfg),
-        Some(Command::Agent) => runtime::run_agent(cfg),
+        Some(Command::Server(svc)) => {
+            tracing::debug!(target: "init-pro", "server flags captured: {:?}", svc);
+            runtime::run_server(cfg)
+        }
+        Some(Command::Agent(ag)) => {
+            tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);
+            runtime::run_agent(cfg)
+        }
         Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run),
         None => {
             // `init-pro` with no subcommand: print help to stdout, exit 0
@@ -103,6 +110,106 @@ where
             let _ = Cli::command().print_long_help();
             println!();
             ExitCode::SUCCESS
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Global wired flags appear at the top level; subcommand-scoped wired
+    /// flags appear in the subcommand help (Table A scope correctness).
+    #[test]
+    fn wired_flags_appear_in_help_surface() {
+        let mut cmd = Cli::command();
+
+        // Globals (--data-dir/--debug) are top-level options.
+        let root_help = cmd.render_help().to_string();
+        for flag in ["--data-dir", "--debug"] {
+            assert!(root_help.contains(flag), "root help missing global {flag}");
+        }
+
+        // Server-scoped + shared wired flags appear in `server --help`.
+        let mut server = cmd
+            .find_subcommand("server")
+            .expect("server subcommand exists")
+            .clone();
+        let server_help = server.render_help().to_string();
+        for flag in [
+            "--config",
+            "--disable",
+            "--disable-etcd",
+            "--disable-apiserver",
+            "--disable-agent",
+            "--disable-controller-manager",
+            "--disable-scheduler",
+            "--disable-cloud-controller",
+            "--disable-kube-proxy",
+            "--disable-network-policy",
+            "--disable-helm-controller",
+            "--datastore-endpoint",
+            "--prefer-bundled-bin",
+            "--token",
+            "--server",
+            "--cluster-init",
+        ] {
+            assert!(
+                server_help.contains(flag),
+                "server --help missing wired flag {flag}"
+            );
+        }
+
+        // Shared (S+A) wired flags appear in `agent --help`.
+        let mut agent = cmd
+            .find_subcommand("agent")
+            .expect("agent subcommand exists")
+            .clone();
+        let agent_help = agent.render_help().to_string();
+        for flag in ["--config", "--token", "--server", "--prefer-bundled-bin"] {
+            assert!(agent_help.contains(flag), "agent --help missing wired flag {flag}");
+        }
+    }
+
+    /// Server-only flags must NOT appear in `agent --help` (scope correctness).
+    #[test]
+    fn agent_help_excludes_server_only_flags() {
+        let cmd = Cli::command();
+        let mut agent = cmd.find_subcommand("agent").expect("agent exists").clone();
+        let help = agent.render_help().to_string();
+        for flag in ["--cluster-init", "--datastore-endpoint", "--disable-network-policy"] {
+            assert!(
+                !help.contains(flag),
+                "agent --help should not list server-only flag {flag}"
+            );
+        }
+    }
+
+    /// A type-correct wired flag must be accepted (no "unknown" error).
+    #[test]
+    fn server_accepts_wired_flags_without_error() {
+        let argv = [
+            "init-pro",
+            "server",
+            "--data-dir",
+            "/tmp/dd",
+            "--disable",
+            "coredns",
+            "--datastore-endpoint",
+            "mysql://x",
+            "--cluster-init",
+            "--token",
+            "secret",
+        ];
+        let cli = Cli::try_parse_from(argv).expect("wired flags accepted");
+        match cli.command {
+            Some(Command::Server(s)) => {
+                assert_eq!(s.disable, vec!["coredns".to_string()]);
+                assert!(s.cluster_init);
+                assert_eq!(s.shared.token.as_deref(), Some("secret"));
+            }
+            _ => panic!("expected Server"),
         }
     }
 }
