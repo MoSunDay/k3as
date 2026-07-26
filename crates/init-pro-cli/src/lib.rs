@@ -91,6 +91,26 @@ where
         }
     };
 
+    // Fatal conflict validation (Table B, A4): exit non-zero with the
+    // k3s-parity message BEFORE logging/resolve so a fatal is clean.
+    match &cli.command {
+        Some(Command::Server(svc)) => {
+            if let Err(flags::conflicts::Fatal(msg)) =
+                flags::conflicts::validate_server(svc, &strip.seen)
+            {
+                eprintln!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        }
+        Some(Command::Agent(ag)) => {
+            if let Err(flags::conflicts::Fatal(msg)) = flags::conflicts::validate_agent(ag) {
+                eprintln!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        }
+        _ => {}
+    }
+
     init_pro_infra::logging::init(cli.debug);
     flags::warn_noops(&strip.seen);
     let cfg = init_pro_infra::Config::resolve(
