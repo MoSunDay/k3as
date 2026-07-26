@@ -10,6 +10,7 @@ mod cmd;
 mod config_scan;
 mod flags;
 mod runtime;
+mod stage;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

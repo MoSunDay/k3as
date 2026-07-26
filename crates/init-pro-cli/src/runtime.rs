@@ -2,7 +2,8 @@
 //!
 //! `server` / `agent` install the graceful-shutdown handler and then idle until
 //! a signal arrives — enough to exercise the infra (T0.3) and to host real
-//! layers as they land. `stage` exposes the T0.2 manifest contract.
+//! layers as they land. `stage` exposes the T0.2 manifest contract + B5 runtime
+//! staging.
 
 use std::process::ExitCode;
 
@@ -61,34 +62,58 @@ fn run_supervised(role: &'static str, cfg: Config) -> ExitCode {
 }
 
 /// `stage --dry-run` lists the embedded manifest + hashes without writing.
-/// `stage` (no dry-run) is the live atomic-staging path arriving in B5.
+/// `stage` (no dry-run) performs the live atomic staging (B5).
 pub fn run_stage(cfg: Config, dry_run: bool, manifest: &EmbeddedManifest) -> ExitCode {
     if dry_run {
-        let assets = manifest.assets;
-        println!("init-pro stage --dry-run");
-        println!("data-dir: {}", cfg.data_dir.display());
-        println!(
-            "manifest ({} embedded asset{}):",
-            assets.len(),
-            if assets.len() == 1 { "" } else { "s" }
-        );
-        if assets.is_empty() {
-            println!("  (none — build with INIT_PRO_EMBED=1 to bake vendor artifacts)");
-        } else {
-            let total = assets.iter().map(|a| a.size).sum::<u64>();
-            for a in assets {
-                println!("  {:<28} {} bytes  sha256={}", a.path, a.size, a.sha256);
-            }
-            println!("total uncompressed: {} bytes", total);
-        }
-        // B3: manifest summaries
-        let sums_lines = manifest.sha256_sums.lines().count();
-        let links_lines = manifest.data_links.lines().count();
-        println!(".sha256sums: {} entries", sums_lines);
-        println!(".links: {} entries", links_lines);
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("stage: live staging arrives in B5 (use --dry-run to inspect the manifest)");
-        ExitCode::FAILURE
+        print_dry_run(&cfg, manifest);
+        return ExitCode::SUCCESS;
     }
+
+    match crate::stage::stage(&cfg, manifest.assets, manifest.sha256_sums) {
+        Ok(result) => {
+            if result.staged {
+                println!(
+                    "init-pro stage: staged {} asset(s) -> data/{}",
+                    manifest.assets.len(),
+                    result.hash
+                );
+            } else {
+                println!("init-pro stage: up-to-date (data/current -> {})", result.hash);
+            }
+            println!("data/current: {}", result.current.display());
+            for entry in &result.path_entries {
+                println!("PATH+: {}", entry.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("init-pro stage: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print the dry-run manifest listing.
+fn print_dry_run(cfg: &Config, manifest: &EmbeddedManifest) {
+    let assets = manifest.assets;
+    println!("init-pro stage --dry-run");
+    println!("data-dir: {}", cfg.data_dir.display());
+    println!(
+        "manifest ({} embedded asset{}):",
+        assets.len(),
+        if assets.len() == 1 { "" } else { "s" }
+    );
+    if assets.is_empty() {
+        println!("  (none — build with INIT_PRO_EMBED=1 to bake vendor artifacts)");
+    } else {
+        let total = assets.iter().map(|a| a.size).sum::<u64>();
+        for a in assets {
+            println!("  {:<28} {} bytes  sha256={}", a.path, a.size, a.sha256);
+        }
+        println!("total uncompressed: {} bytes", total);
+    }
+    let sums_lines = manifest.sha256_sums.lines().count();
+    let links_lines = manifest.data_links.lines().count();
+    println!(".sha256sums: {} entries", sums_lines);
+    println!(".links: {} entries", links_lines);
 }
