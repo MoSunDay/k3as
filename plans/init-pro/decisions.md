@@ -481,3 +481,77 @@ not 5.2 extensions).
   an independent crate, **not** wired into `init-pro server`. **T5.2** adds the
   HTTP phase pipeline + cosocket; **T5.3** the `resty::*` stdlib; **T5.4**
   Ingress→Lua route compilation (M1).
+
+## Q13 — Per-request coroutine-local binding & the data-plane server shape (T5.2)
+
+**Context.** Q12 fixed the VM model (one worker-wide LuaJIT VM, per-coroutine
+threads on a `LocalSet`). T5.2's content phase needs **each in-flight request's
+Lua coroutine to reach its own `RequestContext`** — the live `ngx.req`/
+`ngx.header`/`ngx.status`/cosocket handles — without a global lock and without
+leaking one request's state into another's coroutine. openresty does this
+implicitly via per-request VM globals; our single shared VM must do it
+explicitly. Two sub-problems surfaced in the same spike: (1) how to key a
+context to the *right* coroutine, and (2) how to host the HTTP data-plane
+server that drives these coroutines, given the VM is `!Send`.
+
+**Options.**
+- A) **`Lua::app_data` + `current_thread().to_pointer()` key (per-coroutine).**
+  Store a `ContextStore: RefCell<HashMap<*const u8, Rc<RequestContext>>>` in the
+  VM's `app_data`. At request start, `Lua::create_thread(content_fn)` makes a
+  *real* coroutine thread, bind its `current_thread().to_pointer()` -> context,
+  then drive it with `Thread::into_async`. Each `ngx.*` API looks up the running
+  coroutine's pointer to find its context.
+- B) **`call_async` implicit coroutine.** Drive `content_fn` with
+  `Function::call_async`. Simpler — but mlua runs the function on the **root
+  thread**, so `current_thread().to_pointer()` is identical for every request
+  (collapses to one key). A spike proved it: distinct coroutines all report the
+  *same* thread pointer, so any app_data key collides across concurrent
+  requests. Unusable.
+- C) **Per-request VM** (a fresh `Lua` per request). Removes the binding problem
+  entirely, but contradicts Q12 (worker-wide VM amortising compile/state) and
+  pays full VM init per request.
+
+**Decision: A.** Per-request binding is **coroutine-local**: an explicit
+`Lua::create_thread` + `Thread::into_async` drives a genuine per-request
+coroutine, and `Lua::current_thread().to_pointer()` (the coroutine's stable
+identity, distinct under interleaving — proven by the spike) keys a
+`ContextStore` held in `app_data`. `context::bind`/`unbind`/`current` are the
+only accessors; `current()` returns `Rc<RequestContext>` (cheap clone, no
+locking). `RequestContext` carries the method/URI/headers, a status slot, an
+ordered header bag, and the cosocket handle table. This keeps one shared VM
+(Q12) while giving every request its own isolated `ngx.*` view.
+
+**Related finding — the data-plane server is raw TCP, not axum.** Resolving the
+binding exposed a second constraint: **axum's `Send` handler bound is
+incompatible with the `!Send` Lua VM.** A handler that drives a Lua coroutine
+cannot be `Send`, so it cannot be an axum `Router` route (Q11/Q12 assumed the
+shared axum substrate would host the data plane — that part is **superseded for
+the data plane**; the apiserver keeps axum). The Router data-plane server is a
+small raw-TCP HTTP/1.1 loop (`serve.rs`): read request head, bind context,
+drive the content-phase coroutine on the `LocalSet`, then write the assembled
+response. Parallelism stays per-worker (one `LocalSet`), consistent with Q12.
+
+**Consequences.**
+- `+` Coroutine-local binding is correct under concurrency: the spike showed N
+  interleaved requests each observe *their own* method/URI/status/headers, with
+  no cross-talk. `tests/content_phase.rs` exercises this over real TCP
+  (`real_client_concurrent_requests_stay_distinct_over_tcp`).
+- `+` Real HTTP interop: `ngx.req`/`ngx.header`/`ngx.status`/`ngx.say`/
+  `ngx.print`/`ngx.exit` are observed by a real TCP client
+  (`real_client_observes_content_phase_over_tcp`).
+- `+` Cosocket (`ngx.socket.tcp`: `connect`/`send`/`receive`/`settimeout`/
+  `close`) streams to a real echo server; `send` takes Lua strings (binary-safe
+  via `LuaString`), `receive` returns a Lua string (fixed-size and line modes).
+- `−` Raw TCP means we re-implement a minimal HTTP/1.1 head parser + response
+  writer rather than reusing hyper/axum for the data plane. Mitigated: the loop
+  is ~210 lines and only handles what the content phase emits; the apiserver
+  (T1.2) still benefits from axum.
+- `−` `current_thread().to_pointer()` is an opaque identity, not a stable
+  hashable value across VM resets; we never persist it. Mitigated: contexts are
+  bound/unbound within the request future's scope, so pointers never outlive
+  their request.
+- → **T5.1 → done** (the spike is closed; nothing further is owed by T5.1).
+  **T5.2 Scope A** (content phase + `ngx.*` + cosocket, verified by real HTTP
+  clients) is complete. Remaining T5.2 scope — the full phase chain
+  (`rewrite`/`access`/`header_filter`/`body_filter`/`log`/`balancer`),
+  `ngx.var`/`ngx.shared.DICT`/`ngx.exec`/`ngx.redirect` — is T5.2 Scope B+.
