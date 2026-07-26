@@ -18,11 +18,11 @@ API/etcd 用最小桩实现，只为给 Router 喂 Ingress。
 ## TODO（按 sprint 排序，每条含交付物）
 
 ### Sprint 1 — 工作空间 + multicall 骨架（T0.1 + T0.3 部分）
-- Cargo workspace：`init-pro`(root bin) · `init-pro-core` · `init-pro-multicall`
-  · `init-pro-cli` · `init-pro-infra`
+- Cargo workspace：`init-pro`(root bin) · `common` · `multicall`
+  · `cli` · `infra`
 - `argv[0]` 分派 + 别名表（`kubectl/ctr/crictl/containerd/server/agent/etcd`），
   未知→help；reexec helper（`/proc/self/exe` + `arg0`）
-- `init-pro-infra`：tracing、分层配置（CLI > env > file > default）、`--data-dir`、
+- `infra`：tracing、分层配置（CLI > env > file > default）、`--data-dir`、
   SIGTERM/SIGINT 优雅退出（tokio）
 - 交付：`cargo build` 产出单一 `init-pro`；`scripts/multicall-selftest.sh` 全绿
 - **状态：done** — commit `T0.1 + T0.3(spike)`

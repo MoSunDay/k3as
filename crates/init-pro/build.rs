@@ -37,7 +37,7 @@ fn main() {
             return;
         }
     };
-    let artifacts = match init_pro_vendor::parse(&src) {
+    let artifacts = match vendor::parse(&src) {
         Ok(a) => a,
         Err(e) => {
             println!("cargo:warning=vendor: manifest invalid: {e}");
@@ -46,11 +46,11 @@ fn main() {
     };
 
     // --- B4: license gate + SPDX SBOM ------------------------------------
-    if let Err(e) = init_pro_vendor::sbom::validate(&artifacts) {
+    if let Err(e) = vendor::sbom::validate(&artifacts) {
         println!("cargo:warning=vendor: license gate FAILED: {e}");
         std::process::exit(1);
     }
-    let spdx = init_pro_vendor::sbom::render_spdx(&artifacts, &iso_now());
+    let spdx = vendor::sbom::render_spdx(&artifacts, &iso_now());
     let licenses_dir = repo_root.join("LICENSES");
     let spdx_path = licenses_dir.join("spdx-2.3.json");
     if let Err(e) = std::fs::create_dir_all(&licenses_dir).and_then(|_| std::fs::write(&spdx_path, &spdx)) {
@@ -59,8 +59,8 @@ fn main() {
     println!("cargo:warning=vendor: license gate passed (Q7); SPDX SBOM -> LICENSES/spdx-2.3.json");
 
     // --- B1 (cont): acquire ----------------------------------------------
-    let mode = init_pro_vendor::mode_from_env();
-    match init_pro_vendor::run(&vendor_root, &artifacts, mode) {
+    let mode = vendor::mode_from_env();
+    match vendor::run(&vendor_root, &artifacts, mode) {
         Ok(rep) => {
             if rep.skipped > 0 {
                 println!(
@@ -97,7 +97,7 @@ fn env_truthy(key: &str) -> bool {
 fn write_assets(vendor_bin: &Path) {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     if env_truthy("INIT_PRO_EMBED") {
-        match init_pro_vendor::generate(vendor_bin, &out_dir, 19) {
+        match vendor::generate(vendor_bin, &out_dir, 19) {
             Ok(rep) => {
                 println!("cargo:warning=vendor: embed: {}", rep.summary());
                 for f in &rep.files {
@@ -110,13 +110,13 @@ fn write_assets(vendor_bin: &Path) {
             }
         }
     } else {
-        init_pro_vendor::generate_empty(&out_dir).expect("write empty assets.rs");
+        vendor::generate_empty(&out_dir).expect("write empty assets.rs");
     }
 }
 
 fn write_empty_assets() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
-    init_pro_vendor::generate_empty(&out_dir).expect("write empty assets.rs");
+    vendor::generate_empty(&out_dir).expect("write empty assets.rs");
 }
 
 /// Current UTC date as ISO-8601 (for SPDX `created`).

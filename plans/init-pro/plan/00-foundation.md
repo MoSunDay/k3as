@@ -23,7 +23,7 @@ that every later TODO must keep green.
     as internal names). Unknown `argv[0]` → print help.
   - `reexec` helper: child processes re-invoke the same binary with a
     forced alias (k3s `stageAndRun`, `link_repos/k3s/cmd/k3s/main.go`).
-  - Crate skeleton: `init-pro-core`, `init-pro-cli`, `init-pro-multicall` (dispatch),
+  - Crate skeleton: `common`, `cli`, `multicall` (dispatch),
     placeholders for later layers.
 
 - **验收手段 / Acceptance**
@@ -33,7 +33,7 @@ that every later TODO must keep green.
   - Unit test asserting dispatch table is exhaustive over the alias set.
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `cargo build --release` -> single `target/release/init-pro`; `scripts/multicall-selftest.sh` all OK; `init-pro-multicall` unit tests green (alias resolution incl. cross-wire guard, `Action::as_str` round-trip, exhaustive dispatch-table); `init-pro` integration test covers `external_stub` help branch (exit success + banner) and no-help branch (exit `2` + stderr) via real `argv[0]` dispatch.
+- **证据 / Evidence** — `cargo build --release` -> single `target/release/init-pro`; `scripts/multicall-selftest.sh` all OK; `multicall` unit tests green (alias resolution incl. cross-wire guard, `Action::as_str` round-trip, exhaustive dispatch-table); `init-pro` integration test covers `external_stub` help branch (exit success + banner) and no-help branch (exit `2` + stderr) via real `argv[0]` dispatch.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — —
 
@@ -99,7 +99,7 @@ that every later TODO must keep green.
     `bin/init-pro` exists -> no rewrite).
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `init-pro-vendor` crate (acquire/manifest/digest/embed/dataverify/sbom), `crates/init-pro/build.rs` (acquire + embed + SBOM driver), `crates/init-pro-cli/src/stage.rs` (runtime stage()), `vendor/versions.toml` (containerd 1.7.20 / runc 1.1.13 / CNI 1.5.1, all Apache-2.0); `scripts/stage-fresh-dir-test.sh` (8/8 assertions green). MSRV bumped 1.80→1.89 (std File::lock).
+- **证据 / Evidence** — `vendor` crate (acquire/manifest/digest/embed/dataverify/sbom), `crates/init-pro/build.rs` (acquire + embed + SBOM driver), `crates/cli/src/stage.rs` (runtime stage()), `vendor/versions.toml` (containerd 1.7.20 / runc 1.1.13 / CNI 1.5.1, all Apache-2.0); `scripts/stage-fresh-dir-test.sh` (8/8 assertions green). MSRV bumped 1.80→1.89 (std File::lock).
 - **卡点 / Blockers** — none (Q6 resolves packaging topology; Q7 resolves
     licensing/SBOM/size; deferred items are intentional: etcd FFI = T2.1,
     `k3s-root` GPL host utilities = later point-release, hard size-cap
@@ -111,7 +111,7 @@ that every later TODO must keep green.
 ## T0.3 — 公共基础设施 crate (log/config/signal)
 
 - **目标 / Goal**
-  A `init-pro-infra` crate providing logging, structured config, signal
+  A `infra` crate providing logging, structured config, signal
   handling, and shutdown coordination shared by all layers.
 
 - **核心实现 / Core implementation**
@@ -130,7 +130,7 @@ that every later TODO must keep green.
     a deadline.
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `init-pro-infra` crate: `config` (5 precedence tests), `signal` (`Shutdown` + `install`), `logging` (`tracing` + `--debug`; 4 idempotency/env tests asserting no-panic across debug true/false + `RUST_LOG` set/unset); `scripts/graceful-shutdown-test.sh` asserts server drains on SIGTERM within a deadline.
+- **证据 / Evidence** — `infra` crate: `config` (5 precedence tests), `signal` (`Shutdown` + `install`), `logging` (`tracing` + `--debug`; 4 idempotency/env tests asserting no-panic across debug true/false + `RUST_LOG` set/unset); `scripts/graceful-shutdown-test.sh` asserts server drains on SIGTERM within a deadline.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T0.1
 
@@ -186,7 +186,7 @@ that every later TODO must keep green.
     matrix is the authoritative behavior spec.
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `init-pro-cli` clap-derive `ServerCmd`/`AgentCmd`
+- **证据 / Evidence** — `cli` clap-derive `ServerCmd`/`AgentCmd`
     (A2) wire the Phase-1 flag subset; `strip_noop()` + deduped `warn_noops()`
     (A3) accept the rest with WARN; `validate_server`/`validate_agent`
     (A4) enforce 7 fatal conflict rules; `scripts/cli-flag-parity-test.sh`

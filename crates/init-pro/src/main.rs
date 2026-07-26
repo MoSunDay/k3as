@@ -8,8 +8,8 @@
 
 use std::process::ExitCode;
 
-use init_pro_core::embed::EmbeddedManifest;
-use init_pro_multicall::{resolve, Action};
+use common::embed::EmbeddedManifest;
+use multicall::{resolve, Action};
 
 mod assets;
 
@@ -29,11 +29,11 @@ fn main() -> ExitCode {
     match resolve(&argv0) {
         // init-pro itself (or an unknown name) -> drive the CLI; clap will
         // print help/version as appropriate.
-        Some(Action::InitPro) | None => init_pro_cli::run(&manifest),
+        Some(Action::InitPro) | None => cli::run(&manifest),
         // Forced init-pro subcommands via alias name.
-        Some(Action::Server) => init_pro_cli::run_forced("server", &extra, &manifest),
-        Some(Action::Agent) => init_pro_cli::run_forced("agent", &extra, &manifest),
+        Some(Action::Server) => cli::run_forced("server", &extra, &manifest),
+        Some(Action::Agent) => cli::run_forced("agent", &extra, &manifest),
         // Bundled-peer aliases: Phase 1 stubs.
-        Some(external) => init_pro_multicall::external_stub(external, &extra),
+        Some(external) => multicall::external_stub(external, &extra),
     }
 }
