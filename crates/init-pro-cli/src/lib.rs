@@ -6,6 +6,7 @@
 //! - [`run_forced`] — used by the multicall dispatcher when a symlinked alias
 //!   (`server`, `agent`, ...) selects a known init-pro subcommand.
 
+mod config_scan;
 mod runtime;
 
 use std::path::PathBuf;
@@ -73,6 +74,9 @@ where
     // Collect into Vec<String> so clap can consume it.
     let argv: Vec<String> = argv.into_iter().map(Into::into).collect();
 
+    // Pre-clap config-file pre-scan (Q8): surface --config/-c without clap.
+    let cli_config = config_scan::pre_scan_config(&argv);
+
     let cli = match Cli::try_parse_from(argv) {
         Ok(c) => c,
         Err(e) => {
@@ -82,7 +86,11 @@ where
     };
 
     init_pro_infra::logging::init(cli.debug);
-    let cfg = init_pro_infra::Config::resolve(cli.data_dir.as_deref(), Some(cli.debug));
+    let cfg = init_pro_infra::Config::resolve(
+        cli.data_dir.as_deref(),
+        Some(cli.debug),
+        cli_config.as_deref(),
+    );
     tracing::debug!(target: "init-pro", data_dir = ?cfg.data_dir, is_debug = cfg.debug, "config resolved");
 
     match cli.command {
