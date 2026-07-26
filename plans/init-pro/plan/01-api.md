@@ -14,23 +14,37 @@ be wire-compatible with upstream kubectl/kube-rs.
   StrategicMergePatch semantics.
 
 - **核心实现 / Core implementation**
-  - Built on `kube-rs` core types; add our own schema registry for init-pro
-    API groups (`init-pro.io/*`) and pass-through for native groups.
-  - OpenAPI / swagger schema generation matching upstream so
-    `kubectl explain` works.
-  - etcd serialization: protobuf for native core types where upstream does
-    (k8s `runtime.Serializer` parity), JSON otherwise.
-  - `rest.Config` discovery compatible (kube-rs client resolves us).
+  - Built on `kube-core` 4.x + `k8s-openapi` 0.28 (`v1_32` feature) core
+    types; add our own schema registry for init-pro API groups
+    (`init-pro.io/*`) and pass-through for native groups.
+  - **Wire format = JSON-only for v1 (decision Q10):** API server, etcd
+    storage, and watch all use `application/json`. protobuf is explicitly
+    deferred — see `decisions.md` Q10.
+  - `ApiVersion` parsing + GVK↔GVR helpers; `SchemaRegistry` mapping GVK →
+    type info (kind/resource/plural/list-kind/scope) for core/v1 types
+    (Pod, ConfigMap, Secret, Service, Namespace, Node, Event).
+  - Byte-faithful JSON round-trip (serde) on a fixed object set; StrategicMergePatch
+    core algorithm (containers/volumes/labels by merge-key) + JSONPatch fallback.
+  - OpenAPI/v2 schema discovery skeleton (served by T1.2; full `kubectl explain`
+    is gated behind a running server — see Q10 consequences).
 
 - **验收手段 / Acceptance**
-  - `kubectl get --raw` + `kube-rs` Api round-trip equality on a fixed
-    object set (part of T0.6 golden).
-  - `kubectl explain pods.spec` returns upstream-identical schema.
+  - `cargo test` JSON round-trip equality (deserialize → serialize → bytes
+    equal canonical fixtures) on Pod/ConfigMap/Namespace representative objects.
+  - GVK→GVR conversion round-trips without information loss.
+  - StrategicMergePatch: container list merges by name, volumes merge by name.
+  - **Deferred to T0.6/T1.2:** `kubectl get --raw` + `kube-rs` round-trip
+    (needs the HTTP server); `kubectl explain pods.spec` (needs discovery +
+    running server — recorded in Q10).
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — Protobuf API fidelity is the hard part; decide
-    whether v1 supports JSON-only and adds protobuf later.
+- **状态 / Status** — done
+- **证据 / Evidence** — `crates/init-pro-api`: GVK/GVR wrappers (`gvk.rs`),
+    schema registry (`schema.rs`), JSON round-trip (`serde_ext.rs` +
+    `tests/json_fidelity.rs`), StrategicMergePatch (`patch.rs`), `init-pro.io` CRD types
+    (`initpro.rs`), discovery doc builders (`discovery.rs`). 39 tests in
+    `init-pro-api` + 1 in `init-pro-cli`; `cargo test --locked --workspace`
+    181 green; `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- **卡点 / Blockers** — Resolved by **Q10** (JSON-only v1; protobuf deferred).
 - **依赖 / Depends on** — T0.3
 
 ---

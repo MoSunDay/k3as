@@ -9,6 +9,7 @@ members = [
     "crates/init-pro-cli",
     "crates/init-pro-infra",
     "crates/init-pro-vendor",
+    "crates/init-pro-api",
 ]
 
 [workspace.package]
@@ -27,11 +28,18 @@ init-pro-multicall = { path = "crates/init-pro-multicall" }
 init-pro-cli = { path = "crates/init-pro-cli" }
 init-pro-infra = { path = "crates/init-pro-infra" }
 init-pro-vendor = { path = "crates/init-pro-vendor" }
+init-pro-api = { path = "crates/init-pro-api" }
 
 # External
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "help"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Layer 1 resource model (T1.1). JSON-only for v1 (Q10).
+kube-core = { version = "4.2", default-features = false, features = ["json-patch"] }
+k8s-openapi = { version = "0.28", features = ["v1_32"] }
+json-patch = "4"
 sha2 = "0.10"
 zstd = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process"] }

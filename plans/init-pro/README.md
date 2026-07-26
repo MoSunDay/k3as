@@ -40,6 +40,7 @@ global platform configuration variable.
 | Q7 | **Licensing/SBOM/size:** per-build SPDX SBOM + `LICENSES/` + license allow-list gate; GPL `k3s-root` excluded in v1; soft size budget. |
 | Q8 | **Config-file pre-scan:** ported `configfilearg` (`--config`/`-c` + env + default + `key+`); `.d/` dropins & http-config deferred. |
 | Q9 | **Flag v1 posture:** max compatibility — accept-wired (Phase-1 subset) / accept-no-op-warn (rest) / fatal (conflicts). Matrix in `plan/00-foundation-flag-matrix.md`. |
+| Q10 | **JSON-only wire format for v1** — API server, etcd storage, and watch all use `application/json`; protobuf deferred (see `decisions.md` Q10). Unblocks T1.1/T1.2/T2.2. |
 
 ---
 

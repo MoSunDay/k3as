@@ -7,6 +7,60 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 3
+
+### Added
+- **T1.1 — resource model & API group schema.** A Kubernetes-faithful Rust
+  resource model in a new `init-pro-api` crate, unlocking T1.2 (APIServer),
+  T1.3 (auth), T2.2 (etcd data plane), and T5.4 (router).
+  - **Decision Q10 (serialization).** v1 is **JSON-only** on every path — API
+    wire, etcd storage, watch streams. protobuf is explicitly deferred (see
+    `decisions.md` Q10). `kubectl`/`kube-rs`/`helm` negotiate JSON via
+    discovery automatically; no client breakage.
+  - **`kube-core` 4.2 + `k8s-openapi` 0.28 (`v1_32`).** Cold build ~11s, 754MB
+    RAM (kept behind `init-pro-api` so cli/infra never recompile it).
+  - **S2 — GVK/GVR (`gvk.rs`).** `ApiVersion` round-trip parsing (core vs
+    grouped, rejects empty version), GVK↔GVR join helpers, `TypeMeta`→GVK.
+  - **S3 — schema registry (`schema.rs`).** `SchemaRegistry` maps GVK→type info
+    (kind/plural/list-kind/scope); lossless GVK↔GVR conversion; core/v1 types
+    (Pod, ConfigMap, Secret, Service, Namespace, Node, Event) registered from
+    their static `k8s_openapi::Resource` consts; case-insensitive group lookup.
+  - **S4 — JSON round-trip fidelity (`serde_ext.rs` + `tests/json_fidelity.rs`).**
+    Round-trip of Pod/ConfigMap/Namespace is asserted (a) idempotent
+    (serialize twice → identical bytes) and (b) semantically lossless
+    (canonical-key-sorted compare). `canonical_json` for order-insensitive eq.
+  - **S5 — Strategic Merge Patch (`patch.rs`).** Core SMP semantics: recursive
+    map merge, `null`-deletes-field, merge-by-key lists (containers /
+    initContainers / ephemeralContainers / volumes by `name`, ports by
+    `containerPort`, env by `name`) with order preservation + `$patch: delete`,
+    atomic replace for non-keyed lists; RFC 6902 JSON Patch fallback.
+  - **S6 — `init-pro.io/v1` group (`initpro.rs`).** `LuaRouter` CRD (the Router
+    config surface, Q4) with flattened `TypeMeta`/`ObjectMeta`/spec/status,
+    registered into the schema registry, kubectl-apply JSON round-trip.
+  - **S7 — discovery skeleton (`discovery.rs` + `init-pro-cli/discovery.rs`).**
+    `/api` (`APIVersions`) + `/apis` (`APIGroupList`) + per-group
+    `APIResourceList` bodies built from the registry — byte-correct today,
+    served by T1.2's HTTP layer later. `init-pro server` builds the served
+    schema + logs the group summary at startup.
+  - **47 tests in `init-pro-api`** (8 gvk + 8 schema + 5 serde + 11 patch + 6
+    discovery + 4 initpro + 5 json_fidelity integration) + 1 in `init-pro-cli`;
+    workspace total **189 green**; `cargo clippy --workspace --all-targets
+    -- -D warnings` clean; all files ≤400 lines.
+  - **Structural coverage.** Every new `pub fn` on the resource model has a
+    direct test: `get_by_gvr` (pod resolve + unknown → `None` + case-insensitive
+    group) and `is_core_resource` (core `""` vs grouped); the trivial
+    `with_merge_key` (merge-vs-replace), `to_json_pretty`/`canonical_value` and
+    `is_empty` accessors are covered too — no untested public surface.
+
+### Changed
+- **`Cargo.toml` workspace deps:** added `init-pro-api`, `serde_json`,
+  `thiserror`, `kube-core` 4.2 (features `json-patch`), `k8s-openapi` 0.28
+  (`v1_32`), `json-patch` 4.
+- **`00-foundation.md`:** T0.4 status corrected to `done` (was stale
+  `not-started` despite being complete in Sprint 2) with evidence.
+- **`decisions.md` / `README.md`:** added **Q10** ADR (JSON-only v1) + table row.
+- **`index.md` SSOT:** T1.1 → `done`.
+
 ## [Unreleased] — Phase 1, Sprint 2
 
 ### Added

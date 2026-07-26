@@ -323,3 +323,50 @@ exactly one of:
 - → **T0.4** implements clap-derive server/agent flag groups + the pre-scan
   (Q8) + `DisableItems` validation + conflict rules; the matrix is the
   frozen baseline; `scripts/cli-flag-parity-test.sh` enforces it.
+
+---
+
+## Q10 — Serialization wire format for v1 (JSON-only vs protobuf)
+
+**Context.** T1.1 (resource model) must pick a serialization wire format.
+Upstream Kubernetes uses a **dual codec**: protobuf for native core types
+(the `application/vnd.kubernetes.protobuf` content type, driven by generated
+`*.pb.go` + `runtime.ProtobufMarshaller`), and JSON for everything else
+(CRDs, status, watch fallback). Faithful protobuf parity requires either
+generating `.proto`-backed Rust bindings for every native type or vendoring
+Go's `k8s.io/apimachinery` runtime — a large, fragile surface that would
+block the critical path (T1.2/T2.2) behind an unbounded protobuf-fidelity
+effort. JSON is lossless, ubiquitous, and `kubectl`/`kube-rs`/`helm` all
+negotiate it transparently via the discovery `accept` header.
+
+**Options.**
+- A) **Full protobuf parity day-one** — generate Rust protobuf codecs for all
+  core types before T1.2 ships.
+- B) **JSON-only for v1; protobuf deferred** to a later decision/TODO.
+- C) Mixed: JSON on the wire but protobuf inside etcd storage (mirrors
+  upstream's `runtime.StorageSerializer` cost model).
+
+**Decision: B.** init-pro v1 speaks **JSON only** on every path (API server
+wire format, etcd storage encoding, watch streams). protobuf is explicitly
+deferred: native etcd blobs will be JSON-encoded, and `Content-Type:
+application/json` is the negotiated codec. `kubectl`/`kube-rs` detect
+JSON-only servers via discovery and fall back automatically — no client-side
+breakage (verified against the `Accept` negotiation in
+`k8s.io/apimachinery/pkg/runtime/serializer`). The protobuf deferral is
+recorded as a future decision gated behind a measured need (large-list
+watch throughput on >10k-object clusters).
+
+**Consequences.**
+- `+` Unblocks T1.1/T1.2/T2.2 immediately; no protobuf codegen pipeline to
+  build and keep in lock-step with upstream `k8s-openapi` releases.
+- `+` Byte-faithful JSON round-trip (S4) becomes the *whole* fidelity bar —
+  testable with `serde_json` against canonical fixtures (part of T0.6).
+- `+` Storage debugging is human-readable (`etcdctl get` shows JSON).
+- `−` Watch/list throughput on very large clusters is higher-bandwidth than
+  protobuf; acceptable for v1 scale targets. Mitigation: watch
+  `gzip`/chunked-transfer (T1.2) and a future protobuf decision if measured.
+- `−` `kubectl explain` needs OpenAPI v2/v3 schema discovery (T1.1 ships the
+  discovery skeleton in S7; full OpenAPI generation is a separate TODO).
+- → **T1.1** ships JSON-only resource model + schema registry + StrategicMergePatch;
+  **T1.2** serves JSON codecs end to end; a future `Q? — protobuf storage`
+  decision may reopen this once T0.6 watch benchmarks exist.

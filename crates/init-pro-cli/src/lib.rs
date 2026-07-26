@@ -8,6 +8,7 @@
 
 mod cmd;
 mod config_scan;
+pub mod discovery;
 mod flags;
 mod runtime;
 mod stage;
