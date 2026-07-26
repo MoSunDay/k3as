@@ -8,6 +8,7 @@
 
 mod cmd;
 mod config_scan;
+mod flags;
 mod runtime;
 
 use std::path::PathBuf;
@@ -75,10 +76,14 @@ where
     // Collect into Vec<String> so clap can consume it.
     let argv: Vec<String> = argv.into_iter().map(Into::into).collect();
 
-    // Pre-clap config-file pre-scan (Q8): surface --config/-c without clap.
-    let cli_config = config_scan::pre_scan_config(&argv);
+    // Pre-clap strip of accept-no-op-warn flags (Q9, A3): removes the ~108
+    // no-op flags (and their values) so clap only sees the 17 wired flags.
+    let strip = flags::strip_noop(&argv);
 
-    let cli = match Cli::try_parse_from(argv) {
+    // Pre-clap config-file pre-scan (Q8): surface --config/-c without clap.
+    let cli_config = config_scan::pre_scan_config(&strip.argv);
+
+    let cli = match Cli::try_parse_from(strip.argv) {
         Ok(c) => c,
         Err(e) => {
             // `--help` / `--version` come through here and exit with the right code.
@@ -87,6 +92,7 @@ where
     };
 
     init_pro_infra::logging::init(cli.debug);
+    flags::warn_noops(&strip.seen);
     let cfg = init_pro_infra::Config::resolve(
         cli.data_dir.as_deref(),
         Some(cli.debug),
