@@ -25,7 +25,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     callable from Lua) + `Function::call_async` (drives a Lua function as a
     coroutine, parking it at each inner `await`). `luajit52` is OFF (openresty =
     LuaJIT 2.1 = Lua 5.1).
-  - **New crate `init-pro-router`** (`lib.rs`/`vm.rs`/`ngx.rs`, each <=44 lines)
+  - **New crate `router`** (`lib.rs`/`vm.rs`/`ngx.rs`, each <=44 lines)
     depending only on `mlua` + `tokio` (no api/apiserver coupling). `ngx.sleep`
     maps to `tokio::time::sleep`; the VM is built by `worker_vm()`.
   - **Kill-criterion PASSED** (`tests/concurrency.rs`): coroutine B starts and
@@ -36,7 +36,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
   - **Latency baseline** (`tests/sleep_latency.rs`): `ngx.sleep(10ms)` round-trip
     ~= 11ms (~1ms bridge overhead). v1 number recorded per plan; cosocket
     microbench is T5.2.
-  - **4 tests** in `init-pro-router` (1 vm unit + 2 concurrency + 1 latency);
+  - **4 tests** in `router` (1 vm unit + 2 concurrency + 1 latency);
     **1 self-test script** (`scripts/router-coroutine-selftest.sh`). Workspace
     total **199 green** (was 195); `cargo clippy --all-targets -- -D warnings`
     clean; `cargo build --release -p init-pro` completes; all new files <=154
@@ -46,7 +46,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
 - **Workspace deps:** added `mlua` 0.12 (`luajit`,`vendored`,`async`,
   `error-send`, `default-features = false`); LuaJIT is built from source via
   `luajit-src` on first compile (~25s, offline-reproducible, Q7-consistent).
-  Added `init-pro-router` to members + internal deps.
+  Added `router` to members + internal deps.
 - **`decisions.md`:** added **Q12** ADR. **`index.md`** T5.1 -> `in-progress`;
   **`plan/05-ingress-lua.md`** T5.1 status/evidence/blockers updated with the
   measured numbers.
@@ -68,18 +68,18 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     Router (T5.2). **Plain HTTP for this slice**; TLS (rustls) + real kubectl
     interop is deferred to T1.2b/T1.3. Acceptance is `curl` byte-equivalence
     + a Rust integration test, not kubectl (kubectl refuses plain HTTP).
-  - **New crate `init-pro-apiserver`** (`lib.rs`/`discovery_handlers.rs`/
-    `serve.rs`, all ≤104 lines). `init-pro-api` stays HTTP-free; the apiserver
+  - **New crate `apiserver`** (`lib.rs`/`discovery_handlers.rs`/
+    `serve.rs`, all ≤104 lines). `api` stays HTTP-free; the apiserver
     crate is the thin transport layer over the T1.1 pure builders.
     `serve(registry, addr, server_address, shutdown)` takes a generic
-    shutdown future (kept decoupled from `init-pro-infra`).
+    shutdown future (kept decoupled from `infra`).
   - **Listen flags.** `--bind-address` (default `127.0.0.1`) +
     `--https-listen-port` (default `6443`) added to `init-pro server` (k3s
     parity), with `INIT_PRO_*` env support; removed from the no-op strip set.
     `--disable-apiserver` keeps the port closed.
   - **Graceful drain.** The server is spawned and joined after the shared
     `Shutdown` token fires, so axum drains in-flight requests before exit.
-  - **6 tests** in `init-pro-apiserver` (1 router-build + 5 HTTP fidelity:
+  - **6 tests** in `apiserver` (1 router-build + 5 HTTP fidelity:
     `/api`, `/apis`, `/api/v1`, `/apis/init-pro.io/v1`, unknown→404); **2
     parity scripts** (`scripts/apiserver-discovery-parity-test.sh` — real
     `init-pro server` + `curl`, `graceful-shutdown-test.sh` still green).
@@ -90,7 +90,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
 ### Changed
 - **Workspace deps:** added `axum` 0.8 (`http1`,`json`,`tokio`,`macros`),
   `tower` 0.5; added `net` to `tokio` features.
-- **`init-pro-cli`:** `runtime.rs` spawns the apiserver (was the T1.1
+- **`cli`:** `runtime.rs` spawns the apiserver (was the T1.1
   placeholder `let _ = &schema;`); `ServerCmd` gained the bind flags;
   `lib.rs` parses the bind address. Snapshot `tests/snapshots/server-help.txt`
   + `cli-flag-parity-test.sh` updated for the two new wired flags.
@@ -100,14 +100,14 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
 
 ### Added
 - **T1.1 — resource model & API group schema.** A Kubernetes-faithful Rust
-  resource model in a new `init-pro-api` crate, unlocking T1.2 (APIServer),
+  resource model in a new `api` crate, unlocking T1.2 (APIServer),
   T1.3 (auth), T2.2 (etcd data plane), and T5.4 (router).
   - **Decision Q10 (serialization).** v1 is **JSON-only** on every path — API
     wire, etcd storage, watch streams. protobuf is explicitly deferred (see
     `decisions.md` Q10). `kubectl`/`kube-rs`/`helm` negotiate JSON via
     discovery automatically; no client breakage.
   - **`kube-core` 4.2 + `k8s-openapi` 0.28 (`v1_32`).** Cold build ~11s, 754MB
-    RAM (kept behind `init-pro-api` so cli/infra never recompile it).
+    RAM (kept behind `api` so cli/infra never recompile it).
   - **S2 — GVK/GVR (`gvk.rs`).** `ApiVersion` round-trip parsing (core vs
     grouped, rejects empty version), GVK↔GVR join helpers, `TypeMeta`→GVK.
   - **S3 — schema registry (`schema.rs`).** `SchemaRegistry` maps GVK→type info
@@ -126,13 +126,13 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
   - **S6 — `init-pro.io/v1` group (`initpro.rs`).** `LuaRouter` CRD (the Router
     config surface, Q4) with flattened `TypeMeta`/`ObjectMeta`/spec/status,
     registered into the schema registry, kubectl-apply JSON round-trip.
-  - **S7 — discovery skeleton (`discovery.rs` + `init-pro-cli/discovery.rs`).**
+  - **S7 — discovery skeleton (`discovery.rs` + `cli/discovery.rs`).**
     `/api` (`APIVersions`) + `/apis` (`APIGroupList`) + per-group
     `APIResourceList` bodies built from the registry — byte-correct today,
     served by T1.2's HTTP layer later. `init-pro server` builds the served
     schema + logs the group summary at startup.
-  - **47 tests in `init-pro-api`** (8 gvk + 8 schema + 5 serde + 11 patch + 6
-    discovery + 4 initpro + 5 json_fidelity integration) + 1 in `init-pro-cli`;
+  - **47 tests in `api`** (8 gvk + 8 schema + 5 serde + 11 patch + 6
+    discovery + 4 initpro + 5 json_fidelity integration) + 1 in `cli`;
     workspace total **189 green**; `cargo clippy --workspace --all-targets
     -- -D warnings` clean; all files ≤400 lines.
   - **Structural coverage.** Every new `pub fn` on the resource model has a
@@ -142,7 +142,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     `is_empty` accessors are covered too — no untested public surface.
 
 ### Changed
-- **`Cargo.toml` workspace deps:** added `init-pro-api`, `serde_json`,
+- **`Cargo.toml` workspace deps:** added `api`, `serde_json`,
   `thiserror`, `kube-core` 4.2 (features `json-patch`), `k8s-openapi` 0.28
   (`v1_32`), `json-patch` 4.
 - **`00-foundation.md`:** T0.4 status corrected to `done` (was stale
@@ -183,7 +183,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     `tests/snapshots/` gate the wired-flag surface.
 
 - **T0.2 — packaging pipeline (in progress; B1 done, embed/stage/SBOM next).**
-  - **B1 — pinned artifact acquire (Q6).** New `init-pro-vendor` crate
+  - **B1 — pinned artifact acquire (Q6).** New `vendor` crate
     (build-dependency of `init-pro`) reads `vendor/versions.toml` and acquires
     pinned upstream artifacts with SHA-256 verification (k3s `sha256sum -c`
     parity) into the gitignored `vendor/cache/` + `vendor/bin/`.
@@ -201,7 +201,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     - Verified end-to-end: `INIT_PRO_VENDOR=1 cargo build` downloads + verifies
       + stages all three (containerd+runc→`vendor/bin/`, CNI→`vendor/bin/aux/`);
       a corrupt partial download was correctly rejected by the SHA-256 gate.
-  - **B2 — zstd embed codegen (Q6).** `init-pro-vendor` compresses each acquired
+  - **B2 — zstd embed codegen (Q6).** `vendor` compresses each acquired
     artifact per-file with zstd level 19 and emits a content-addressed
     `assets.rs` (one `include_bytes!` blob per file, keyed by SHA-256). Build
     embeds the blobs into the single binary; verified via `init-pro stage
@@ -215,7 +215,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
     allow-list gate (Apache-2.0/BSD/MIT/ISC — non-cleared artifact fails the
     build), and generates a SPDX-2.3 SBOM referenced by `stage --dry-run`.
   - **B5 — runtime stage() (k3s `extract()` parity).**
-    `crates/init-pro-cli/src/stage.rs` mirrors k3s `cmd/k3s/main.go:259-375`:
+    `crates/cli/src/stage.rs` mirrors k3s `cmd/k3s/main.go:259-375`:
     flock `<data-dir>/data/.lock` → write blobs to `<data-dir>/data/<HASH>/`-tmp
     → `dataverify` (recompute `.sha256sums`/`.links`) → atomic rename → symlink
     `data/current` → `<HASH>` (+ `data/previous` rollback); writes `bin/` +
@@ -229,10 +229,10 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
 
 ### Tests
 - `cargo test --locked --workspace` → **141 passed; 0 failed** (fresh; up from 23 → 81 → 101 → 141).
-  - `init-pro-cli` unit: +58 (config-file parse/resolve_path/scalar/slice/key+
+  - `cli` unit: +58 (config-file parse/resolve_path/scalar/slice/key+
     append; config_scan; strip_noop incl. short/value/dedup; conflicts ×7;
     help-parity surface).
-  - `init-pro-infra` unit: config-file + 3-arg resolve coverage.
+  - `infra` unit: config-file + 3-arg resolve coverage.
 - `cargo clippy --workspace --all-targets -- -D warnings` → **0 warnings**.
 - e2e: `scripts/cli-flag-parity-test.sh` → **16/16 assertions green**.
 
@@ -260,15 +260,15 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
   (`RUST_LOG` always overrides); layered config (CLI > env > file > default)
   honoring `--data-dir`/`--debug` and `INIT_PRO_*` envs; graceful-shutdown
   coordination on SIGTERM/SIGINT.
-- Cargo workspace with five crates: `init-pro`, `init-pro-multicall`,
-  `init-pro-cli`, `init-pro-infra`, `init-pro-core`. `release` profile targets
+- Cargo workspace with five crates: `init-pro`, `multicall`,
+  `cli`, `infra`, `common`. `release` profile targets
   a single small stripped binary (Q1: single-binary constraint).
 
 ### Tests
 - `cargo test --workspace` → **23 passed; 0 failed** (fresh).
-  - `init-pro-multicall` unit: **9** (alias resolution incl. cross-wire guard,
+  - `multicall` unit: **9** (alias resolution incl. cross-wire guard,
     `Action::as_str` round-trip, basename/case, `wants_help`, external flag).
-  - `init-pro-infra` unit: **12** (config precedence x5, signal trigger/idle,
+  - `infra` unit: **12** (config precedence x5, signal trigger/idle,
     install-returns-ok, `logging::init` idempotency x4).
   - `init-pro` integration: **2** (`external_stub` help branch exits success +
     banner; no-help branch exits `2` + stderr, via real argv[0] dispatch).

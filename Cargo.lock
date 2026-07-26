@@ -68,6 +68,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "api"
+version = "0.1.0"
+dependencies = [
+ "json-patch",
+ "k8s-openapi",
+ "kube-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "apiserver"
+version = "0.1.0"
+dependencies = [
+ "api",
+ "axum",
+ "k8s-openapi",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -241,10 +266,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api",
+ "apiserver",
+ "clap",
+ "common",
+ "infra",
+ "sha2",
+ "tokio",
+ "tracing",
+ "zstd",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "common"
+version = "0.1.0"
 
 [[package]]
 name = "cpufeatures"
@@ -521,62 +566,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "init-pro"
-version = "0.1.0"
-dependencies = [
- "init-pro-cli",
- "init-pro-core",
- "init-pro-multicall",
- "init-pro-vendor",
-]
-
-[[package]]
-name = "init-pro-api"
-version = "0.1.0"
-dependencies = [
- "json-patch",
- "k8s-openapi",
- "kube-core",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "init-pro-apiserver"
-version = "0.1.0"
-dependencies = [
- "axum",
- "init-pro-api",
- "k8s-openapi",
- "serde_json",
- "tokio",
- "tower",
- "tracing",
-]
-
-[[package]]
-name = "init-pro-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "init-pro-api",
- "init-pro-apiserver",
- "init-pro-core",
- "init-pro-infra",
- "sha2",
- "tokio",
- "tracing",
- "zstd",
-]
-
-[[package]]
-name = "init-pro-core"
-version = "0.1.0"
-
-[[package]]
-name = "init-pro-infra"
+name = "infra"
 version = "0.1.0"
 dependencies = [
  "tokio",
@@ -585,25 +575,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "init-pro-multicall"
-version = "0.1.0"
-
-[[package]]
-name = "init-pro-router"
+name = "init-pro"
 version = "0.1.0"
 dependencies = [
- "mlua",
- "tokio",
-]
-
-[[package]]
-name = "init-pro-vendor"
-version = "0.1.0"
-dependencies = [
- "serde",
- "sha2",
- "toml",
- "zstd",
+ "cli",
+ "common",
+ "multicall",
+ "vendor",
 ]
 
 [[package]]
@@ -831,6 +809,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "multicall"
+version = "0.1.0"
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -974,6 +956,14 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "router"
+version = "0.1.0"
+dependencies = [
+ "mlua",
+ "tokio",
+]
 
 [[package]]
 name = "rustc-hash"
@@ -1375,6 +1365,16 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vendor"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "toml",
+ "zstd",
+]
 
 [[package]]
 name = "version_check"

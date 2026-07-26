@@ -251,7 +251,7 @@ commands in a `ValidFlags` map (`server`, `etcd-snapshot` — notably **not**
 - C) No config-file pre-scan in v1; flags only.
 
 **Decision: B.** Port `configfilearg` semantics to a **pre-clap layer** in
-`init-pro-cli`: resolution order env `INIT_PRO_CONFIG_FILE` →
+`cli`: resolution order env `INIT_PRO_CONFIG_FILE` →
 `--config`/`-c` → default `<data-dir>/config.yaml`; injected after the
 command word so CLI wins; slice flags append; `key+` = append-to-slice;
 per-command invalid-flag stripping (ported `stripInvalidFlags`, applied to
@@ -399,7 +399,7 @@ the sole negotiated codec (Q10); axum's `Json` extractor/response sets it.
 **TLS posture: plain HTTP for T1.2a; TLS deferred to T1.3.** T1.2a binds the
 loopback and serves discovery over **plain HTTP**. Acceptance for this slice is
 `curl` byte-equivalence (see `scripts/apiserver-discovery-parity-test.sh` and
-`init-pro-apiserver/tests/discovery_http.rs`), **not** real kubectl interop —
+`apiserver/tests/discovery_http.rs`), **not** real kubectl interop —
 kubectl refuses plain HTTP, and certificate management is the natural neighbor
 of the T1.3 identity/auth work. Real kubectl interop (TLS + persistence + watch)
 is the deferred acceptance gate of **T1.2b**.
@@ -463,7 +463,7 @@ not 5.2 extensions).
   phase hooks (T5.2/T5.3) land in familiar territory, and a worker-wide VM
   amortises compilation/state across requests.
 - `+` **The bridge is proven real.** The T5.1 kill-criterion
-  (`init-pro-router/tests/concurrency.rs`) shows coroutine B starting and
+  (`router/tests/concurrency.rs`) shows coroutine B starting and
   finishing **inside** coroutine A's `ngx.sleep(50ms)` window (order
   `A_start < B_start < B_end < A_end`), total wall ≈ max ≈ 50ms (not the serial
   sum); 10 coroutines × 20ms complete in ~21ms. `ngx.sleep(10ms)` round-trip is

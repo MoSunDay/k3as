@@ -4,14 +4,14 @@
 resolver = "2"
 members = [
     "crates/init-pro",
-    "crates/init-pro-core",
-    "crates/init-pro-multicall",
-    "crates/init-pro-cli",
-    "crates/init-pro-infra",
-    "crates/init-pro-vendor",
-    "crates/init-pro-api",
-    "crates/init-pro-apiserver",
-    "crates/init-pro-router",
+    "crates/common",
+    "crates/multicall",
+    "crates/cli",
+    "crates/infra",
+    "crates/vendor",
+    "crates/api",
+    "crates/apiserver",
+    "crates/router",
 ]
 
 [workspace.package]
@@ -25,14 +25,14 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
-init-pro-core = { path = "crates/init-pro-core" }
-init-pro-multicall = { path = "crates/init-pro-multicall" }
-init-pro-cli = { path = "crates/init-pro-cli" }
-init-pro-infra = { path = "crates/init-pro-infra" }
-init-pro-vendor = { path = "crates/init-pro-vendor" }
-init-pro-api = { path = "crates/init-pro-api" }
-init-pro-apiserver = { path = "crates/init-pro-apiserver" }
-init-pro-router = { path = "crates/init-pro-router" }
+common = { path = "crates/common" }
+multicall = { path = "crates/multicall" }
+cli = { path = "crates/cli" }
+infra = { path = "crates/infra" }
+vendor = { path = "crates/vendor" }
+api = { path = "crates/api" }
+apiserver = { path = "crates/apiserver" }
+router = { path = "crates/router" }
 
 # External
 anyhow = "1"

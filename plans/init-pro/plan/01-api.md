@@ -38,11 +38,11 @@ be wire-compatible with upstream kubectl/kube-rs.
     running server — recorded in Q10).
 
 - **状态 / Status** — done
-- **证据 / Evidence** — `crates/init-pro-api`: GVK/GVR wrappers (`gvk.rs`),
+- **证据 / Evidence** — `crates/api`: GVK/GVR wrappers (`gvk.rs`),
     schema registry (`schema.rs`), JSON round-trip (`serde_ext.rs` +
     `tests/json_fidelity.rs`), StrategicMergePatch (`patch.rs`), `init-pro.io` CRD types
     (`initpro.rs`), discovery doc builders (`discovery.rs`). 39 tests in
-    `init-pro-api` + 1 in `init-pro-cli`; `cargo test --locked --workspace`
+    `api` + 1 in `cli`; `cargo test --locked --workspace`
     181 green; `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - **卡点 / Blockers** — Resolved by **Q10** (JSON-only v1; protobuf deferred).
 - **依赖 / Depends on** — T0.3

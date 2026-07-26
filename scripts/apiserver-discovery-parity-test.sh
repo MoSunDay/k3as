@@ -21,17 +21,17 @@ bad()  { echo "FAIL $*" >&2; exit 1; }
 
 # Start the server on a unique loopback port, plain HTTP (TLS is T1.3, Q11).
 "$BIN" server --data-dir "$DD" --bind-address 127.0.0.1 --https-listen-port "$PORT" \
-    >/tmp/init-pro-apiserver.log 2>&1 &
+    >/tmp/apiserver.log 2>&1 &
 SRV=$!
 cleanup() { kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; rm -rf "$DD"; }
 trap cleanup EXIT
 
 # Wait until the apiserver reports it is listening.
 for _ in $(seq 1 50); do
-  grep -q "discovery listening" /tmp/init-pro-apiserver.log && break
+  grep -q "discovery listening" /tmp/apiserver.log && break
   sleep 0.1
 done
-grep -q "discovery listening" /tmp/init-pro-apiserver.log || bad "apiserver never reported listening"
+grep -q "discovery listening" /tmp/apiserver.log || bad "apiserver never reported listening"
 
 BASE="http://127.0.0.1:${PORT}"
 

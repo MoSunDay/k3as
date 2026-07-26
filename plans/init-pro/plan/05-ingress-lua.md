@@ -40,7 +40,7 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
 
 - **状态 / Status** — in-progress (spike: coroutine<->async bridge PROVEN;
     cosocket / HTTP phase pipeline / Ingress compilation are T5.2-T5.4)
-- **证据 / Evidence** — new crate `init-pro-router` (`lib.rs`/`vm.rs`/`ngx.rs`,
+- **证据 / Evidence** — new crate `router` (`lib.rs`/`vm.rs`/`ngx.rs`,
     each <=44 lines; depends only on `mlua` + `tokio`). **Kill-criterion PASSED**
     (`tests/concurrency.rs`): coroutine B starts and finishes *inside* coroutine
     A's `ngx.sleep(50ms)` window (order `A_start < B_start < B_end < A_end`),
@@ -93,7 +93,7 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
   `resty.lock`, `resty.sha*`, `resty.md5`, etc.
 
 - **核心实现 / Core implementation**
-  - Implement as Lua-exposed Rust modules under `init-pro-router::resty::*`.
+  - Implement as Lua-exposed Rust modules under `router::resty::*`.
   - `resty.http` backed by `reqwest`/hyper client (cosocket-compatible API).
   - `resty.lrucache` backed by Rust LRU; `ngx.shared.DICT` API parity.
   - Compatibility test corpus taken from openresty lua-resty-* test suites

@@ -34,10 +34,10 @@ scripts/graceful-shutdown-test.sh # server drains on SIGTERM (T0.3)
 | Crate | Role |
 |-------|------|
 | `init-pro` | the single binary; `argv[0]` dispatch |
-| `init-pro-multicall` | alias table + reexec + peer stubs (T0.1) |
-| `init-pro-cli` | clap CLI surface + subcommands (T0.4) |
-| `init-pro-infra` | tracing, layered config, graceful shutdown (T0.3) |
-| `init-pro-core` | shared domain primitives |
+| `multicall` | alias table + reexec + peer stubs (T0.1) |
+| `cli` | clap CLI surface + subcommands (T0.4) |
+| `infra` | tracing, layered config, graceful shutdown (T0.3) |
+| `common` | shared domain primitives |
 
 ## License
 

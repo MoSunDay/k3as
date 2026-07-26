@@ -12,9 +12,9 @@ name = "init-pro"
 path = "src/main.rs"
 
 [dependencies]
-init-pro-multicall = { workspace = true }
-init-pro-cli = { workspace = true }
-init-pro-core = { workspace = true }
+multicall = { workspace = true }
+cli = { workspace = true }
+common = { workspace = true }
 
 [build-dependencies]
-init-pro-vendor = { workspace = true }
+vendor = { workspace = true }
