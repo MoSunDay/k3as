@@ -7,6 +7,53 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 2
+
+### Added
+- **T0.4 — k3s-compatible CLI.** The `server`/`agent` surface accepts the full
+  k3s flag vocabulary in three postures (frozen matrix
+  `plan/00-foundation-flag-matrix.md`, ADR Q9):
+  - **Pre-clap config pre-scan (Q8, A1).** `infra/configfile.rs` parses the
+    layered config file (`<data-dir>/config.yaml` by default) with two-pass
+    resolution that breaks the data-dir↔config-path circularity (R3).
+    `Config::resolve` now takes 3 args: `(cli_data_dir, cli_debug, cli_config)`.
+    Precedence: CLI > env (`INIT_PRO_*`) > file > default. A `config_scan.rs`
+    argv scanner finds `--config`/`-c` before clap, short-circuiting `--help`.
+  - **17 accept-wired flags (Table A, A2).** `server`/`agent` clap-derive
+    structs capture `--data-dir`/`-d`, `--debug`, `--config`/`-c`, `--disable`,
+    `--disable-{etcd,apiserver,agent,controller-manager,scheduler,cloud-controller,kube-proxy,network-policy,helm-controller}`,
+    `--datastore-endpoint`, `--prefer-bundled-bin`, `--token`/`-t`,
+    `--server`/`-s`, `--cluster-init`.
+  - **~108 accept-no-op-warn flags (Table C, A3).** `strip_noop()` removes
+    them from argv before clap so operators' k3s scripts keep working;
+    `warn_noops()` logs each distinct flag once at WARN (deduped).
+  - **7 fatal conflict rules (Table B, A4).** `validate_server` /
+    `validate_agent` enforce k3s-parity preconditions and emit matching
+    messages before logging/resolve: cluster-reset-restore-path needs
+    cluster-reset; disable-{apiserver,etcd} ✗ datastore-endpoint;
+    disable-etcd needs server; unknown `--disable` token (whitelist:
+    `coredns, servicelb, traefik, local-storage, metrics-server, runtimes`);
+    agent needs token; agent needs server.
+  - **Parity harness (A5).** `scripts/cli-flag-parity-test.sh` exercises all
+    five matrix assertions (accept / no-op-warn / fatal / `INIT_PRO_*` parity /
+    unknown `K3S_*` ignored). Frozen `server`/`agent --help` snapshots in
+    `tests/snapshots/` gate the wired-flag surface.
+
+### Tests
+- `cargo test --locked --workspace` → **81 passed; 0 failed** (fresh; up from 23).
+  - `init-pro-cli` unit: +58 (config-file parse/resolve_path/scalar/slice/key+
+    append; config_scan; strip_noop incl. short/value/dedup; conflicts ×7;
+    help-parity surface).
+  - `init-pro-infra` unit: config-file + 3-arg resolve coverage.
+- `cargo clippy --workspace --all-targets -- -D warnings` → **0 warnings**.
+- e2e: `scripts/cli-flag-parity-test.sh` → **16/16 assertions green**.
+
+### Known limitations
+- `run_server` / `run_agent` / `run_stage` remain Phase 1 stubs (idle until
+  signal / manifest print) — real Layers 1–4 arrive from Phase 2.
+- Config-file layer is read but not yet surfaced to `--dry-run` beyond
+  `data-dir`; structured fields land with the layers that consume them.
+
 ## [Unreleased] — Phase 1, Sprint 1
 
 ### Added

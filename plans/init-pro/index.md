@@ -13,7 +13,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T0.1 | 0 | 单一二进制 multicall crate 骨架 | done | — |
 | T0.2 | 0 | 构建与 bundling pipeline | not-started | T0.1 |
 | T0.3 | 0 | 公共基础设施 crate (log/config/signal) | done | T0.1 |
-| T0.4 | 0 | CLI: multicall + k3s 兼容 flag | not-started | T0.1, T0.3 |
+| T0.4 | 0 | CLI: multicall + k3s 兼容 flag | done | T0.1, T0.3 |
 | T0.5 | 0 | 规划体系与文档中枢 | done | — |
 | T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | not-started | T0.1 |
 | T1.1 | 1 | 资源模型与 API group schema | not-started | T0.3 |
@@ -70,7 +70,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
-- **Sprint 2 (T0.2 + T0.4) blockers resolved (Q6–Q9):** status remains `not-started` for both, but the open `待定` items are now decisions — T0.2 packaging = **Q6**, licensing/SBOM/size = **Q7**; T0.4 config pre-scan = **Q8**, flag posture/matrix = **Q9** + `plan/00-foundation-flag-matrix.md`. Full 7-field detail for T0.2/T0.4 lives in `plan/00-foundation.md`. See `decisions.md` for ADR rationale.
+- **Sprint 2 (T0.2 + T0.4):** T0.4 = **done** (k3s-compatible CLI — pre-clap config pre-scan Q8, 17 wired flags, ~108 no-op strip, 7 fatal conflict rules, parity script + frozen `--help` snapshots). T0.2 = `not-started` (packaging pipeline, next). Frozen flag matrix: `plan/00-foundation-flag-matrix.md`; ADRs Q6–Q9 in `decisions.md`.
 
 ---
 

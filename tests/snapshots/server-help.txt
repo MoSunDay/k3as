@@ -1,0 +1,45 @@
+Run the control-plane server
+
+Usage: init-pro server [OPTIONS]
+
+Options:
+  -c, --config <FILE>
+          Config file (pre-clap pre-scan, Q8). env `INIT_PRO_CONFIG_FILE` [env: INIT_PRO_CONFIG_FILE=]
+  -d, --data-dir <DIR>
+          Data directory (k3s `-d` / `--data-dir` parity)
+      --debug
+          Turn on debug logging (k3s `--debug` parity)
+  -t, --token <TOKEN>
+          Cluster join secret. env `INIT_PRO_TOKEN` [env: INIT_PRO_TOKEN=]
+  -s, --server <SERVER>
+          Server URL to join. env `INIT_PRO_URL` [env: INIT_PRO_URL=]
+      --prefer-bundled-bin
+          Flip child PATH ordering: `bin/aux` ahead of host PATH (Q6 stage)
+      --disable <DISABLE>
+          Disable packaged components (validated against `DisableItems` in A4)
+      --disable-etcd
+          Disable embedded etcd (etcd runtime = T2.1)
+      --disable-apiserver
+          Disable the apiserver
+      --disable-agent
+          Disable the local kubelet/agent run
+      --disable-controller-manager
+          Disable kube-controller-manager
+      --disable-scheduler
+          Disable kube-scheduler
+      --disable-cloud-controller
+          Disable the k3s cloud-controller-manager
+      --disable-kube-proxy
+          Disable kube-proxy
+      --disable-network-policy
+          Disable the network-policy controller
+      --disable-helm-controller
+          Disable the helm controller
+      --datastore-endpoint <DATASTORE_ENDPOINT>
+          External datastore DSN (storage backend wiring = T2.x). env `INIT_PRO_DATASTORE_ENDPOINT` [env: INIT_PRO_DATASTORE_ENDPOINT=]
+      --cluster-init
+          Bootstrap a new cluster (etcd init = T2.1/T3.4). env `INIT_PRO_CLUSTER_INIT` [env: INIT_PRO_CLUSTER_INIT=]
+  -h, --help
+          Print help
+  -V, --version
+          Print version
