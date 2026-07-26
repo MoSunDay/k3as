@@ -4,6 +4,7 @@
 use mlua::Lua;
 
 use crate::ngx;
+use crate::resty;
 
 /// Build a fresh worker-wide LuaJIT VM with the `ngx.*` async primitives
 /// registered. Mirrors openresty's per-worker `init_worker_by_lua` VM.
@@ -16,6 +17,7 @@ use crate::ngx;
 pub fn worker_vm() -> mlua::Result<Lua> {
     let lua = Lua::new();
     ngx::register(&lua)?;
+    resty::register(&lua)?;
     Ok(lua)
 }
 

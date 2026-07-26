@@ -6,11 +6,11 @@
 //! not per VM, not per thread. A plain global swap races the instant coroutine
 //! A parks and coroutine B runs (Q13 spike: app_data-swap is unsafe).
 //!
-//! The chosen mechanism: each request runs as an **explicit** Lua `Thread`
+//! The chosen mechanism: each request phase runs as an **explicit** Lua `Thread`
 //! (created via `Lua::create_thread`, driven via `Thread::into_async` — *not*
 //! the implicit coroutines `call_async` spawns, which collapse to the root
 //! thread). We key the live [`RequestContext`] by the coroutine's stable
-//! pointer (`Thread::to_pointer()`). A registered async function reads
+//! pointer (`Thread::to_pointer()`). A registered function reads
 //! `Lua::current_thread().to_pointer()` and resolves its own request —
 //! distinct and stable even across interleaving (Q13 spike PASS).
 
@@ -25,7 +25,7 @@ use mlua::Lua;
 ///
 /// Single-threaded (`!Send`) by design: one VM per worker thread (Q12), driven
 /// on a `tokio::task::LocalSet`. Interior mutability via the enclosing
-/// [`Rc`]`<`[`RefCell`]`<..>> lets the Lua `__index`/`__newindex` closures write
+/// [`Rc`]`<`[`RefCell`]`<..>>` lets the Lua `__index`/`__newindex` closures write
 /// status / headers / body without an `&mut` borrow of the VM.
 pub struct RequestContext {
     /// Incoming request method (`GET`, `POST`, ...).
@@ -34,8 +34,14 @@ pub struct RequestContext {
     pub uri: String,
     /// Path component of [`Self::uri`] (no query).
     pub path: String,
+    /// Query string component of [`Self::uri`] (the part after `?`).
+    pub query: String,
     /// Incoming headers, `(name, value)` in received order.
     pub req_headers: Vec<(String, String)>,
+    /// Buffered request body bytes (read by the transport before the phase).
+    pub req_body: Vec<u8>,
+    /// Whether `ngx.req.read_body()` has marked the body as available.
+    pub req_body_read: bool,
 
     /// Status code the Lua phase wrote (default `200`).
     pub status: u16,
@@ -43,21 +49,28 @@ pub struct RequestContext {
     pub resp_headers: Vec<(String, String)>,
     /// Body bytes accumulated by `ngx.say` / `ngx.print`.
     pub body: Vec<u8>,
-    /// `ngx.exit(code)` sentinel: when `Some`, the phase must terminate.
+    /// `ngx.exit(code)` sentinel: when `Some`, the generative phases must stop.
     pub exit_code: Option<i32>,
     /// Whether `ngx.say` was used (drives the default `Content-Type`).
     pub said: bool,
+
+    /// User vars set via `ngx.var.NAME = value` (openresty `$NAME`).
+    pub user_vars: Vec<(String, String)>,
+    /// `ngx.arg[1]` carrier for `body_filter_by_lua` (the current chunk).
+    pub arg_body: Vec<u8>,
+    /// `ngx.arg[2]` carrier for `body_filter_by_lua` (is-final-chunk flag).
+    pub arg_eof: bool,
+    /// `ngx.exec(uri)` re-dispatch target; the pipeline honours it once set.
+    pub exec_uri: Option<String>,
 }
 
 impl RequestContext {
-    /// Build the context from the parsed [`http::Request`] head.
+    /// Build the context from the parsed [`http::Request`] head (empty body).
     pub fn from_parts(parts: &Parts) -> Self {
         let method = parts.method.as_str().to_owned();
         let uri = parts.uri.to_string();
-        let path = parts
-            .uri
-            .path()
-            .to_owned();
+        let path = parts.uri.path().to_owned();
+        let query = parts.uri.query().unwrap_or("").to_owned();
         let req_headers = parts
             .headers
             .iter()
@@ -72,13 +85,57 @@ impl RequestContext {
             method,
             uri,
             path,
+            query,
             req_headers,
+            req_body: Vec::new(),
+            req_body_read: false,
             status: 200,
             resp_headers: Vec::new(),
             body: Vec::new(),
             exit_code: None,
             said: false,
+            user_vars: Vec::new(),
+            arg_body: Vec::new(),
+            arg_eof: false,
+            exec_uri: None,
         }
+    }
+
+    /// Set the buffered request body (called by the data plane after reading).
+    pub fn with_body(mut self, body: Vec<u8>) -> Self {
+        self.req_body = body;
+        self
+    }
+
+    /// Reset the *generative* response state for an `ngx.exec` re-dispatch:
+    /// a fresh status/body, as if the request just arrived at the new URI.
+    pub fn reset_for_exec(&mut self, new_uri: String) {
+        self.uri = new_uri.clone();
+        let (path, query) = match new_uri.split_once('?') {
+            Some((p, q)) => (p.to_owned(), q.to_owned()),
+            None => (new_uri, String::new()),
+        };
+        self.path = path;
+        self.query = query;
+        self.status = 200;
+        self.body.clear();
+        self.said = false;
+        self.exit_code = None;
+        self.exec_uri = None;
+    }
+
+    /// The request scheme: `https` when TLS lands (T5.4), else `http`.
+    pub fn scheme(&self) -> &'static str {
+        "http"
+    }
+
+    /// The `Host` header value (first one wins), or empty.
+    pub fn host(&self) -> String {
+        self.req_headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("host"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
     }
 }
 

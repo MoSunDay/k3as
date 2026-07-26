@@ -32,9 +32,9 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
 | T5.1 | 5 | mlua + coroutine↔async 桥 | done | T0.3 |
-| T5.2 | 5 | HTTP 管线 + phase hooks | in-progress | T5.1 |
-| T5.3 | 5 | resty::* 等价标准库 | not-started | T5.1 |
-| T5.4 | 5 | 内置 Router 核心 + Ingress→Lua 路由编译 | not-started | T5.2, T5.3, T1.1 |
+| T5.2 | 5 | HTTP 管线 + phase hooks | done | T5.1 |
+| T5.3 | 5 | resty::* 等价标准库 | in-progress (Scope A+B core done) | T5.1, T5.2 |
+| T5.4 | 5 | 内置 Router 核心 + Ingress→Lua 路由编译 | in-progress (Scope A+B / M1 data plane done) | T5.2, T5.3, T1.1 |
 | T5.5 | 5 | 热加载 / 动态配置 (no-restart reload) | not-started | T5.4 |
 | T5.6 | 5 | ServiceLB (L4/LB 数据面) | not-started | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |

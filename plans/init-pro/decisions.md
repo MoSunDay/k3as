@@ -555,3 +555,203 @@ response. Parallelism stays per-worker (one `LocalSet`), consistent with Q12.
   clients) is complete. Remaining T5.2 scope — the full phase chain
   (`rewrite`/`access`/`header_filter`/`body_filter`/`log`/`balancer`),
   `ngx.var`/`ngx.shared.DICT`/`ngx.exec`/`ngx.redirect` — is T5.2 Scope B+.
+
+---
+
+## Q14 — Per-phase coroutines, body buffering & the filter semantics (T5.2 Scope B)
+
+**Date.** 2026-07-26 (Sprint 6).
+
+**Context.** Q13 established per-request coroutine-local binding: each
+in-flight request's Lua coroutine gets its own `RequestContext`, looked up in a
+`ContextStore` (in VM `app_data`) by `Lua::current_thread().to_pointer()`.
+Scope A (Sprint 5) shipped only the `content` phase. Scope B must add the full
+openresty phase chain — `init_worker`→`rewrite`→`access`→`content`→
+`header_filter`→`body_filter`→`log` — plus request-body reading and the rest of
+the `ngx.*` surface (`ngx.var`, `ngx.arg`, `ngx.exec`, `ngx.redirect`, time
+helpers). Two design questions dominated: how to chain the phases, and how to
+feed the request body to Lua.
+
+**Decision A — one explicit Lua `Thread` per phase, sharing one context.**
+Rather than one long-lived "driver" coroutine that yields between phases, each
+phase runs as its **own** `Lua::create_thread` + `Thread::into_async` coroutine.
+All phases of a single request share the *same* `Rc<RefCell<RequestContext>>`
+(this is what the Q13 pointer lookup returns). Why per-phase threads:
+- The short-circuit signals — `ngx.exit(STATUS)`, `ngx.exec(uri)`,
+  `ngx.redirect(url)` — unwind the running coroutine via a sentinel
+  `mlua::Error` (`PhaseAborted`). Cleanly propagating that **per phase** (run
+  the thread, inspect the outcome, decide whether to continue) is far simpler
+  than catching-and-continuing inside a single driver coroutine, where the Lua
+  stack would carry the abort across the phase boundary.
+- Phase isolation: a hard Lua error / panic in one phase cannot corrupt the
+  next phase's Lua stack (each has its own thread).
+- Distinct threads → distinct `current_thread().to_pointer()` values, yet the
+  Q13 lookup still resolves to the one shared context (`RequestContext` holds
+  the per-request `Thread`s in a small map, or they're re-entrant on the same
+  binding). Binding/unbind per phase is cheap (one `Rc` clone).
+
+**Phase ordering & short-circuit rules.** `rewrite`→`access`→`content` are
+*generative*: an `ngx.exit` / `ngx.redirect` / `ngx.exec` in any of them stops
+further generative phases (a `rewrite` exit skips `content`). The *filter*
+phases (`header_filter`, `body_filter`) **always run**, even after a content
+short-circuit — that is how a `header_filter_by_lua` still mutates a 302 from
+`ngx.redirect`. `log` runs last (fire-and-forget; the response is already
+captured). `init_worker_by_lua` runs once at worker boot, before any request.
+
+**`ngx.exec` re-dispatch.** An internal redirect re-runs the generative phases
+for the rewritten URI (openresty semantics). It is loop-guarded
+(`MAX_EXEC_REDIRECTS = 10`) so a Lua bug cannot infinite-loop the worker.
+
+**Decision B — buffered request body, with chunked decoding and a size cap.**
+The data plane (`serve.rs`) now buffers the request body before the phase runs,
+honouring `Content-Length` **or** `Transfer-Encoding: chunked` (decoded),
+capped at `MAX_BODY_BYTES = 1 MiB` (overflow → `413 Request Entity Too Large`).
+The body lives in `RequestContext::req_body` (`Option<Vec<u8>>`); `ngx.req.
+read_body()` materialises it, `get_body_data()` returns it, `get_post_args()`/
+`get_query_args()` parse it as `application/x-www-form-urlencoded`. This matches
+openresty's buffered mode for small bodies, which covers the Ingress use case.
+
+**Decision C — `body_filter` is a buffered whole-body transform.** `ngx.arg[1]`
+is primed with the fully assembled body, the user filter mutates it, and the
+result is committed back to the response. This is **not** true chunked
+streaming (openresty's `ngx.arg[1]` is a stream chunk). It is flagged as a
+known limitation; true streaming `body_filter` is deferred to **T5.6** (the
+ServiceLB data-plane work), where the body plumbing must be reworked for
+streaming proxying anyway.
+
+**Consequences.**
+- `+` The phase chain is composable (`Pipeline::build()` builder; `Pipeline::
+  new(src)` kept as the content-only convenience) and generic: a future
+  `balancer_by_lua` (T5.4) or `ssl_certificate_by_lua` can register with the
+  same mechanism.
+- `+` Short-circuit semantics are openresty-faithful: filters run after a
+  content exit; `ngx.exec` re-dispatches; `ngx.redirect` emits the HTTP
+  redirect. All verified by `tests/phase_chain.rs` (15 tests, including the
+  §6 gate `real_client_observes_header_filter_mutation`).
+- `+` Request bodies round-trip: POST Content-Length **and** chunked bodies are
+  readable from Lua; the 1 MiB cap protects the worker from unbounded buffering.
+- `−` Buffered body + buffered `body_filter` means the whole response body is
+  materialised in memory per request. Acceptable for v1 Ingress (headers/health
+  probes/small payloads); streaming is T5.6. **Documented limitation.**
+- `−` The data plane re-implements chunked-TE decoding (~40 lines) rather than
+  reusing hyper's body framing; consistent with the Q13 raw-TCP decision.
+- → **T5.2 → done.** Scope A (content + cosocket) + Scope B (full phase chain,
+  body, `ngx.var`/`ngx.arg`/`ngx.exec`/`ngx.redirect`/time) are complete and
+  verified by real HTTP clients. Unblocks **T5.4** (M1 Ingress spike) once
+  **T5.3** (`resty::*`, which owns `ngx.shared.DICT`) lands.
+
+## Q15 — Auto-created shared dicts & the resty::* storage model (T5.3 Scope A)
+
+**Date.** 2026-07-26 (Sprint 7).
+
+**Context.** T5.3 must give Lua the `resty::*` standard library users expect
+from openresty, and — critically — the `ngx.shared.DICT` surface, which is the
+worker-process shared-state layer a router needs (rate-limit counters, A/B
+decision tables, dedup caches). Two questions dominated: (1) how do shared
+dicts *come into existence* when there is no `lua_shared_dict` directive yet
+(Ingress config compilation is **T5.4**, and no nginx-style config exists at
+all in k3as), and (2) where does the state live given the Q12 single-threaded
+`!Send` VM model.
+
+**Decision A — shared dicts are auto-created on first access.** In openresty,
+`ngx.shared.foo` is an error *unless* the operator pre-declared it with
+`lua_shared_dict foo 1m;`. k3as deliberately **deviates**: accessing an
+unknown `ngx.shared.<name>` lazily materialises a new dict (default capacity)
+rather than raising. The mechanism is an `__index` metamethod on the
+`ngx.shared` proxy: a miss falls through to `SharedDictRegistry::get_or_create`,
+which inserts a fresh `Rc<RefCell<SharedDictStore>>` into the registry and
+returns a `SharedDictHandle` userdata bound to it. This avoids a chicken-and-egg
+dependency on T5.4 config (Lua can `ngx.shared.foo:set(...)` today with zero
+config plumbing) and matches the "compile to Lua routing tables" ethos — the
+Ingress compiler will simply *use* dicts that already self-initialise.
+
+**Decision B — per-worker `RefCell` state, no `DashMap`.** The Q12 VM is
+single-threaded and `!Send`: all Lua runs on one worker thread. Shared-dict
+state therefore lives in `SharedDictRegistry` — a `RefCell<HashMap<String,
+Rc<RefCell<SharedDictStore>>>>` placed in the VM's `app_data` — and is borrowed,
+not locked. Scope is **worker-process**, not cluster-wide: values set by
+request A are observable by request B on the *same* worker (verified by the T5.3
+gate `shared_dict_persists_across_requests_real_tcp`), but do not cross
+workers. This is the openresty `lua_shared_dict` contract exactly (openresty
+shmem is likewise per-worker-process). No `DashMap`: it would imply
+multi-threaded VM access that the Q12 model forbids.
+
+**Decision C — hand-written LRU, no `lru` crate.** `resty.lrucache` is a
+*local* (per-userdata, not shared) cache, distinct from `ngx.shared.DICT`.
+Its ordering is a plain `Vec<Vec<u8>>` (MRU front) keyed by a `HashMap<Vec<u8>,
+RegistryKey>`, where values are stored in the Lua registry (so tables, numbers,
+and strings all work, matching openresty). No `lru`/`linked-hash-map`
+dependency — consistent with the Q4 minimalism stance. Default capacity 1024
+(openresty default).
+
+**Decision D — Scope A / Scope B split.** T5.3 is delivered in two slices.
+**Scope A (Sprint 7, this ADR):** `resty.lrucache`, `ngx.shared.DICT` (full
+API: get/set/add/replace/incr/delete/flush_all/get_keys/get_all),
+`resty.random` (bytes/token via `getrandom`), `resty.string` (base64/hex) and
+`resty.sha256`. **Scope B (Sprint 8, deferred):** `resty.http`, `resty.lock`,
+and the remaining digests (md5, sha1, sha512). The split exists because
+`resty.http` needs cosocket TLS, which is blocked behind **T5.4/T5.6**.
+
+**Consequences.**
+- `+` Zero-config shared state: Lua `ngx.shared.<anything>:set/get` works today,
+  unblocking T5.4 routing-table experiments with no `lua_shared_dict` plumbing.
+- `+` Faithful openresty semantics: per-worker scope, the full DICT API, and
+  `resty.lrucache` that accepts arbitrary Lua values (tables included).
+- `+` The T5.3 acceptance gate is a *real TCP* round-trip — request A writes,
+  request B reads, on the actual data plane (`serve.rs`), not a unit stub.
+- `−` **Documented deviation:** accessing an undeclared dict *succeeds* instead
+  of erroring. Operators cannot reserve a fixed size slot pre-runtime. To be
+  tightened in **T5.4**: when the Ingress compiler emits config, it will
+  pre-create well-known dicts (e.g. `limit_req`, `balancer_state`) with explicit
+  capacities, and `__index` will honour an existing entry before auto-creating.
+- `−` State is not cluster-replicated; multi-worker deployments see independent
+  dicts. This matches openresty and is sufficient for v1 Ingress (counters are
+  eventually-consistent across workers). Cluster sync is a post-v1 concern.
+- → **T5.3 → in-progress (Scope A).** `resty::*` core lands; unblocks **T5.4**
+  (M1 Ingress spike) for routing-table + rate-limit experiments. Scope B
+  (resty.http/lock, TLS-bound) follows in Sprint 8.
+
+---
+
+## Q16 — The crypto provider: `ring` over `aws-lc-rs` (T5.4 Scope B / TLS)
+
+**Date.** 2026-07-26 (Sprint 8).
+
+**Context.** Scope B adds TLS in two places: **termination** (the reverse proxy
+accepts HTTPS — SNI selects the cert, the rustls analog of openresty's
+`ssl_certificate_by_lua`) and the **client side** (the cosocket `sslhandshake`
+and `resty.http.request_uri` dial HTTPS upstreams). rustls 0.23 requires an
+explicit crypto provider; the choice is `ring` vs `aws-lc-rs`.
+
+**Decision — `ring`.** Every TLS dependency selects the `ring` provider and
+disables default features:
+- `rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }`
+- `tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }`
+- plus `rustls-pemfile` (PEM parse), `webpki-roots` (Mozilla root store for the
+  client `verify=true` path); the test-only self-signed-cert generator is
+  `rcgen` (`ring` feature) — a dev-dependency, never shipped in the release
+  binary (R5).
+
+Rationale:
+- **Smaller, widely audited** — the leaner provider, consistent with the
+  minimal-dependency posture (ADR **Q4**) and the router's `#![forbid(unsafe_code)]`.
+- **No extra C-toolchain build dependency** for the provider in the
+  configurations used (keeps the offline/vendored build, Q6, simple).
+- **One provider, everywhere** — server termination, the cosocket client, and
+  `resty.http` all share one `rustls::crypto::ring::default_provider()` via
+  `tls::build_server_config` / `build_client_config`.
+
+**Consequences.**
+- `+` A single, audited crypto stack across the data plane (no mixed providers);
+  a cert that validates in one path validates in all.
+- `+` `verify=false` (the `NoVerify` client verifier) is shared verbatim by the
+  cosocket `sslhandshake` and `resty.http`, so Lua that disables verification
+  behaves identically in both (deliberate M1 parity).
+- `−` `aws-lc-rs`-only cipher suites are unavailable; none are needed for the
+  M1 Ingress/TLS slice.
+- `−` Dynamic, Lua-driven cert issuance (openresty's true mid-handshake
+  `ssl_certificate_by_lua` callback) is **deferred** — rustls's
+  `ResolvesServerCert` is exactly the synchronous SNI selection point, so the
+  `SniCertResolver` seam is already in place for a future Lua callback.
+- → unblocks **T5.4 Scope B** (HTTPS termination + client TLS) and the
+  `resty.http`/`resty.lock` work, whose TLS paths depended on this.
