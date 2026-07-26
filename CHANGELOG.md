@@ -7,6 +7,51 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 3 (T1.2a)
+
+### Added
+- **T1.2a — HTTP discovery API server.** `init-pro server` now binds
+  `127.0.0.1:6443` (overridable) and serves byte-correct Kubernetes API
+  discovery over HTTP: `GET /api` (`APIVersions`), `GET /apis`
+  (`APIGroupList`), `GET /api/v1` + `GET /apis/{group}/{version}`
+  (`APIResourceList`), with `Content-Type: application/json` (Q10) and `404`
+  for unknown group/version. This proves the HTTP framework choice,
+  exercises T1.1's discovery builders over a real transport, and shares the
+  stack with the Router data plane (T5.2). No etcd needed; discovery is driven
+  entirely by the `SchemaRegistry`.
+  - **Decision Q11 (HTTP framework & TLS posture).** Framework is **axum**
+    (on hyper/tokio/tower) — one stack for both the apiserver (T1.2) and the
+    Router (T5.2). **Plain HTTP for this slice**; TLS (rustls) + real kubectl
+    interop is deferred to T1.2b/T1.3. Acceptance is `curl` byte-equivalence
+    + a Rust integration test, not kubectl (kubectl refuses plain HTTP).
+  - **New crate `init-pro-apiserver`** (`lib.rs`/`discovery_handlers.rs`/
+    `serve.rs`, all ≤104 lines). `init-pro-api` stays HTTP-free; the apiserver
+    crate is the thin transport layer over the T1.1 pure builders.
+    `serve(registry, addr, server_address, shutdown)` takes a generic
+    shutdown future (kept decoupled from `init-pro-infra`).
+  - **Listen flags.** `--bind-address` (default `127.0.0.1`) +
+    `--https-listen-port` (default `6443`) added to `init-pro server` (k3s
+    parity), with `INIT_PRO_*` env support; removed from the no-op strip set.
+    `--disable-apiserver` keeps the port closed.
+  - **Graceful drain.** The server is spawned and joined after the shared
+    `Shutdown` token fires, so axum drains in-flight requests before exit.
+  - **6 tests** in `init-pro-apiserver` (1 router-build + 5 HTTP fidelity:
+    `/api`, `/apis`, `/api/v1`, `/apis/init-pro.io/v1`, unknown→404); **2
+    parity scripts** (`scripts/apiserver-discovery-parity-test.sh` — real
+    `init-pro server` + `curl`, `graceful-shutdown-test.sh` still green).
+    Workspace total **195 green**; `cargo clippy --all-targets -- -D warnings`
+    clean; all new files ≤104 lines; pure additive diff (no `#[ignore]`,
+    no deleted tests).
+
+### Changed
+- **Workspace deps:** added `axum` 0.8 (`http1`,`json`,`tokio`,`macros`),
+  `tower` 0.5; added `net` to `tokio` features.
+- **`init-pro-cli`:** `runtime.rs` spawns the apiserver (was the T1.1
+  placeholder `let _ = &schema;`); `ServerCmd` gained the bind flags;
+  `lib.rs` parses the bind address. Snapshot `tests/snapshots/server-help.txt`
+  + `cli-flag-parity-test.sh` updated for the two new wired flags.
+- **`decisions.md`:** added **Q11** ADR.
+
 ## [Unreleased] — Phase 1, Sprint 3
 
 ### Added

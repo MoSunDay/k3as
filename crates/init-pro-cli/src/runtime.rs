@@ -1,25 +1,34 @@
-//! Subcommand implementations (Phase 1 stubs).
+//! Subcommand implementations (Phase 1).
 //!
-//! `server` / `agent` install the graceful-shutdown handler and then idle until
-//! a signal arrives — enough to exercise the infra (T0.3) and to host real
-//! layers as they land. `stage` exposes the T0.2 manifest contract + B5 runtime
-//! staging.
+//! `server` installs the graceful-shutdown handler, builds the served schema
+//! registry, and serves the T1.2a HTTP discovery endpoints (`/api`, `/apis`,
+//! `/api/v1`, `/apis/<g>/<v>`) on the bind address — draining on signal.
+//! `agent` installs the handler and idles until Layers 3–4 land. `stage`
+//! exposes the T0.2 manifest contract + B5 runtime staging.
 
+use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use init_pro_core::embed::EmbeddedManifest;
 use init_pro_infra::{Config, Shutdown};
 
-pub fn run_server(cfg: Config) -> ExitCode {
-    run_supervised("server", cfg)
+/// Server-only wiring: where to bind the discovery API + whether it is disabled.
+pub struct ServerBind {
+    pub addr: SocketAddr,
+    pub disable_apiserver: bool,
+}
+
+pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
+    run_supervised("server", cfg, Some(bind))
 }
 
 pub fn run_agent(cfg: Config) -> ExitCode {
-    run_supervised("agent", cfg)
+    run_supervised("agent", cfg, None)
 }
 
-/// `server` / `agent` differ only in role name until Layers 1–4 land.
-fn run_supervised(role: &'static str, cfg: Config) -> ExitCode {
+/// `server` serves discovery when given a [`ServerBind`]; `agent` only idles
+/// until Layers 3–4 land.
+fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name(role)
@@ -39,27 +48,47 @@ fn run_supervised(role: &'static str, cfg: Config) -> ExitCode {
             tracing::warn!(target: "init-pro", role, "signal handler install failed: {e}");
         }
 
-        // T1.1 (S7) skeleton: build the served schema registry + discovery
-        // documents so T1.2 can serve `/api` + `/apis` from byte-correct bodies.
-        let schema = if role == "server" {
-            let reg = crate::discovery::served_schema();
-            let summary = crate::discovery::served_groups_summary(&reg, "127.0.0.1:6443");
-            tracing::info!(target: "init-pro", role, "T1.1 {summary}");
-            Some(reg)
-        } else {
-            None
+        // T1.2a: build the served schema registry, serve HTTP discovery, and
+        // keep a handle so the process waits for full drain on shutdown.
+        let server_join = match &bind {
+            Some(b) if !b.disable_apiserver => {
+                let reg = crate::discovery::served_schema();
+                let advertised = b.addr.to_string();
+                let summary = crate::discovery::served_groups_summary(&reg, &advertised);
+                tracing::info!(target: "init-pro", role, "T1.1 {summary}");
+                let server_shutdown = shutdown.clone();
+                let addr = b.addr;
+                Some(tokio::spawn(async move {
+                    if let Err(e) =
+                        init_pro_apiserver::serve(reg, addr, advertised, async move {
+                            server_shutdown.cancelled().await;
+                        })
+                        .await
+                    {
+                        tracing::error!(target: "init-pro", role, "apiserver exited: {e}");
+                    }
+                }))
+            }
+            Some(_) => {
+                tracing::info!(target: "init-pro", role, "apiserver disabled by flag");
+                None
+            }
+            None => None,
         };
-        let _ = &schema; // held for T1.2 HTTP layer
 
         tracing::info!(
             target: "init-pro",
             role,
             version = init_pro_core::version(),
             data_dir = %cfg.data_dir.display(),
-            "init-pro {role} ready (Phase 1 stub; Layers 1–4 arrive in Phase 2)",
+            "init-pro {role} ready",
         );
 
         shutdown.cancelled().await;
+        tracing::info!(target: "init-pro", role, "init-pro {role}: draining");
+        if let Some(jh) = server_join {
+            let _ = jh.await;
+        }
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining complete");
         Ok::<(), std::io::Error>(())
     });

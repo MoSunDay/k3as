@@ -370,3 +370,50 @@ watch throughput on >10k-object clusters).
 - → **T1.1** ships JSON-only resource model + schema registry + StrategicMergePatch;
   **T1.2** serves JSON codecs end to end; a future `Q? — protobuf storage`
   decision may reopen this once T0.6 watch benchmarks exist.
+
+---
+
+## Q11 — HTTP framework & TLS posture for the API server (T1.2a)
+
+**Context.** T1.2 serves the Kubernetes discovery surface over HTTP. We need
+an async HTTP server framework shared across the codebase: the **apiserver**
+(T1.2) and the **Router data plane** (T5.2, which the plan explicitly calls
+"hyper body streaming") both need a hyper/tokio-based server. Choosing now
+de-risks both the discovery slice and the critical-path Router. Separately,
+kubectl refuses plain HTTP, so the TLS question is immediate for any
+real-client interop.
+
+**Options.**
+- A) `actix-web` — feature-rich, but its own actor runtime diverges from the
+  tokio/hyper substrate the Router (T5.2) and etcd client (T2.x) rely on.
+- B) Raw `hyper` — maximal control, but we'd hand-roll routing/middleware that
+  both the apiserver and the Router need.
+- C) **`axum`** — built on hyper/tokio/tower, ergonomic routing + extractors,
+  composable middleware, the de-facto Rust standard.
+
+**Decision: C.** HTTP framework is **axum** (on hyper/tokio/tower). It is the
+single server stack for the apiserver (T1.2) and the Router data plane (T5.2),
+so the choice de-risks both paths at once. `Content-Type: application/json` is
+the sole negotiated codec (Q10); axum's `Json` extractor/response sets it.
+
+**TLS posture: plain HTTP for T1.2a; TLS deferred to T1.3.** T1.2a binds the
+loopback and serves discovery over **plain HTTP**. Acceptance for this slice is
+`curl` byte-equivalence (see `scripts/apiserver-discovery-parity-test.sh` and
+`init-pro-apiserver/tests/discovery_http.rs`), **not** real kubectl interop —
+kubectl refuses plain HTTP, and certificate management is the natural neighbor
+of the T1.3 identity/auth work. Real kubectl interop (TLS + persistence + watch)
+is the deferred acceptance gate of **T1.2b**.
+
+**Consequences.**
+- `+` One HTTP stack for two paths; the Router (T5.2) reuses axum's hyper body
+  streaming instead of pulling in a second framework.
+- `+` Discovery handlers are thin transport wrappers over the T1.1 builders —
+  byte fidelity is already proven, so T1.2a is a low-risk slice.
+- `−` kubectl cannot talk to T1.2a directly (no TLS). Mitigated: `curl`
+  acceptance + the byte-fidelity integration test prove the wire shape; kubectl
+  interop lands with T1.2b + T1.3.
+- `−` Adding `axum`/`tower` grows the dependency graph. Mitigated: axum reuses
+  transitive deps (hyper/tokio) already pulled in by the Router path.
+- → **T1.2a** ships axum-backed discovery on plain HTTP; **T1.2b** adds the
+  store trait + CRUD/watch (needs T2.2); **T1.3** adds TLS (rustls) + auth so
+  kubectl interop becomes the acceptance gate.

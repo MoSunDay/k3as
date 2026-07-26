@@ -100,6 +100,7 @@ check_help() { # snapshot scope flags...
 }
 check_help "$SNAP/server-help.txt" "server" \
   --config --data-dir --debug --token --server --prefer-bundled-bin \
+  --bind-address --https-listen-port \
   --disable --disable-etcd --disable-apiserver --disable-agent \
   --disable-controller-manager --disable-scheduler --disable-cloud-controller \
   --disable-kube-proxy --disable-network-policy --disable-helm-controller \
