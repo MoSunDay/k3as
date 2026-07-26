@@ -98,6 +98,8 @@ mod tests {
     fn srv(shared: WiredShared) -> ServerCmd {
         ServerCmd {
             shared,
+            bind_address: "127.0.0.1".to_string(),
+            https_listen_port: 6443,
             disable: vec![],
             disable_etcd: false,
             disable_apiserver: false,

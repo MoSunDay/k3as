@@ -15,6 +15,10 @@ Options:
           Server URL to join. env `INIT_PRO_URL` [env: INIT_PRO_URL=]
       --prefer-bundled-bin
           Flip child PATH ordering: `bin/aux` ahead of host PATH (Q6 stage)
+      --bind-address <IP>
+          IP address the API server binds on (k3s `--bind-address` parity). env `INIT_PRO_BIND_ADDRESS` [env: INIT_PRO_BIND_ADDRESS=] [default: 127.0.0.1]
+      --https-listen-port <PORT>
+          Secure port the API server listens on (k3s `--https-listen-port` parity). Plain HTTP for v1 (TLS is T1.3, ADR Q11); this is the discovery port. env `INIT_PRO_HTTPS_LISTEN_PORT` [env: INIT_PRO_HTTPS_LISTEN_PORT=] [default: 6443]
       --disable <DISABLE>
           Disable packaged components (validated against `DisableItems` in A4)
       --disable-etcd

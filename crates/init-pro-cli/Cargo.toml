@@ -11,6 +11,7 @@ publish.workspace = true
 init-pro-core = { workspace = true }
 init-pro-infra = { workspace = true }
 init-pro-api = { workspace = true }
+init-pro-apiserver = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

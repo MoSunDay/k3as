@@ -11,6 +11,17 @@ pub struct ServerCmd {
     #[command(flatten)]
     pub shared: WiredShared,
 
+    /// IP address the API server binds on (k3s `--bind-address` parity).
+    /// env `INIT_PRO_BIND_ADDRESS`.
+    #[arg(long = "bind-address", env = "INIT_PRO_BIND_ADDRESS", default_value = "127.0.0.1", value_name = "IP")]
+    pub bind_address: String,
+
+    /// Secure port the API server listens on (k3s `--https-listen-port` parity).
+    /// Plain HTTP for v1 (TLS is T1.3, ADR Q11); this is the discovery port.
+    /// env `INIT_PRO_HTTPS_LISTEN_PORT`.
+    #[arg(long = "https-listen-port", env = "INIT_PRO_HTTPS_LISTEN_PORT", default_value_t = 6443, value_name = "PORT")]
+    pub https_listen_port: u16,
+
     /// Disable packaged components (validated against `DisableItems` in A4).
     #[arg(long = "disable", value_delimiter = ',')]
     pub disable: Vec<String>,

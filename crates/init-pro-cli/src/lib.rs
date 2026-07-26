@@ -126,7 +126,22 @@ where
     match cli.command {
         Some(Command::Server(svc)) => {
             tracing::debug!(target: "init-pro", "server flags captured: {:?}", svc);
-            runtime::run_server(cfg)
+            match format!("{}:{}", svc.bind_address, svc.https_listen_port).parse::<std::net::SocketAddr>() {
+                Ok(addr) => runtime::run_server(
+                    cfg,
+                    runtime::ServerBind {
+                        addr,
+                        disable_apiserver: svc.disable_apiserver,
+                    },
+                ),
+                Err(e) => {
+                    eprintln!(
+                        "init-pro server: invalid --bind-address/--https-listen-port ({}:{}): {e}",
+                        svc.bind_address, svc.https_listen_port
+                    );
+                    ExitCode::FAILURE
+                }
+            }
         }
         Some(Command::Agent(ag)) => {
             tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);

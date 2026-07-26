@@ -25,8 +25,8 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("log", Some('l'), true),
     nf("alsologtostderr", None, false),
     // C.2 Listener / TLS / SAN
-    nf("bind-address", None, true),
-    nf("https-listen-port", None, true),
+    // (`bind-address` + `https-listen-port` are wired in T1.2a; kept here are
+    // the remaining k3s listener/TLS flags that remain no-op for v1.)
     nf("supervisor-port", None, true),
     nf("apiserver-port", None, true),
     nf("apiserver-bind-address", None, true),
@@ -174,6 +174,7 @@ mod tests {
             "disable-scheduler", "disable-cloud-controller", "disable-kube-proxy",
             "disable-network-policy", "disable-helm-controller", "datastore-endpoint",
             "prefer-bundled-bin", "token", "server", "cluster-init",
+            "bind-address", "https-listen-port",
         ];
         for w in wired {
             assert!(find_long(w).is_none(), "{w} must not be no-op");
