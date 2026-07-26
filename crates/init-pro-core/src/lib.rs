@@ -1,13 +1,14 @@
-//! init-pro-core: shared domain primitives (placeholder).
-//!
-//! Fills out with API model / resource types as Layers 1+ land. Kept dependency
-//! free so every layer can depend on it without pulling the world.
 #![forbid(unsafe_code)]
 
-/// Crate version (= the single binary's version).
+//! Shared domain primitives used by every layer. Kept dependency-free so heavy
+//! layers can depend on it without pulling the world.
+
+pub mod embed;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Build identifier string used in logs and `--version`.
 pub fn version() -> &'static str {
     VERSION
 }
+
+pub use embed::EmbeddedAsset;

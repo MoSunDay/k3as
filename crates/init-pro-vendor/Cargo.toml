@@ -12,3 +12,4 @@ description = "Pinned upstream-artifact acquire + SHA-256 verify (T0.2, Q6)"
 serde = { workspace = true }
 toml = "0.8"
 sha2 = "0.10"
+zstd = { workspace = true }

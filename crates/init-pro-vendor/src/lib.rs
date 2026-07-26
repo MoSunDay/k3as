@@ -12,7 +12,9 @@
 
 pub mod acquire;
 pub mod digest;
+pub mod embed;
 pub mod manifest;
 
 pub use acquire::{mode_from_env, run, AcquireError, Action, Mode, Report};
+pub use embed::{generate, generate_empty, EmbedError, EmbedReport};
 pub use manifest::{parse, Artifact, Kind, ParseError};
