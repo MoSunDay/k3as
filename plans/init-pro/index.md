@@ -31,7 +31,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | not-started | T4.2 |
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
-| T5.1 | 5 | mlua + coroutine↔async 桥 | not-started | T0.3 |
+| T5.1 | 5 | mlua + coroutine↔async 桥 | in-progress | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks | not-started | T5.1 |
 | T5.3 | 5 | resty::* 等价标准库 | not-started | T5.1 |
 | T5.4 | 5 | 内置 Router 核心 + Ingress→Lua 路由编译 | not-started | T5.2, T5.3, T1.1 |

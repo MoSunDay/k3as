@@ -11,6 +11,7 @@ members = [
     "crates/init-pro-vendor",
     "crates/init-pro-api",
     "crates/init-pro-apiserver",
+    "crates/init-pro-router",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ init-pro-infra = { path = "crates/init-pro-infra" }
 init-pro-vendor = { path = "crates/init-pro-vendor" }
 init-pro-api = { path = "crates/init-pro-api" }
 init-pro-apiserver = { path = "crates/init-pro-apiserver" }
+init-pro-router = { path = "crates/init-pro-router" }
 
 # External
 anyhow = "1"
@@ -49,6 +51,9 @@ zstd = "0.13"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "macros"] }
 tower = { version = "0.5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process", "net"] }
+# Lua VM for the built-in Router (T5.1). LuaJIT via vendored luajit-src; `async` enables coroutine<->Rust-future bridging; `error-send` makes the
+# error type Send. `luajit52` is OFF (openresty = LuaJIT 2.1 = Lua 5.1).
+mlua = { version = "0.12", features = ["luajit", "vendored", "async", "error-send"], default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
