@@ -47,3 +47,4 @@ __pycache__/
 # T0.2 vendored peer binaries (versions.toml is checked in)
 /vendor/bin/
 /vendor/cache/
+LICENSES/

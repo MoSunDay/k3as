@@ -15,6 +15,7 @@ pub mod dataverify;
 pub mod digest;
 pub mod embed;
 pub mod manifest;
+pub mod sbom;
 
 pub use acquire::{mode_from_env, run, AcquireError, Action, Mode, Report};
 pub use embed::{generate, generate_empty, EmbedError, EmbedReport};

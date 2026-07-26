@@ -1,7 +1,8 @@
-//! T0.2 acquire + embed driver (Q6). Reads `vendor/versions.toml`, stages
-//! pinned upstream artifacts into `vendor/bin/` (B1), and — when
-//! `INIT_PRO_EMBED=1` — zstd-compresses each file and generates `$OUT_DIR/
-//! assets.rs` (B2) for `include_bytes!` embedding.
+//! T0.2 acquire + embed + SBOM driver (Q6/Q7). Reads `vendor/versions.toml`,
+//! stages pinned upstream artifacts into `vendor/bin/` (B1), runs the Q7
+//! license allow-list gate + writes SPDX-2.3 SBOM to `LICENSES/` (B4), and —
+//! when `INIT_PRO_EMBED=1` — zstd-compresses each file and generates
+//! `$OUT_DIR/assets.rs` (B2) for `include_bytes!` embedding.
 //!
 //! Default (`cargo build`) is **Auto** acquire (cache-or-skip, no network) +
 //! empty embed registry — so the dev loop and `cargo test` stay fast. Set
@@ -43,6 +44,21 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // --- B4: license gate + SPDX SBOM ------------------------------------
+    if let Err(e) = init_pro_vendor::sbom::validate(&artifacts) {
+        println!("cargo:warning=vendor: license gate FAILED: {e}");
+        std::process::exit(1);
+    }
+    let spdx = init_pro_vendor::sbom::render_spdx(&artifacts, &iso_now());
+    let licenses_dir = repo_root.join("LICENSES");
+    let spdx_path = licenses_dir.join("spdx-2.3.json");
+    if let Err(e) = std::fs::create_dir_all(&licenses_dir).and_then(|_| std::fs::write(&spdx_path, &spdx)) {
+        println!("cargo:warning=vendor: failed to write SPDX SBOM to {}: {e}", spdx_path.display());
+    }
+    println!("cargo:warning=vendor: license gate passed (Q7); SPDX SBOM -> LICENSES/spdx-2.3.json");
+
+    // --- B1 (cont): acquire ----------------------------------------------
     let mode = init_pro_vendor::mode_from_env();
     match init_pro_vendor::run(&vendor_root, &artifacts, mode) {
         Ok(rep) => {
@@ -101,4 +117,29 @@ fn write_assets(vendor_bin: &Path) {
 fn write_empty_assets() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR set by cargo"));
     init_pro_vendor::generate_empty(&out_dir).expect("write empty assets.rs");
+}
+
+/// Current UTC date as ISO-8601 (for SPDX `created`).
+fn iso_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (y, m, d) = epoch_to_ymd(secs as i64 / 86400);
+    format!("{y:04}-{m:02}-{d:02}T00:00:00Z")
+}
+
+/// Days since 1970-01-01 → (year, month, day). Howard Hinnant's algorithm.
+fn epoch_to_ymd(days: i64) -> (i64, u32, u32) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
