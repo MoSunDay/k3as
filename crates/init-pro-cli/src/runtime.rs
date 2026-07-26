@@ -6,7 +6,7 @@
 
 use std::process::ExitCode;
 
-use init_pro_core::embed::EmbeddedAsset;
+use init_pro_core::embed::EmbeddedManifest;
 use init_pro_infra::{Config, Shutdown};
 
 pub fn run_server(cfg: Config) -> ExitCode {
@@ -62,23 +62,30 @@ fn run_supervised(role: &'static str, cfg: Config) -> ExitCode {
 
 /// `stage --dry-run` lists the embedded manifest + hashes without writing.
 /// `stage` (no dry-run) is the live atomic-staging path arriving in B5.
-pub fn run_stage(cfg: Config, dry_run: bool, embedded: &[EmbeddedAsset]) -> ExitCode {
+pub fn run_stage(cfg: Config, dry_run: bool, manifest: &EmbeddedManifest) -> ExitCode {
     if dry_run {
+        let assets = manifest.assets;
         println!("init-pro stage --dry-run");
         println!("data-dir: {}", cfg.data_dir.display());
-        println!("manifest ({} embedded asset{}):", embedded.len(), if embedded.len() == 1 { "" } else { "s" });
-        if embedded.is_empty() {
+        println!(
+            "manifest ({} embedded asset{}):",
+            assets.len(),
+            if assets.len() == 1 { "" } else { "s" }
+        );
+        if assets.is_empty() {
             println!("  (none — build with INIT_PRO_EMBED=1 to bake vendor artifacts)");
         } else {
-            let total = embedded.iter().map(|a| a.size).sum::<u64>();
-            for a in embedded {
-                println!(
-                    "  {:<28} {} bytes  sha256={}",
-                    a.path, a.size, a.sha256
-                );
+            let total = assets.iter().map(|a| a.size).sum::<u64>();
+            for a in assets {
+                println!("  {:<28} {} bytes  sha256={}", a.path, a.size, a.sha256);
             }
             println!("total uncompressed: {} bytes", total);
         }
+        // B3: manifest summaries
+        let sums_lines = manifest.sha256_sums.lines().count();
+        let links_lines = manifest.data_links.lines().count();
+        println!(".sha256sums: {} entries", sums_lines);
+        println!(".links: {} entries", links_lines);
         ExitCode::SUCCESS
     } else {
         eprintln!("stage: live staging arrives in B5 (use --dry-run to inspect the manifest)");

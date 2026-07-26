@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use init_pro_core::embed::EmbeddedAsset;
+use init_pro_core::embed::EmbeddedManifest;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,22 +54,22 @@ pub enum Command {
 }
 
 /// Drive the CLI from the real process args.
-pub fn run(embedded: &[EmbeddedAsset]) -> ExitCode {
-    run_from(std::env::args(), embedded)
+pub fn run(manifest: &EmbeddedManifest) -> ExitCode {
+    run_from(std::env::args(), manifest)
 }
 
 /// Drive the CLI as if the given subcommand were selected (multicall forced).
-pub fn run_forced(subcmd: &str, extra: &[String], embedded: &[EmbeddedAsset]) -> ExitCode {
+pub fn run_forced(subcmd: &str, extra: &[String], manifest: &EmbeddedManifest) -> ExitCode {
     let prog = std::env::args()
         .next()
         .unwrap_or_else(|| "init-pro".to_string());
     let argv = std::iter::once(prog)
         .chain(std::iter::once(subcmd.to_string()))
         .chain(extra.iter().cloned());
-    run_from(argv, embedded)
+    run_from(argv, manifest)
 }
 
-fn run_from<I, S>(argv: I, embedded: &[EmbeddedAsset]) -> ExitCode
+fn run_from<I, S>(argv: I, manifest: &EmbeddedManifest) -> ExitCode
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
@@ -130,7 +130,7 @@ where
             tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);
             runtime::run_agent(cfg)
         }
-        Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, embedded),
+        Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, manifest),
         None => {
             // `init-pro` with no subcommand: print help to stdout, exit 0
             // (k3s prints usage; we keep it success so the contract is friendly).

@@ -15,6 +15,7 @@ use std::fs;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::dataverify;
 use crate::digest;
 
 /// Summary of an embed codegen run.
@@ -130,6 +131,8 @@ fn render(entries: &[Entry], assets_dir: &Path) -> String {
     w.push_str("use init_pro_core::embed::EmbeddedAsset;\n\n");
 
     if entries.is_empty() {
+        w.push_str("pub static SHA256_SUMS: &str = \"\";\n");
+        w.push_str("pub static DATA_LINKS: &str = \"\";\n");
         w.push_str("pub fn embedded_assets() -> &'static [EmbeddedAsset] {\n    &[]\n}\n");
         return w;
     }
@@ -159,6 +162,18 @@ fn render(entries: &[Entry], assets_dir: &Path) -> String {
         );
     }
     w.push_str("];\n\n");
+    // .sha256sums manifest (k3s dataverify parity, B3)
+    let sums: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| (e.logical.clone(), e.sha256.clone()))
+        .collect();
+    let sha256_content = dataverify::render_sha256sums(&sums);
+    let _ = writeln!(w, "\npub static SHA256_SUMS: &str = {:?};", sha256_content);
+
+    // .links manifest — empty for v1 (no symlinks in the bundle; B5 may populate)
+    let links_content = dataverify::render_links(&[]);
+    let _ = writeln!(w, "pub static DATA_LINKS: &str = {:?};", links_content);
+
     w.push_str("pub fn embedded_assets() -> &'static [EmbeddedAsset] {\n    &ASSETS\n}\n");
     w
 }
@@ -275,6 +290,23 @@ mod tests {
         assert!(src.contains("path: \"bin/aux/bridge\""));
         assert!(src.contains("zstd: Z_bbb2222222222222"));
         assert!(src.contains("size: 200"));
+        // B3: manifests present
+        assert!(src.contains("pub static SHA256_SUMS"));
+        assert!(src.contains("pub static DATA_LINKS"));
+        assert!(src.contains("aaa111"));
+    }
+
+    #[test]
+    fn render_includes_sha256sums_manifest() {
+        let entries = vec![Entry {
+            logical: "bin/runc".into(),
+            sha256: "bcfc299c1ab255e9d045ffaf2e324c0abaf58f599831a7c2c4a80b33f795de94".into(),
+            size: 100,
+            compressed_len: 40,
+        }];
+        let src = render(&entries, Path::new("/fake"));
+        // sha256sums content must contain the hash + path in the standard format
+        assert!(src.contains("bcfc299c1ab255e9d045ffaf2e324c0abaf58f599831a7c2c4a80b33f795de94  bin/runc"));
     }
 
     #[test]

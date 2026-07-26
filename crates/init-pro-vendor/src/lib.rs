@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod acquire;
+pub mod dataverify;
 pub mod digest;
 pub mod embed;
 pub mod manifest;
