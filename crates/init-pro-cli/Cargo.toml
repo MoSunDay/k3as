@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 init-pro-core = { workspace = true }
 init-pro-infra = { workspace = true }
+init-pro-api = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

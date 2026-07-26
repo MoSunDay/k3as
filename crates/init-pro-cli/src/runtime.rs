@@ -39,6 +39,18 @@ fn run_supervised(role: &'static str, cfg: Config) -> ExitCode {
             tracing::warn!(target: "init-pro", role, "signal handler install failed: {e}");
         }
 
+        // T1.1 (S7) skeleton: build the served schema registry + discovery
+        // documents so T1.2 can serve `/api` + `/apis` from byte-correct bodies.
+        let schema = if role == "server" {
+            let reg = crate::discovery::served_schema();
+            let summary = crate::discovery::served_groups_summary(&reg, "127.0.0.1:6443");
+            tracing::info!(target: "init-pro", role, "T1.1 {summary}");
+            Some(reg)
+        } else {
+            None
+        };
+        let _ = &schema; // held for T1.2 HTTP layer
+
         tracing::info!(
             target: "init-pro",
             role,

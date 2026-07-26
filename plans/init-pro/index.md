@@ -16,7 +16,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T0.4 | 0 | CLI: multicall + k3s 兼容 flag | done | T0.1, T0.3 |
 | T0.5 | 0 | 规划体系与文档中枢 | done | — |
 | T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | not-started | T0.1 |
-| T1.1 | 1 | 资源模型与 API group schema | not-started | T0.3 |
+| T1.1 | 1 | 资源模型与 API group schema | done | T0.3 |
 | T1.2 | 1 | APIServer 核心 (REST + kubectl 真实交互) | not-started | T1.1, T2.2 |
 | T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) | not-started | T1.1 |
 | T2.1 | 2 | etcd embed/FFI/子进程 bundling | not-started | T0.2 |

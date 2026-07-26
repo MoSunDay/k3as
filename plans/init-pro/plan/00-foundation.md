@@ -185,8 +185,14 @@ that every later TODO must keep green.
     output diffed against a frozen file (cosmetic deltas whitelisted); the
     matrix is the authoritative behavior spec.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — done
+- **证据 / Evidence** — `init-pro-cli` clap-derive `ServerCmd`/`AgentCmd`
+    (A2) wire the Phase-1 flag subset; `strip_noop()` + deduped `warn_noops()`
+    (A3) accept the rest with WARN; `validate_server`/`validate_agent`
+    (A4) enforce 7 fatal conflict rules; `scripts/cli-flag-parity-test.sh`
+    (A5) exercises all five matrix assertions + frozen `tests/snapshots/`
+    `server`/`agent --help` gate the wired-flag surface. 17 accept-wired
+    flags, ~108 accept-no-op-warn, 7 fatal rules — all green.
 - **卡点 / Blockers** — none (Q8 resolves config pre-scan scope; Q9 +
     `plan/00-foundation-flag-matrix.md` resolve the flag posture; `.d/`
     dropins & http-config are an intentional documented deferral).
