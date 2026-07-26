@@ -8,6 +8,7 @@ members = [
     "crates/init-pro-multicall",
     "crates/init-pro-cli",
     "crates/init-pro-infra",
+    "crates/init-pro-vendor",
 ]
 
 [workspace.package]
@@ -25,11 +26,14 @@ init-pro-core = { path = "crates/init-pro-core" }
 init-pro-multicall = { path = "crates/init-pro-multicall" }
 init-pro-cli = { path = "crates/init-pro-cli" }
 init-pro-infra = { path = "crates/init-pro-infra" }
+init-pro-vendor = { path = "crates/init-pro-vendor" }
 
 # External
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env", "help"] }
 serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
