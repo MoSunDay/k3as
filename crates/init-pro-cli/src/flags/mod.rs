@@ -5,6 +5,7 @@
 //! and operators' k3s scripts keep working. Each distinct no-op flag seen is
 //! logged exactly once at WARN.
 
+pub mod conflicts;
 pub mod noop;
 
 pub use noop::{find_long, find_short};
