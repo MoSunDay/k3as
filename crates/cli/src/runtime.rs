@@ -7,6 +7,7 @@
 //! exposes the T0.2 manifest contract + B5 runtime staging.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::process::ExitCode;
 
 use common::embed::EmbeddedManifest;
@@ -56,10 +57,15 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
                 let advertised = b.addr.to_string();
                 let summary = crate::discovery::served_groups_summary(&reg, &advertised);
                 tracing::info!(target: "init-pro", role, "T1.1 {summary}");
+                // T1.2b: default backend = the zero-dependency embedded store
+                // (ADR Q17). Real etcd-gRPC (T2.2) / SQLite-KINE (T2.3) slot in
+                // as alternative StorageBackend impls behind --datastore-endpoint.
+                let store: Arc<dyn storage::StorageBackend> =
+                    Arc::new(storage::EmbeddedStorage::new());
                 let server_shutdown = shutdown.clone();
                 let addr = b.addr;
                 Some(tokio::spawn(async move {
-                    if let Err(e) = apiserver::serve(reg, addr, advertised, async move {
+                    if let Err(e) = apiserver::serve(reg, store, addr, advertised, async move {
                         server_shutdown.cancelled().await;
                     })
                     .await

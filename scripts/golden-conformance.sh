@@ -3,8 +3,8 @@
 # behaviors that every later TODO must keep green. Boots a real init-pro
 # server and diffs its responses against committed golden fixtures in golden/.
 #
-# Today = the EMPTY-CLUSTER baseline: the server is discovery-only (T1.2a), so
-# the cases assert the discovery contract is byte-stable and that no resource
+# Today = the EMPTY-CLUSTER baseline: discovery (T1.2a) + CRUD/watch over the
+# embedded store (T1.2b). The discovery contract is byte-stable; CRUD cases
 # collection endpoints exist yet. As CRUD/watch/storage/scheduling layers land
 # (T1.2, T2.x, T3.x), their golden cases are appended below — each TODO tags
 # which cases it must keep green (plan/00-foundation.md T0.6, Q2 merge gate).
@@ -80,6 +80,29 @@ check_status() {
   fi
 }
 
+# Assert an arbitrary HTTP method returns an exact status, optionally with a
+# request body + content-type. Used for CRUD round-trips introduced by T1.2b.
+#   $1 id   $2 method   $3 path   $4 want   $5 desc   [$6 content-type $7 body-file]
+check_method() {
+  local id="$1" method="$2" path="$3" want="$4" desc="$5" ct="${6:-}" body_file="${7:-}" max_time="${8:-}"
+  local code extra=()
+  [[ -n "$max_time" ]] && extra+=(--max-time "$max_time")
+  # Suppress curl's non-zero exit (e.g. 28 on watch-stream timeout) so we
+  # still get the %{http_code} that was received before the body stalled.
+  if [[ -n "$body_file" ]]; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' "${extra[@]}" -X "$method" -H "Content-Type: $ct" --data-binary "@$body_file" "$BASE$path" 2>/dev/null || true)"
+  else
+    code="$(curl -s -o /dev/null -w '%{http_code}' "${extra[@]}" -X "$method" "$BASE$path" 2>/dev/null || true)"
+  fi
+  if [[ "$code" == "$want" ]]; then
+    ok "$id  $method $path -> $code  ($desc)"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL $id  $method $path -> $code (expected $want)  ($desc)"
+    FAIL=$((FAIL+1))
+  fi
+}
+
 echo "## golden conformance — empty-cluster baseline (port $PORT)"
 
 # --- discovery contract (byte-stable) ---
@@ -88,10 +111,20 @@ check_body G02 "/apis"                "$GOLDEN/discovery-apis.json"
 check_body G03 "/api/v1"              "$GOLDEN/discovery-core-v1.json"
 check_body G04 "/apis/init-pro.io/v1" "$GOLDEN/discovery-initpro-v1.json"
 
-# --- empty-cluster: no resource collection endpoints exist yet ---
-# (updated when T1.2 introduces real list/storage handlers)
-check_status G05 "/apis/fabricated.io/v9beta1"  "404" "unknown group/version"
-check_status G06 "/api/v1/pods"                 "404" "no collection endpoint (T1.2 will add)"
+# --- collection endpoints now exist (T1.2b) ---
+check_status G05 "/apis/fabricated.io/v9beta1"           "404" "unknown group/version"
+check_status G06 "/api/v1/pods"                          "200" "empty pods collection list (T1.2b)"
+
+# --- CRUD round-trip over the embedded store (T1.2b) ---
+TMP_CM="$(mktemp)"
+printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"golden-cm","namespace":"default"},"data":{"k":"v"}}' > "$TMP_CM"
+check_method G07 "POST"   "/api/v1/namespaces/default/configmaps"              "201" "create ConfigMap"                "application/json" "$TMP_CM"
+check_method G08 "GET"    "/api/v1/namespaces/default/configmaps/golden-cm"    "200" "get ConfigMap"
+check_method G09 "GET"    "/api/v1/namespaces/default/configmaps"              "200" "list ConfigMaps (1 item)"
+check_method G10 "DELETE" "/api/v1/namespaces/default/configmaps/golden-cm"    "200" "delete ConfigMap"
+check_method G11 "GET"    "/api/v1/namespaces/default/configmaps/golden-cm"    "404" "deleted ConfigMap is gone"
+check_method G12 "GET"    "/api/v1/namespaces/default/configmaps?watch=1"      "200" "watch stream opens (T1.2b)" "" "" "2"
+rm -f "$TMP_CM"
 
 echo
 echo "golden: $PASS passed, $FAIL failed"

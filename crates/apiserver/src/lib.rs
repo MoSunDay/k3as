@@ -1,29 +1,33 @@
-//! Kubernetes API server HTTP layer (TODO **T1.2a**).
+//! Kubernetes API server HTTP layer (TODO **T1.2**).
 //!
-//! Serves byte-correct API discovery over HTTP from a [`SchemaRegistry`]:
-//!   - `GET /api`                  -> `APIVersions`     (core group)
-//!   - `GET /apis`                 -> `APIGroupList`    (non-core groups)
-//!   - `GET /api/v1`               -> `APIResourceList` (core/v1 index)
-//!   - `GET /apis/:group/:version` -> `APIResourceList` (per group/version)
+//! Serves byte-correct API discovery (T1.2a) plus REST CRUD + watch over a
+//! [`storage::StorageBackend`] (T1.2b):
+//!   - discovery: `GET /api`, `/apis`, `/api/v1`, `/apis/<g>/<v>`
+//!   - CRUD: `POST`/`GET`/`PUT`/`DELETE`/`PATCH` on resource collections + items
+//!   - watch: `GET /<collection>?watch=1` -> chunked `application/json` stream
 //!
-//! The discovery bodies are produced by [`api::discovery`], which is
-//! already unit-tested for byte fidelity against upstream `meta/v1`. These
-//! handlers are a thin transport wrapper: build the document, hand it to
-//! `axum::Json` (which sets `Content-Type: application/json`, the sole wire
-//! codec per decision **Q10**).
-//!
-//! # Scope
-//!
-//! Discovery-only. No CRUD, watch, or persistence: the store trait +
-//! etcd-backed CRUD lands in **T1.2b** (needs T2.2). TLS (rustls) and real
-//! kubectl interop are deferred — acceptance for T1.2a is `curl`
-//! byte-equivalence over plain HTTP on the loopback (see ADR **Q11**). The HTTP
-//! framework choice (axum) is shared with the Router data plane (T5.2 "hyper
-//! body streaming"), so it de-risks both the critical and the de-risk paths.
+//! The discovery bodies are produced by [`api::discovery`]; the CRUD handlers
+//! are a transport wrapper over [`storage`]. The wire format is JSON-only for
+//! v1 (decision **Q10**). TLS (rustls) + real kubectl auth/interop are
+//! deferred to **T1.3** (ADR **Q11**); acceptance for T1.2b is HTTP-level
+//! round-trip against the embedded store (no real etcd needed — ADR **Q17**).
 #![forbid(unsafe_code)]
 
+mod app;
+mod collection;
 mod discovery_handlers;
+mod error;
+mod item;
 mod serve;
+mod state;
 
-pub use discovery_handlers::discovery_app;
+pub use app::api_app;
 pub use serve::serve;
+
+/// Discovery-only router kept for backward compatibility with the T1.2a tests:
+/// builds the full app over a throwaway embedded store. Prefer [`api_app`].
+pub fn discovery_app(registry: api::SchemaRegistry, server_address: impl Into<String>) -> axum::Router {
+    use std::sync::Arc;
+    let store: Arc<dyn storage::StorageBackend> = Arc::new(storage::EmbeddedStorage::new());
+    api_app(Arc::new(registry), store, server_address.into())
+}
