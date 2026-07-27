@@ -37,7 +37,11 @@ enum ConnStream {
 }
 
 impl AsyncRead for ConnStream {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             ConnStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
             ConnStream::Tls(s) => Pin::new(&mut **s).poll_read(cx, buf),
@@ -46,7 +50,11 @@ impl AsyncRead for ConnStream {
 }
 
 impl AsyncWrite for ConnStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             ConnStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
             ConnStream::Tls(s) => Pin::new(&mut **s).poll_write(cx, buf),
@@ -103,7 +111,11 @@ impl UserData for Cosocket {
 }
 
 /// `sock:connect(host, port)` -> `1`.
-async fn connect(_lua: Lua, this: UserDataRef<Cosocket>, (host, port): (String, u16)) -> mlua::Result<i64> {
+async fn connect(
+    _lua: Lua,
+    this: UserDataRef<Cosocket>,
+    (host, port): (String, u16),
+) -> mlua::Result<i64> {
     let stream = TcpStream::connect((host.as_str(), port))
         .await
         .map_err(|e| runtime(format!("cosocket connect: {e}")))?;
@@ -118,7 +130,11 @@ async fn connect(_lua: Lua, this: UserDataRef<Cosocket>, (host, port): (String, 
 }
 
 /// `sock:send(s [, ...])` -> total bytes sent.
-async fn send(_lua: Lua, this: UserDataRef<Cosocket>, chunks: mlua::Variadic<mlua::LuaString>) -> mlua::Result<i64> {
+async fn send(
+    _lua: Lua,
+    this: UserDataRef<Cosocket>,
+    chunks: mlua::Variadic<mlua::LuaString>,
+) -> mlua::Result<i64> {
     let mut payload = Vec::new();
     for c in chunks {
         payload.extend_from_slice(&c.as_bytes());
@@ -139,7 +155,11 @@ async fn send(_lua: Lua, this: UserDataRef<Cosocket>, chunks: mlua::Variadic<mlu
 }
 
 /// `sock:receive(n)` -> exactly `n` bytes; `sock:receive("*l"|nil)` -> one line.
-async fn receive(lua: Lua, this: UserDataRef<Cosocket>, spec: ReceiveSpec) -> mlua::Result<mlua::LuaString> {
+async fn receive(
+    lua: Lua,
+    this: UserDataRef<Cosocket>,
+    spec: ReceiveSpec,
+) -> mlua::Result<mlua::LuaString> {
     let bytes = match spec {
         ReceiveSpec::Bytes(n) => recv_exact(&this, n).await?,
         ReceiveSpec::Line => recv_line(&this).await?,
@@ -165,11 +185,19 @@ impl mlua::FromLua for SslOpts {
             mlua::Value::Table(t) => {
                 let server_name: String = t.get("server_name")?;
                 let verify: bool = t.get("verify").unwrap_or(true);
-                Ok(SslOpts { server_name, verify })
+                Ok(SslOpts {
+                    server_name,
+                    verify,
+                })
             }
-            mlua::Value::String(s) => Ok(SslOpts { server_name: s.to_str()?.to_owned(), verify: true }),
+            mlua::Value::String(s) => Ok(SslOpts {
+                server_name: s.to_str()?.to_owned(),
+                verify: true,
+            }),
             mlua::Value::Nil => Err(runtime("sslhandshake: server_name required")),
-            other => Err(runtime(format!("sslhandshake: expected table/string, got {other:?}"))),
+            other => Err(runtime(format!(
+                "sslhandshake: expected table/string, got {other:?}"
+            ))),
         }
     }
 }
@@ -190,8 +218,12 @@ async fn sslhandshake(_lua: Lua, this: UserDataRef<Cosocket>, opts: SslOpts) -> 
     let cfg = crate::tls::build_client_config(opts.verify)
         .map_err(|e| runtime(format!("sslhandshake: client config: {e}")))?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
-    let name = rustls::pki_types::ServerName::try_from(opts.server_name.clone())
-        .map_err(|e| runtime(format!("sslhandshake: bad server name {0:?}: {e}", opts.server_name)))?;
+    let name = rustls::pki_types::ServerName::try_from(opts.server_name.clone()).map_err(|e| {
+        runtime(format!(
+            "sslhandshake: bad server name {0:?}: {e}",
+            opts.server_name
+        ))
+    })?;
     match connector.connect(name, plain).await {
         Ok(tls) => {
             put_back(&this, ConnStream::Tls(Box::new(tls)));

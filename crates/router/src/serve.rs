@@ -58,10 +58,7 @@ where
     Ok(())
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
-    pipeline: &Pipeline,
-) -> std::io::Result<()> {
+async fn handle_connection(mut stream: TcpStream, pipeline: &Pipeline) -> std::io::Result<()> {
     let head = conn::read_head(&mut stream).await?;
     let (req, body_spec) = match conn::parse_request(&head) {
         Ok(v) => v,
@@ -74,7 +71,11 @@ async fn handle_connection(
     let body = match conn::read_body(&mut stream, body_spec).await {
         Ok(b) => b,
         Err(BodyError::TooLarge) => {
-            conn::write_response(&mut stream, conn::error_response(413, "request body too large")).await?;
+            conn::write_response(
+                &mut stream,
+                conn::error_response(413, "request body too large"),
+            )
+            .await?;
             return Ok(());
         }
         Err(BodyError::Io(e)) => return Err(e),

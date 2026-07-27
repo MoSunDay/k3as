@@ -14,8 +14,8 @@
 use std::future::Future;
 use std::net::SocketAddr;
 
-use axum::Router;
 use api::SchemaRegistry;
+use axum::Router;
 
 use crate::discovery_handlers::discovery_app;
 

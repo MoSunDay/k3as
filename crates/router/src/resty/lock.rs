@@ -37,7 +37,10 @@ impl LockRegistry {
     }
 
     fn release(&self, dict: &str, key: &str) -> bool {
-        self.0.borrow_mut().remove(&(dict.to_owned(), key.to_owned())).is_some()
+        self.0
+            .borrow_mut()
+            .remove(&(dict.to_owned(), key.to_owned()))
+            .is_some()
     }
 }
 
@@ -78,7 +81,11 @@ impl UserData for Lock {
 }
 
 /// `lock:lock(key)` -> `elapsed_seconds` (number) or `nil, "timeout"`.
-async fn lock(_lua: Lua, this: UserDataRef<Lock>, key: String) -> mlua::Result<(Option<f64>, Option<String>)> {
+async fn lock(
+    _lua: Lua,
+    this: UserDataRef<Lock>,
+    key: String,
+) -> mlua::Result<(Option<f64>, Option<String>)> {
     let started = Instant::now();
     let deadline = started + Duration::from_millis(this.timeout_ms);
     let exptime = Duration::from_secs(this.exptime_sec.max(1));
@@ -127,7 +134,10 @@ impl mlua::FromLua for LockOpts {
                 timeout_ms: t.get("timeout").ok(),
                 exptime_sec: t.get("exptime").ok(),
             }),
-            _ => Ok(LockOpts { timeout_ms: None, exptime_sec: None }),
+            _ => Ok(LockOpts {
+                timeout_ms: None,
+                exptime_sec: None,
+            }),
         }
     }
 }

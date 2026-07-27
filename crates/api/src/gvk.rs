@@ -40,12 +40,18 @@ pub struct ApiVersion {
 impl ApiVersion {
     /// Build from explicit group + version.
     pub fn new(group: impl Into<String>, version: impl Into<String>) -> Self {
-        Self { group: group.into(), version: version.into() }
+        Self {
+            group: group.into(),
+            version: version.into(),
+        }
     }
 
     /// Core (`""`) group shortcut.
     pub fn core(version: impl Into<String>) -> Self {
-        Self { group: String::new(), version: version.into() }
+        Self {
+            group: String::new(),
+            version: version.into(),
+        }
     }
 
     /// `true` when the group is the core group (`""`).
@@ -77,15 +83,17 @@ impl FromStr for ApiVersion {
         }
         // Delegate to kube-core's proven GroupVersion parser (handles the
         // core-vs-grouped split identically to upstream apimachinery).
-        let gv = GroupVersion::from_str(s)
-            .map_err(|_| ApiVersionError { raw: s.to_string() })?;
+        let gv = GroupVersion::from_str(s).map_err(|_| ApiVersionError { raw: s.to_string() })?;
         // kube-core mirrors upstream `ParseGroupVersion`, which accepts a
         // trailing slash (`"apps/"` -> group "apps", version ""). An empty
         // version is never a usable apiVersion, so reject it here.
         if gv.version.is_empty() {
             return Err(ApiVersionError { raw: s.to_string() });
         }
-        Ok(Self { group: gv.group, version: gv.version })
+        Ok(Self {
+            group: gv.group,
+            version: gv.version,
+        })
     }
 }
 
@@ -96,7 +104,10 @@ impl From<&ApiVersion> for GroupVersion {
 }
 
 /// Derive a GVK from an `apiVersion` string + kind.
-pub fn gvk_from_api_version(api_version: &str, kind: &str) -> Result<GroupVersionKind, ApiVersionError> {
+pub fn gvk_from_api_version(
+    api_version: &str,
+    kind: &str,
+) -> Result<GroupVersionKind, ApiVersionError> {
     let av = ApiVersion::from_str(api_version)?;
     Ok(GroupVersionKind::gvk(&av.group, &av.version, kind))
 }
@@ -174,12 +185,18 @@ mod tests {
         let core = gvk_from_api_version("v1", "Pod").unwrap();
         assert_eq!(core, GroupVersionKind::gvk("", "v1", "Pod"));
         let grp = gvk_from_api_version("rbac.authorization.k8s.io/v1", "Role").unwrap();
-        assert_eq!(grp, GroupVersionKind::gvk("rbac.authorization.k8s.io", "v1", "Role"));
+        assert_eq!(
+            grp,
+            GroupVersionKind::gvk("rbac.authorization.k8s.io", "v1", "Role")
+        );
     }
 
     #[test]
     fn gvk_from_type_meta_round_trips() {
-        let tm = TypeMeta { api_version: "batch/v1".into(), kind: "Job".into() };
+        let tm = TypeMeta {
+            api_version: "batch/v1".into(),
+            kind: "Job".into(),
+        };
         let gvk = gvk_from_type_meta(&tm).unwrap();
         assert_eq!(gvk, GroupVersionKind::gvk("batch", "v1", "Job"));
         assert!(gvk_from_type_meta(&TypeMeta::default()).is_none());
@@ -191,9 +208,9 @@ mod tests {
         let gvk = GroupVersionKind::gvk("networking.k8s.io", "v1", "Ingress");
         let av = ApiVersion::new("networking.k8s.io", "v1");
         assert_eq!(gvk.api_version(), av.to_string());
-        let _ = GroupVersionResource::gvr("networking.k8s.io", "v1", "ingresses"); // smoke
+        let _ = GroupVersionResource::gvr("networking.k8s.io", "v1", "ingresses");
+        // smoke
     }
-
 
     #[test]
     fn is_core_resource_distinguishes_core_from_grouped() {
@@ -202,5 +219,4 @@ mod tests {
         let grouped = GroupVersionResource::gvr("apps", "v1", "deployments");
         assert!(!is_core_resource(&grouped));
     }
-
 }

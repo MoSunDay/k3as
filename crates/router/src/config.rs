@@ -32,7 +32,9 @@ pub struct RouteStore {
 impl RouteStore {
     /// Install an initial table (generation 0).
     pub fn new(table: RouteTable) -> Self {
-        Self { table: Rc::new(RefCell::new(Rc::new(table))) }
+        Self {
+            table: Rc::new(RefCell::new(Rc::new(table))),
+        }
     }
 
     /// Take a cheap snapshot of the *current* table (`Rc` clone — no deep copy).
@@ -63,7 +65,9 @@ impl RouteStore {
 /// `kube-rs` informer (T5.5) will satisfy.
 pub trait ConfigSource {
     /// Yield the next route table, or `None` when the source is exhausted.
-    fn next_table(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteTable>>>>;
+    fn next_table(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteTable>>>>;
 }
 
 /// A static one-shot source: yields its table once, then `None` forever.
@@ -78,7 +82,9 @@ impl StaticConfigSource {
 }
 
 impl ConfigSource for StaticConfigSource {
-    fn next_table(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteTable>>>> {
+    fn next_table(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<RouteTable>>>> {
         let table = self.table.take();
         Box::pin(async move { table })
     }

@@ -126,7 +126,12 @@ mod tests {
 
     #[test]
     fn value_noop_flag_strips_value() {
-        let r = strip_noop(&argv(&["init-pro", "server", "--cluster-cidr", "10.0.0.0/16"]));
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "server",
+            "--cluster-cidr",
+            "10.0.0.0/16",
+        ]));
         assert_eq!(r.argv, argv(&["init-pro", "server"]));
         assert_eq!(r.seen, vec!["cluster-cidr".to_string()]);
     }
@@ -153,16 +158,37 @@ mod tests {
     #[test]
     fn wired_flags_pass_through() {
         let r = strip_noop(&argv(&[
-            "init-pro", "server", "--data-dir", "/x", "--debug", "--cluster-init",
+            "init-pro",
+            "server",
+            "--data-dir",
+            "/x",
+            "--debug",
+            "--cluster-init",
         ]));
-        assert_eq!(r.argv, argv(&["init-pro", "server", "--data-dir", "/x", "--debug", "--cluster-init"]));
+        assert_eq!(
+            r.argv,
+            argv(&[
+                "init-pro",
+                "server",
+                "--data-dir",
+                "/x",
+                "--debug",
+                "--cluster-init"
+            ])
+        );
         assert!(r.seen.is_empty());
     }
 
     #[test]
     fn mixed_noop_and_wired() {
         let r = strip_noop(&argv(&[
-            "init-pro", "agent", "--token", "secret", "--node-name", "n1", "--debug",
+            "init-pro",
+            "agent",
+            "--token",
+            "secret",
+            "--node-name",
+            "n1",
+            "--debug",
         ]));
         assert_eq!(
             r.argv,
@@ -187,14 +213,23 @@ mod tests {
     #[test]
     fn unknown_flag_passes_to_clap() {
         let r = strip_noop(&argv(&["init-pro", "server", "--totally-unknown", "x"]));
-        assert_eq!(r.argv, argv(&["init-pro", "server", "--totally-unknown", "x"]));
+        assert_eq!(
+            r.argv,
+            argv(&["init-pro", "server", "--totally-unknown", "x"])
+        );
         assert!(r.seen.is_empty());
     }
 
     #[test]
     fn bool_noop_at_value_position_not_swallowed() {
         // A bool no-op followed by a wired value flag: the wired flag survives.
-        let r = strip_noop(&argv(&["init-pro", "server", "--rootless", "--data-dir", "/x"]));
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "server",
+            "--rootless",
+            "--data-dir",
+            "/x",
+        ]));
         assert_eq!(r.argv, argv(&["init-pro", "server", "--data-dir", "/x"]));
     }
 }

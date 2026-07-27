@@ -28,9 +28,8 @@ impl PhaseOutcome {
 /// default `Content-Type: text/plain` when only `ngx.say`/`ngx.print` were used
 /// and no content-type was set, plus `Content-Length`.
 pub fn build_response(out: PhaseOutcome) -> Response<Bytes> {
-    let mut builder = Response::builder().status(
-        StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-    );
+    let mut builder = Response::builder()
+        .status(StatusCode::from_u16(out.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
     let mut has_content_type = false;
     for (name, value) in &out.headers {
         if name == "content-type" {
@@ -48,5 +47,7 @@ pub fn build_response(out: PhaseOutcome) -> Response<Bytes> {
     }
     let body = Bytes::from(out.body);
     builder = builder.header(http::header::CONTENT_LENGTH, body.len());
-    builder.body(body).unwrap_or_else(|_| Response::new(Bytes::new()))
+    builder
+        .body(body)
+        .unwrap_or_else(|_| Response::new(Bytes::new()))
 }

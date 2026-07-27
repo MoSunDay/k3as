@@ -17,7 +17,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
 };
 
 use crate::gvk::ApiVersion;
-use crate::schema::{Scope, SchemaRegistry, TypeInfo};
+use crate::schema::{SchemaRegistry, Scope, TypeInfo};
 
 /// Build the `/api` response (core `""` group): the list of served versions.
 /// `server_address` is the host:port the API server advertises (passed by T1.2).
@@ -31,10 +31,12 @@ pub fn core_api_versions(registry: &SchemaRegistry, server_address: &str) -> API
         .collect();
     APIVersions {
         versions,
-        server_address_by_client_cidrs: vec![k8s_openapi::apimachinery::pkg::apis::meta::v1::ServerAddressByClientCIDR {
-            client_cidr: "0.0.0.0/0".to_string(),
-            server_address: server_address.to_string(),
-        }],
+        server_address_by_client_cidrs: vec![
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::ServerAddressByClientCIDR {
+                client_cidr: "0.0.0.0/0".to_string(),
+                server_address: server_address.to_string(),
+            },
+        ],
     }
 }
 
@@ -73,7 +75,9 @@ pub fn api_group_list(registry: &SchemaRegistry) -> APIGroupList {
             }
         })
         .collect();
-    APIGroupList { groups: groups_list }
+    APIGroupList {
+        groups: groups_list,
+    }
 }
 
 /// Build the `/api/<version>` or `/apis/<group>/<version>` resource index.
@@ -105,7 +109,11 @@ fn to_api_resource(group: &str, info: &TypeInfo) -> APIResource {
         namespaced: matches!(info.scope, Scope::Namespaced),
         kind: info.kind.clone(),
         verbs: default_verbs(),
-        group: if group.is_empty() { None } else { Some(group.to_string()) },
+        group: if group.is_empty() {
+            None
+        } else {
+            Some(group.to_string())
+        },
         version: None,
         storage_version_hash: None,
         categories: None,
@@ -114,10 +122,12 @@ fn to_api_resource(group: &str, info: &TypeInfo) -> APIResource {
 }
 
 fn default_verbs() -> Vec<String> {
-    ["get", "list", "watch", "create", "update", "patch", "delete"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "get", "list", "watch", "create", "update", "patch", "delete",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn lowercase_first(s: &str) -> String {
@@ -144,7 +154,10 @@ mod tests {
         let reg = registry_with_initpro();
         let doc = core_api_versions(&reg, "127.0.0.1:6443");
         assert!(doc.versions.iter().any(|v| v == "v1"));
-        assert_eq!(doc.server_address_by_client_cidrs[0].server_address, "127.0.0.1:6443");
+        assert_eq!(
+            doc.server_address_by_client_cidrs[0].server_address,
+            "127.0.0.1:6443"
+        );
     }
 
     #[test]
@@ -154,8 +167,18 @@ mod tests {
         let groups: Vec<&str> = doc.groups.iter().map(|g| g.name.as_str()).collect();
         assert!(groups.contains(&"init-pro.io"), "groups = {groups:?}");
         let initpro_group = doc.groups.iter().find(|g| g.name == "init-pro.io").unwrap();
-        assert_eq!(initpro_group.preferred_version.as_ref().unwrap().version, "v1");
-        assert_eq!(initpro_group.preferred_version.as_ref().unwrap().group_version, "init-pro.io/v1");
+        assert_eq!(
+            initpro_group.preferred_version.as_ref().unwrap().version,
+            "v1"
+        );
+        assert_eq!(
+            initpro_group
+                .preferred_version
+                .as_ref()
+                .unwrap()
+                .group_version,
+            "init-pro.io/v1"
+        );
     }
 
     #[test]
@@ -174,7 +197,11 @@ mod tests {
     fn api_resource_list_for_initpro_v1_lists_luarouters() {
         let reg = registry_with_initpro();
         let doc = api_resource_list(&reg, "init-pro.io", "v1").expect("init-pro.io/v1 served");
-        let lr = doc.resources.iter().find(|r| r.name == "luarouters").unwrap();
+        let lr = doc
+            .resources
+            .iter()
+            .find(|r| r.name == "luarouters")
+            .unwrap();
         assert_eq!(lr.kind, "LuaRouter");
         assert_eq!(lr.singular_name, "luaRouter");
         assert!(lr.namespaced);

@@ -33,7 +33,10 @@ pub struct CertKey {
 impl CertKey {
     /// Construct from PEM byte slices.
     pub fn pem(cert_pem: impl Into<Vec<u8>>, key_pem: impl Into<Vec<u8>>) -> Self {
-        Self { cert_pem: cert_pem.into(), key_pem: key_pem.into() }
+        Self {
+            cert_pem: cert_pem.into(),
+            key_pem: key_pem.into(),
+        }
     }
 }
 
@@ -93,7 +96,11 @@ impl ResolvesServerCert for SniCertResolver {
     fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
         let name = client_hello.server_name().map(str::to_ascii_lowercase);
         match name {
-            Some(n) => self.by_sni.get(&n).cloned().or_else(|| self.default.clone()),
+            Some(n) => self
+                .by_sni
+                .get(&n)
+                .cloned()
+                .or_else(|| self.default.clone()),
             None => self.default.clone(),
         }
     }
@@ -102,9 +109,7 @@ impl ResolvesServerCert for SniCertResolver {
 /// Build a TLS server config from `(sni_host, CertKey)` pairs, using the
 /// `ring` provider. The result wraps an [`Arc`]`<`[`ServerConfig`]`>` ready for
 /// `tokio_rustls::TlsAcceptor::from`.
-pub fn build_server_config(
-    entries: &[(String, CertKey)],
-) -> std::io::Result<Arc<ServerConfig>> {
+pub fn build_server_config(entries: &[(String, CertKey)]) -> std::io::Result<Arc<ServerConfig>> {
     let resolver = Arc::new(SniCertResolver::new(entries)?);
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut cfg = ServerConfig::builder_with_provider(provider)
@@ -123,12 +128,7 @@ fn io_err_raw(msg: impl Into<String>) -> std::io::Error {
 }
 
 fn io_err<E: std::fmt::Display>(ctx: &str) -> impl Fn(E) -> std::io::Error + '_ {
-    move |e: E| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{ctx}: {e}"),
-        )
-    }
+    move |e: E| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{ctx}: {e}"))
 }
 
 // ============================ client (outbound TLS) ============================

@@ -53,9 +53,10 @@ pub fn pre_scan_config(argv: &[String]) -> Option<PathBuf> {
 
 /// True if a help/version token appears before the `--` separator.
 fn has_short_circuit(argv: &[String]) -> bool {
-    argv.iter().skip(1).take_while(|t| t.as_str() != "--").any(|t| {
-        SHORT_CIRCUIT.contains(&t.as_str())
-    })
+    argv.iter()
+        .skip(1)
+        .take_while(|t| t.as_str() != "--")
+        .any(|t| SHORT_CIRCUIT.contains(&t.as_str()))
 }
 
 #[cfg(test)]

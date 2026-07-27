@@ -17,7 +17,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, clap::Args)]
 pub struct WiredShared {
     /// Config file (pre-clap pre-scan, Q8). env `INIT_PRO_CONFIG_FILE`.
-    #[arg(short = 'c', long = "config", value_name = "FILE", env = "INIT_PRO_CONFIG_FILE")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        value_name = "FILE",
+        env = "INIT_PRO_CONFIG_FILE"
+    )]
     pub config: Option<PathBuf>,
 
     /// Cluster join secret. env `INIT_PRO_TOKEN`.

@@ -28,7 +28,9 @@ pub(crate) enum BodySpec {
 }
 
 /// Read the request head: bytes up to and including the blank `\r\n` line.
-pub(crate) async fn read_head<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<Vec<u8>> {
+pub(crate) async fn read_head<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(1024);
     let mut byte = [0u8; 1];
     loop {
@@ -99,7 +101,10 @@ pub(crate) fn parse_request(head: &[u8]) -> Result<(Request<()>, BodySpec), Stri
     } else {
         BodySpec::None
     };
-    let req = req.uri(target).body(()).map_err(|e| format!("bad request: {e}"))?;
+    let req = req
+        .uri(target)
+        .body(())
+        .map_err(|e| format!("bad request: {e}"))?;
     Ok((req, spec))
 }
 
@@ -133,7 +138,9 @@ pub(crate) async fn read_body<S: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Decode HTTP/1.1 chunked transfer-encoding into a flat buffer.
-async fn read_chunked<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>, BodyError> {
+async fn read_chunked<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Result<Vec<u8>, BodyError> {
     let mut out = Vec::new();
     loop {
         let size_line = read_line(stream).await.map_err(BodyError::Io)?;
@@ -153,7 +160,10 @@ async fn read_chunked<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result
         }
         let prev = out.len();
         out.resize(prev + size, 0u8);
-        stream.read_exact(&mut out[prev..]).await.map_err(BodyError::Io)?;
+        stream
+            .read_exact(&mut out[prev..])
+            .await
+            .map_err(BodyError::Io)?;
         let mut crlf = [0u8; 2];
         stream.read_exact(&mut crlf).await.map_err(BodyError::Io)?;
     }
@@ -161,7 +171,9 @@ async fn read_chunked<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result
 }
 
 /// Read one CRLF-terminated line (the CRLF is not included in the result).
-pub(crate) async fn read_line<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<String> {
+pub(crate) async fn read_line<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> std::io::Result<String> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -183,7 +195,10 @@ pub(crate) async fn read_line<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -
 // ---------- response serialisation ----------
 
 /// Serialise an [`http::Response`] onto the wire (HTTP/1.1, connection: close).
-pub(crate) async fn write_response<S: tokio::io::AsyncWrite + Unpin>(stream: &mut S, resp: Response<Bytes>) -> std::io::Result<()> {
+pub(crate) async fn write_response<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    resp: Response<Bytes>,
+) -> std::io::Result<()> {
     let (parts, body) = resp.into_parts();
     let status = parts.status.as_u16();
     let reason = reason_phrase(status);
@@ -285,7 +300,11 @@ fn parse_upstream_response(buf: &[u8]) -> std::io::Result<UpstreamResponse> {
             headers.push((name.trim().to_owned(), value.trim().to_owned()));
         }
     }
-    Ok(UpstreamResponse { status, headers, body })
+    Ok(UpstreamResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 fn parse_status_line(line: &str) -> std::io::Result<u16> {
@@ -307,8 +326,14 @@ fn io_err(msg: &str) -> std::io::Error {
 pub(crate) fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "connection" | "keep-alive" | "proxy-authenticate"
-            | "proxy-authorization" | "te" | "trailer" | "transfer-encoding" | "upgrade"
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
     )
 }
 
@@ -322,7 +347,9 @@ mod tests {
             parse_request(b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n").unwrap();
         assert_eq!(req.method(), Method::POST);
         assert!(matches!(spec, BodySpec::Length(5)));
-        let (_, spec) = parse_request(b"POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+        let (_, spec) =
+            parse_request(b"POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .unwrap();
         assert!(matches!(spec, BodySpec::Chunked));
         let (_, spec) = parse_request(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         assert!(matches!(spec, BodySpec::None));

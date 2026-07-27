@@ -45,9 +45,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     let socket = lua.create_table()?;
     socket.set(
         "tcp",
-        lua.create_function(|lua, (): ()| {
-            lua.create_userdata(crate::cosocket::Cosocket::new())
-        })?,
+        lua.create_function(|lua, (): ()| lua.create_userdata(crate::cosocket::Cosocket::new()))?,
     )?;
     ngx.raw_set("socket", socket)?;
 

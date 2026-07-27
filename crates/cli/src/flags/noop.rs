@@ -142,7 +142,11 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
 
 /// Const constructor (keeps the table `const`-friendly and readable).
 const fn nf(long: &'static str, short: Option<char>, takes_value: bool) -> NoopFlag {
-    NoopFlag { long, short, takes_value }
+    NoopFlag {
+        long,
+        short,
+        takes_value,
+    }
 }
 
 /// Look up a no-op flag by its `--long` name.
@@ -169,12 +173,26 @@ mod tests {
     fn no_long_name_collides_with_wired() {
         // Wired flag long names (Table A) must NOT appear in the no-op set.
         let wired = [
-            "data-dir", "debug", "config", "disable", "disable-etcd",
-            "disable-apiserver", "disable-agent", "disable-controller-manager",
-            "disable-scheduler", "disable-cloud-controller", "disable-kube-proxy",
-            "disable-network-policy", "disable-helm-controller", "datastore-endpoint",
-            "prefer-bundled-bin", "token", "server", "cluster-init",
-            "bind-address", "https-listen-port",
+            "data-dir",
+            "debug",
+            "config",
+            "disable",
+            "disable-etcd",
+            "disable-apiserver",
+            "disable-agent",
+            "disable-controller-manager",
+            "disable-scheduler",
+            "disable-cloud-controller",
+            "disable-kube-proxy",
+            "disable-network-policy",
+            "disable-helm-controller",
+            "datastore-endpoint",
+            "prefer-bundled-bin",
+            "token",
+            "server",
+            "cluster-init",
+            "bind-address",
+            "https-listen-port",
         ];
         for w in wired {
             assert!(find_long(w).is_none(), "{w} must not be no-op");

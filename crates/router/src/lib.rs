@@ -11,13 +11,14 @@
 //!   real-TCP HTTP/1.1 data plane. A `header_filter_by_lua` mutates headers
 //!   observed by a real client (the T5.2 acceptance gate). ADRs **Q13/Q14**.
 //! - **T5.3** (done): `resty::*` + `ngx.shared.DICT`.
-//! - **T5.4** (in progress, Scope A): Ingress→route-table compiler, a Rust
-//!   round-robin [`balancer::Balancer`] + upstream resolver, and a Rust HTTP
-//!   reverse proxy ([`proxy::serve_proxy`]) that routes traffic to upstream
-//!   Services. `Phase::Balancer` is wired. TLS + hot reload land in Scope B.
+//! - **T5.4** (done): the Ingress→route-table compiler, a Rust round-robin
+//!   [`balancer::Balancer`] + upstream resolver, a Rust HTTP reverse proxy
+//!   ([`proxy::serve_proxy`]), TLS termination with SNI ([`tls`]), and a
+//!   no-restart hot-reload seam ([`config`]). `Phase::Balancer` is wired.
 //!
-//! Cosocket (`ngx.socket.tcp`) is in; TLS termination + informer-driven config
-//! are Scope B.
+//! Cosocket (`ngx.socket.tcp`), TLS/SNI, and hot reload are all in. Live
+//! `kube-rs` informer config sourcing + dynamic Lua cert issuance are deferred
+//! to T5.5 / Phase 2.
 #![forbid(unsafe_code)]
 
 mod balancer;
@@ -27,12 +28,12 @@ mod context;
 mod cosocket;
 mod ingress;
 mod ngx;
+mod pipeline;
 mod proxy;
 mod resty;
 mod route;
-mod tls;
-mod pipeline;
 mod serve;
+mod tls;
 mod vm;
 
 pub use balancer::{pick_peer, Balancer, StaticResolver, UpstreamResolver};
@@ -40,8 +41,8 @@ pub use config::{reload_channel, ConfigSource, RouteStore, StaticConfigSource};
 pub use context::RequestContext;
 pub use ingress::compile_ingress;
 pub use pipeline::{build_response, Phase, PhaseOutcome, Pipeline, PipelineBuilder};
-pub use proxy::{ProxyOptions, serve_proxy};
+pub use proxy::{serve_proxy, ProxyOptions};
 pub use route::{HostMatcher, PathMatcher, PortRef, RouteRule, RouteTable, UpstreamRef};
-pub use tls::{build_server_config, CertKey, SniCertResolver};
 pub use serve::{ephemeral_listener, serve};
+pub use tls::{build_server_config, CertKey, SniCertResolver};
 pub use vm::worker_vm;

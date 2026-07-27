@@ -7,7 +7,7 @@
 //! single integration-test binary still named `resty_stdlib`.
 
 mod helpers;
-mod lrucache;
-mod shared_dict;
-mod random_string;
 mod http_lock;
+mod lrucache;
+mod random_string;
+mod shared_dict;

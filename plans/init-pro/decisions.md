@@ -755,3 +755,74 @@ Rationale:
   `SniCertResolver` seam is already in place for a future Lua callback.
 - → unblocks **T5.4 Scope B** (HTTPS termination + client TLS) and the
   `resty.http`/`resty.lock` work, whose TLS paths depended on this.
+
+## Q17 — Storage backend strategy: pure-Rust embedded store vs etcd FFI vs supervised etcd (T2.1)
+
+**Date.** 2026-07-27 (Sprint 10).
+
+**Context.** T2.1/T2.2 must give the apiserver a place to persist objects.
+Upstream k3s delegates to a real etcd (or to its SQLite `kine` shim for the
+embedded-server mode) and speaks the etcd **gRPC v3** API. init-pro has three
+honest ways to acquire that capability for v1: (A) link against Go's `etcd`
+via cgo/FFI (or a Rust etcd-client against a bundled etcd *subprocess* we
+supervise), (B) supervise a real `etcd` binary as a child process (mirrors how
+k3s bundles `etcd` in the tarball, Q6), or (C) implement the **etcd
+semantics** that Kubernetes actually depends on in pure Rust behind a trait,
+treating etcd-the-database as one swappable implementation. Q10 already
+committed JSON-only storage encoding and Q1 the single-multicall-binary
+posture, both of which bear on the choice.
+
+**Options.**
+- A) **etcd FFI / link Go `etcd`.** Highest fidelity but pulls a Go runtime into
+  a Rust binary via cgo, fights `#![forbid(unsafe_code)]`, and either bloats the
+  image (Q6 size budget) or forces an async Rust↔Go-runtime bridge with a large
+  unsafe/concurrency hazard surface. There is no maintained *pure-Rust* etcd
+  server implementation to link against — only clients.
+- B) **Supervise a bundled `etcd` subprocess.** Matches k3s's bundle-and-run
+  ethos (Q6) and the existing `vendor` acquire path. But it re-introduces the
+  full etcd-gRPC wire surface, a second process lifecycle to manage (graceful
+  shutdown, restart, auth), and a ~25 MB Go binary in the image — and for the
+  *embedded/single-server* mode it still needs an on-disk store, i.e. much of
+  option C anyway.
+- C) **Pure-Rust embedded store behind a `StorageBackend` trait; etcd-gRPC and
+  SQLite/KINE become alternative trait impls.** The apiserver depends only on
+  the trait. A zero-dependency in-memory `EmbeddedStorage` implements the
+  *etcd semantics Kubernetes actually relies on* (a single monotonic cluster
+  revision; per-key `create_revision`/`mod_revision`/`version` matching etcd's
+  `KeyValue`, where `mod_revision` *is* the Kubernetes `resourceVersion`;
+  optimistic concurrency via an `if_revision` compare; live `watch` via
+  broadcast fan-out). `--datastore-endpoint` selects the impl: embedded by
+  default, a real etcd gRPC client or a SQLite/KINE impl later.
+
+**Decision: C.** Implement etcd *semantics* in pure Rust behind the
+`StorageBackend` trait; do **not** FFI-link Go etcd or supervise a bundled
+subprocess for v1. The `crates/storage` crate ships the trait + the embedded
+default impl. This is the spike recorded against T2.1. `--datastore-endpoint`
+is the switchover seam (Q5-style): pointing it at an `etcd://` URL selects a
+real-etcd gRPC client impl (T2.3), and a `sqlite://`/KINE path selects the
+on-disk single-server store; the apiserver code is unchanged across all three.
+
+**Consequences.**
+- `+` Keeps `#![forbid(unsafe_code)]` intact (no cgo, no process supervision of
+  a Go binary), consistent with Q4/Q6's minimal, audited dependency posture.
+- `+` The apiserver (T1.2) programs to a *trait*, not a wire protocol — so
+  persistence lands on the critical path without an etcd-gRPC client being on
+  it. Swapping in a real backend later is a trait-impl swap behind an
+  endpoint flag, not an apiserver rewrite.
+- `+` The embedded store is the perfect test double: T1.2 unit/integration
+  tests get deterministic, in-process persistence with no port/socket teardown.
+- `+` Faithful *revision/CAS/watch* semantics mean Kubernetes-level invariants
+  (resourceVersion monotonicity, optimistic-concurrency `409 Conflict`,
+  watch-from-revision) hold identically across backends.
+- `−` The embedded store is **in-memory, per-process, non-durable**: it is the
+  default and the test double, *not* an HA/durable production backend. Loss on
+  restart is expected until T2.3 (SQLite/KINE) or a real-etcd impl lands.
+- `−` The embedded store does **live-watch only** (no historical replay from a
+  past revision); resource-version-based historical replay is an
+  etcd-gRPC-backend capability, deferred to T2.3.
+- `−` Multi-server HA (leader election, raft) is **out of scope for the embedded
+  impl** entirely; it arrives with the real-etcd backend and T3.4
+  (multi-server).
+- → unblocks **T1.2** (the next gate), which now programs to
+  `StorageBackend`; T2.3 slots alternative impls in behind
+  `--datastore-endpoint` with no apiserver churn.

@@ -32,7 +32,11 @@ fn main() {
     let src = match std::fs::read_to_string(&manifest_path) {
         Ok(s) => s,
         Err(e) => {
-            println!("cargo:warning=vendor: no manifest at {} ({})", manifest_path.display(), e);
+            println!(
+                "cargo:warning=vendor: no manifest at {} ({})",
+                manifest_path.display(),
+                e
+            );
             write_empty_assets();
             return;
         }
@@ -53,8 +57,13 @@ fn main() {
     let spdx = vendor::sbom::render_spdx(&artifacts, &iso_now());
     let licenses_dir = repo_root.join("LICENSES");
     let spdx_path = licenses_dir.join("spdx-2.3.json");
-    if let Err(e) = std::fs::create_dir_all(&licenses_dir).and_then(|_| std::fs::write(&spdx_path, &spdx)) {
-        println!("cargo:warning=vendor: failed to write SPDX SBOM to {}: {e}", spdx_path.display());
+    if let Err(e) =
+        std::fs::create_dir_all(&licenses_dir).and_then(|_| std::fs::write(&spdx_path, &spdx))
+    {
+        println!(
+            "cargo:warning=vendor: failed to write SPDX SBOM to {}: {e}",
+            spdx_path.display()
+        );
     }
     println!("cargo:warning=vendor: license gate passed (Q7); SPDX SBOM -> LICENSES/spdx-2.3.json");
 

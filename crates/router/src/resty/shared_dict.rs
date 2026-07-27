@@ -101,9 +101,7 @@ impl SharedDictRegistry {
         self.0
             .borrow_mut()
             .entry(name.to_owned())
-            .or_insert_with(|| {
-                Rc::new(RefCell::new(SharedDictStore::new(DEFAULT_DICT_CAPACITY)))
-            })
+            .or_insert_with(|| Rc::new(RefCell::new(SharedDictStore::new(DEFAULT_DICT_CAPACITY))))
             .clone()
     }
 }

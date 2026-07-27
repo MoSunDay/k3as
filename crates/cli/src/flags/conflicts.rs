@@ -178,7 +178,9 @@ mod tests {
         s.disable_apiserver = true;
         s.datastore_endpoint = Some("mysql://x".to_string());
         let err = validate_server(&s, &[]).unwrap_err();
-        assert!(err.0.contains("cannot use --disable-apiserver with --datastore-endpoint"));
+        assert!(err
+            .0
+            .contains("cannot use --disable-apiserver with --datastore-endpoint"));
     }
 
     #[test]
@@ -189,7 +191,9 @@ mod tests {
         s.disable_etcd = true;
         s.datastore_endpoint = Some("mysql://x".to_string());
         let err = validate_server(&s, &[]).unwrap_err();
-        assert!(err.0.contains("cannot use --disable-etcd with --datastore-endpoint"));
+        assert!(err
+            .0
+            .contains("cannot use --disable-etcd with --datastore-endpoint"));
     }
 
     #[test]
@@ -241,5 +245,4 @@ mod tests {
             ]
         );
     }
-
 }

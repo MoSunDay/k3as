@@ -1,14 +1,11 @@
-# Minimal CI for init-pro (Phase 1, DoD #3).
+# init-pro CI. The canonical gates (plans/init-pro/README.md):
+#   cargo build --workspace --locked
+#   cargo test  --workspace --locked
+#   cargo clippy --workspace --all-targets -- -D warnings
+# plus the e2e acceptance scripts under scripts/ (which run a PRE-BUILT binary).
 #
-# `build` gates every push/PR on cargo build/test/clippy (--locked). `golden`
-# (needs build) is the T0.6 merge gate: it boots a real init-pro server and
-# diffs its discovery responses against the committed golden fixtures, plus
-# the multicall + flag-parity harnesses. The `golden` job is the named
-# required check for branch protection.
-#
-# No vendored binaries are committed; in AUTO mode build.rs skips the acquire
-# and emits an empty embed registry, so the dev/test loop (and this CI) stays
-# fast and network-free. Set INIT_PRO_VENDOR=1 to fetch the real artifacts.
+# `--locked` is mandatory so CI never silently picks up new dep patch versions
+# (deps are caret-only; the lock file is the contract).
 name: CI
 
 on:
@@ -16,48 +13,68 @@ on:
     branches: [main, "sprint-*"]
   pull_request:
 
-# Cancel superseded runs on the same ref.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   CARGO_TERM_COLOR: always
+  # build.rs: no network, empty embed registry -> fast, deterministic builds.
+  INIT_PRO_VENDOR: "0"
+  INIT_PRO_EMBED: "0"
 
 jobs:
-  build:
-    name: build + test + clippy
+  lint-test:
+    name: fmt + clippy + test + e2e
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain (stable, >= 1.89)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build (--locked)
-        run: cargo build --locked --workspace
-      - name: Test (--locked)
-        run: cargo test --locked --workspace
-      - name: Clippy (-D warnings)
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-  golden:
-    name: golden conformance (T0.6 gate)
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: Build binary (debug)
+        run: cargo build --workspace --locked
+
+      - name: Install curl (e2e dependency)
+        run: sudo apt-get update && sudo apt-get install -y curl
+
+      - name: e2e — multicall + CLI parity + graceful shutdown
+        run: |
+          scripts/multicall-selftest.sh
+          scripts/cli-flag-parity-test.sh
+          scripts/graceful-shutdown-test.sh
+
+      - name: e2e — router coroutine/latency selftest
+        run: scripts/router-coroutine-selftest.sh
+
+      - name: e2e — discovery parity + golden conformance (T0.6)
+        run: |
+          scripts/apiserver-discovery-parity-test.sh
+          scripts/golden-conformance.sh
+
+  bundle:
+    name: INIT_PRO_EMBED=1 build + stage test
     runs-on: ubuntu-latest
-    needs: build
+    env:
+      # Acquire pinned upstream peers (containerd/runc/cni) and bake them into
+      # the binary so the stage() acceptance harness has something to extract.
+      INIT_PRO_VENDOR: "1"
+      INIT_PRO_EMBED: "1"
     steps:
       - uses: actions/checkout@v4
-      - name: Rust toolchain (stable, >= 1.89)
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
-      - name: Build (for the harness scripts)
-        run: cargo build --locked
-      - name: Golden conformance - empty-cluster baseline (T0.6)
-        run: scripts/golden-conformance.sh
-      - name: Multicall selftest (T0.1)
-        run: scripts/multicall-selftest.sh
-      - name: CLI flag parity (T0.4)
-        run: scripts/cli-flag-parity-test.sh
+      - name: Install Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with embedded assets
+        run: cargo build -p init-pro --locked
+      - name: e2e — stage fresh-dir (T0.2 B6)
+        run: scripts/stage-fresh-dir-test.sh

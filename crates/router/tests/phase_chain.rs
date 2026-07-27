@@ -13,7 +13,10 @@ use tokio::net::TcpStream;
 use tokio::task::LocalSet;
 
 /// Drive one request through the pipeline (logical, in-process).
-async fn run_one(builder: router::PipelineBuilder, req: Request<()>) -> (u16, Vec<(String, String)>, Vec<u8>) {
+async fn run_one(
+    builder: router::PipelineBuilder,
+    req: Request<()>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let p = builder.try_build().expect("pipeline");
     let out = p.serve_request(req).await;
     let resp = build_response(out);
@@ -149,7 +152,8 @@ async fn ngx_exec_internal_redirect_reruns() {
 async fn ngx_redirect_emits_302_location() {
     LocalSet::new()
         .run_until(async {
-            let b = Pipeline::build().content(r#"return function() ngx.redirect("/elsewhere") end"#);
+            let b =
+                Pipeline::build().content(r#"return function() ngx.redirect("/elsewhere") end"#);
             let (s, hdrs, _body) = run_one(b, get("/")).await;
             assert_eq!(s, 302);
             assert_eq!(header(&hdrs, "location"), Some("/elsewhere"));
@@ -176,7 +180,9 @@ async fn post_body_echoed_via_get_body_data() {
                 .unwrap()
                 .into_parts()
                 .0;
-            let out = p.serve_request_with_body(&parts, b"hello=world".to_vec()).await;
+            let out = p
+                .serve_request_with_body(&parts, b"hello=world".to_vec())
+                .await;
             assert_eq!(build_response(out).body().as_ref(), b"hello=world");
         })
         .await;
@@ -196,8 +202,16 @@ async fn post_and_query_args_parsed() {
                    end"#,
             );
             let p = b.try_build().expect("pipeline");
-            let parts = Request::builder().method("POST").uri("/x?who=alice").body(()).unwrap().into_parts().0;
-            let out = p.serve_request_with_body(&parts, b"greeting=hello+world".to_vec()).await;
+            let parts = Request::builder()
+                .method("POST")
+                .uri("/x?who=alice")
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0;
+            let out = p
+                .serve_request_with_body(&parts, b"greeting=hello+world".to_vec())
+                .await;
             assert_eq!(build_response(out).body().as_ref(), b"hello world|alice\n");
         })
         .await;
@@ -271,7 +285,10 @@ async fn http_get(
 }
 
 /// Send raw bytes (request) and parse the HTTP/1.1 response.
-async fn send_and_read(stream: &mut TcpStream, req: &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) {
+async fn send_and_read(
+    stream: &mut TcpStream,
+    req: &[u8],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
     stream.write_all(req).await.expect("write");
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.expect("read");
@@ -288,7 +305,12 @@ async fn send_and_read(stream: &mut TcpStream, req: &[u8]) -> (u16, Vec<(String,
     let mut body_start = 0;
     for (i, line) in text.split("\r\n").enumerate() {
         if line.is_empty() {
-            body_start = text.split("\r\n").take(i).map(|l| l.len() + 2).sum::<usize>() + 2;
+            body_start = text
+                .split("\r\n")
+                .take(i)
+                .map(|l| l.len() + 2)
+                .sum::<usize>()
+                + 2;
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
@@ -389,8 +411,10 @@ async fn real_client_observes_redirect() {
             let _ = tx.send(());
             let _ = server.await;
             assert_eq!(status, 301);
-            assert_eq!(header(&headers, "location"), Some("https://example.com/new"));
+            assert_eq!(
+                header(&headers, "location"),
+                Some("https://example.com/new")
+            );
         })
         .await;
 }
-

@@ -2,52 +2,81 @@
 
 A from-scratch Rust reimplementation of a **k3s-compatible**, fully
 protocol-standard Kubernetes distribution, shipped as **one multicall binary**
-and featuring a first-class **built-in Lua Router** (an openresty-style data
-plane). Ingesting `argv[0]` selects behavior:
+and featuring a first-class **built-in Lua Router** (an openresty-style HTTP
+data plane). The basename of `argv[0]` selects behavior:
 
 ```
 init-pro server | agent | kubectl | ctr | crictl | containerd | etcd
 ```
 
+Deploy the same binary under every alias (symlinks just work) — that is the
+whole distribution in one artifact (decision **Q1**).
+
 ## Status
 
-**Phase 1 (M0 + M1) — complete.** M0 foundation is green (T0.1–T0.6, with the
-golden-conformance merge gate running in CI); the M1 Router spike is de-risked
-(T5.1–T5.4: an Ingress compiles to a route table and serves real traffic over
-HTTP/HTTPS with no-restart hot reload). The Phase 2 entry point is TBD. See
-`plans/init-pro/` for the SSOT plan and `plans/init-pro/phase-1-implementation.md`
-for the sprint breakdown.
+**Phase 1** — the foundation (Layer 0) and the **M1 Router data-plane vertical
+slice** (de-risked first per **Q5**) are **done**. The resource model +
+byte-correct API discovery (T1.1/T1.2a) serve real `kubectl` discovery
+traffic, and the **storage layer has started** (T2.1/T2.2: the `StorageBackend`
+trait + an embedded etcd-compatible backend now land resources).
+
+Today the server is an **API-discovery shell with a mature Lua data plane and
+no persistence yet** — real resource CRUD/watch (T1.2) and the control plane
+(T3.x) are the next gates. See `plans/init-pro/` for the SSOT plan and
+`CHANGELOG.md` for per-sprint retrospectives.
 
 ## Build & verify
 
 ```
-cargo build --locked             # single binary: target/debug/init-pro
-cargo test --locked              # unit + integration tests across all crates
-scripts/multicall-selftest.sh     # every alias answers --help (T0.1)
-scripts/graceful-shutdown-test.sh # server drains on SIGTERM (T0.3)
-scripts/golden-conformance.sh     # T0.6 golden gate: empty-cluster baseline (6 cases)
-scripts/cli-flag-parity-test.sh   # k3s CLI flag parity (accept/no-op/fatal)
+cargo build --workspace --locked   # single binary: target/debug/init-pro
+cargo test  --workspace --locked   # unit + integration tests across all crates
+cargo clippy --workspace --all-targets -- -D warnings   # must be zero
 ```
 
-> `--locked` pins to `Cargo.lock` so CI/release builds don't silently pick up
-> new patch versions of dependencies (deps are caret-only). The selftest
-> scripts run a **pre-built** binary, so build with `cargo build --locked`
-> before invoking them.
+The e2e acceptance scripts under `scripts/` run a **pre-built** binary, so
+build first, then e.g.:
+
+```
+scripts/multicall-selftest.sh            # every alias answers --help (T0.1)
+scripts/graceful-shutdown-test.sh        # server drains on SIGTERM (T0.3)
+scripts/apiserver-discovery-parity-test.sh  # curl byte-parity vs k8s (T1.2a)
+scripts/golden-conformance.sh            # immutable wire baseline (T0.6)
+scripts/router-coroutine-selftest.sh     # Router coroutine<->async bridge (T5.1)
+```
+
+> `--locked` pins to `Cargo.lock` so CI/release builds stay reproducible (deps
+> are caret-only). `build.rs` defaults to **no network + empty embed registry**
+> for a fast dev loop; set `INIT_PRO_VENDOR=1` to download pinned upstream
+> peers and `INIT_PRO_EMBED=1` to bake them into the binary.
+
+## CI & container
+
+CI (`.github/workflows/ci.yml`) runs fmt + clippy + the full test suite + every
+e2e script on each push/PR, plus a separate `INIT_PRO_EMBED=1` bundle job.
+
+A multi-stage `Dockerfile` produces the single binary in a slim image:
+
+```
+docker build -t init-pro .
+docker run --rm -p 6443:6443 init-pro server
+```
 
 ## Layout
 
 | Crate | Role |
 |-------|------|
-| `init-pro` | the single binary; `argv[0]` dispatch + `build.rs` (vendored acquire/embed/SBOM) |
-| `common` | shared domain primitives |
+| `init-pro` | the single binary; `argv[0]` dispatch + build.rs asset bundling |
 | `multicall` | alias table + reexec + peer stubs (T0.1) |
-| `cli` | clap CLI surface + subcommands + runtime `stage()` (T0.4, T0.2-B5) |
+| `cli` | clap CLI + subcommands + flag-parity strip filter (T0.4) |
 | `infra` | tracing, layered config, graceful shutdown (T0.3) |
-| `vendor` | pinned-artifact acquire (SHA-256 gate), per-file zstd embed, license gate + SPDX SBOM (T0.2) |
-| `api` | resource model, API group schema, GVK, strategic-merge patch (T1.1) |
-| `apiserver` | HTTP discovery API server — axum (T1.2a) |
-| `router` | built-in Lua Router — mlua bridge, phase pipeline, `resty::*` stdlib, Ingress→route compiler, balancer, reverse proxy, TLS (T5.1–T5.4) |
+| `common` | shared primitives: embed descriptor + `version()` |
+| `vendor` | pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2) |
+| `api` | resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1) |
+| `apiserver` | HTTP discovery endpoints (T1.2a); REST CRUD lands in T1.2 |
+| `router` | built-in Lua data plane: phase pipeline, resty.*, Ingress->route, balancer, reverse proxy, TLS (T5.1-T5.4) |
+| `storage` | `StorageBackend` trait + embedded etcd-compatible store (T2.1/T2.2) |
 
 ## License
 
-Apache-2.0 (bundled peers retain their own licenses; SBOM lands with T0.2).
+Apache-2.0 (bundled peers retain their own licenses; an SPDX-2.3 SBOM is
+generated by the build, T0.2).

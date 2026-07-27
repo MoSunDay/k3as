@@ -8,8 +8,8 @@
 
 use std::time::{Duration, Instant};
 
-use router::worker_vm;
 use mlua::Function;
+use router::worker_vm;
 use tokio::task::LocalSet;
 
 #[tokio::test]

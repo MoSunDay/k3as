@@ -7,6 +7,84 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 10 (storage layer T2.1/T2.2 + releasable increment)
+
+Opens Phase 2 on the critical path: the **storage layer** the APIServer REST
+face (T1.2) sits on. Two of the three Sprint-9 deliverables that were *described
+but not yet materialized* — the populated golden fixtures and the actual CI
+workflow file — are landed here, plus a first container image and repo-local
+agent memory.
+
+### Added
+- **T2.1/T2.2 — the `storage` crate (started).** A generic
+  `StorageBackend` trait (`Watch`/`List`/`Create`/`Update`/`Delete`) over the
+  upstream `/registry/...` key layout, plus an embedded, zero-dependency
+  backend (`EmbeddedStorage`) that reproduces etcd's *semantics*: a single
+  monotonic cluster revision, per-key `create_revision`/`mod_revision`/
+  `version` (etcd `KeyValue` parity, where `mod_revision` is the Kubernetes
+  `resourceVersion`), optimistic concurrency via an `if_revision` CAS on
+  `update`/`delete`, and live `watch` via a tokio broadcast fan-out.
+  - **T2.1 spike decision:** implement etcd semantics in pure Rust behind the
+    trait rather than FFI-linking Go's `etcd` or supervising a bundled
+    subprocess. The real etcd-gRPC client and the SQLite/KINE impl (T2.3) slot
+    in as alternative trait impls selected by `--datastore-endpoint`; the
+    embedded store is the default and the test double.
+  - **`crates/storage/`** — `lib.rs`, `key.rs` (`/registry/...` layout), `entry.rs`
+    (`StoredEntry`/`WatchEvent`/`Revision`), `error.rs`, `backend.rs` (the trait +
+    `Watch`), `embedded.rs` (`EmbeddedStorage`). **15 integration tests** in
+    `tests/embedded_storage.rs`: CRUD round-trip, resourceVersion monotonicity,
+    optimistic-concurrency conflict on a stale revision, list prefix/namespace
+    filtering + revision ordering, watch put/delete events, and the upstream key
+    layout assertions.
+- **Golden fixtures materialized (T0.6).** Sprint 9 committed the harness and
+  documented the 4 cases but left the `discovery-*.json` fixtures empty (0 bytes).
+  This sprint generated them from a live server with the documented
+  `127.0.0.1:<port>` -> `127.0.0.1:@@PORT@@` normalization; `scripts/golden-conformance.sh`
+  is now genuinely **6/6 green** (was a body-mismatch-fail against empty files).
+- **`.github/workflows/ci.yml` materialized + expanded.** Sprint 9 described a
+  CI workflow; the `.github/` directory did not exist. Now landed: a
+  `lint-test` job (fmt `--check`, clippy `-D warnings`, `cargo test --locked`,
+  debug build, then the e2e suite — multicall, CLI parity, graceful shutdown,
+  router coroutine selftest, discovery parity, golden conformance) and a
+  `bundle` job (`INIT_PRO_EMBED=1` build + `stage-fresh-dir-test.sh`).
+- **`Dockerfile` + `.dockerignore`.** Multi-stage (rust:1.89 builder ->
+  debian:bookworm-slim runtime); installs the multicall binary under every
+  alias so `docker exec ... kubectl` and symlink invocation both work. Exposes
+  6443; `--build-arg EMBED=1` bakes the pinned peers in.
+- **Repo-local agent memory.** `agents.md` (entry point: SSOT pointers, build
+  gates, conventions, 10-crate map, state) + `features/` cards
+  (`discovery-api`, `router-data-plane`, `storage-layer`, a feature index, and a
+  feature-centric changelog).
+
+### Changed
+- **Workspace version `0.1.0` -> `0.2.0`** (milestone-aligned; propagated to the
+  server's `--version` via `env!("CARGO_PKG_VERSION")`).
+- **SSOT drift reconciled.** `index.md` + `plan/02-storage.md` now mark
+  T2.1/T2.2 `in-progress` (were `not-started` despite `crates/storage/`
+  landing). `crates/router/src/lib.rs` header fixed: T5.4 is **done**
+  (TLS/SNI + hot reload shipped + tested), not "in progress, Scope A". README
+  refreshed (was a Sprint-1 snapshot of 5 crates; now lists all 10 + CI/Docker).
+- **`cargo fmt --all`.** The tree was one rustfmt revision behind (trailing
+  commas, `use` ordering, struct-literal normalization across ~70 files); normalized so the new CI fmt gate is green. Formatting only — no semantics.
+
+### Tests
+- `cargo test --workspace` -> **311 passed; 0 failed; 0 ignored** (fresh).
+  **+15 net-new** over the Sprint 9 baseline (all in the new `storage` crate:
+  0 unit + 15 integration). fmt + clippy `-D warnings` both clean.
+- e2e (7 scripts): multicall, CLI parity, graceful shutdown, router coroutine,
+  discovery parity, golden conformance all green against the plain debug build;
+  `stage-fresh-dir-test` green under the `INIT_PRO_EMBED=1` bundle build.
+
+### Known limitations
+- The storage backend is **not yet wired into the REST face** — that is T1.2
+  (the next gate). The server is still discovery-only over the wire; the new
+  store is exercised only by its own integration tests.
+- `EmbeddedStorage` is a **live-watch** backend (no historical replay from a
+  past revision); replay is an etcd-gRPC-backend capability for later.
+- `EmbeddedStorage` is in-memory and per-process: not durable across restarts
+  and not HA. Durability + HA arrive with the etcd/SQLite backends (T2.2/T2.3)
+  and multi-server (T3.4).
+
 ## [Unreleased] — Phase 1, Sprint 9 (Phase 1 closeout: M0 + M1 done)
 
 Closes Phase 1. The T0.6 golden gate — the merge gate every later TODO must

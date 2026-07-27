@@ -30,9 +30,18 @@ fn external_stub_help_exits_success_with_banner() {
         out.status.code()
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("kubectl"), "stdout must name the alias: {stdout}");
-    assert!(stdout.contains("stub"), "stdout must mark it as a stub: {stdout}");
-    assert!(stdout.contains("Usage:"), "stdout must print usage line: {stdout}");
+    assert!(
+        stdout.contains("kubectl"),
+        "stdout must name the alias: {stdout}"
+    );
+    assert!(
+        stdout.contains("stub"),
+        "stdout must mark it as a stub: {stdout}"
+    );
+    assert!(
+        stdout.contains("Usage:"),
+        "stdout must print usage line: {stdout}"
+    );
 }
 
 #[test]
@@ -45,7 +54,10 @@ fn external_stub_without_help_exits_2_with_stderr() {
         out.status.code()
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("crictl"), "stderr must name the alias: {stderr}");
+    assert!(
+        stderr.contains("crictl"),
+        "stderr must name the alias: {stderr}"
+    );
     assert!(
         stderr.contains("not implemented"),
         "stderr must say not-implemented: {stderr}"

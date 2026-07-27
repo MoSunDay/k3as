@@ -19,7 +19,10 @@ pub struct UpstreamRef {
 impl UpstreamRef {
     /// Convenience constructor for a numeric port.
     pub fn port(service: impl Into<String>, port: u16) -> Self {
-        Self { service: service.into(), port: PortRef::Number(port) }
+        Self {
+            service: service.into(),
+            port: PortRef::Number(port),
+        }
     }
 }
 
@@ -143,9 +146,7 @@ fn prefix_match(rule: &str, req: &str) -> bool {
         return true;
     }
     // req must start with rule and the next byte must be a path separator.
-    req.len() > rule.len()
-        && req.starts_with(rule)
-        && req.as_bytes()[rule.len()] == b'/'
+    req.len() > rule.len() && req.starts_with(rule) && req.as_bytes()[rule.len()] == b'/'
 }
 
 /// One compiled routing rule.
@@ -204,13 +205,16 @@ impl RouteTable {
     /// Sort rules by descending specificity (longest, most exact first).
     pub fn finalise(mut self) -> Self {
         // Descending specificity: most-exact host + longest path first.
-        self.rules.sort_by_key(|r| std::cmp::Reverse(specificity(r)));
+        self.rules
+            .sort_by_key(|r| std::cmp::Reverse(specificity(r)));
         self
     }
 
     /// Find the first rule matching `(host, path)`, most specific first.
     pub fn lookup(&self, host: &str, path: &str) -> Option<&RouteRule> {
-        self.rules.iter().find(|r| r.host.matches(host) && r.path.matches(path))
+        self.rules
+            .iter()
+            .find(|r| r.host.matches(host) && r.path.matches(path))
     }
 
     /// The default backend, if any.

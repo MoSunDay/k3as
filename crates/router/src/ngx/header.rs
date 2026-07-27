@@ -15,10 +15,7 @@ use crate::ngx::{normalize_header, value_to_string};
 ///
 /// Captures an [`Rc`] clone of the context; no guard is held across an await
 /// (these closures are synchronous).
-pub(super) fn proxy(
-    lua: &Lua,
-    ctx: Rc<RefCell<RequestContext>>,
-) -> mlua::Result<Table> {
+pub(super) fn proxy(lua: &Lua, ctx: Rc<RefCell<RequestContext>>) -> mlua::Result<Table> {
     let proxy = lua.create_table()?;
     let mt = lua.create_table()?;
     let ctx_get = ctx.clone();
@@ -41,9 +38,11 @@ pub(super) fn proxy(
     )?;
     mt.set(
         "__newindex",
-        lua.create_function(move |_lua, (_self, key, value): (Table, LuaString, Value)| {
-            set_one(&ctx_set, normalize_header(&key), value)
-        })?,
+        lua.create_function(
+            move |_lua, (_self, key, value): (Table, LuaString, Value)| {
+                set_one(&ctx_set, normalize_header(&key), value)
+            },
+        )?,
     )?;
     proxy.set_metatable(Some(mt))?;
     Ok(proxy)
@@ -69,11 +68,7 @@ pub(super) fn bulk_set(lua: &Lua, value: Value) -> mlua::Result<()> {
 
 /// Write one header value into the live request, honouring the openresty
 /// multi-value (table) and delete (nil) semantics.
-fn set_one(
-    ctx: &Rc<RefCell<RequestContext>>,
-    key: String,
-    value: Value,
-) -> mlua::Result<()> {
+fn set_one(ctx: &Rc<RefCell<RequestContext>>, key: String, value: Value) -> mlua::Result<()> {
     let mut g = ctx.borrow_mut();
     match value {
         Value::Nil => g.resp_headers.retain(|(n, _)| *n != key),
@@ -97,7 +92,13 @@ fn set_one(
 mod tests {
     #[test]
     fn normalize_is_lowercase_dashes() {
-        assert_eq!(crate::ngx::normalize_header_key("Content_Type"), "content-type");
-        assert_eq!(crate::ngx::normalize_header_key("X-Served-By"), "x-served-by");
+        assert_eq!(
+            crate::ngx::normalize_header_key("Content_Type"),
+            "content-type"
+        );
+        assert_eq!(
+            crate::ngx::normalize_header_key("X-Served-By"),
+            "x-served-by"
+        );
     }
 }

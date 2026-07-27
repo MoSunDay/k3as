@@ -26,8 +26,10 @@ async fn http_request_uri_plaintext_get() {
                 )
                 .eval::<mlua::Function>()
                 .expect("fn");
-            let (status, body, ct, greet): (u16, String, String, String) =
-                f.call_async(("127.0.0.1", addr.port())).await.expect("call");
+            let (status, body, ct, greet): (u16, String, String, String) = f
+                .call_async(("127.0.0.1", addr.port()))
+                .await
+                .expect("call");
             let _ = tx.send(());
             assert_eq!(status, 200);
             assert_eq!(body, "hello-world");
@@ -56,8 +58,10 @@ async fn http_post_request_sends_body() {
                 )
                 .eval::<mlua::Function>()
                 .expect("fn");
-            let (status, body): (u16, String) =
-                f.call_async(("127.0.0.1", addr.port())).await.expect("call");
+            let (status, body): (u16, String) = f
+                .call_async(("127.0.0.1", addr.port()))
+                .await
+                .expect("call");
             let _ = tx.send(());
             assert_eq!(status, 200);
             assert_eq!(body, "posted-ok");
@@ -74,8 +78,11 @@ async fn http_request_uri_https_tls() {
             // extension (RFC 6066 forbids IPs in SNI), so the resolver must
             // fall back to its default cert. verify=false skips SAN checks.
             let cert = gen_test_cert("127.0.0.1");
-            let cfg = build_server_config(&[(String::new(), CertKey::pem(cert.cert_pem.clone(), cert.key_pem.clone()))])
-                .expect("server cfg");
+            let cfg = build_server_config(&[(
+                String::new(),
+                CertKey::pem(cert.cert_pem.clone(), cert.key_pem.clone()),
+            )])
+            .expect("server cfg");
             let (addr, tx) = spawn_responder(Some(cfg), "secure-body").await;
             let lua = worker_vm().expect("vm");
             let f = lua
@@ -91,8 +98,10 @@ async fn http_request_uri_https_tls() {
                 )
                 .eval::<mlua::Function>()
                 .expect("fn");
-            let (status, body): (u16, String) =
-                f.call_async(("127.0.0.1", addr.port())).await.expect("call");
+            let (status, body): (u16, String) = f
+                .call_async(("127.0.0.1", addr.port()))
+                .await
+                .expect("call");
             let _ = tx.send(());
             assert_eq!(status, 200);
             assert_eq!(body, "secure-body");
@@ -175,7 +184,11 @@ async fn lock_mutual_exclusion_across_coroutines() {
             let (ra, rb) = tokio::join!(fa.call_async::<String>(()), fb.call_async::<String>(()));
             assert_eq!(ra.expect("A"), "A");
             // B only acquired after A released -> marker already cleared to "no".
-            assert_eq!(rb.expect("B"), "no", "waiter must not enter the critical section while held");
+            assert_eq!(
+                rb.expect("B"),
+                "no",
+                "waiter must not enter the critical section while held"
+            );
         })
         .await;
 }

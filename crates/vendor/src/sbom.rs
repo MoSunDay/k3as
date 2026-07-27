@@ -13,13 +13,7 @@
 use crate::manifest::Artifact;
 
 /// Q7 license allow-list — licenses cleared for inclusion in init-pro v1.
-pub const ALLOWED_LICENSES: &[&str] = &[
-    "Apache-2.0",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "MIT",
-    "ISC",
-];
+pub const ALLOWED_LICENSES: &[&str] = &["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MIT", "ISC"];
 
 /// A license failed the Q7 allow-list gate.
 ///
@@ -224,8 +218,14 @@ mod tests {
         assert_eq!(err.license, "GPL-2.0");
         let msg = err.to_string();
         assert!(msg.contains("GPL-2.0"), "message names license: {msg}");
-        assert!(msg.contains("forbidden-tool"), "message names artifact: {msg}");
-        assert!(msg.contains("Apache-2.0"), "message lists what is allowed: {msg}");
+        assert!(
+            msg.contains("forbidden-tool"),
+            "message names artifact: {msg}"
+        );
+        assert!(
+            msg.contains("Apache-2.0"),
+            "message lists what is allowed: {msg}"
+        );
     }
 
     #[test]
@@ -241,7 +241,8 @@ mod tests {
         assert!(doc.contains("\"dataLicense\": \"CC0-1.0\""));
         assert!(doc.contains("\"SPDXID\": \"SPDXRef-DOCUMENT\""));
         assert!(doc.contains("\"name\": \"vendor\""));
-        assert!(doc.contains("\"documentNamespace\": \"https://init-pro.dev/spdx/2026-07-26T00:00:00Z\""));
+        assert!(doc
+            .contains("\"documentNamespace\": \"https://init-pro.dev/spdx/2026-07-26T00:00:00Z\""));
         assert!(doc.contains("\"creators\": [\"Tool: vendor\"]"));
         assert!(doc.contains("\"created\": \"2026-07-26T00:00:00Z\""));
         assert!(doc.contains("\"packages\":"));
@@ -255,7 +256,11 @@ mod tests {
         ];
         let doc = render_spdx(&arts, "2026-07-26T00:00:00Z");
         for a in &arts {
-            assert!(doc.contains(&format!("\"name\": \"{}\"", a.name)), "missing name {}", a.name);
+            assert!(
+                doc.contains(&format!("\"name\": \"{}\"", a.name)),
+                "missing name {}",
+                a.name
+            );
             assert!(
                 doc.contains(&format!("SPDXRef-Package-{}", a.name)),
                 "missing SPDXID for {}",
@@ -302,7 +307,11 @@ mod tests {
             doc.matches(']').count(),
             "unbalanced brackets",
         );
-        assert_eq!(doc.matches('"').count() % 2, 0, "odd number of double-quotes");
+        assert_eq!(
+            doc.matches('"').count() % 2,
+            0,
+            "odd number of double-quotes"
+        );
     }
 
     #[test]

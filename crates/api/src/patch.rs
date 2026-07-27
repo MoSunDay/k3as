@@ -52,13 +52,17 @@ impl PatchStrategy {
         let mut s = Self::default();
         // containers, initContainers, ephemeralContainers -> merge by name
         for field in ["containers", "initContainers", "ephemeralContainers"] {
-            s.merge_keys.insert(format!("spec/{field}"), "name".to_string());
+            s.merge_keys
+                .insert(format!("spec/{field}"), "name".to_string());
         }
         // volumes -> merge by name
-        s.merge_keys.insert("spec/volumes".to_string(), "name".to_string());
-        // container ports -> merge by containerPort
         s.merge_keys
-            .insert("spec/containers/ports".to_string(), "containerPort".to_string());
+            .insert("spec/volumes".to_string(), "name".to_string());
+        // container ports -> merge by containerPort
+        s.merge_keys.insert(
+            "spec/containers/ports".to_string(),
+            "containerPort".to_string(),
+        );
         // env vars -> merge by name
         s.merge_keys
             .insert("spec/containers/env".to_string(), "name".to_string());
@@ -153,9 +157,9 @@ fn merge_list(
         *target = patch.clone();
         return Ok(());
     };
-    let target_arr = target.as_array_mut().ok_or_else(|| {
-        PatchError::Invalid("merge-key list target is not an array".to_string())
-    })?;
+    let target_arr = target
+        .as_array_mut()
+        .ok_or_else(|| PatchError::Invalid("merge-key list target is not an array".to_string()))?;
     let patch_arr = patch.as_array().expect("checked by caller");
 
     let mut result: Vec<Value> = Vec::with_capacity(target_arr.len() + patch_arr.len());
@@ -203,8 +207,16 @@ fn merge_list(
         }
     }
     // drop tombstoned elements, preserving order of the survivors
-    let survivors: Vec<Value> = result.into_iter().enumerate()
-        .filter_map(|(i, v)| if deleted.get(i).copied().unwrap_or(false) { None } else { Some(v) })
+    let survivors: Vec<Value> = result
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            if deleted.get(i).copied().unwrap_or(false) {
+                None
+            } else {
+                Some(v)
+            }
+        })
         .collect();
     *target = Value::Array(survivors);
     Ok(())
@@ -255,7 +267,10 @@ mod tests {
 
     #[test]
     fn null_deletes_field() {
-        assert_eq!(merge(json!({"a": 1, "b": 2}), json!({"a": null})), json!({"b": 2}));
+        assert_eq!(
+            merge(json!({"a": 1, "b": 2}), json!({"a": null})),
+            json!({"b": 2})
+        );
     }
 
     #[test]
@@ -318,9 +333,13 @@ mod tests {
     #[test]
     fn volumes_merge_by_name() {
         let target = json!({"spec": {"volumes": [{"name": "v1", "emptyDir": {}}]}});
-        let patch = json!({"spec": {"volumes": [{"name": "v1", "emptyDir": {"medium": "Memory"}}]}});
+        let patch =
+            json!({"spec": {"volumes": [{"name": "v1", "emptyDir": {"medium": "Memory"}}]}});
         let out = merge(target, patch);
-        assert_eq!(out["spec"]["volumes"][0]["emptyDir"]["medium"], json!("Memory"));
+        assert_eq!(
+            out["spec"]["volumes"][0]["emptyDir"]["medium"],
+            json!("Memory")
+        );
     }
 
     #[test]
@@ -337,17 +356,20 @@ mod tests {
         let target = json!({"metadata": {"labels": {"a": "1", "b": "2"}}});
         let patch = json!({"metadata": {"labels": {"b": "3", "c": "4"}}});
         let out = merge(target, patch);
-        assert_eq!(out["metadata"]["labels"], json!({"a": "1", "b": "3", "c": "4"}));
+        assert_eq!(
+            out["metadata"]["labels"],
+            json!({"a": "1", "b": "3", "c": "4"})
+        );
     }
 
     #[test]
     fn json_patch_fallback_applies() {
         let mut target = json!({"a": "b"});
-        let patch: JsonPatch = serde_json::from_str(r#"[{"op":"add","path":"/c","value":"d"}]"#).unwrap();
+        let patch: JsonPatch =
+            serde_json::from_str(r#"[{"op":"add","path":"/c","value":"d"}]"#).unwrap();
         apply_json_patch(&mut target, &patch).unwrap();
         assert_eq!(target, json!({"a": "b", "c": "d"}));
     }
-
 
     #[test]
     fn with_merge_key_adds_a_custom_merge_strategy() {
@@ -367,5 +389,4 @@ mod tests {
         strategic_merge(&mut out2, &patch, &PatchStrategy::default()).unwrap();
         assert!(out2["spec"]["networks"][0].get("extra").is_none());
     }
-
 }
