@@ -7,6 +7,57 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 10.5 — REST CRUD + watch over the embedded store (2026-07-27)
+
+**Focus:** Wire the embedded storage backend (T2.1/T2.2 spike) into the
+apiserver as real REST CRUD + watch handlers. The server graduates from
+discovery-only to a functional data plane.
+
+### What landed
+- **T1.2b REST CRUD + watch** (`crates/apiserver/`):
+  - `state.rs` — `AppState` (registry + store + server_addr), `Loc`/`Resolved`
+    path resolution, upstream-faithful `/registry/<group>/<version>/...` key
+    layout, helper functions for type-meta/namespace/resourceVersion injection.
+  - `collection.rs` — `do_create` (scope validation, namespace injection),
+    `do_list` (prefix scan + key-cursor pagination), `do_watch` (chunked
+    `application/json` stream via tokio mpsc + `Body::from_stream`, ADDED/
+    MODIFIED/DELETED event projection). Core + grouped wrappers for both
+    cluster-scoped and namespaced resources.
+  - `item.rs` — `do_get`, `do_replace` (resourceVersion CAS → 409 on stale),
+    `do_delete` (resourceVersion CAS), `do_patch` (strategic-merge /
+    RFC-7386 merge / RFC-6902 JSON-patch). Core + grouped wrappers.
+  - `error.rs` — `ApiError` enum → metav1 `Status` JSON (404/409/400/500).
+  - `app.rs` — `api_app()` assembles discovery + CRUD + watch routes.
+  - `serve.rs` — `serve()` now takes `Arc<dyn StorageBackend>` as 2nd param.
+  - `cli/runtime.rs` — constructs `EmbeddedStorage::new()` and passes to serve.
+
+### Semantics implemented
+- resourceVersion CAS on PUT/DELETE (409 Conflict on stale revision).
+- PATCH: strategic-merge (default), merge-patch (RFC 7386), JSON-patch (RFC 6902).
+- Watch: live events only (embedded backend has no historical replay);
+  `resourceVersion` param accepted for API parity.
+- Namespace auto-injection for namespaced resources on create.
+- List pagination via key cursor (not offset).
+
+### Deferred
+- Server-side apply field-manager → T1.2c (next sprint).
+- Real etcd-gRPC backend → T2.3 (`--datastore-endpoint etcd://`).
+- Historical watch replay → T2.3 (etcd-gRPC backend capability).
+
+### Test counts
+- 326 total (was 311): +14 REST CRUD integration tests, +1 watch streaming
+  test (real TCP, minimal HTTP/1.1 client), +0 unit (refactor of existing
+  discovery_handlers test).
+- Golden conformance: 12/12 (was 6/6): G06 fixed (pods list → 200), G07–G12
+  added (CRUD round-trip + watch-open).
+
+### SSOT updates
+- `index.md`: T1.2 not-started → in-progress; T2.1 in-progress → done.
+- `plan/01-api.md`: T1.2 evidence updated (T1.2a done, T1.2b done, T1.2c deferred).
+- `plan/02-storage.md`: T2.1 → done; T2.2 blockers updated.
+- `decisions.md`: Q17 (already written in Sprint 10) — pure-Rust embedded
+  store decision, now validated by the REST wiring.
+
 ## [Unreleased] — Phase 1, Sprint 10 (storage layer T2.1/T2.2 + releasable increment)
 
 Opens Phase 2 on the critical path: the **storage layer** the APIServer REST

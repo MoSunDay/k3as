@@ -51,9 +51,11 @@ sha2 = "0.10"
 zstd = "0.13"
 # HTTP framework (T1.2). axum is built on hyper/tokio/tower and is shared by
 # both the apiserver (T1.2) and the Router data plane (T5.2 "hyper body streaming").
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "macros"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "macros"] }
 tower = { version = "0.5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process", "net"] }
+# Stream wrappers (watch body streaming, T1.2b).
+tokio-stream = "0.1"
 # Lua VM for the built-in Router (T5.1). LuaJIT via vendored luajit-src; `async` enables coroutine<->Rust-future bridging; `error-send` makes the
 # error type Send. `luajit52` is OFF (openresty = LuaJIT 2.1 = Lua 5.1).
 mlua = { version = "0.12", features = ["luajit", "vendored", "async", "error-send"], default-features = false }

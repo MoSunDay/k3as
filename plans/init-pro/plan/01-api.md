@@ -72,8 +72,8 @@ be wire-compatible with upstream kubectl/kube-rs.
   - kube-rs example binary does the same against `init-pro`.
   - All cases pinned in T0.6 golden.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — in-progress (T1.2a discovery done; T1.2b CRUD+watch done; T1.2c server-side apply deferred)
+- **证据 / Evidence** — Sprint 10: T1.2a discovery handlers landed (T0.6 golden 4/4). Sprint 10.5: T1.2b REST CRUD + watch landed in `crates/apiserver/` — `api_app()` builds the full router (discovery + CRUD + watch routes) over `Arc<dyn StorageBackend>`; `AppState` resolves resource paths, `collection.rs` (create/list/watch), `item.rs` (get/replace/delete/patch). Handlers: resourceVersion CAS on PUT/DELETE (409 on stale), strategic-merge/merge/JSON PATCH, namespace auto-injection, key-cursor list pagination, live-watch chunked stream (ADDED/MODIFIED/DELETED). 15 apiserver integration tests + 1 watch streaming test (real TCP). `cli/runtime.rs` constructs `EmbeddedStorage` and passes it to `serve()`. Server-side apply field-manager = T1.2c (next).
 - **卡点 / Blockers** — Server-side apply field-manager complexity; opt-in
     scope for v1.
 - **依赖 / Depends on** — T1.1, T2.2

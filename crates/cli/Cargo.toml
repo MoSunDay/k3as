@@ -12,6 +12,7 @@ common = { workspace = true }
 infra = { workspace = true }
 api = { workspace = true }
 apiserver = { workspace = true }
+storage = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
