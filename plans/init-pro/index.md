@@ -15,7 +15,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T0.3 | 0 | 公共基础设施 crate (log/config/signal) | done | T0.1 |
 | T0.4 | 0 | CLI: multicall + k3s 兼容 flag | done | T0.1, T0.3 |
 | T0.5 | 0 | 规划体系与文档中枢 | done | — |
-| T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | not-started | T0.1 |
+| T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | done | T0.1 |
 | T1.1 | 1 | 资源模型与 API group schema | done | T0.3 |
 | T1.2 | 1 | APIServer 核心 (REST + kubectl 真实交互) | not-started | T1.1, T2.2 |
 | T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) | not-started | T1.1 |
@@ -33,8 +33,8 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
 | T5.1 | 5 | mlua + coroutine↔async 桥 | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks | done | T5.1 |
-| T5.3 | 5 | resty::* 等价标准库 | in-progress (Scope A+B core done) | T5.1, T5.2 |
-| T5.4 | 5 | 内置 Router 核心 + Ingress→Lua 路由编译 | in-progress (Scope A+B / M1 data plane done) | T5.2, T5.3, T1.1 |
+| T5.3 | 5 | resty::* 等价标准库 | done | T5.1, T5.2 |
+| T5.4 | 5 | 内置 Router 核心 + Ingress→Lua 路由编译 | done | T5.2, T5.3, T1.1 |
 | T5.5 | 5 | 热加载 / 动态配置 (no-restart reload) | not-started | T5.4 |
 | T5.6 | 5 | ServiceLB (L4/LB 数据面) | not-started | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
@@ -70,6 +70,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 9 — Phase 1 closeout (M0 + M1 done).** T0.6 golden gate landed: `golden/` (4 byte-stable discovery fixtures) + `scripts/golden-conformance.sh` (boots a real server, 6/6 green empty-cluster baseline; the harness itself is the deliverable) + `.github/workflows/ci.yml` (`golden` required check). T5.3/T5.4 marked done — the M1 vertical slice (Ingress→route→real traffic, TLS/SNI, no-restart hot reload) is complete; remaining live `kube-rs` informer + dynamic Lua cert issuance deferred to T5.5/Phase 2. Phase 1 DoD (7/7) met. M0 (T0.1–T0.6) + M1 (T5.1–T5.4) = Phase 1.
 - **Sprint 2 (T0.2 + T0.4): both done.** T0.4 = k3s CLI flag parity (17 wired + ~108 no-op + 7 conflict rules). T0.2 = full bundling pipeline: B1 acquire (3-mode, SHA-256 gate), B2 zstd embed codegen (content-addressed, level 19), B3 .sha256sums/.links dataverify manifests, B4 Q7 license gate + SPDX-2.3 SBOM, B5 runtime stage() (flock→write-tmp→dataverify→atomic-rename→symlink), B6 acceptance harness (8/8 green).
 
 ---

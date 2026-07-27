@@ -1,0 +1,63 @@
+# Minimal CI for init-pro (Phase 1, DoD #3).
+#
+# `build` gates every push/PR on cargo build/test/clippy (--locked). `golden`
+# (needs build) is the T0.6 merge gate: it boots a real init-pro server and
+# diffs its discovery responses against the committed golden fixtures, plus
+# the multicall + flag-parity harnesses. The `golden` job is the named
+# required check for branch protection.
+#
+# No vendored binaries are committed; in AUTO mode build.rs skips the acquire
+# and emits an empty embed registry, so the dev/test loop (and this CI) stays
+# fast and network-free. Set INIT_PRO_VENDOR=1 to fetch the real artifacts.
+name: CI
+
+on:
+  push:
+    branches: [main, "sprint-*"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build + test + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (stable, >= 1.89)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build (--locked)
+        run: cargo build --locked --workspace
+      - name: Test (--locked)
+        run: cargo test --locked --workspace
+      - name: Clippy (-D warnings)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  golden:
+    name: golden conformance (T0.6 gate)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (stable, >= 1.89)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: Build (for the harness scripts)
+        run: cargo build --locked
+      - name: Golden conformance - empty-cluster baseline (T0.6)
+        run: scripts/golden-conformance.sh
+      - name: Multicall selftest (T0.1)
+        run: scripts/multicall-selftest.sh
+      - name: CLI flag parity (T0.4)
+        run: scripts/cli-flag-parity-test.sh

@@ -246,8 +246,8 @@ that every later TODO must keep green.
     harness itself is the deliverable); suite grows as layers land.
   - CI job `golden` is a required check.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — done
+- **证据 / Evidence** — `golden/` (4 byte-stable discovery fixtures: GET `/api`, `/apis`, `/api/v1`, `/apis/init-pro.io/v1`) + `golden/README.md` (documents the 6 cases and the `@@PORT@@` normalization of the only volatile field, `APIVersions.serverAddress`); `scripts/golden-conformance.sh` boots a real `init-pro server` on a free loopback port and diffs live responses against the fixtures — **6/6 green** (G01–G04 byte-exact body matches, G05/G06 assert 404 for unknown group/version and not-yet-existing collection endpoints). The empty-cluster baseline is delivered: *the harness itself is the deliverable*; cases are appended as CRUD/watch/storage/scheduling layers land. `.github/workflows/ci.yml` runs it on every change as a required `golden` check (DoD #3).
 - **卡点 / Blockers** — Licensing/attribution of upstream e2e fixtures;
     pick the smallest meaningful subset first.
 - **依赖 / Depends on** — T0.1
