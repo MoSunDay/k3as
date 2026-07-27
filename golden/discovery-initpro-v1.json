@@ -1,0 +1,1 @@
+{"apiVersion":"v1","kind":"APIResourceList","groupVersion":"init-pro.io/v1","resources":[{"group":"init-pro.io","kind":"LuaRouter","name":"luarouters","namespaced":true,"singularName":"luaRouter","verbs":["get","list","watch","create","update","patch","delete"]}]}
