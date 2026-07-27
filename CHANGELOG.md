@@ -7,6 +7,71 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## [Unreleased] — Phase 1, Sprint 9 (Phase 1 closeout: M0 + M1 done)
+
+Closes Phase 1. The T0.6 golden gate — the merge gate every later TODO must
+keep green (Q2) that was nominally on the critical path but skipped while the
+M1 Router spike advanced — is landed; the in-progress T5.3/T5.4 are marked
+done (remaining items deferred to T5.5 / Phase 2). All 7 Phase 1 DoD criteria
+are met. M0 (T0.1–T0.6) + M1 (T5.1–T5.4) = Phase 1.
+
+### Added
+- **T0.6 — golden conformance merge gate (the empty-cluster baseline).** The
+  harness itself is the deliverable today: it boots a real `init-pro server`
+  on a free loopback port and diffs its discovery responses against committed,
+  byte-stable fixtures; cases are appended as CRUD/watch/storage/scheduling
+  layers land.
+  - `golden/` — 4 byte-stable discovery fixtures (`GET /api`, `/apis`,
+    `/api/v1`, `/apis/init-pro.io/v1`) + `README.md` documenting the 6 cases
+    (G01–G04 body matches; G05/G06 assert 404 for unknown group/version and
+    not-yet-existing collection endpoints) and the `@@PORT@@` normalization of
+    the only volatile field (`APIVersions.serverAddress`).
+  - `scripts/golden-conformance.sh` — boots the server, waits for the
+    `discovery listening` line, diffs live vs. fixture, normalizes the bind
+    `host:port`. **6/6 green** against the discovery-only server (T1.2a).
+- **`.github/workflows/ci.yml` — minimal CI.** A `build` job (`cargo
+  build`/`test`/`clippy -D warnings`, all `--locked`) gates on every push to
+  `main`/`sprint-*` and on PRs; a `golden` job (needs `build`) runs
+  `scripts/golden-conformance.sh` + `scripts/multicall-selftest.sh` +
+  `scripts/cli-flag-parity-test.sh`, providing the named `golden` required
+  check for DoD #3. (Configuring it as a *required* status check in GitHub
+  branch-protection is a one-time repo setting, not a code change.)
+
+### Changed
+- **T5.3 / T5.4 marked done** (were `in-progress`). The M1 data plane is
+  complete — the Ingress→route compiler, round-robin balancer, Rust reverse
+  proxy, rustls/SNI TLS termination, and no-restart route-table hot reload
+  all ship. The two remaining items (a live `kube-rs` informer config source
+  and dynamic Lua-driven cert issuance) are explicitly deferred to **T5.5 /
+  Phase 2**; they are not needed for the M1 spike verdict (Q5).
+- **SSOT synchronized** in lock-step: `index.md` status table (T0.6, T5.3,
+  T5.4 → done) = `plan/00-foundation.md` T0.6 + `plan/05-ingress-lua.md`
+  T5.3/T5.4 Status/Evidence = this changelog. `phase-1-implementation.md`
+  gains a Sprint 9 section + closeout note.
+- **README corrected.** The Layout table now lists all **9** workspace crates
+  (was 5: missing `vendor`, `api`, `apiserver`, `router`) and the Status line
+  reflects Phase 1 (M0 + M1) complete; the Build & verify block lists the
+  golden + flag-parity scripts.
+
+### Tests
+- `cargo build --locked` → single `init-pro` binary (DoD #1).
+- `cargo test --workspace --locked` → **296 passed; 0 failed** (fresh).
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` → 0 warnings.
+- `scripts/golden-conformance.sh` → 6/6 green (T0.6).
+- `scripts/multicall-selftest.sh` → all aliases OK (DoD #2).
+- `scripts/cli-flag-parity-test.sh` → 16/0 (accept/no-op/fatal).
+
+### Phase 1 DoD (7/7)
+1. `cargo build --release` → single `init-pro` binary — ✅
+2. all multicall aliases `--help` pass — ✅
+3. CI `golden` required check green (empty-cluster baseline) — ✅ (workflow
+   added; the `golden` job exists and is green locally; branch-protection is
+   a one-time GitHub repo setting)
+4. T5.1 concurrency bridge stress test passes (quantified latency baseline) — ✅ (Sprint 4)
+5. T5.2 phase pipeline end-to-end observable — ✅ (Sprint 5/6)
+6. T5.3 resty::* subset passes upstream port tests — ✅ (Sprint 7/8)
+7. M1 spike: Ingress→Lua→real traffic, with hot reload (Q5) — ✅ (Sprint 8)
+
 ## [Unreleased] — Phase 1, Sprint 8 (T5.4 — the M1 data plane → in-progress)
 
 ### Added

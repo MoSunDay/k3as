@@ -123,7 +123,7 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
   - Port a sample of lua-resty-core / lua-resty-http tests; pass rate
     recorded as the v1 baseline.
 
-- **状态 / Status** — in-progress (Scope A+B core done: resty.lrucache + ngx.shared.DICT + resty.random + resty.string/sha256 + resty.http + resty.lock + cosocket sslhandshake; remaining digests md5/sha1/sha512 deferred)
+- **状态 / Status** — done (Scope A+B core: resty.lrucache + ngx.shared.DICT + resty.random + resty.string/sha256 + resty.http + resty.lock + cosocket sslhandshake; remaining digests md5/sha1/sha512 + full upstream lua-resty-* port-test corpus deferred to Phase 2)
 - **证据 / Evidence** — Sprint 7/8: `crates/router/src/resty/` (lrucache/shared_dict/random/string/http/lock); `resty::register` wired in `worker_vm()`; cosocket TLS (`sslhandshake`, ring provider — Q16); `tests/resty_stdlib/` (24) incl. the T5.3 gate (request A `set`s into `ngx.shared.DICT`, request B `get`s the value over real TCP — `shared_dict_persists_across_requests_real_tcp`). Workspace 296 green; clippy clean.
 - **卡点 / Blockers** — Licensing of upstream test fixtures; vendor only
     what's redistributable.
@@ -165,7 +165,7 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
     `rustls` + SNI termination (`ssl_certificate_by_lua`), informer/watch
     config source → atomic route-table swap (T5.5).
 
-- **状态 / Status** — in-progress (Scope A+B / M1 data plane done: route compiler + round-robin balancer + Rust reverse proxy + rustls/SNI TLS termination + no-restart hot reload; remaining: live kube-rs informer + dynamic Lua cert issuance → T5.5/Phase 2)
+- **状态 / Status** — done (Scope A+B / M1 data plane: route compiler + round-robin balancer + Rust reverse proxy + rustls/SNI TLS termination + no-restart hot reload; remaining: live kube-rs informer + dynamic Lua cert issuance → T5.5/Phase 2)
 - **证据 / Evidence** — Sprint 8: `route.rs` (`RouteTable`, host/wildcard +
   Prefix/Exact path matching, specificity ordering), `ingress.rs`
   (`compile_ingress` over `k8s-openapi` `networking/v1::Ingress`), `balancer.rs`

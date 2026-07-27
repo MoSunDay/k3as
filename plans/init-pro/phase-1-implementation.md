@@ -88,6 +88,19 @@ API/etcd 用最小桩实现，只为给 Router 喂 Ingress。
 - 交付（M1 验收）：`kubectl apply` 一个 Ingress → `curl` host 路由命中；TLS host 工作；
   第二个 Ingress 热更新无重启
 
+### Sprint 9 — Phase 1 收尾（M0 + M1 done）
+名义关键路径上被跳过的 T0.6 金线门在本轮落地，下游 T5.3/T5.4 关闭，Phase 1 触达 DoD。
+- **T0.6（golden gate）：** 已存在但未跟踪的资产提交——`golden/`（4 个字节稳定的
+  discovery fixture）+ `scripts/golden-conformance.sh`（起真实 server 做空集群基线
+  字节级 diff，`@@PORT@@` 归一化 serverAddress，6/6 绿）。「空集群基线 + harness
+  本身即交付物」验收达成。新增最小 `.github/workflows/ci.yml`，把 `golden` 跑成
+  required check（DoD #3）。
+- **T5.3 / T5.4 标 done：** M1 数据面（Ingress→route→真流量 + TLS/SNI + 无重启热更新）
+  完整；剩余项（live `kube-rs` informer + 动态 Lua 证书签发）明确归入 T5.5/Phase 2。
+- **卫生项：** README 修正（crate 数 5→9、状态更新）；SSOT 三处一致
+  （`index.md` 状态表 = `plan/*.md` 各条 Status = CHANGELOG）。
+- **状态：done — Phase 1 = M0（T0.1–T0.6）+ M1（T5.1–T5.4）达成，DoD 7/7。**
+
 ## Verify（验收 / Definition of Done）
 1. `cargo build --release` → 唯一 `init-pro` 二进制
 2. 全部 multicall 别名 `--help` 通过
@@ -117,3 +130,8 @@ S1 T0.1+T0.3 ─┬─> S2 T0.2+T0.4 ─┐
 ```
 
 > **执行节奏对齐 / Sprint cadence reconciliation.** 上图为名义计划（nominal）。实际执行中 T5.2 因 phase 链 + body 缓冲的复杂度拆为两刀：**S5 = T5.2 Scope A**（content + cosocket）、**S6 = T5.2 Scope B**（完整 phase 链 / body / `ngx.var`·`ngx.arg`·`ngx.exec`·`ngx.redirect`，见 Q14）、**S7 = T5.3 Scope A**（`resty::*` 标准库 + `ngx.shared.DICT`，见 Q15）。T5.3 Scope B（resty.http/lock，受 cosocket TLS 阻塞）与 **T5.4（M1 Ingress spike 验收）**顺延至 **S8**。关键路径 DAG 不变，仅 sprint 编号偏移。
+
+> **Phase 1 收尾 / Sprint 9 closeout.** T0.6 金线门落地（golden fixtures + harness
+> + CI `golden` required check），T5.3/T5.4 标 done（剩余项 → T5.5/Phase 2）。
+> Phase 1 = M0 + M1 达成，DoD 7/7 满足。Phase 2 入口方向待评审：B 路径
+> （T2.1 etcd bundling，平台关键路径起点）vs C 路径（T5.5 Router 热加载）。
