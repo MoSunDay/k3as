@@ -7,9 +7,9 @@
 //! endpoint's body equals the document produced by the pure builder, and that an
 //! unknown group/version yields `404`.
 
+use api::SchemaRegistry;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use api::SchemaRegistry;
 use tower::ServiceExt;
 
 /// A served schema identical to what `init-pro server` exposes: core/v1 native
@@ -21,7 +21,9 @@ fn served_registry() -> SchemaRegistry {
 }
 
 async fn body_string(resp: axum::http::Response<Body>) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
@@ -37,8 +39,15 @@ async fn api_endpoint_serves_core_versions() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.headers().get("content-type").unwrap(), "application/json");
-    assert_eq!(body_string(resp).await, expected, "/api body must be byte-identical");
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+    assert_eq!(
+        body_string(resp).await,
+        expected,
+        "/api body must be byte-identical"
+    );
 }
 
 #[tokio::test]
@@ -55,7 +64,10 @@ async fn apis_endpoint_serves_group_list() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert_eq!(body, expected, "/apis body must be byte-identical");
-    assert!(body.contains(r#""init-pro.io""#), "group list must include init-pro.io");
+    assert!(
+        body.contains(r#""init-pro.io""#),
+        "group list must include init-pro.io"
+    );
 }
 
 #[tokio::test]
@@ -65,7 +77,12 @@ async fn api_v1_serves_core_resource_list() {
 
     let app = apiserver::discovery_app(reg, "127.0.0.1:6443");
     let resp = app
-        .oneshot(Request::builder().uri("/api/v1").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -83,7 +100,12 @@ async fn apis_initpro_v1_serves_resource_list() {
 
     let app = apiserver::discovery_app(reg, "127.0.0.1:6443");
     let resp = app
-        .oneshot(Request::builder().uri("/apis/init-pro.io/v1").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/apis/init-pro.io/v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -98,7 +120,12 @@ async fn unknown_group_version_returns_404() {
     let reg = served_registry();
     let app = apiserver::discovery_app(reg, "127.0.0.1:6443");
     let resp = app
-        .oneshot(Request::builder().uri("/apis/fabricated.io/v9beta1").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/apis/fabricated.io/v9beta1")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

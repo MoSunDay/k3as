@@ -31,30 +31,34 @@ fn shared_dict_inc_atomic_semantics() {
     // Single VM across chunks: the dict zone persists in app_data.
     let lua = worker_vm().expect("vm");
     // inc on a missing key with no init -> nil, "not found".
-    let (none, err): (Option<f64>, Option<String>) =
-        lua.load("return ngx.shared.s4:incr('ctr', 1)").eval().expect("e1");
+    let (none, err): (Option<f64>, Option<String>) = lua
+        .load("return ngx.shared.s4:incr('ctr', 1)")
+        .eval()
+        .expect("e1");
     assert!(none.is_none());
     assert_eq!(err.as_deref(), Some("not found"));
     // inc with init seeds then adds.
-    let (v1, _): (f64, Option<String>) =
-        lua.load("return ngx.shared.s4:incr('ctr', 5, 100)").eval().expect("e2");
+    let (v1, _): (f64, Option<String>) = lua
+        .load("return ngx.shared.s4:incr('ctr', 5, 100)")
+        .eval()
+        .expect("e2");
     assert_eq!(v1, 105.0);
     // subsequent inc accumulates on the same zone.
-    let (v2, _): (f64, Option<String>) =
-        lua.load("return ngx.shared.s4:incr('ctr', -2)").eval().expect("e3");
+    let (v2, _): (f64, Option<String>) = lua
+        .load("return ngx.shared.s4:incr('ctr', -2)")
+        .eval()
+        .expect("e3");
     assert_eq!(v2, 103.0);
 }
 
 #[test]
 fn shared_dict_add_replace_semantics() {
-    let (ok_add, err_add): (bool, Option<String>) = eval(
-        "local d = ngx.shared.s5 d:set('k',1) local ok,err = d:add('k',2) return ok,err",
-    );
+    let (ok_add, err_add): (bool, Option<String>) =
+        eval("local d = ngx.shared.s5 d:set('k',1) local ok,err = d:add('k',2) return ok,err");
     assert!(!ok_add);
     assert_eq!(err_add.as_deref(), Some("exists"));
-    let (ok_rep_miss, err_rep): (bool, Option<String>) = eval(
-        "local d = ngx.shared.s5 local ok,err = d:replace('missing',2) return ok,err",
-    );
+    let (ok_rep_miss, err_rep): (bool, Option<String>) =
+        eval("local d = ngx.shared.s5 local ok,err = d:replace('missing',2) return ok,err");
     assert!(!ok_rep_miss);
     assert_eq!(err_rep.as_deref(), Some("not found"));
     let (ok_rep_ok, val): (bool, Option<i64>) = eval(
@@ -76,9 +80,7 @@ fn shared_dict_get_keys_and_get_all() {
 
 #[test]
 fn shared_dict_flush_all_clears() {
-    let n: i64 = eval(
-        "local d = ngx.shared.s7 d:set('a',1) d:flush_all() return #d:get_keys(0)",
-    );
+    let n: i64 = eval("local d = ngx.shared.s7 d:set('a',1) d:flush_all() return #d:get_keys(0)");
     assert_eq!(n, 0);
 }
 
@@ -101,7 +103,10 @@ end"#;
 async fn shared_dict_persists_across_requests_logical() {
     LocalSet::new()
         .run_until(async {
-            let p = Pipeline::build().content(GATE_CONTENT).try_build().expect("pipeline");
+            let p = Pipeline::build()
+                .content(GATE_CONTENT)
+                .try_build()
+                .expect("pipeline");
             assert_eq!(body_of(&p, get("/write")).await, "wrote\n");
             assert_eq!(
                 body_of(&p, get("/read")).await,
@@ -117,7 +122,10 @@ async fn shared_dict_persists_across_requests_logical() {
 async fn shared_dict_persists_across_requests_real_tcp() {
     LocalSet::new()
         .run_until(async {
-            let p = Pipeline::build().content(GATE_CONTENT).try_build().expect("pipeline");
+            let p = Pipeline::build()
+                .content(GATE_CONTENT)
+                .try_build()
+                .expect("pipeline");
             let (addr, listener) = router::ephemeral_listener().expect("listener");
             let (tx, rx) = tokio::sync::oneshot::channel::<()>();
             let server = tokio::task::spawn_local(router::serve(p, listener, async {

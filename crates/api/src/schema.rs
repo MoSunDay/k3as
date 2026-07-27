@@ -43,8 +43,18 @@ pub struct TypeInfo {
 }
 
 impl TypeInfo {
-    pub fn new(kind: impl Into<String>, resource: impl Into<String>, list_kind: impl Into<String>, scope: Scope) -> Self {
-        Self { kind: kind.into(), resource: resource.into(), list_kind: list_kind.into(), scope }
+    pub fn new(
+        kind: impl Into<String>,
+        resource: impl Into<String>,
+        list_kind: impl Into<String>,
+        scope: Scope,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            resource: resource.into(),
+            list_kind: list_kind.into(),
+            scope,
+        }
     }
 }
 
@@ -77,7 +87,11 @@ struct Key {
 
 impl Key {
     fn from_gvk(gvk: &GroupVersionKind) -> Self {
-        Self { group: gvk.group.to_ascii_lowercase(), version: gvk.version.clone(), kind: gvk.kind.clone() }
+        Self {
+            group: gvk.group.to_ascii_lowercase(),
+            version: gvk.version.clone(),
+            kind: gvk.kind.clone(),
+        }
     }
 }
 
@@ -116,7 +130,14 @@ impl SchemaRegistry {
             <T as ListableResource>::LIST_KIND,
             T::Scope::SCOPE,
         );
-        self.by_gvk.insert(Key { group: group.to_ascii_lowercase(), version, kind }, info);
+        self.by_gvk.insert(
+            Key {
+                group: group.to_ascii_lowercase(),
+                version,
+                kind,
+            },
+            info,
+        );
     }
 
     /// Register a CRD/custom type by explicit fields (used by init-pro.io groups).
@@ -130,7 +151,11 @@ impl SchemaRegistry {
         scope: Scope,
     ) {
         self.by_gvk.insert(
-            Key { group: group.to_ascii_lowercase(), version: version.to_string(), kind: kind.to_string() },
+            Key {
+                group: group.to_ascii_lowercase(),
+                version: version.to_string(),
+                kind: kind.to_string(),
+            },
             TypeInfo::new(kind, resource, list_kind, scope),
         );
     }
@@ -143,7 +168,8 @@ impl SchemaRegistry {
     /// Lookup by GVR (group+version+resource/plural). Group is matched
     /// case-insensitively (upstream parity).
     pub fn get_by_gvr(&self, gvr: &GroupVersionResource) -> Option<&TypeInfo> {
-        self.by_gvk.iter()
+        self.by_gvk
+            .iter()
             .find(|(k, info)| {
                 k.group.eq_ignore_ascii_case(&gvr.group)
                     && k.version == gvr.version
@@ -172,9 +198,9 @@ impl SchemaRegistry {
 
     /// Iterate all `(GVK, TypeInfo)` entries.
     pub fn iter(&self) -> impl Iterator<Item = (GroupVersionKind, &TypeInfo)> {
-        self.by_gvk.iter().map(|(k, info)| {
-            (GroupVersionKind::gvk(&k.group, &k.version, &k.kind), info)
-        })
+        self.by_gvk
+            .iter()
+            .map(|(k, info)| (GroupVersionKind::gvk(&k.group, &k.version, &k.kind), info))
     }
 
     /// Number of registered types.
@@ -222,23 +248,36 @@ mod tests {
         let reg = SchemaRegistry::with_core_v1();
         // core group is "" — case-insensitivity is a no-op here, but the
         // registered mixed-case kind must still resolve.
-        assert!(reg.get(&GroupVersionKind::gvk("", "v1", "ConfigMap")).is_some());
-        assert!(reg.get(&GroupVersionKind::gvk("", "v1", "Missing")).is_none());
+        assert!(reg
+            .get(&GroupVersionKind::gvk("", "v1", "ConfigMap"))
+            .is_some());
+        assert!(reg
+            .get(&GroupVersionKind::gvk("", "v1", "Missing"))
+            .is_none());
     }
 
     #[test]
     fn custom_crd_registration() {
         let mut reg = SchemaRegistry::new();
-        reg.register("init-pro.io", "v1", "LuaRouter", "luarouters", "LuaRouterList", Scope::Namespaced);
+        reg.register(
+            "init-pro.io",
+            "v1",
+            "LuaRouter",
+            "luarouters",
+            "LuaRouterList",
+            Scope::Namespaced,
+        );
         let gvk = GroupVersionKind::gvk("init-pro.io", "v1", "LuaRouter");
         let info = reg.get(&gvk).unwrap();
         assert_eq!(info.resource, "luarouters");
         assert_eq!(info.scope, Scope::Namespaced);
         let gvr = reg.gvr_for(&gvk).unwrap();
-        assert_eq!(gvr, GroupVersionResource::gvr("init-pro.io", "v1", "luarouters"));
+        assert_eq!(
+            gvr,
+            GroupVersionResource::gvr("init-pro.io", "v1", "luarouters")
+        );
         assert_eq!(reg.gvk_for(&gvr).unwrap(), gvk);
     }
-
 
     #[test]
     fn get_by_gvr_resolves_pod() {
@@ -260,7 +299,14 @@ mod tests {
     #[test]
     fn get_by_gvr_matches_group_case_insensitively() {
         let mut reg = SchemaRegistry::new();
-        reg.register("init-pro.io", "v1", "LuaRouter", "luarouters", "LuaRouterList", Scope::Namespaced);
+        reg.register(
+            "init-pro.io",
+            "v1",
+            "LuaRouter",
+            "luarouters",
+            "LuaRouterList",
+            Scope::Namespaced,
+        );
         // Upstream group normalization is case-insensitive: an uppercased group
         // on the GVR must still resolve to the registered type.
         let gvr = GroupVersionResource::gvr("INIT-PRO.IO", "v1", "luarouters");
@@ -276,5 +322,4 @@ mod tests {
         assert!(!reg.is_empty());
         assert_eq!(reg.len(), 1);
     }
-
 }

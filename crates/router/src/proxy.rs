@@ -48,7 +48,6 @@ pub(crate) async fn proxy_request(
     Ok(to_client_response(parsed))
 }
 
-
 /// Build the wire bytes for an upstream HTTP/1.1 request.
 fn build_upstream_request(parts: &Parts, body: &[u8]) -> Vec<u8> {
     let target = parts.uri.to_string();
@@ -98,7 +97,9 @@ fn to_client_response(parsed: UpstreamResponse) -> Response<Bytes> {
         }
     }
     builder = builder.header(http::header::CONTENT_LENGTH, body.len());
-    builder.body(body).unwrap_or_else(|_| Response::new(Bytes::new()))
+    builder
+        .body(body)
+        .unwrap_or_else(|_| Response::new(Bytes::new()))
 }
 
 /// Optional, pluggable parts of the reverse-proxy data plane. `routes`,
@@ -134,7 +135,13 @@ where
     R: UpstreamResolver + 'static,
     F: Future<Output = ()>,
 {
-    let ProxyOptions { balancer, resolver, pipeline, tls, reload } = opts;
+    let ProxyOptions {
+        balancer,
+        resolver,
+        pipeline,
+        tls,
+        reload,
+    } = opts;
     if let Some(p) = &pipeline {
         p.boot().await;
     }
@@ -221,7 +228,16 @@ async fn handle_proxy_connection<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let result = dispatch_request(&mut stream, peer, routes, balancer, resolver, pipeline, forwarded_proto).await;
+    let result = dispatch_request(
+        &mut stream,
+        peer,
+        routes,
+        balancer,
+        resolver,
+        pipeline,
+        forwarded_proto,
+    )
+    .await;
     // Best-effort graceful close: for TLS this flushes a `close_notify` alert
     // (so the client's `read_to_end` doesn't see an abrupt EOF); for plain TCP
     // it just sends FIN. Ignored: the response is already written on success,
@@ -256,7 +272,8 @@ where
     let body = match conn::read_body(stream, body_spec).await {
         Ok(b) => b,
         Err(BodyError::TooLarge) => {
-            conn::write_response(stream, conn::error_response(413, "request body too large")).await?;
+            conn::write_response(stream, conn::error_response(413, "request body too large"))
+                .await?;
             return Ok(());
         }
         Err(BodyError::Io(e)) => return Err(e),
@@ -273,7 +290,8 @@ where
         .or_else(|| routes.default_upstream());
 
     if let Some(up) = upstream {
-        let resp = forward_upstream(up, balancer, resolver, &parts, &body, peer, forwarded_proto).await;
+        let resp =
+            forward_upstream(up, balancer, resolver, &parts, &body, peer, forwarded_proto).await;
         conn::write_response(stream, resp).await?;
         return Ok(());
     }
@@ -310,7 +328,11 @@ async fn forward_upstream(
 }
 
 /// Add `X-Forwarded-For`/`X-Forwarded-Proto` to a proxied response.
-fn with_forwarded_headers(mut resp: Response<Bytes>, peer: SocketAddr, proto: &str) -> Response<Bytes> {
+fn with_forwarded_headers(
+    mut resp: Response<Bytes>,
+    peer: SocketAddr,
+    proto: &str,
+) -> Response<Bytes> {
     let headers = resp.headers_mut();
     if let Ok(v) = HeaderValue::from_str(&peer.to_string()) {
         headers.append("x-forwarded-for", v);
@@ -322,7 +344,10 @@ fn with_forwarded_headers(mut resp: Response<Bytes>, peer: SocketAddr, proto: &s
 
 /// Case-insensitive header lookup returning a cloned String.
 fn header_value(headers: &http::HeaderMap, name: &str) -> Option<String> {
-    headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -372,10 +397,16 @@ mod tests {
 
     #[test]
     fn forwarded_headers_present() {
-        let resp =
-            with_forwarded_headers(Response::new(Bytes::new()), "127.0.0.1:1234".parse().unwrap(), "http");
+        let resp = with_forwarded_headers(
+            Response::new(Bytes::new()),
+            "127.0.0.1:1234".parse().unwrap(),
+            "http",
+        );
         assert_eq!(resp.headers().get("x-forwarded-proto").unwrap(), "http");
-        assert_eq!(resp.headers().get("x-forwarded-for").unwrap(), "127.0.0.1:1234");
+        assert_eq!(
+            resp.headers().get("x-forwarded-for").unwrap(),
+            "127.0.0.1:1234"
+        );
     }
 
     #[test]

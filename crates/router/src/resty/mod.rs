@@ -29,9 +29,7 @@ pub(super) fn key_to_bytes(v: mlua::Value) -> mlua::Result<Vec<u8>> {
         Value::Integer(i) => i.to_string().into_bytes(),
         Value::Number(n) => n.to_string().into_bytes(),
         Value::Boolean(b) => b.to_string().into_bytes(),
-        Value::Nil => {
-            return Err(mlua::Error::RuntimeError("nil key is not allowed".into()))
-        }
+        Value::Nil => return Err(mlua::Error::RuntimeError("nil key is not allowed".into())),
         other => {
             return Err(mlua::Error::RuntimeError(format!(
                 "key must be string/number/boolean (got {other:?})"

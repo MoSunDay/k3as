@@ -21,9 +21,9 @@ pub mod schema;
 pub mod serde_ext;
 
 // Convenience re-exports so consumers depend on `api` only.
+pub use discovery::{api_group_list, api_resource_list, core_api_versions};
 pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use initpro::{LuaRouter, LuaRouterSpec};
 pub use patch::{strategic_merge, PatchStrategy};
-pub use schema::{Scope, SchemaRegistry, TypeInfo};
+pub use schema::{SchemaRegistry, Scope, TypeInfo};
 pub use serde_ext::{from_json, to_json, to_json_pretty};
-pub use discovery::{api_group_list, api_resource_list, core_api_versions};

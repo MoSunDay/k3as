@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 
 use router::{
-    ephemeral_listener, compile_ingress, Balancer, RouteTable, StaticResolver, UpstreamRef,
+    compile_ingress, ephemeral_listener, Balancer, RouteTable, StaticResolver, UpstreamRef,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -65,7 +65,11 @@ async fn spawn_echo(body: &'static str) -> (SocketAddr, JoinHandle<()>) {
 /// Build an Ingress routing `host` + path to a Service backend.
 fn ingress(host: Option<&str>, path: &str, svc: &str, port: i32, name: &str) -> Ingress {
     Ingress {
-        metadata: ObjectMeta { name: Some(name.into()), namespace: Some("default".into()), ..Default::default() },
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            namespace: Some("default".into()),
+            ..Default::default()
+        },
         spec: Some(IngressSpec {
             default_backend: None,
             ingress_class_name: None,
@@ -76,7 +80,10 @@ fn ingress(host: Option<&str>, path: &str, svc: &str, port: i32, name: &str) -> 
                         backend: IngressBackend {
                             service: Some(IngressServiceBackend {
                                 name: svc.to_owned(),
-                                port: Some(ServiceBackendPort { name: None, number: Some(port) }),
+                                port: Some(ServiceBackendPort {
+                                    name: None,
+                                    number: Some(port),
+                                }),
                             }),
                             resource: None,
                         },
@@ -116,25 +123,39 @@ async fn http_get(addr: SocketAddr, path: &str, host: &str) -> Reply {
         .filter_map(|l| l.split_once(':'))
         .map(|(n, v)| (n.trim().to_owned(), v.trim().to_owned()))
         .collect();
-    Reply { status, body: body.to_owned(), headers }
+    Reply {
+        status,
+        body: body.to_owned(),
+        headers,
+    }
 }
 
 fn header<'a>(hs: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    hs.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    hs.iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
 }
 
 /// Start the proxy with the given routes + resolver.
-fn boot(
-    routes: RouteTable,
-    resolver: StaticResolver,
-) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+fn boot(routes: RouteTable, resolver: StaticResolver) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let balancer = Rc::new(Balancer::new());
     let (addr, listener) = ephemeral_listener().expect("listener");
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let server = spawn_local(async move {
-        let _ = router::serve_proxy(routes, router::ProxyOptions { balancer, resolver, pipeline: None, tls: None, reload: None }, listener, async {
-            let _ = rx.await;
-        })
+        let _ = router::serve_proxy(
+            routes,
+            router::ProxyOptions {
+                balancer,
+                resolver,
+                pipeline: None,
+                tls: None,
+                reload: None,
+            },
+            listener,
+            async {
+                let _ = rx.await;
+            },
+        )
         .await;
         // keep tx alive
         drop(tx);
@@ -219,12 +240,19 @@ async fn default_backend_serves_unmatched_requests() {
             let (up_addr, _) = spawn_echo("default-backend").await;
 
             let ing = Ingress {
-                metadata: ObjectMeta { name: Some("d".into()), namespace: Some("default".into()), ..Default::default() },
+                metadata: ObjectMeta {
+                    name: Some("d".into()),
+                    namespace: Some("default".into()),
+                    ..Default::default()
+                },
                 spec: Some(IngressSpec {
                     default_backend: Some(IngressBackend {
                         service: Some(IngressServiceBackend {
                             name: "fallback".to_owned(),
-                            port: Some(ServiceBackendPort { name: None, number: Some(80) }),
+                            port: Some(ServiceBackendPort {
+                                name: None,
+                                number: Some(80),
+                            }),
                         }),
                         resource: None,
                     }),

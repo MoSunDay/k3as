@@ -34,7 +34,6 @@ where
     .await
 }
 
-
 /// Drive one request through the pipeline and build its HTTP response.
 async fn run_one(src: &str, req: Request<()>) -> (StatusCode, Vec<(String, String)>, Bytes) {
     let p = Pipeline::new(src).expect("pipeline");
@@ -50,11 +49,7 @@ async fn run_one(src: &str, req: Request<()>) -> (StatusCode, Vec<(String, Strin
 }
 
 fn get(path: &str) -> Request<()> {
-    Request::builder()
-        .method("GET")
-        .uri(path)
-        .body(())
-        .unwrap()
+    Request::builder().method("GET").uri(path).body(()).unwrap()
 }
 
 // ---- logical (in-process) tests ----
@@ -89,7 +84,10 @@ async fn ngx_header_is_settable() {
             let (status, headers, body) = run_one(src, get("/")).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(
-                headers.iter().find(|(n, _)| n == "content-type").map(|(_, v)| v.clone()),
+                headers
+                    .iter()
+                    .find(|(n, _)| n == "content-type")
+                    .map(|(_, v)| v.clone()),
                 Some("application/json".to_owned())
             );
             assert_eq!(body.as_ref(), br#"{"ok":true}"#);
@@ -213,7 +211,12 @@ async fn http_request(
     for (i, line) in text.split("\r\n").enumerate() {
         if line.is_empty() {
             // body begins after this blank line; compute byte offset.
-            body_start = text.split("\r\n").take(i).map(|l| l.len() + 2).sum::<usize>() + 2;
+            body_start = text
+                .split("\r\n")
+                .take(i)
+                .map(|l| l.len() + 2)
+                .sum::<usize>()
+                + 2;
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
@@ -238,13 +241,9 @@ async fn real_client_observes_content_phase_over_tcp() {
             let pipeline = Pipeline::new(src).expect("pipeline");
             let (addr, listener) = router::ephemeral_listener().expect("listener");
             let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
-            let server = tokio::task::spawn_local(router::serve(
-                pipeline,
-                listener,
-                async move {
-                    let _ = rx.await;
-                },
-            ));
+            let server = tokio::task::spawn_local(router::serve(pipeline, listener, async move {
+                let _ = rx.await;
+            }));
             // serve the first request, then shut down.
             let (status, headers, body) = http_request(addr, "GET", "/anything", &[]).await;
             let _ = _tx.send(());
@@ -253,7 +252,10 @@ async fn real_client_observes_content_phase_over_tcp() {
             assert_eq!(status, 201);
             assert_eq!(body, b"hello over the wire\n");
             assert_eq!(
-                headers.iter().find(|(n, _)| n == "x-served-by").map(|(_, v)| v.clone()),
+                headers
+                    .iter()
+                    .find(|(n, _)| n == "x-served-by")
+                    .map(|(_, v)| v.clone()),
                 Some("init-pro-router".to_owned())
             );
         })
@@ -277,13 +279,9 @@ async fn real_client_concurrent_requests_stay_distinct_over_tcp() {
             let pipeline = Pipeline::new(src).expect("pipeline");
             let (addr, listener) = router::ephemeral_listener().expect("listener");
             let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
-            let server = tokio::task::spawn_local(router::serve(
-                pipeline,
-                listener,
-                async move {
-                    let _ = rx.await;
-                },
-            ));
+            let server = tokio::task::spawn_local(router::serve(pipeline, listener, async move {
+                let _ = rx.await;
+            }));
 
             let a = tokio::task::spawn_local(http_request(addr, "GET", "/a", &[("x-tag", "201")]));
             let b = tokio::task::spawn_local(http_request(addr, "GET", "/b", &[("x-tag", "503")]));

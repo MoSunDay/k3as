@@ -10,20 +10,22 @@ use super::helpers::eval;
 #[test]
 fn random_bytes_exact_length() {
     let lua = worker_vm().expect("vm");
-    let b: mlua::LuaString =
-        lua.load("return resty.random.bytes(32)").eval().expect("eval");
+    let b: mlua::LuaString = lua
+        .load("return resty.random.bytes(32)")
+        .eval()
+        .expect("eval");
     assert_eq!(b.as_bytes().len(), 32);
     assert!(b.as_bytes().iter().any(|&x| x != 0));
 }
 
 #[test]
 fn random_token_is_urlsafe_and_unique() {
-    let (a, b): (String, String) =
-        eval("return resty.random.token(24), resty.random.token(24)");
+    let (a, b): (String, String) = eval("return resty.random.token(24), resty.random.token(24)");
     for t in [&a, &b] {
         assert!(!t.is_empty());
         assert!(
-            t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "non-urlsafe char in {t}"
         );
     }
@@ -34,8 +36,7 @@ fn random_token_is_urlsafe_and_unique() {
 
 #[test]
 fn sha256_known_and_empty_vectors() {
-    let h: String =
-        eval("local d = resty.sha256:new() d:update('abc') return d:final()");
+    let h: String = eval("local d = resty.sha256:new() d:update('abc') return d:final()");
     assert_eq!(
         h,
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"

@@ -190,7 +190,7 @@ into = "aux"
 
     #[test]
     fn rejects_uncleared_license() {
-        let bad = GOOD.replace("Apache-2.0", "GPL-2.0", );
+        let bad = GOOD.replace("Apache-2.0", "GPL-2.0");
         let err = parse(&bad).unwrap_err();
         assert!(err.to_string().contains("GPL-2.0"), "{err}");
     }

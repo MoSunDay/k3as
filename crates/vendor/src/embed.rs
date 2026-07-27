@@ -11,8 +11,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::fs;
 use std::fmt::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::dataverify;
@@ -56,11 +56,7 @@ struct Entry {
 /// `vendor_bin` is `vendor/bin/`; logical paths are prefixed with `"bin/"`.
 /// `out_dir` is the crate `OUT_DIR` (set by cargo). `level` is the zstd
 /// compression level (Q6 target: 19).
-pub fn generate(
-    vendor_bin: &Path,
-    out_dir: &Path,
-    level: i32,
-) -> Result<EmbedReport, EmbedError> {
+pub fn generate(vendor_bin: &Path, out_dir: &Path, level: i32) -> Result<EmbedReport, EmbedError> {
     let assets_dir = out_dir.join("assets");
     fs::create_dir_all(&assets_dir).map_err(|e| EmbedError::io("assets dir", e))?;
 
@@ -158,7 +154,10 @@ fn render(entries: &[Entry], assets_dir: &Path) -> String {
         let _ = writeln!(
             w,
             "    EmbeddedAsset {{ path: {:?}, sha256: {:?}, size: {}, zstd: Z_{} }},",
-            e.logical, e.sha256, e.size, blob_ident(&e.sha256)
+            e.logical,
+            e.sha256,
+            e.size,
+            blob_ident(&e.sha256)
         );
     }
     w.push_str("];\n\n");
@@ -306,15 +305,27 @@ mod tests {
         }];
         let src = render(&entries, Path::new("/fake"));
         // sha256sums content must contain the hash + path in the standard format
-        assert!(src.contains("bcfc299c1ab255e9d045ffaf2e324c0abaf58f599831a7c2c4a80b33f795de94  bin/runc"));
+        assert!(src.contains(
+            "bcfc299c1ab255e9d045ffaf2e324c0abaf58f599831a7c2c4a80b33f795de94  bin/runc"
+        ));
     }
 
     #[test]
     fn render_dedup_identical_sha() {
         let sha = "ccc3333333333333cccccccccccccccccccccccccccccccccccccccccccc";
         let entries = vec![
-            Entry { logical: "bin/a".into(), sha256: sha.into(), size: 10, compressed_len: 4 },
-            Entry { logical: "bin/b".into(), sha256: sha.into(), size: 10, compressed_len: 4 },
+            Entry {
+                logical: "bin/a".into(),
+                sha256: sha.into(),
+                size: 10,
+                compressed_len: 4,
+            },
+            Entry {
+                logical: "bin/b".into(),
+                sha256: sha.into(),
+                size: 10,
+                compressed_len: 4,
+            },
         ];
         let src = render(&entries, Path::new("/fake"));
         // Only one include_bytes! for the shared SHA.

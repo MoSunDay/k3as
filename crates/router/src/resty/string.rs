@@ -39,10 +39,7 @@ pub(super) fn build_sha256(lua: &Lua) -> mlua::Result<Table> {
 }
 
 /// `resty.string.encode_base64(s, no_padding?)` -> standard base64 string.
-fn encode_base64(
-    _lua: &Lua,
-    (s, no_pad): (LuaString, Option<bool>),
-) -> mlua::Result<String> {
+fn encode_base64(_lua: &Lua, (s, no_pad): (LuaString, Option<bool>)) -> mlua::Result<String> {
     let enc = if no_pad.unwrap_or(false) {
         STANDARD_NO_PAD.encode(s.as_bytes())
     } else {

@@ -59,11 +59,10 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
                 let server_shutdown = shutdown.clone();
                 let addr = b.addr;
                 Some(tokio::spawn(async move {
-                    if let Err(e) =
-                        apiserver::serve(reg, addr, advertised, async move {
-                            server_shutdown.cancelled().await;
-                        })
-                        .await
+                    if let Err(e) = apiserver::serve(reg, addr, advertised, async move {
+                        server_shutdown.cancelled().await;
+                    })
+                    .await
                     {
                         tracing::error!(target: "init-pro", role, "apiserver exited: {e}");
                     }
@@ -119,7 +118,10 @@ pub fn run_stage(cfg: Config, dry_run: bool, manifest: &EmbeddedManifest) -> Exi
                     result.hash
                 );
             } else {
-                println!("init-pro stage: up-to-date (data/current -> {})", result.hash);
+                println!(
+                    "init-pro stage: up-to-date (data/current -> {})",
+                    result.hash
+                );
             }
             println!("data/current: {}", result.current.display());
             for entry in &result.path_entries {

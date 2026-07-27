@@ -60,7 +60,11 @@ async fn spawn_echo(body: &'static str) -> (SocketAddr, JoinHandle<()>) {
 
 fn ingress(host: Option<&str>, path: &str, svc: &str, port: i32, name: &str) -> Ingress {
     Ingress {
-        metadata: ObjectMeta { name: Some(name.into()), namespace: Some("default".into()), ..Default::default() },
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            namespace: Some("default".into()),
+            ..Default::default()
+        },
         spec: Some(IngressSpec {
             default_backend: None,
             ingress_class_name: None,
@@ -71,7 +75,10 @@ fn ingress(host: Option<&str>, path: &str, svc: &str, port: i32, name: &str) -> 
                         backend: IngressBackend {
                             service: Some(IngressServiceBackend {
                                 name: svc.to_owned(),
-                                port: Some(ServiceBackendPort { name: None, number: Some(port) }),
+                                port: Some(ServiceBackendPort {
+                                    name: None,
+                                    number: Some(port),
+                                }),
                             }),
                             resource: None,
                         },
@@ -88,9 +95,11 @@ fn ingress(host: Option<&str>, path: &str, svc: &str, port: i32, name: &str) -> 
 
 async fn http_get(addr: SocketAddr, host: &str) -> u16 {
     let mut tcp = TcpStream::connect(addr).await.unwrap();
-    tcp.write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
+    tcp.write_all(
+        format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
     let mut buf = Vec::new();
     tcp.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf);
@@ -103,13 +112,17 @@ async fn http_get(addr: SocketAddr, host: &str) -> u16 {
 
 async fn http_get_body(addr: SocketAddr, host: &str) -> String {
     let mut tcp = TcpStream::connect(addr).await.unwrap();
-    tcp.write_all(format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
+    tcp.write_all(
+        format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
     let mut buf = Vec::new();
     tcp.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf);
-    text.split_once("\r\n\r\n").map(|(_, b)| b.to_owned()).unwrap_or_default()
+    text.split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_owned())
+        .unwrap_or_default()
 }
 
 /// **THE M1 GATE (reload half):** a second Ingress, pushed via the config
@@ -118,47 +131,61 @@ async fn http_get_body(addr: SocketAddr, host: &str) -> String {
 /// `b.example.com`, `b` reaches its upstream — same listener, same process.
 #[tokio::test]
 async fn hot_reload_routes_new_ingress_without_restart() {
-    tokio::task::LocalSet::new().run_until(async {
-        let (a_addr, _a) = spawn_echo("svc-a").await;
-        let (b_addr, _b) = spawn_echo("svc-b").await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (a_addr, _a) = spawn_echo("svc-a").await;
+            let (b_addr, _b) = spawn_echo("svc-b").await;
 
-        let ing_a = ingress(Some("a.example.com"), "/", "svc-a", 80, "a");
-        let ing_b = ingress(Some("b.example.com"), "/", "svc-b", 80, "b");
+            let ing_a = ingress(Some("a.example.com"), "/", "svc-a", 80, "a");
+            let ing_b = ingress(Some("b.example.com"), "/", "svc-b", 80, "b");
 
-        let mut resolver = StaticResolver::new();
-        resolver.set(UpstreamRef::port("svc-a", 80), vec![a_addr]);
-        resolver.set(UpstreamRef::port("svc-b", 80), vec![b_addr]);
+            let mut resolver = StaticResolver::new();
+            resolver.set(UpstreamRef::port("svc-a", 80), vec![a_addr]);
+            resolver.set(UpstreamRef::port("svc-b", 80), vec![b_addr]);
 
-        let routes_a = compile_ingress(std::slice::from_ref(&ing_a));
-        let (tx, rx) = reload_channel();
-        let balancer = Rc::new(Balancer::new());
-        let (addr, listener) = ephemeral_listener().unwrap();
-        let (stx, srx) = tokio::sync::oneshot::channel::<()>();
-        let server = spawn_local(async move {
-            let _ = router::serve_proxy(routes_a, router::ProxyOptions { balancer, resolver, pipeline: None, tls: None, reload: Some(rx) }, listener, async {
-                let _ = srx.await;
-            }).await;
-            drop(stx);
-        });
+            let routes_a = compile_ingress(std::slice::from_ref(&ing_a));
+            let (tx, rx) = reload_channel();
+            let balancer = Rc::new(Balancer::new());
+            let (addr, listener) = ephemeral_listener().unwrap();
+            let (stx, srx) = tokio::sync::oneshot::channel::<()>();
+            let server = spawn_local(async move {
+                let _ = router::serve_proxy(
+                    routes_a,
+                    router::ProxyOptions {
+                        balancer,
+                        resolver,
+                        pipeline: None,
+                        tls: None,
+                        reload: Some(rx),
+                    },
+                    listener,
+                    async {
+                        let _ = srx.await;
+                    },
+                )
+                .await;
+                drop(stx);
+            });
 
-        // Baseline: a routes, b does not.
-        assert_eq!(http_get_body(addr, "a.example.com").await, "svc-a");
-        assert_eq!(http_get(addr, "b.example.com").await, 404);
+            // Baseline: a routes, b does not.
+            assert_eq!(http_get_body(addr, "a.example.com").await, "svc-a");
+            assert_eq!(http_get(addr, "b.example.com").await, 404);
 
-        // Push a second Ingress via the hot-reload channel (no restart).
-        let routes_ab = compile_ingress(&[ing_a, ing_b]);
-        tx.send(routes_ab).unwrap();
-        // Let the single-thread reload task drain the channel.
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
+            // Push a second Ingress via the hot-reload channel (no restart).
+            let routes_ab = compile_ingress(&[ing_a, ing_b]);
+            tx.send(routes_ab).unwrap();
+            // Let the single-thread reload task drain the channel.
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
 
-        // Now b routes to its upstream, on the same process/listener.
-        assert_eq!(http_get_body(addr, "b.example.com").await, "svc-b");
-        // a still works (the new table is a full superset).
-        assert_eq!(http_get_body(addr, "a.example.com").await, "svc-a");
-        server.abort();
-    }).await;
+            // Now b routes to its upstream, on the same process/listener.
+            assert_eq!(http_get_body(addr, "b.example.com").await, "svc-b");
+            // a still works (the new table is a full superset).
+            assert_eq!(http_get_body(addr, "a.example.com").await, "svc-a");
+            server.abort();
+        })
+        .await;
 }
 
 /// [`RouteStore`] stamps a monotonic generation on each install.

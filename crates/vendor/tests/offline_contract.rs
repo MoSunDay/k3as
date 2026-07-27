@@ -6,8 +6,8 @@
 
 #![forbid(unsafe_code)]
 
-use vendor::{run, AcquireError, Artifact, Kind, Mode};
 use std::path::PathBuf;
+use vendor::{run, AcquireError, Artifact, Kind, Mode};
 
 fn fake_artifact() -> Artifact {
     Artifact {
@@ -33,8 +33,14 @@ fn fresh_vendor(tag: &str) -> PathBuf {
 fn offline_empty_cache_fails() {
     let root = fresh_vendor("empty");
     let err = run(&root, &[fake_artifact()], Mode::Offline).unwrap_err();
-    assert!(matches!(err, AcquireError::OfflineMissing { .. }), "{err:?}");
-    assert!(err.hint().contains("INIT_PRO_VENDOR"), "hint missing fix: {err}");
+    assert!(
+        matches!(err, AcquireError::OfflineMissing { .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.hint().contains("INIT_PRO_VENDOR"),
+        "hint missing fix: {err}"
+    );
     std::fs::remove_dir_all(&root).ok();
 }
 
@@ -55,6 +61,9 @@ fn offline_wrong_sha_treated_as_missing() {
     std::fs::create_dir_all(root.join("cache")).unwrap();
     std::fs::write(root.join("cache").join("fake"), b"corrupt-or-wrong").unwrap();
     let err = run(&root, &[fake_artifact()], Mode::Offline).unwrap_err();
-    assert!(matches!(err, AcquireError::OfflineMissing { .. }), "{err:?}");
+    assert!(
+        matches!(err, AcquireError::OfflineMissing { .. }),
+        "{err:?}"
+    );
     std::fs::remove_dir_all(&root).ok();
 }

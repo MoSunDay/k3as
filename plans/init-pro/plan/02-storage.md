@@ -26,10 +26,9 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
   - `init-pro server` brings up etcd; `init-pro etcdctl endpoint health` OK.
   - Crash test: kill inner etcd, supervisor restarts within deadline.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — FFI binding feasibility vs subprocess trade-off;
-    pick in this TODO's spike.
+- **状态 / Status** — in-progress
+- **证据 / Evidence** — Sprint 10: T2.1 **spike decision** recorded — implement etcd *semantics* in pure Rust behind the `StorageBackend` trait rather than FFI-linking Go etcd or supervising a bundled subprocess. The embedded backend (`crates/storage/src/embedded.rs`) is the zero-dependency default; the real etcd-gRPC client remains an alternative trait impl. `Action::Etcd` multicall alias still a peer stub until the subprocess/embed path is needed for HA (T3.4).
+- **卡点 / Blockers** — resolved the FFI-vs-subprocess trade-off by choosing pure-Rust semantics; real etcd backend deferred (not on the critical path until HA/T3.4).
 - **依赖 / Depends on** — T0.2
 
 ---
@@ -51,9 +50,9 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
     conflict on stale `resourceVersion`).
   - `etcdctl get /registry/pods --prefix` shows expected layout.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **状态 / Status** — in-progress
+- **证据 / Evidence** — Sprint 10: `crates/storage/` landed — `StorageBackend` trait (`Watch`/`List`/`Create`/`Update`/`Delete` + `if_revision` CAS) and `EmbeddedStorage` (etcd `KeyValue` parity: create_revision/mod_revision/version; `/registry/...` upstream key layout). 15 integration tests green: CRUD round-trip, resourceVersion monotonicity, optimistic-concurrency conflict on stale revision, list prefix/namespace filtering, watch put/delete events.
+- **卡点 / Blockers** — wired into the REST face is T1.2 (next gate); embedded backend is live-watch only (no historical replay) until the etcd-gRPC impl.
 - **依赖 / Depends on** — T2.1, T1.1
 
 ---

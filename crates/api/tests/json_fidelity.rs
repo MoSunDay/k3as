@@ -22,7 +22,10 @@ where
         to_json(&again).expect("encode twice")
     };
     // idempotent: second serialization == first
-    assert_eq!(once, twice, "serialization must be idempotent (stable field order)");
+    assert_eq!(
+        once, twice,
+        "serialization must be idempotent (stable field order)"
+    );
 
     // semantically lossless: canonical form of input == canonical of output
     assert_eq!(

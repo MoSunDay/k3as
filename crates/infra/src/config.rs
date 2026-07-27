@@ -125,16 +125,16 @@ fn locator_data_dir(cli_data_dir: Option<&Path>) -> PathBuf {
 /// assert "the file layer returned a real value" (A1 acceptance gate).
 pub fn file_layer_data_dir(cli_config: Option<&Path>) -> Option<PathBuf> {
     let locator = locator_data_dir(None);
-    let entries = configfile::resolve_path(cli_config, &locator)
-        .and_then(|p| configfile::load(&p))?;
+    let entries =
+        configfile::resolve_path(cli_config, &locator).and_then(|p| configfile::load(&p))?;
     file_value(&entries, "data-dir").map(PathBuf::from)
 }
 
 /// File-layer `debug` value (A1 acceptance gate).
 pub fn file_layer_debug(cli_config: Option<&Path>) -> Option<bool> {
     let locator = locator_data_dir(None);
-    let entries = configfile::resolve_path(cli_config, &locator)
-        .and_then(|p| configfile::load(&p))?;
+    let entries =
+        configfile::resolve_path(cli_config, &locator).and_then(|p| configfile::load(&p))?;
     file_value(&entries, "debug").map(parse_bool)
 }
 
@@ -183,11 +183,7 @@ mod tests {
 
     /// Write a config file under a fresh temp dir; returns its path.
     fn write_cfg(name: &str, body: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "initpro-cfg-{}-{}",
-            name,
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("initpro-cfg-{}-{}", name, std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("config.yaml");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -234,11 +230,17 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         for v in ["1", "true", "TRUE", "yes", "on"] {
             std::env::set_var("INIT_PRO_DEBUG", v);
-            assert!(Config::resolve(None, None, None).debug, "debug true for {v}");
+            assert!(
+                Config::resolve(None, None, None).debug,
+                "debug true for {v}"
+            );
         }
         for v in ["0", "false", "no", ""] {
             std::env::set_var("INIT_PRO_DEBUG", v);
-            assert!(!Config::resolve(None, None, None).debug, "debug false for {v:?}");
+            assert!(
+                !Config::resolve(None, None, None).debug,
+                "debug false for {v:?}"
+            );
         }
         std::env::remove_var("INIT_PRO_DEBUG");
         // Explicit CLI false beats env true.
@@ -307,7 +309,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("initpro-dd-default-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.yaml"), "data-dir /resolved-by-default-path\n").unwrap();
+        std::fs::write(
+            dir.join("config.yaml"),
+            "data-dir /resolved-by-default-path\n",
+        )
+        .unwrap();
         std::env::set_var("INIT_PRO_DATA_DIR", dir.to_string_lossy().to_string());
         // No --config: resolve_path falls back to <locator>/config.yaml.
         // The file layer reading the value proves the default path was used.
@@ -328,10 +334,7 @@ mod tests {
     fn keyplus_append_read_from_file() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_env();
-        let cfg = write_cfg(
-            "append",
-            "disable+ coredns\ndisable+ servicelb\n",
-        );
+        let cfg = write_cfg("append", "disable+ coredns\ndisable+ servicelb\n");
         let entries = configfile::load(&cfg).unwrap();
         assert_eq!(
             configfile::slice(&entries, "disable"),
@@ -353,10 +356,7 @@ mod tests {
         std::env::set_var("INIT_PRO_DATA_DIR", loc.to_string_lossy().to_string());
 
         // File layer value proves the file at <locator>/config.yaml was read.
-        assert_eq!(
-            file_layer_data_dir(None),
-            Some(PathBuf::from("/from-file"))
-        );
+        assert_eq!(file_layer_data_dir(None), Some(PathBuf::from("/from-file")));
         // Final resolved data-dir = env (wins over file).
         let c = Config::resolve(None, None, None);
         assert_eq!(c.data_dir, loc);

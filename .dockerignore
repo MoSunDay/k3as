@@ -1,0 +1,7 @@
+target/
+.git/
+**/.git
+*.log
+LICENSES/
+vendor/bin/
+vendor/cache/

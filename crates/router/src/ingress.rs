@@ -86,7 +86,10 @@ fn backend_upstream(backend: &IngressBackend) -> Option<UpstreamRef> {
         (None, Some(name)) => crate::route::PortRef::Named(name.to_owned()),
         (None, None) => return None,
     };
-    Some(UpstreamRef { service: svc.name.clone(), port: port_ref })
+    Some(UpstreamRef {
+        service: svc.name.clone(),
+        port: port_ref,
+    })
 }
 
 /// `ingress/<namespace>/<name>` label for tracing.
@@ -100,8 +103,8 @@ fn ingress_origin(ing: &Ingress) -> String {
 mod tests {
     use super::*;
     use k8s_openapi::api::networking::v1::{
-        HTTPIngressPath, HTTPIngressRuleValue, IngressBackend, IngressRule,
-        IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
+        HTTPIngressPath, HTTPIngressRuleValue, IngressBackend, IngressRule, IngressServiceBackend,
+        IngressSpec, IngressTLS, ServiceBackendPort,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
@@ -109,14 +112,21 @@ mod tests {
         IngressBackend {
             service: Some(IngressServiceBackend {
                 name: name.to_owned(),
-                port: Some(ServiceBackendPort { name: None, number: Some(port) }),
+                port: Some(ServiceBackendPort {
+                    name: None,
+                    number: Some(port),
+                }),
             }),
             resource: None,
         }
     }
 
     fn path(backend: IngressBackend, p: &str, ty: &str) -> HTTPIngressPath {
-        HTTPIngressPath { backend, path: Some(p.to_owned()), path_type: ty.to_owned() }
+        HTTPIngressPath {
+            backend,
+            path: Some(p.to_owned()),
+            path_type: ty.to_owned(),
+        }
     }
 
     fn rule(host: Option<&str>, paths: Vec<HTTPIngressPath>) -> IngressRule {
@@ -128,7 +138,10 @@ mod tests {
 
     fn ingress(name: &str, spec: IngressSpec) -> Ingress {
         Ingress {
-            metadata: ObjectMeta { name: Some(name.to_owned()), ..Default::default() },
+            metadata: ObjectMeta {
+                name: Some(name.to_owned()),
+                ..Default::default()
+            },
             spec: Some(spec),
             status: None,
         }

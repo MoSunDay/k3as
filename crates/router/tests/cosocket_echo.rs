@@ -154,9 +154,7 @@ async fn cosocket_echo_latency_baseline() {
             let elapsed = start.elapsed();
 
             let per_rt = elapsed / N as u32;
-            println!(
-                "cosocket echo: {N} round-trips x {SZ}B = {elapsed:?} total, ~{per_rt:?}/rt"
-            );
+            println!("cosocket echo: {N} round-trips x {SZ}B = {elapsed:?} total, ~{per_rt:?}/rt");
             // Sanity: each localhost round-trip should be well under 10ms.
             assert!(
                 per_rt < Duration::from_millis(10),

@@ -113,7 +113,6 @@ mod tests {
         assert_ne!(canonical_json(br#"[1,2,3]"#).unwrap(), a);
     }
 
-
     #[test]
     fn to_json_pretty_is_multiline_and_round_trips() {
         let v: Value = serde_json::json!({"b": 2, "a": 1});
@@ -130,5 +129,4 @@ mod tests {
         let s = String::from_utf8(canonical_value(&v).unwrap()).unwrap();
         assert!(s.find("\"a\"").unwrap() < s.find("\"z\"").unwrap());
     }
-
 }

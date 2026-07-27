@@ -51,18 +51,20 @@ pub(super) fn proxy(lua: &Lua, ctx: Rc<RefCell<RequestContext>>) -> mlua::Result
     )?;
     mt.set(
         "__newindex",
-        lua.create_function(move |_lua, (_self, key, value): (Table, LuaString, Value)| {
-            let key = key.to_string_lossy();
-            let mut g = ctx_set.borrow_mut();
-            match value {
-                Value::Nil => g.user_vars.retain(|(n, _)| *n != key),
-                v => {
-                    g.user_vars.retain(|(n, _)| *n != key);
-                    g.user_vars.push((key, value_to_string(v)?));
+        lua.create_function(
+            move |_lua, (_self, key, value): (Table, LuaString, Value)| {
+                let key = key.to_string_lossy();
+                let mut g = ctx_set.borrow_mut();
+                match value {
+                    Value::Nil => g.user_vars.retain(|(n, _)| *n != key),
+                    v => {
+                        g.user_vars.retain(|(n, _)| *n != key);
+                        g.user_vars.push((key, value_to_string(v)?));
+                    }
                 }
-            }
-            Ok(())
-        })?,
+                Ok(())
+            },
+        )?,
     )?;
     proxy.set_metatable(Some(mt))?;
     Ok(proxy)
@@ -80,8 +82,7 @@ pub(super) fn bulk_set(lua: &Lua, value: Value) -> mlua::Result<()> {
     g.user_vars.clear();
     for pair in t.pairs::<LuaString, Value>() {
         let (k, v) = pair?;
-        g.user_vars
-            .push((k.to_string_lossy(), value_to_string(v)?));
+        g.user_vars.push((k.to_string_lossy(), value_to_string(v)?));
     }
     Ok(())
 }

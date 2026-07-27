@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use router::worker_vm;
 use mlua::Function;
+use router::worker_vm;
 use tokio::task::LocalSet;
 
 /// Ordered log of `(label, elapsed-since-vm-start)` recorded from Lua.

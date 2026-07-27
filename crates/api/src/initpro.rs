@@ -10,7 +10,7 @@ use kube_core::gvk::GroupVersionKind;
 use kube_core::metadata::{ObjectMeta, TypeMeta};
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{Scope, SchemaRegistry};
+use crate::schema::{SchemaRegistry, Scope};
 
 /// API group + version for init-pro's own resources.
 pub const GROUP: &str = "init-pro.io";
@@ -104,7 +104,10 @@ pub fn gvk() -> GroupVersionKind {
 /// Construct a `LuaRouter` with correct `TypeMeta`.
 pub fn new_lua_router(name: &str, namespace: &str, spec: LuaRouterSpec) -> LuaRouter {
     LuaRouter {
-        types: TypeMeta { api_version: API_VERSION.to_string(), kind: "LuaRouter".to_string() },
+        types: TypeMeta {
+            api_version: API_VERSION.to_string(),
+            kind: "LuaRouter".to_string(),
+        },
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some(namespace.to_string()),

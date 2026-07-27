@@ -108,7 +108,10 @@ mod tests {
     #[test]
     fn empty_pool_yields_none() {
         let b = Balancer::new();
-        let up = UpstreamRef { service: "x".into(), port: PortRef::Number(1) };
+        let up = UpstreamRef {
+            service: "x".into(),
+            port: PortRef::Number(1),
+        };
         assert_eq!(b.select(&up, &[]), None);
     }
 

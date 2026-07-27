@@ -80,7 +80,10 @@ impl PhaseList {
     }
 
     pub(crate) fn get(&self, phase: Phase) -> Option<&Function> {
-        self.slots.iter().find(|s| s.phase == phase).map(|s| &s.func)
+        self.slots
+            .iter()
+            .find(|s| s.phase == phase)
+            .map(|s| &s.func)
     }
 }
 

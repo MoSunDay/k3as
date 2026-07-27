@@ -11,10 +11,10 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use std::fs::File;
 use common::embed::EmbeddedAsset;
 use infra::Config;
 use sha2::{Digest, Sha256};
+use std::fs::File;
 
 /// Result of a staging operation.
 #[derive(Debug, Clone)]
@@ -33,7 +33,11 @@ pub struct StageResult {
 ///
 /// Flow: flock → write-tmp → dataverify → atomic-rename → symlink rotation.
 /// Idempotent: skips if `data/current` already resolves to this hash.
-pub fn stage(cfg: &Config, assets: &[EmbeddedAsset], sha256_sums: &str) -> Result<StageResult, StageError> {
+pub fn stage(
+    cfg: &Config,
+    assets: &[EmbeddedAsset],
+    sha256_sums: &str,
+) -> Result<StageResult, StageError> {
     if assets.is_empty() {
         return Err(StageError::no_assets());
     }
@@ -64,8 +68,7 @@ pub fn stage(cfg: &Config, assets: &[EmbeddedAsset], sha256_sums: &str) -> Resul
         .read(true)
         .open(&lock_path)
         .map_err(|e| StageError::io("open lock file", e))?;
-    lock.lock()
-        .map_err(|e| StageError::io("flock", e))?;
+    lock.lock().map_err(|e| StageError::io("flock", e))?;
 
     // 4. Write to <hash>-tmp/ (clean any stale tmp first).
     let tmp_dir = data_dir.join(format!("{hash}-tmp"));
@@ -120,15 +123,20 @@ fn write_asset(base: &Path, asset: &EmbeddedAsset) -> Result<(), StageError> {
         fs::create_dir_all(parent).map_err(|e| StageError::io("create parent dir", e))?;
     }
 
-    let decompressed = zstd::decode_all(asset.zstd)
-        .map_err(|e| StageError::io("zstd decompress", e))?;
+    let decompressed =
+        zstd::decode_all(asset.zstd).map_err(|e| StageError::io("zstd decompress", e))?;
 
     if decompressed.len() as u64 != asset.size {
-        return Err(StageError::size_mismatch(asset.path, asset.size, decompressed.len() as u64));
+        return Err(StageError::size_mismatch(
+            asset.path,
+            asset.size,
+            decompressed.len() as u64,
+        ));
     }
 
     let mut f = fs::File::create(&dest).map_err(|e| StageError::io("create staged file", e))?;
-    f.write_all(&decompressed).map_err(|e| StageError::io("write staged file", e))?;
+    f.write_all(&decompressed)
+        .map_err(|e| StageError::io("write staged file", e))?;
     drop(f);
 
     set_mode(&dest, asset.path);
@@ -192,10 +200,7 @@ fn is_executable(logical: &str) -> bool {
 
 /// PATH entries for child processes: CNI aux dir first, then bin.
 fn path_entries(current: &Path) -> Vec<PathBuf> {
-    vec![
-        current.join("bin").join("aux"),
-        current.join("bin"),
-    ]
+    vec![current.join("bin").join("aux"), current.join("bin")]
 }
 
 /// Encode bytes as lowercase hex.
@@ -215,24 +220,54 @@ pub struct StageError {
 
 #[derive(Debug)]
 enum StageErrorKind {
-    Io { ctx: String, source: std::io::Error },
+    Io {
+        ctx: String,
+        source: std::io::Error,
+    },
     NoAssets,
-    SizeMismatch { path: String, expected: u64, actual: u64 },
-    HashMismatch { path: String, expected: String, actual: String },
+    SizeMismatch {
+        path: String,
+        expected: u64,
+        actual: u64,
+    },
+    HashMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl StageError {
     fn io(ctx: &str, source: std::io::Error) -> Self {
-        StageError { kind: StageErrorKind::Io { ctx: ctx.into(), source } }
+        StageError {
+            kind: StageErrorKind::Io {
+                ctx: ctx.into(),
+                source,
+            },
+        }
     }
     fn no_assets() -> Self {
-        StageError { kind: StageErrorKind::NoAssets }
+        StageError {
+            kind: StageErrorKind::NoAssets,
+        }
     }
     fn size_mismatch(path: &str, expected: u64, actual: u64) -> Self {
-        StageError { kind: StageErrorKind::SizeMismatch { path: path.into(), expected, actual } }
+        StageError {
+            kind: StageErrorKind::SizeMismatch {
+                path: path.into(),
+                expected,
+                actual,
+            },
+        }
     }
     fn hash_mismatch(path: &str, expected: &str, actual: &str) -> Self {
-        StageError { kind: StageErrorKind::HashMismatch { path: path.into(), expected: expected.into(), actual: actual.into() } }
+        StageError {
+            kind: StageErrorKind::HashMismatch {
+                path: path.into(),
+                expected: expected.into(),
+                actual: actual.into(),
+            },
+        }
     }
 }
 
@@ -240,12 +275,29 @@ impl std::fmt::Display for StageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             StageErrorKind::Io { ctx, source } => write!(f, "{ctx}: {source}"),
-            StageErrorKind::NoAssets => write!(f, "no embedded assets to stage (build with INIT_PRO_EMBED=1)"),
-            StageErrorKind::SizeMismatch { path, expected, actual } => {
-                write!(f, "size mismatch for {path}: expected {expected}, got {actual}")
+            StageErrorKind::NoAssets => write!(
+                f,
+                "no embedded assets to stage (build with INIT_PRO_EMBED=1)"
+            ),
+            StageErrorKind::SizeMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "size mismatch for {path}: expected {expected}, got {actual}"
+                )
             }
-            StageErrorKind::HashMismatch { path, expected, actual } => {
-                write!(f, "SHA-256 mismatch for {path}: expected {expected}, got {actual}")
+            StageErrorKind::HashMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "SHA-256 mismatch for {path}: expected {expected}, got {actual}"
+                )
             }
         }
     }

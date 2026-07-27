@@ -95,11 +95,17 @@ fn parse_uri(s: &str) -> mlua::Result<Uri> {
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (
             h.to_owned(),
-            p.parse::<u16>().map_err(|_| err(format!("http: bad port {p:?}")))?,
+            p.parse::<u16>()
+                .map_err(|_| err(format!("http: bad port {p:?}")))?,
         ),
         None => (authority.to_owned(), if tls { 443 } else { 80 }),
     };
-    Ok(Uri { tls, host, port, path })
+    Ok(Uri {
+        tls,
+        host,
+        port,
+        path,
+    })
 }
 
 fn build_request(uri: &Uri, opts: &RequestOpts) -> mlua::Result<Vec<u8>> {
@@ -168,8 +174,7 @@ fn make_response(lua: &Lua, buf: &[u8]) -> mlua::Result<Table> {
 }
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len())
-        .position(|w| w == needle)
+    hay.windows(needle.len()).position(|w| w == needle)
 }
 
 // ---- option + error helpers ----
@@ -202,13 +207,25 @@ impl mlua::FromLua for RequestOpts {
         }
         let verify = t.get("verify").ok();
         let timeout_ms = t.get("timeout").ok();
-        Ok(RequestOpts { method, body, headers, verify, timeout_ms })
+        Ok(RequestOpts {
+            method,
+            body,
+            headers,
+            verify,
+            timeout_ms,
+        })
     }
 }
 
 impl Default for RequestOpts {
     fn default() -> Self {
-        Self { method: "GET".into(), body: Vec::new(), headers: Vec::new(), verify: None, timeout_ms: None }
+        Self {
+            method: "GET".into(),
+            body: Vec::new(),
+            headers: Vec::new(),
+            verify: None,
+            timeout_ms: None,
+        }
     }
 }
 

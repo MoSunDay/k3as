@@ -72,9 +72,7 @@ pub fn parse(content: &str) -> Vec<ConfigEntry> {
             continue;
         }
         // Find the first separator: space, '=' or ':'.
-        let sep = line
-            .find([' ', '=', ':'])
-            .unwrap_or(line.len());
+        let sep = line.find([' ', '=', ':']).unwrap_or(line.len());
         let mut key = line[..sep].trim().to_string();
         let rest = line[sep..].trim_start_matches([' ', '=', ':']).trim();
         if key.is_empty() {

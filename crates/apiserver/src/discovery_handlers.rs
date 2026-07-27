@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 
+use api::SchemaRegistry;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use api::SchemaRegistry;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{APIGroupList, APIResourceList, APIVersions};
 
 /// Shared, read-only application state: the served schema + the advertised

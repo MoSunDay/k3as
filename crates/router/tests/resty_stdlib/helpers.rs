@@ -34,9 +34,11 @@ pub(crate) async fn http_get(
     path: &str,
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let mut s = TcpStream::connect(addr).await.expect("connect");
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nconnection: close\r\n\r\n").as_bytes())
-        .await
-        .expect("write");
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nconnection: close\r\n\r\n").as_bytes(),
+    )
+    .await
+    .expect("write");
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.expect("read");
     let text = String::from_utf8_lossy(&buf);
@@ -49,7 +51,12 @@ pub(crate) async fn http_get(
     let mut body_start = 0;
     for (i, line) in text.split("\r\n").enumerate() {
         if line.is_empty() {
-            body_start = text.split("\r\n").take(i).map(|l| l.len() + 2).sum::<usize>() + 2;
+            body_start = text
+                .split("\r\n")
+                .take(i)
+                .map(|l| l.len() + 2)
+                .sum::<usize>()
+                + 2;
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
@@ -80,11 +87,10 @@ pub(crate) fn gen_test_cert(host: &str) -> TestCert {
 pub(crate) async fn spawn_responder(
     tls_cfg: Option<Arc<rustls::ServerConfig>>,
     body: &'static str,
-) -> (
-    std::net::SocketAddr,
-    tokio::sync::oneshot::Sender<()>,
-) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn_local(async move {

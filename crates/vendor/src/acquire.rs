@@ -94,19 +94,12 @@ impl Report {
 ///
 /// `vendor_root` is the repo `vendor/` dir; the cache is `vendor/cache/` and
 /// staged files land under `vendor/bin/`.
-pub fn run(
-    vendor_root: &Path,
-    artifacts: &[Artifact],
-    mode: Mode,
-) -> Result<Report, AcquireError> {
+pub fn run(vendor_root: &Path, artifacts: &[Artifact], mode: Mode) -> Result<Report, AcquireError> {
     let cache_dir = vendor_root.join("cache");
     std::fs::create_dir_all(&cache_dir).map_err(|e| AcquireError::io("cache dir", e))?;
     std::fs::create_dir_all(vendor_root.join("bin")).map_err(|e| AcquireError::io("bin dir", e))?;
 
-    let hits: Vec<bool> = artifacts
-        .iter()
-        .map(|a| cache_hit(&cache_dir, a))
-        .collect();
+    let hits: Vec<bool> = artifacts.iter().map(|a| cache_hit(&cache_dir, a)).collect();
     let actions = plan(&hits, mode);
 
     let mut rep = Report {
@@ -150,7 +143,18 @@ fn download_to_cache(art: &Artifact, cache_dir: &Path) -> Result<(), AcquireErro
     let _ = std::fs::remove_file(&tmp);
 
     let st = Command::new("curl")
-        .args(["-fSL", "--retry", "5", "--retry-delay", "3", "--connect-timeout", "20", "--max-time", "600", "-o"])
+        .args([
+            "-fSL",
+            "--retry",
+            "5",
+            "--retry-delay",
+            "3",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "600",
+            "-o",
+        ])
         .arg(&tmp)
         .arg(&art.url)
         .status()
@@ -165,8 +169,8 @@ fn download_to_cache(art: &Artifact, cache_dir: &Path) -> Result<(), AcquireErro
             source: std::io::Error::other(format!("curl exited {st}")),
         });
     }
-    let actual = digest::sha256_file(&tmp)
-        .map_err(|e| AcquireError::io("hash downloaded file", e))?;
+    let actual =
+        digest::sha256_file(&tmp).map_err(|e| AcquireError::io("hash downloaded file", e))?;
     if !actual.eq_ignore_ascii_case(&art.sha256) {
         let _ = std::fs::remove_file(&tmp);
         return Err(AcquireError::ShaMismatch {
@@ -191,12 +195,10 @@ fn stage(art: &Artifact, cache_dir: &Path, vendor_root: &Path) -> Result<(), Acq
             if art.strip > 0 {
                 cmd.arg(format!("--strip-components={}", art.strip));
             }
-            let st = cmd
-                .status()
-                .map_err(|e| AcquireError::ExtractFailed {
-                    name: art.name.clone(),
-                    source: e,
-                })?;
+            let st = cmd.status().map_err(|e| AcquireError::ExtractFailed {
+                name: art.name.clone(),
+                source: e,
+            })?;
             if !st.success() {
                 return Err(AcquireError::ExtractFailed {
                     name: art.name.clone(),
@@ -206,11 +208,10 @@ fn stage(art: &Artifact, cache_dir: &Path, vendor_root: &Path) -> Result<(), Acq
         }
         crate::manifest::Kind::Bin => {
             let target = dest_dir.join(art.bin_name());
-            std::fs::copy(&src, &target)
-                .map_err(|e| AcquireError::ExtractFailed {
-                    name: art.name.clone(),
-                    source: e,
-                })?;
+            std::fs::copy(&src, &target).map_err(|e| AcquireError::ExtractFailed {
+                name: art.name.clone(),
+                source: e,
+            })?;
             chmod_exec(&target);
         }
     }
@@ -238,11 +239,27 @@ fn chmod_exec(_path: &Path) {}
 /// Acquire failure.
 #[derive(Debug)]
 pub enum AcquireError {
-    OfflineMissing { name: String, url: String },
-    DownloadFailed { name: String, source: std::io::Error },
-    ShaMismatch { name: String, expected: String, actual: String },
-    ExtractFailed { name: String, source: std::io::Error },
-    Io { ctx: String, source: std::io::Error },
+    OfflineMissing {
+        name: String,
+        url: String,
+    },
+    DownloadFailed {
+        name: String,
+        source: std::io::Error,
+    },
+    ShaMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
+    ExtractFailed {
+        name: String,
+        source: std::io::Error,
+    },
+    Io {
+        ctx: String,
+        source: std::io::Error,
+    },
 }
 
 impl AcquireError {
@@ -300,7 +317,10 @@ mod tests {
 
     #[test]
     fn plan_auto_skips_misses() {
-        assert_eq!(plan(&[true, false], Mode::Auto), vec![Action::Cached, Action::Skip]);
+        assert_eq!(
+            plan(&[true, false], Mode::Auto),
+            vec![Action::Cached, Action::Skip]
+        );
     }
 
     #[test]
@@ -313,10 +333,7 @@ mod tests {
 
     #[test]
     fn plan_offline_errors_misses() {
-        assert_eq!(
-            plan(&[false], Mode::Offline),
-            vec![Action::MissingOffline]
-        );
+        assert_eq!(plan(&[false], Mode::Offline), vec![Action::MissingOffline]);
     }
 
     #[test]

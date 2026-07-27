@@ -32,9 +32,7 @@ fn token(_lua: &Lua, n: usize) -> mlua::Result<String> {
 
 /// Fill `buf` from the OS CSPRNG, mapping failures to a Lua runtime error.
 fn fill_random(buf: &mut [u8], what: &str) -> mlua::Result<()> {
-    getrandom::fill(buf).map_err(|e| {
-        mlua::Error::RuntimeError(format!("resty.random.{what}: {e}"))
-    })
+    getrandom::fill(buf).map_err(|e| mlua::Error::RuntimeError(format!("resty.random.{what}: {e}")))
 }
 
 #[cfg(test)]
@@ -53,6 +51,8 @@ mod tests {
     #[test]
     fn token_is_urlsafe_charset() {
         let t = token(&Lua::new(), 16).expect("token");
-        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 }

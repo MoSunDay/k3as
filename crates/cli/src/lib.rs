@@ -126,7 +126,9 @@ where
     match cli.command {
         Some(Command::Server(svc)) => {
             tracing::debug!(target: "init-pro", "server flags captured: {:?}", svc);
-            match format!("{}:{}", svc.bind_address, svc.https_listen_port).parse::<std::net::SocketAddr>() {
+            match format!("{}:{}", svc.bind_address, svc.https_listen_port)
+                .parse::<std::net::SocketAddr>()
+            {
                 Ok(addr) => runtime::run_server(
                     cfg,
                     runtime::ServerBind {
@@ -212,7 +214,10 @@ mod tests {
             .clone();
         let agent_help = agent.render_help().to_string();
         for flag in ["--config", "--token", "--server", "--prefer-bundled-bin"] {
-            assert!(agent_help.contains(flag), "agent --help missing wired flag {flag}");
+            assert!(
+                agent_help.contains(flag),
+                "agent --help missing wired flag {flag}"
+            );
         }
     }
 
@@ -222,7 +227,11 @@ mod tests {
         let cmd = Cli::command();
         let mut agent = cmd.find_subcommand("agent").expect("agent exists").clone();
         let help = agent.render_help().to_string();
-        for flag in ["--cluster-init", "--datastore-endpoint", "--disable-network-policy"] {
+        for flag in [
+            "--cluster-init",
+            "--datastore-endpoint",
+            "--disable-network-policy",
+        ] {
             assert!(
                 !help.contains(flag),
                 "agent --help should not list server-only flag {flag}"
