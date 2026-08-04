@@ -5,10 +5,14 @@
 > binary** with a first-class, built-in **Lua data plane** (an openresty-style
 > router, not a sidecar).
 
+**English** | [中文](README_zh.md)
+
 ![Rust](https://img.shields.io/badge/Rust-stable%20(1.89)-ce422b?logo=rust)
 ![Edition](https://img.shields.io/badge/Edition-2021-orange)
 ![License](https://img.shields.io/badge/License-Apache--2.0-blue)
-![Status](https://img.shields.io/badge/Phase%201-M0%20%2B%20M1%20done-green)
+![Status](https://img.shields.io/badge/Phase%201-done%20%C2%B7%20Phase%202%20WIP-green)
+![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)
+![Golden](https://img.shields.io/badge/golden-12%2F12-brightgreen)
 
 The basename of `argv[0]` selects behavior — deploy the **same binary** under
 every alias and symlink deployment *just works* (decision **Q1**):
@@ -41,21 +45,23 @@ plane is complete.
 
 ## Status
 
-**Phase 1 is complete** (M0 foundation + M1 router slice) and **Phase 2 has
-started** — the `storage` crate (T2.1/T2.2) just landed and unblocks T1.2.
+**Phase 1 is complete** (M0 foundation + M1 router slice) and **Phase 2 is in
+progress** — the `storage` crate landed (T2.1) and the apiserver now serves
+**real REST CRUD + watch** over the embedded store (T1.2b).
 
 | Layer | TODO | What | Status |
 |------:|:-----|------|:------:|
 | 0 | T0.1–T0.6 | multicall, vendor/bundle, infra, CLI, golden conformance | ✅ done |
 | 1 | T1.1 | resource model + API-group schema + discovery builders | ✅ done |
-| 1 | T1.2 | APIServer REST CRUD + real `kubectl` interaction | ⬜ next |
-| 1 | T1.3 | auth (kubeconfig / token / RBAC) | ⬜ |
-| 2 | T2.1 / T2.2 | `StorageBackend` trait + embedded etcd-compatible backend | 🚧 in-progress |
+| 1 | T1.2 | APIServer: discovery (T1.2a) + REST CRUD & watch (T1.2b) done; SSA (T1.2c) deferred | 🟡 in-progress |
+| 1 | T1.3 | authn/authz (kubeconfig / token / RBAC) | ⬜ |
+| 2 | T2.1 | embedded storage backend + `StorageBackend` trait (Q17) | ✅ done |
+| 2 | T2.2 | storage data plane wired into apiserver | 🟡 in-progress |
 | 2 | T2.3 | SQLite / KINE alternative backend | ⬜ |
-| 3 | T3.1–T3.4 | controller-manager, scheduler, bootstrap, HA | ⬜ |
-| 4 | T4.1–T4.5 | containerd/CRI, kubelet, CNI, netpol, node proxy | ⬜ |
-| 5 | T5.1–T5.4 | Lua VM bridge, phase pipeline, `resty.*`, Ingress→route + TLS | ✅ done |
-| 5 | T5.5–T5.7 | hot reload, ServiceLB L4, router as config variable | ⬜ |
+| 3 | T3.1–T3.4 | controller-manager, scheduler, bootstrap/certs, HA | ⬜ |
+| 4 | T4.1–T4.5 | containerd/CRI, kubelet, CNI, netpol, node tunnel | ⬜ |
+| 5 | T5.1–T5.4 | Lua bridge, phase pipeline, `resty.*`, Ingress→route + TLS | ✅ done |
+| 5 | T5.5–T5.7 | hot reload, ServiceLB, router-as-config-var | ⬜ |
 | 6 | T6.1–T6.2 | HelmChart auto-deploy, standard addons | ⬜ |
 | 7 | T7.1–T7.3 | AI-agent workloads, GPU scheduling, argo-workflows | ⬜ |
 
@@ -63,10 +69,12 @@ started** — the `storage` crate (T2.1/T2.2) just landed and unblocks T1.2.
 > **T0.6 (golden conformance)** is a merge gate, not a node: every TODO must
 > keep it green. See [`plans/init-pro/index.md`](plans/init-pro/index.md) for
 > the authoritative SSOT and [`CHANGELOG.md`](CHANGELOG.md) for per-sprint
-> retrospectives (311 tests passing, 0 failing).
+> retrospectives (326 tests passing, 0 failing; golden harness 12/12).
 
-Today the server is an **API-discovery shell with a mature Lua data plane**;
-resource CRUD/watch wiring (T1.2) is the next gate.
+Today the server is a **functional data plane**: API discovery + REST CRUD
+(create/list/get/replace/delete/patch) + a chunked watch stream, all backed by
+the embedded store with resourceVersion CAS. Next gate: server-side apply
+field-manager (T1.2c) and authn/authz (T1.3).
 
 ---
 
@@ -77,7 +85,7 @@ resource CRUD/watch wiring (T1.2) is the next gate.
 cargo build --workspace --locked
 #   -> target/debug/init-pro
 
-# 2. Run the server (API discovery + Lua data plane)
+# 2. Run the server (discovery + REST CRUD + watch + Lua data plane)
 target/debug/init-pro server --https-listen-port 6443
 
 # 3. Every alias works via symlink / argv[0]:
@@ -88,7 +96,7 @@ target/debug/init-pro agent --help                   # agent subcommand
 ### Verify the build
 
 ```bash
-cargo test  --workspace --locked                       # 311 tests
+cargo test  --workspace --locked                       # 326 tests
 cargo clippy --workspace --all-targets -- -D warnings  # zero warnings
 cargo fmt   --all --check                              # clean
 ```
@@ -104,6 +112,7 @@ scripts/graceful-shutdown-test.sh          # SIGTERM drains cleanly (T0.3)
 scripts/router-coroutine-selftest.sh       # coroutine↔async bridge (T5.1)
 scripts/apiserver-discovery-parity-test.sh # curl byte-parity vs k8s (T1.2a)
 scripts/golden-conformance.sh              # immutable wire baseline (T0.6)
+scripts/stage-fresh-dir-test.sh            # runtime stage() bundling (T0.2)
 ```
 
 ---
@@ -115,8 +124,8 @@ compilation, reverse proxy, TLS — all **inside** the binary and drivable from
 Lua via [`mlua`](https://crates.io/crates/mlua):
 
 ```
- HTTP/1.1 request
-       │
+client request
+   │
    ┌───▼──────────────────────────────────────────────┐
    │  Router VM (single mlua VM per worker, !Send)     │  Q12/Q13
    │  phase pipeline: rewrite → access → content →     │  Q14
@@ -155,7 +164,7 @@ concurrency in Rust. See [`features/router-data-plane.md`](features/router-data-
 | [`cli`](crates/cli) | clap CLI + subcommands + k3s flag-parity strip filter | 0 |
 | [`common`](crates/common) | shared primitives: embed descriptor + `version()` | 0 |
 | [`api`](crates/api) | resource model, schema registry, discovery builders, `init-pro.io` CRDs | 1 |
-| [`apiserver`](crates/apiserver) | HTTP discovery endpoints (T1.2a); REST CRUD lands in T1.2 | 1 |
+| [`apiserver`](crates/apiserver) | discovery + REST CRUD + watch over a `StorageBackend` (T1.2) | 1 |
 | [`storage`](crates/storage) | `StorageBackend` trait + embedded etcd-compatible store | 2 |
 | [`router`](crates/router) | built-in Lua data plane: phase pipeline, `resty.*`, Ingress→route, balancer, proxy, TLS | 5 |
 
