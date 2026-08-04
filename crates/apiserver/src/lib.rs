@@ -17,6 +17,7 @@ mod app;
 mod collection;
 mod discovery_handlers;
 mod error;
+mod apply;
 mod item;
 mod serve;
 mod state;

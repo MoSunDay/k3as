@@ -10,9 +10,11 @@
 //! - [`schema`] — `SchemaRegistry`: GVK → type info (kind/plural/list/scope).
 //! - [`serde_ext`] — round-trip-faithful JSON (de)serialization helpers.
 //! - [`patch`] — Strategic Merge Patch (core/v1 strategies) + JSON Patch fallback.
+//! - [`apply`] — Server-Side Apply field-manager (T1.2c).
 //! - [`initpro`] — the `init-pro.io/v1` CRD types (e.g. `LuaRouter`).
 #![forbid(unsafe_code)]
 
+pub mod apply;
 pub mod discovery;
 pub mod gvk;
 pub mod initpro;
@@ -21,6 +23,7 @@ pub mod schema;
 pub mod serde_ext;
 
 // Convenience re-exports so consumers depend on `api` only.
+pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldEntry, Operation};
 pub use discovery::{api_group_list, api_resource_list, core_api_versions};
 pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use initpro::{LuaRouter, LuaRouterSpec};

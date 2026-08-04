@@ -1,4 +1,4 @@
-//! Kubernetes `Status` error mapping (TODO **T1.2b**).
+//! Kubernetes `Status` error mapping (TODO **T1.2b** + **T1.2c**).
 //!
 //! Converts storage-layer and request-shape errors into the canonical
 //! `metav1.Status` JSON body with the right HTTP code + `reason`, so kubectl
@@ -23,6 +23,13 @@ pub(crate) enum ApiError {
     AlreadyExists { kind: String, name: String },
     /// `PUT`/`DELETE` failed the `resourceVersion` CAS check.
     Conflict { kind: String, name: String },
+    /// Server-side apply conflict: another field manager owns a field.
+    ApplyConflict {
+        kind: String,
+        name: String,
+        /// `(path, manager)` pairs.
+        conflicts: Vec<(String, String)>,
+    },
     /// The request body was missing required fields (e.g. `metadata.name`).
     Invalid { kind: String, message: String },
     /// Malformed JSON or unsupported content type.
@@ -50,19 +57,43 @@ impl ApiError {
             ApiError::AlreadyExists { kind, name } => (
                 StatusCode::CONFLICT,
                 "AlreadyExists",
-                format!("{kind} \"{name}\" already exists"),
+                format!("{kind}s \"{name}\" already exists"),
                 json!({ "kind": kind, "name": name }),
             ),
             ApiError::Conflict { kind, name } => (
                 StatusCode::CONFLICT,
                 "Conflict",
                 format!(
-                    "Operation cannot be fulfilled on {kind} \"{name}\": \
-                     the object has been modified; please apply your changes \
-                     to the latest version and try again"
+                    "Operation cannot be fulfilled on {kind} \"{name}\": the object has been \
+                     modified; please apply your changes to the latest version and try again"
                 ),
                 json!({ "kind": kind, "name": name }),
             ),
+            ApiError::ApplyConflict { kind, name, conflicts } => {
+                let causes: Vec<Value> = conflicts
+                    .iter()
+                    .map(|(path, mgr)| {
+                        json!({
+                            "reason": "FieldManagerConflict",
+                            "message": format!("conflict: \"{mgr}\" owns \"{path}\""),
+                            "field": path,
+                        })
+                    })
+                    .collect();
+                let n = conflicts.len();
+                let detail = conflicts
+                    .iter()
+                    .map(|(p, m)| format!("\"{m}\" owns \"{p}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let plural = if n == 1 { "" } else { "s" };
+                (
+                    StatusCode::CONFLICT,
+                    "Conflict",
+                    format!("Apply failed with {n} conflict{plural}: {detail}"),
+                    json!({ "kind": kind, "name": name, "causes": causes }),
+                )
+            }
             ApiError::Invalid { kind, message } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Invalid",
@@ -114,4 +145,3 @@ pub(crate) fn storage_error(err: StorageError, kind: &str, name: &str) -> ApiErr
         other => ApiError::Internal(other.to_string()),
     }
 }
-

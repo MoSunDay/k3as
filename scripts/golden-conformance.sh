@@ -126,6 +126,13 @@ check_method G11 "GET"    "/api/v1/namespaces/default/configmaps/golden-cm"    "
 check_method G12 "GET"    "/api/v1/namespaces/default/configmaps?watch=1"      "200" "watch stream opens (T1.2b)" "" "" "2"
 rm -f "$TMP_CM"
 
+# --- Server-Side Apply over the embedded store (T1.2c) ---
+TMP_APPLY="$(mktemp)"
+printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"golden-apply-cm","namespace":"default"},"data":{"k":"v"}}' > "$TMP_APPLY"
+check_method G13 "PATCH" "/api/v1/namespaces/default/configmaps/golden-apply-cm?fieldManager=golden-test" "201" "SSA apply creates ConfigMap (T1.2c)"  "application/apply-patch+yaml" "$TMP_APPLY"
+check_method G14 "PATCH" "/api/v1/namespaces/default/configmaps/golden-apply-cm?fieldManager=golden-test" "200" "SSA apply updates ConfigMap (T1.2c)" "application/apply-patch+yaml" "$TMP_APPLY"
+rm -f "$TMP_APPLY"
+
 echo
 echo "golden: $PASS passed, $FAIL failed"
 if [[ "$FAIL" -ne 0 ]]; then
