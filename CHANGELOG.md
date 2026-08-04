@@ -7,6 +7,64 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 11 — Server-Side Apply field-manager (T1.2c) (2026-08-04)
+
+**Focus:** Implement server-side apply (SSA) so `kubectl apply` works
+end-to-end. Field ownership tracked via `metadata.managedFields[]`,
+with conflict detection, force-override, and field pruning.
+
+### What landed
+- **T1.2c SSA field-manager** — two new crates' worth of logic:
+  - `crates/api/src/apply/mod.rs` — `apply_object()` entry point: create-on-
+    absent (seeds managedFields), update (merge + prune owned fields),
+    conflict detection (409 when another fieldManager owns a field),
+    force-override (`?force=true` transfers ownership), managedFields
+    read/write round-trip on `metadata.managedFields[]`.
+  - `crates/api/src/apply/field_set.rs` — FieldsV1 tree extraction (object
+    fields + keyed-list elements by merge key), tree flattening to owned
+    paths, field pruning by path removal, identity/system-field exclusion
+    (`apiVersion`, `kind`, `metadata.name`, etc. are never owned).
+  - `crates/apiserver/src/apply.rs` — `ApplyQuery` extractor
+    (`fieldManager`, `force`, `fieldValidation`), `is_apply_ct()` content-type
+    check, `do_apply()` handler dispatching to `api::apply::apply_object`.
+  - `crates/apiserver/src/item.rs` — PUT/PATCH wrappers now accept
+    `HeaderMap` + `Bytes` + `Query<ApplyQuery>`; when content-type contains
+    `apply-patch`, dispatch to `do_apply` instead of replace/patch.
+  - `crates/apiserver/src/error.rs` — `ApplyConflict` variant (409) with
+    `causes` array listing conflicting field paths and owning managers.
+
+### Semantics implemented
+- 201 on create-via-apply (object absent).
+- 200 on update-via-apply (object exists, same or new fields).
+- 409 Conflict when a field in the desired object is owned by a different
+  `fieldManager`. Overridable with `?force=true` (ownership transfer).
+- Field pruning: fields owned by the applying manager that are absent from
+  the new desired object are removed.
+- Identity/system fields (`apiVersion`, `kind`, `metadata.name`,
+  `metadata.namespace`, `metadata.creationTimestamp`, `metadata.uid`,
+  `metadata.resourceVersion`, `metadata.generation`) are excluded from
+  ownership tracking — they are not conflict points.
+
+### Scope A limitations
+- Object fields + keyed-list ownership by merge key (e.g. `containers` by
+  `name`). Atomic lists owned as a unit.
+- Full fieldsV1 edge cases (`i:`/`v:` indexes, atom replacement) deferred.
+- Server-side field validation (`?fieldValidation=Strict|Warn|Ignore`)
+  accepted but not enforced (server trusts the input).
+
+### Test counts
+- 341 total (was 326): +8 `crates/api/tests/apply.rs` (create, update,
+  conflict, force, prune, multi-manager, field-tree extraction, round-trip),
+  +7 `crates/apiserver/tests/rest_apply.rs` (create 201, update 200,
+  conflict 409, force override, managedFields response, PUT apply, prune).
+- Golden conformance: 14/14 (was 12/12): G13 (SSA create → 201), G14
+  (SSA update → 200).
+- `cargo clippy --workspace --all-targets -- -D warnings` → 0 warnings.
+
+### SSOT updates
+- `index.md`: T1.2 in-progress → done (T1.2a + T1.2b + T1.2c complete).
+- `plan/01-api.md`: T1.2c evidence recorded.
+
 ## Sprint 10.5 — REST CRUD + watch over the embedded store (2026-07-27)
 
 **Focus:** Wire the embedded storage backend (T2.1/T2.2 spike) into the
