@@ -78,7 +78,7 @@ impl PatchStrategy {
         self
     }
 
-    fn merge_key_for(&self, path: &[String]) -> Option<&str> {
+    pub fn merge_key_for(&self, path: &[String]) -> Option<&str> {
         let joined = path.join("/");
         self.merge_keys.get(&joined).map(String::as_str)
     }

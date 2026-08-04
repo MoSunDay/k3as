@@ -13,18 +13,28 @@ timestamps/uids/resourceVersions in discovery payloads).
 
 ## Cases
 
-| ID  | Endpoint                  | Fixture                      | Asserts                              | Kept green by |
-|-----|---------------------------|------------------------------|--------------------------------------|---------------|
-| G01 | `GET /api`                | `discovery-api.json`         | APIVersions lists core `v1`          | T0.6, T1.1    |
-| G02 | `GET /apis`               | `discovery-apis.json`        | APIGroupList includes init-pro.io    | T0.6, T1.1    |
-| G03 | `GET /api/v1`             | `discovery-core-v1.json`     | core/v1 APIResourceList (7 kinds)    | T0.6, T1.1    |
-| G04 | `GET /apis/init-pro.io/v1`| `discovery-initpro-v1.json`  | luarouters CRD resource list         | T0.6, T1.1    |
-| G05 | `GET /apis/fabricated.io/v9beta1` | (status 404)         | unknown group/version → 404          | T0.6          |
-| G06 | `GET /api/v1/pods`        | (status 404)                 | no collection endpoint yet           | T0.6 → T1.2   |
+| ID  | Endpoint                                                      | Fixture                     | Asserts                                                  | Kept green by |
+|-----|---------------------------------------------------------------|-----------------------------|----------------------------------------------------------|---------------|
+| G01 | `GET /api`                                                    | `discovery-api.json`        | APIVersions lists core `v1`                              | T0.6, T1.1    |
+| G02 | `GET /apis`                                                   | `discovery-apis.json`       | APIGroupList includes init-pro.io                        | T0.6, T1.1    |
+| G03 | `GET /api/v1`                                                 | `discovery-core-v1.json`    | core/v1 APIResourceList (7 kinds)                        | T0.6, T1.1    |
+| G04 | `GET /apis/init-pro.io/v1`                                    | `discovery-initpro-v1.json` | luarouters CRD resource list                             | T0.6, T1.1    |
+| G05 | `GET /apis/fabricated.io/v9beta1`                             | (status 404)                | unknown group/version → 404                              | T0.6          |
+| G06 | `GET /api/v1/pods`                                            | (status 200)                | empty pods collection list                               | T1.2b         |
+| G07 | `POST /api/v1/namespaces/default/configmaps`                  | (status 201)                | create ConfigMap golden-cm → 201                         | T1.2b         |
+| G08 | `GET /api/v1/namespaces/default/configmaps/golden-cm`         | (status 200)                | get ConfigMap golden-cm → 200                            | T1.2b         |
+| G09 | `GET /api/v1/namespaces/default/configmaps`                   | (status 200)                | list ConfigMaps (1 item) → 200                           | T1.2b         |
+| G10 | `DELETE /api/v1/namespaces/default/configmaps/golden-cm`      | (status 200)                | delete ConfigMap golden-cm → 200                         | T1.2b         |
+| G11 | `GET /api/v1/namespaces/default/configmaps/golden-cm`         | (status 404)                | deleted ConfigMap is gone → 404                          | T1.2b         |
+| G12 | `GET /api/v1/namespaces/default/configmaps?watch=1`           | (status 200)                | watch stream opens → 200                                 | T1.2b         |
+| G13 | `PATCH /api/v1/namespaces/default/configmaps/golden-apply-cm` | `apply-patch+yaml`          | creates golden-apply-cm → 201 (fieldManager=golden-test) | T1.2c         |
+| G14 | `PATCH /api/v1/namespaces/default/configmaps/golden-apply-cm` | `apply-patch+yaml`          | updates golden-apply-cm → 200 (fieldManager=golden-test) | T1.2c         |
 
 ## Growing the suite
 
-This is the **empty-cluster baseline**: the server is discovery-only (T1.2a).
-When a layer adds a wire-visible behavior, append its golden case here and to
+This baseline now spans discovery (T1.2a) plus a CRUD/watch/server-side-apply
+round-trip over the embedded store (T1.2b); it started life as the
+empty-cluster discovery-only contract (G01-G06). When a layer adds a
+wire-visible behavior, append its golden case here and to
 `scripts/golden-conformance.sh`, then commit the new fixture. Flaky cases are
 quarantined, never deleted.
