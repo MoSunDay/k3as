@@ -21,7 +21,9 @@ edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
 authors = ["init-pro"]
-repository = "https://example.invalid/init-pro"
+# TODO: set to the real git hosting URL before publishing.
+repository = "https://github.com/init-pro/init-pro"
+description = "A k3s-compatible Kubernetes distribution in one Rust multicall binary, with a built-in Lua data plane."
 publish = false
 
 [workspace.dependencies]
