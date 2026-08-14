@@ -17,7 +17,7 @@ timestamps/uids/resourceVersions in discovery payloads).
 |-----|---------------------------------------------------------------|-----------------------------|----------------------------------------------------------|---------------|
 | G01 | `GET /api`                                                    | `discovery-api.json`        | APIVersions lists core `v1`                              | T0.6, T1.1    |
 | G02 | `GET /apis`                                                   | `discovery-apis.json`       | APIGroupList includes init-pro.io                        | T0.6, T1.1    |
-| G03 | `GET /api/v1`                                                 | `discovery-core-v1.json`    | core/v1 APIResourceList (7 kinds)                        | T0.6, T1.1    |
+| G03 | `GET /api/v1`                                                 | `discovery-core-v1.json`    | core/v1 APIResourceList (9 kinds, incl. persistentvolumeclaims T3.1b) | T0.6, T1.1    |
 | G04 | `GET /apis/init-pro.io/v1`                                    | `discovery-initpro-v1.json` | luarouters CRD resource list                             | T0.6, T1.1    |
 | G05 | `GET /apis/fabricated.io/v9beta1`                             | (status 404)                | unknown group/version → 404                              | T0.6          |
 | G06 | `GET /api/v1/pods`                                            | (status 200)                | empty pods collection list                               | T1.2b         |
@@ -30,7 +30,7 @@ timestamps/uids/resourceVersions in discovery payloads).
 | G13 | `PATCH /api/v1/namespaces/default/configmaps/golden-apply-cm` | `apply-patch+yaml`          | creates golden-apply-cm → 201 (fieldManager=golden-test) | T1.2c         |
 | G14 | `PATCH /api/v1/namespaces/default/configmaps/golden-apply-cm` | `apply-patch+yaml`          | updates golden-apply-cm → 200 (fieldManager=golden-test) | T1.2c         |
 | G15 | `GET /api/v1/namespaces/default/configmaps?watch=1&resourceVersion=0` | (poll grep)                | watch replays retained history (ADDED)                   | T2.2          |
-| G16 | `GET /apis/apps/v1`                                           | `discovery-apps-v1.json`    | apps/v1 APIResourceList (deployments/replicasets/statefulsets/daemonsets) | T3.1a         |
+| G16 | `GET /apis/apps/v1`                                           | `discovery-apps-v1.json`    | apps/v1 APIResourceList (deployments/replicasets/statefulsets/daemonsets + controllerrevisions T3.1b) | T3.1a, T3.1b  |
 | G17 | `POST/PUT .../deployments/golden-dep` + pods/endpoints polls  | (convergence poll)          | Deployment scale 3→1 converges; Endpoints reflect membership | T3.1a         |
 
 ## Growing the suite

@@ -1,15 +1,19 @@
-//! Controller set (T3.1a/T3.1b): ReplicaSet / Deployment / Endpoints.
+//! Controller set (T3.1a/T3.1b): ReplicaSet / Deployment / Endpoints /
+//! StatefulSet.
 //!
-//! Scope note: StatefulSet, DaemonSet and garbage collection are **T3.1b**.
-//! Each controller is a pure-ish `reconcile(client, object)` function over
-//! `serde_json::Value` (JSON-only wire, Q10); desired-state convergence is
-//! driven externally by the runner's informers + workqueues (T3.2).
+//! Scope note: DaemonSet and garbage collection are the remaining **T3.1b**
+//! work. Each controller is a pure-ish `reconcile(client, object)` function
+//! over `serde_json::Value` (JSON-only wire, Q10); desired-state convergence
+//! is driven externally by the runner's informers + workqueues (T3.2).
 
 pub mod conditions;
 pub mod deployment;
 pub mod endpoints;
+/// Pure StatefulSet ordinal/naming/revision math (T3.1b).
+pub mod ordinal;
 pub mod replicaset;
 pub mod rollout;
+pub mod statefulset;
 
 use std::sync::Arc;
 
@@ -23,6 +27,7 @@ use crate::object::controller_of;
 pub struct Caches {
     pub deployments: Arc<ObjectStore>,
     pub replicasets: Arc<ObjectStore>,
+    pub statefulsets: Arc<ObjectStore>,
     pub pods: Arc<ObjectStore>,
     pub services: Arc<ObjectStore>,
 }
@@ -38,6 +43,7 @@ impl Caches {
         Self {
             deployments: Arc::new(ObjectStore::new()),
             replicasets: Arc::new(ObjectStore::new()),
+            statefulsets: Arc::new(ObjectStore::new()),
             pods: Arc::new(ObjectStore::new()),
             services: Arc::new(ObjectStore::new()),
         }
