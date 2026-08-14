@@ -1,16 +1,18 @@
 //! Controller set (T3.1a/T3.1b): ReplicaSet / Deployment / Endpoints /
-//! StatefulSet / DaemonSet.
+//! StatefulSet / DaemonSet / Namespace lifecycle / garbage collection.
 //!
-//! Scope note: garbage collection is the remaining **T3.1b** work. Each
-//! controller is a pure-ish `reconcile(client, object)` function over
+//! Each controller is a pure-ish `reconcile(client, object)` function over
 //! `serde_json::Value` (JSON-only wire, Q10); desired-state convergence
 //! is driven externally by the runner's informers + workqueues (T3.2).
+//! GC + namespace termination semantics: decision **Q20**.
 
 pub mod conditions;
 pub mod daemonset;
 pub mod deployment;
 pub mod endpoints;
+pub mod gc;
 /// Pure StatefulSet ordinal/naming/revision math (T3.1b).
+pub mod namespace;
 pub mod ordinal;
 pub mod replicaset;
 pub mod rollout;
@@ -36,6 +38,9 @@ pub struct Caches {
     /// the node informer keeps it fresh, the node -> DaemonSet fan-out
     /// reads it.
     pub nodes: Arc<ObjectStore>,
+    /// Cluster-scoped Namespaces (T3.1b, Q20): the namespace lifecycle
+    /// controller reconciles terminating namespaces through this cache.
+    pub namespaces: Arc<ObjectStore>,
 }
 
 impl Default for Caches {
@@ -54,6 +59,7 @@ impl Caches {
             pods: Arc::new(ObjectStore::new()),
             services: Arc::new(ObjectStore::new()),
             nodes: Arc::new(ObjectStore::new()),
+            namespaces: Arc::new(ObjectStore::new()),
         }
     }
 }

@@ -4,6 +4,7 @@
 //! layers can depend on it without pulling the world.
 
 pub mod embed;
+pub mod time;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

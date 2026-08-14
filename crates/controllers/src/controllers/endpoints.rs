@@ -23,6 +23,11 @@ pub async fn reconcile(
     service: &Value,
     endpoints: Option<&Value>,
 ) -> Result<(), ControllerError> {
+    // Terminating Services (deletionTimestamp set, T3.1b/Q20) stop
+    // receiving endpoint updates; the namespace drain / GC owns teardown.
+    if is_terminating(service) {
+        return Ok(());
+    }
     let ns = namespace(service).unwrap_or("default");
     let Some(svc_name) = name(service) else {
         return Ok(());
