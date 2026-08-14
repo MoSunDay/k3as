@@ -3,6 +3,9 @@
 //! `server` installs the graceful-shutdown handler, builds the served schema
 //! registry, and serves the T1.2a HTTP discovery endpoints (`/api`, `/apis`,
 //! `/api/v1`, `/apis/<g>/<v>`) on the bind address — draining on signal.
+//! Since T3.1a the server also runs the controller manager against the same
+//! storage Arc as the apiserver, in-process (decision **Q19**), stopping it
+//! after the API surface has drained.
 //! `agent` installs the handler and idles until Layers 3–4 land. `stage`
 //! exposes the T0.2 manifest contract + B5 runtime staging.
 
@@ -51,6 +54,13 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
 
         // T1.2a: build the served schema registry, serve HTTP discovery, and
         // keep a handle so the process waits for full drain on shutdown.
+        // T3.1a (decision Q19): the controller manager runs in-process,
+        // sharing the apiserver's storage Arc, so controller reads/writes hit
+        // the same store the API surface serves (no loopback HTTP hop).
+        let mut controllers_drain: Option<(
+            Vec<tokio::task::JoinHandle<()>>,
+            controllers::Stop,
+        )> = None;
         let server_join = match &bind {
             Some(b) if !b.disable_apiserver => {
                 let reg = crate::discovery::served_schema();
@@ -62,6 +72,15 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
                 // as alternative StorageBackend impls behind --datastore-endpoint.
                 let store: Arc<dyn storage::StorageBackend> =
                     Arc::new(storage::EmbeddedStorage::new());
+                // T3.1a: spawn the controller manager against the same
+                // storage Arc (Q19); leader-elected via a Lease + CAS (Q18).
+                // Only the full apiserver path runs controllers —
+                // `--disable-apiserver` keeps single-process server semantics.
+                let cm_stop = controllers::Stop::new();
+                let cm_handles =
+                    controllers::ControllerManager::spawn(store.clone(), cm_stop.clone());
+                tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
+                controllers_drain = Some((cm_handles, cm_stop));
                 let server_shutdown = shutdown.clone();
                 let addr = b.addr;
                 Some(tokio::spawn(async move {
@@ -93,6 +112,16 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining");
         if let Some(jh) = server_join {
             let _ = jh.await;
+        }
+        // T3.1a: after the API surface has drained, stop the controllers and
+        // join their tasks (leadership elector + supervisor; the supervisor
+        // aborts the worker/informer set). `let _ =` tolerates aborted tasks.
+        if let Some((cm_handles, cm_stop)) = controllers_drain {
+            cm_stop.trigger();
+            for h in cm_handles {
+                let _ = h.await;
+            }
+            tracing::info!(target: "init-pro", role, "controller manager drained");
         }
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining complete");
         Ok::<(), std::io::Error>(())

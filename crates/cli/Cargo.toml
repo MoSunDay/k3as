@@ -12,7 +12,9 @@ common = { workspace = true }
 infra = { workspace = true }
 api = { workspace = true }
 apiserver = { workspace = true }
+controllers = { workspace = true }
 storage = { workspace = true }
+k8s-openapi = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

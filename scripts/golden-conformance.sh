@@ -4,7 +4,9 @@
 # server and diffs its responses against committed golden fixtures in golden/.
 #
 # Today = the EMPTY-CLUSTER baseline: discovery (T1.2a) + CRUD/watch over the
-# embedded store (T1.2b). The discovery contract is byte-stable; CRUD cases
+# embedded store (T1.2b), extended by the T3.1a controller acceptance (G17:
+# Deployment scale converge + Endpoints membership). The discovery contract is
+# byte-stable; CRUD cases
 # collection endpoints exist yet. As CRUD/watch/storage/scheduling layers land
 # (T1.2, T2.x, T3.x), their golden cases are appended below — each TODO tags
 # which cases it must keep green (plan/00-foundation.md T0.6, Q2 merge gate).
@@ -103,7 +105,7 @@ check_method() {
   fi
 }
 
-echo "## golden conformance — empty-cluster baseline (port $PORT)"
+echo "## golden conformance — empty-cluster baseline + controller loops (port $PORT)"
 
 # --- discovery contract (byte-stable) ---
 check_body G01 "/api"                 "$GOLDEN/discovery-api.json"        serveraddr
@@ -151,6 +153,85 @@ else
   FAIL=$((FAIL+1))
 fi
 rm -f "$TMP_CM"
+
+# --- controllers wired into the server (T3.1a) ---
+# G16: the apps/v1 group the controllers serve is part of the byte-stable
+# discovery contract (Deployment/ReplicaSet driven by T3.1a; StatefulSet/
+# DaemonSet schema-only until T3.1b).
+check_body G16 "/apis/apps/v1" "$GOLDEN/discovery-apps-v1.json"
+
+# G17: T3.1a acceptance -- a real Deployment scale 1->3->1 must converge
+# (Deployment -> ReplicaSet -> Pods) and a selector Service's Endpoints must
+# reflect pod membership at each scale. StatefulSet/DaemonSet/GC/rollout
+# status are T3.1b and get their own cases later.
+TMP_DEP3="$(mktemp)"
+TMP_DEP1="$(mktemp)"
+TMP_SVC="$(mktemp)"
+printf '%s' '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"golden-dep","namespace":"default"},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"golden-web"}},"template":{"metadata":{"labels":{"app":"golden-web"}},"spec":{"containers":[{"name":"web","image":"nginx:1.29","ports":[{"containerPort":80}]}]}}}}' > "$TMP_DEP3"
+# Same object, scaled to 1 (full-object PUT, kubectl-style).
+sed 's/"replicas":3/"replicas":1/' "$TMP_DEP3" > "$TMP_DEP1"
+printf '%s' '{"apiVersion":"v1","kind":"Service","metadata":{"name":"golden-dep-svc","namespace":"default"},"spec":{"selector":{"app":"golden-web"},"ports":[{"port":80}]}}' > "$TMP_SVC"
+DEP_PATH="/apis/apps/v1/namespaces/default/deployments/golden-dep"
+PODS_PATH="/api/v1/namespaces/default/pods"
+EPS_PATH="/api/v1/namespaces/default/endpoints/golden-dep-svc"
+
+# Count live pods owned by the deployment. NOTE: pod items carry an
+# ownerReference whose name also matches "golden-dep-*", so counting names
+# over-counts; each pod item repeats its own "kind":"Pod" exactly once
+# (the list envelope is "PodList", which does not match). `|| true` keeps
+# grep's no-match exit (empty list) from tripping `set -o pipefail`.
+pod_count() { curl -s "$BASE$PODS_PATH" | grep -o '"kind":"Pod"' | wc -l || true; }
+# Endpoint subset addresses: one "ip" field per address entry.
+ep_addr_count() { curl -s "$BASE$EPS_PATH" | grep -o '"ip"' | wc -l || true; }
+
+# 1. Create the Deployment (replicas=3) + the selector Service.
+G17_CREATE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" --data-binary "@$TMP_DEP3" "$BASE/apis/apps/v1/namespaces/default/deployments")"
+G17_SVC="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" --data-binary "@$TMP_SVC" "$BASE/api/v1/namespaces/default/services")"
+
+# 2. Poll for convergence: status.replicas==3 AND 3 pods (max ~15s).
+G17_SCALE3_PODS=0
+for _ in $(seq 1 60); do
+  D="$(curl -s "$BASE$DEP_PATH")"
+  N="$(pod_count)"
+  if printf '%s' "$D" | grep -q '"replicas":3' && [[ "$N" -eq 3 ]]; then
+    G17_SCALE3_PODS=1; break
+  fi
+  sleep 0.25
+done
+
+# 3/4. Endpoints must carry all 3 selector-matched pods as addresses.
+G17_EPS3=0
+for _ in $(seq 1 60); do
+  if [[ "$(ep_addr_count)" -eq 3 ]]; then G17_EPS3=1; break; fi
+  sleep 0.25
+done
+
+# 5. Scale down 3->1 (PUT full object) and wait for pods + endpoints to match.
+G17_SCALE1_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Content-Type: application/json" --data-binary "@$TMP_DEP1" "$BASE$DEP_PATH")"
+G17_SCALE1_PODS=0
+for _ in $(seq 1 60); do
+  D="$(curl -s "$BASE$DEP_PATH")"
+  N="$(pod_count)"
+  if printf '%s' "$D" | grep -q '"replicas":1' && [[ "$N" -eq 1 ]]; then
+    G17_SCALE1_PODS=1; break
+  fi
+  sleep 0.25
+done
+G17_EPS1=0
+for _ in $(seq 1 60); do
+  if [[ "$(ep_addr_count)" -eq 1 ]]; then G17_EPS1=1; break; fi
+  sleep 0.25
+done
+
+if [[ "$G17_CREATE" == "201" && "$G17_SVC" == "201" && "$G17_SCALE3_PODS" -eq 1 && "$G17_EPS3" -eq 1 \
+      && "$G17_SCALE1_CODE" == "200" && "$G17_SCALE1_PODS" -eq 1 && "$G17_EPS1" -eq 1 ]]; then
+  ok "G17  deployment golden-dep scale 3->1 converge + endpoints membership  (controllers, T3.1a)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL G17  controller convergence (create=$G17_CREATE svc=$G17_SVC scale3pods=$G17_SCALE3_PODS eps3=$G17_EPS3 put=$G17_SCALE1_CODE scale1pods=$G17_SCALE1_PODS eps1=$G17_EPS1)"
+  FAIL=$((FAIL+1))
+fi
+rm -f "$TMP_DEP3" "$TMP_DEP1" "$TMP_SVC"
 
 echo
 echo "golden: $PASS passed, $FAIL failed"
