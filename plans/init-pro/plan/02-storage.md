@@ -36,23 +36,42 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
 ## T2.2 — etcd v3 数据面 = APIServer storage backend
 
 - **目标 / Goal**
-  APIServer storage backed by etcd v3 with leases, compaction, and
-  `resourceVersion` semantics identical to upstream.
+  APIServer storage backed by etcd v3 semantics: watch with historical
+  replay, compaction, and `resourceVersion` behavior identical to upstream.
 
 - **核心实现 / Core implementation**
-  - etcd v3 gRPC client (Rust `etcd-client` or tonic-generated).
+  - Backend contract = `StorageBackend` trait (Q17): the embedded pure-Rust
+    impl is the v1 default; a real etcd v3 gRPC client remains an
+    alternative trait impl (deferred to T2.3 — not needed on the critical
+    path).
   - Key layout `/registry/...` (upstream parity).
-  - Transactions for CAS on `resourceVersion`; watch multiplexing.
-  - Compaction policy + TTL leases for LeaderElection/locks.
+  - Transactions for CAS on `resourceVersion` (`if_revision`).
+  - Watch: bounded revision event log (`src/history.rs`, default 10k
+    revisions) — `watch(prefix, start_revision)` replays retained history
+    (etcd-inclusive semantics) then continues live from a single
+    lock-ordered seam; lossless and duplicate-free by construction.
+    Lagging consumers get the stream closed (re-list + re-watch), never a
+    silent skip.
+  - Compaction: `compact(revision)` on the trait advances the watermark
+    (embedded impl clamps future revisions to current); reads unaffected.
+    A watch start at/below the watermark → `StorageError::Compacted`
+    (etcd `ErrCompacted`), surfaced by the apiserver as `410 Gone` /
+    reason `Expired`.
+  - Leader election does NOT use etcd TTL leases: Q18 locks
+    `coordination.k8s.io` Lease objects + `resourceVersion` CAS instead
+    (backend-agnostic, upstream client-go semantics).
+  - `DELETED` watch events carry the object's final state (upstream
+    parity; required by the future GC controller, T3.1).
 
 - **验收手段 / Acceptance**
   - T0.6 golden storage cases pass (CRUD + optimistic-concurrency
-    conflict on stale `resourceVersion`).
-  - `etcdctl get /registry/pods --prefix` shows expected layout.
+    conflict on stale `resourceVersion` + watch replay, G15).
+  - Watch from `resourceVersion=N` yields exactly the events after N
+    (k8s semantics; apiserver maps to etcd start `N+1`).
 
-- **状态 / Status** — in-progress
-- **证据 / Evidence** — Sprint 10: `crates/storage/` landed — `StorageBackend` trait (`Watch`/`List`/`Create`/`Update`/`Delete` + `if_revision` CAS) and `EmbeddedStorage` (etcd `KeyValue` parity: create_revision/mod_revision/version; `/registry/...` upstream key layout). 15 integration tests green: CRUD round-trip, resourceVersion monotonicity, optimistic-concurrency conflict on stale revision, list prefix/namespace filtering, watch put/delete events.
-- **卡点 / Blockers** — embedded backend wired into REST (T1.2b, Sprint 10.5); real etcd-gRPC backend deferred to T2.3; embedded backend is live-watch only (no historical replay) and in-memory/non-durable until T2.3.
+- **状态 / Status** — done
+- **证据 / Evidence** — Sprint 10: trait + `EmbeddedStorage` (etcd `KeyValue` parity, `/registry/...` layout) + 15 integration tests. Sprint 10.5: wired into REST CRUD/watch (T1.2b). Sprint 12: watch historical replay + compaction closeout — `crates/storage/src/history.rs` (event log + watermark, 4 unit tests), replay-then-live seam under one lock, `compact` on the trait, `Compacted` → 410 Gone mapping in the apiserver, k8s↔etcd `resourceVersion` translation fixed (`ListParams` was silently dropping the wire param). 26 storage integration tests (11 new: replay order/ seam losslessness under concurrent writes / prefix filtering / future start / compacted errors / eviction / prev-object-on-delete / multi-watcher) + 4 unit; 4 new apiserver watch-replay tests over real TCP; 360 total, golden 15/15 (G15).
+- **卡点 / Blockers** — none for v1 scope. Durability (restart persistence), policy-grade retention/compaction scheduling, and the real etcd-gRPC client are T2.3 (Q17). Policy note: the 10k-revision default retention is deliberately generous; aggressive compaction would starve slow informers.
 - **依赖 / Depends on** — T2.1, T1.1
 
 ---

@@ -11,8 +11,8 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 `argv[0]` selects behavior: `server` | `agent` | `kubectl` | `ctr` |
 `crictl` | `containerd` | `etcd` (symlink deployment just works). It has a
 first-class built-in Lua Router - an openresty-style programmable HTTP
-data plane driven by Lua via mlua - not a sidecar addon. Phase 1 is in
-progress. The Cargo workspace lives under `crates/` (10 crates).
+data plane driven by Lua via mlua - not a sidecar addon. Phase 1 (M0 + M1)
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (10 crates).
 
 ## The SSOT (single source of truth)
 
@@ -21,7 +21,7 @@ progress. The Cargo workspace lives under `crates/` (10 crates).
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q17
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q18
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -29,9 +29,9 @@ progress. The Cargo workspace lives under `crates/` (10 crates).
 NEVER contradict the SSOT. If you change semantics, update index.md + the
 matching plan/*.md + decisions.md in lock-step.
 
-SSOT drift watch (reconciled in Sprint 10; re-check on touch):
-- T2.1/T2.2 were marked "not-started" in index.md but `crates/storage/` had
-  landed. NOW fixed: both -> in-progress in index.md + plan/02-storage.md.
+SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
+- T2.1/T2.2 status-vs-code drift was reconciled in Sprint 10 and T2.2 closed
+  as done in Sprint 12 (watch replay + compaction landed; see CHANGELOG).
 - `crates/router/src/lib.rs` previously claimed "T5.4 in progress, Scope A".
   NOW fixed: header says T5.4 done (TLS + hot reload are implemented and tested).
 - The repo's root project-instructions header (the `# agents.md` preamble fed to
@@ -83,9 +83,9 @@ SSOT drift watch (reconciled in Sprint 10; re-check on touch):
 | `common` | Shared primitives: embed descriptor + `version()`. |
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
 | `api` | Resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1). |
-| `apiserver` | HTTP discovery endpoints only (T1.2a). |
+| `apiserver` | HTTP discovery + REST CRUD/watch/SSA over the storage trait (T1.2 done). |
 | `router` | Built-in Lua data plane: phase pipeline, resty.*, Ingress->route compiler, balancer, reverse proxy, TLS (T5.1-T5.4). |
-| `storage` | `StorageBackend` trait + embedded etcd-compatible store (T2.1/T2.2). |
+| `storage` | `StorageBackend` trait + embedded etcd-semantics store incl. watch replay + compaction (T2.1/T2.2 done). |
 
 ## Critical path & current state
 
@@ -96,12 +96,15 @@ SSOT drift watch (reconciled in Sprint 10; re-check on touch):
   keep `scripts/golden-conformance.sh` green.
 - Done: Layer 0 (T0.1-T0.6), T1.1, and the Layer 5 M1 slice (T5.1-T5.4).
   Phase 1 (M0 + M1) is complete.
-- Storage (T2.1/T2.2) just landed: trait + `EmbeddedStorage` + 15 tests in
-  `crates/storage/` (SSOT table stale - see above).
-- Next gate: T1.2 (REST CRUD + real kubectl interaction), now unblocked by
-  storage.
-- The server is currently DISCOVERY-ONLY with zero persistence; storage
-  CRUD wiring into the REST face is T1.2 (not started).
+- Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
+  etcd revision/CAS semantics, watch historical replay + compaction);
+  durability + alternative backends are T2.3 (Q17). Leader election is
+  Lease-object + CAS, not etcd leases (Q18).
+- Next gate on the critical path: T3.1 (controller loops / informers) -
+  unblocked since T1.2 + T2.2 are done. T4.1 (containerd bundling) is the
+  longest unstarted chain to M3 and worth an early risk-spike.
+- The server serves real REST CRUD/watch/SSA over the embedded store
+  (kubectl-compatible); zero-restart durability arrives with T2.3.
 
 ## Decisions that matter (Q-codes)
 
@@ -115,4 +118,4 @@ SSOT drift watch (reconciled in Sprint 10; re-check on touch):
 - Q12/Q13/Q14 - Router VM model, coroutine<->async bridge, per-phase
   coroutines and filter semantics.
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q17).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q18).

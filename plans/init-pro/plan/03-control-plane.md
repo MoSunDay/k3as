@@ -16,7 +16,8 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
   - `init-pro-controllers` crate; generic informer + workqueue pattern
     (kube-rs `Api::watch` + `Controller`).
   - Per-controller reconcile with upstream-identical status fields.
-  - Leader election via etcd lease (T2.2) so only one server runs them.
+  - Leader election via `coordination.k8s.io` Lease + resourceVersion
+    CAS (Q18) so only one server runs them — no etcd-lease dependency.
 
 - **验收手段 / Acceptance**
   - Golden (T0.6): scale a Deployment 1→3→1; pods converge; endpoints
@@ -90,7 +91,9 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
 
 - **核心实现 / Core implementation**
   - etcd cluster bootstrap + membership (T2.1) across N servers.
-  - Per-component leader election (etcd leases): only one apiserver-etcd-
+  - Per-component leader election via Lease objects + CAS (Q18; etcd
+    TTL leases are an implementation detail of the real-etcd backend,
+    not the election contract): only one apiserver-etcd-
     primary set of controllers runs.
   - Proxy/load-balancing of agent→server traffic (k3s agent LB,
     `link_repos/k3s/pkg/agent/loadbalancer/`).
