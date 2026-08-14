@@ -38,9 +38,9 @@ pub(crate) struct ListParams {
     /// Opaque cursor returned by a previous page (the next storage key).
     #[serde(default, rename = "continue")]
     pub continue_token: Option<String>,
-    /// Watch start point (the embedded backend serves live events from
-    /// subscription; this is accepted for API parity).
-    #[serde(default)]
+    /// Watch start point (Q10 wire name `resourceVersion`): absent = live
+    /// only, `0` = replay retained history, `N` = events after N.
+    #[serde(default, rename = "resourceVersion")]
     pub resource_version: Option<String>,
 }
 
@@ -163,7 +163,17 @@ async fn do_watch(
     prefix: &storage::KeyPrefix,
     params: &ListParams,
 ) -> Response {
-    let start_rev = params.resource_version.as_deref().and_then(|s| s.parse::<u64>().ok());
+    // Kubernetes watch semantics: `resourceVersion=N` = "Start at N" (events
+    // AFTER N) and `0` = "start at any retained version". The storage trait
+    // takes etcd's inclusive `start_revision`, hence the +1 / 0->1 mapping.
+    let start_rev = match params.resource_version.as_deref() {
+        None | Some("") => None,
+        Some(s) => match s.parse::<u64>() {
+            Ok(0) => Some(1),
+            Ok(n) => Some(n + 1),
+            Err(_) => None,
+        },
+    };
     let watch = match st.store.watch(prefix, start_rev).await {
         Ok(w) => w,
         Err(e) => return storage_error(e, &res.kind, "").into_response(),
@@ -204,16 +214,20 @@ fn watch_event_line(ev: &WatchEvent, api_version: &str, kind: &str) -> Option<St
             set_resource_version(&mut obj, e.mod_revision);
             Some(serde_json::to_string(&json!({ "type": typ, "object": obj })).unwrap_or_default())
         }
-        WatchEvent::Delete { key, mod_revision } => {
-            // The embedded backend carries no value on delete; rebuild a
-            // minimal object (name is the last path segment) with the deletion
-            // revision. The etcd-backed impl (T2.2) will carry the full object.
-            let name = key.rsplit('/').next().unwrap_or("").to_string();
-            let obj = json!({
-                "apiVersion": api_version,
-                "kind": kind,
-                "metadata": { "name": name, "resourceVersion": mod_revision.to_string() },
-            });
+        WatchEvent::Delete { key, mod_revision, prev } => {
+            // Upstream `DELETED` events carry the object's final state; the
+            // deletion revision is stamped as its resourceVersion. Backends
+            // that do not retain the previous value degrade to a minimal
+            // stub (name is the last path segment).
+            let mut obj = match prev {
+                Some(e) => e.value.clone(),
+                None => json!({
+                    "apiVersion": api_version,
+                    "kind": kind,
+                    "metadata": { "name": key.rsplit('/').next().unwrap_or("") },
+                }),
+            };
+            set_resource_version(&mut obj, *mod_revision);
             Some(serde_json::to_string(&json!({ "type": "DELETED", "object": obj })).unwrap_or_default())
         }
     }

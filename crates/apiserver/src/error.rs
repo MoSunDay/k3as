@@ -30,6 +30,10 @@ pub(crate) enum ApiError {
         /// `(path, manager)` pairs.
         conflicts: Vec<(String, String)>,
     },
+    /// A watch `resourceVersion` at or below the storage compaction
+    /// watermark: the requested history is gone (upstream `410 Gone`,
+    /// reason `Expired`).
+    Gone { requested: u64, watermark: u64 },
     /// The request body was missing required fields (e.g. `metadata.name`).
     Invalid { kind: String, message: String },
     /// Malformed JSON or unsupported content type.
@@ -94,6 +98,12 @@ impl ApiError {
                     json!({ "kind": kind, "name": name, "causes": causes }),
                 )
             }
+            ApiError::Gone { requested, watermark } => (
+                StatusCode::GONE,
+                "Expired",
+                format!("too old resource version: {requested} ({watermark})"),
+                Value::Null,
+            ),
             ApiError::Invalid { kind, message } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "Invalid",
@@ -140,6 +150,9 @@ pub(crate) fn storage_error(err: StorageError, kind: &str, name: &str) -> ApiErr
         }
         StorageError::Conflict { expected: _, have: _, .. } => {
             ApiError::Conflict { kind: kind.to_string(), name: name.to_string() }
+        }
+        StorageError::Compacted { requested, watermark } => {
+            ApiError::Gone { requested, watermark }
         }
         StorageError::InvalidKey { key } => ApiError::BadRequest(format!("invalid storage key: {key}")),
         other => ApiError::Internal(other.to_string()),

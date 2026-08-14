@@ -133,6 +133,25 @@ check_method G13 "PATCH" "/api/v1/namespaces/default/configmaps/golden-apply-cm?
 check_method G14 "PATCH" "/api/v1/namespaces/default/configmaps/golden-apply-cm?fieldManager=golden-test" "200" "SSA apply updates ConfigMap (T1.2c)" "application/apply-patch+yaml" "$TMP_APPLY"
 rm -f "$TMP_APPLY"
 
+# --- watch historical replay (T2.2) ---
+# G15: `?watch=1&resourceVersion=0` must replay retained history (the ADDED
+# for the just-created ConfigMap) before any live events -- the informer
+# disconnect/reconnect contract. curl is bounded by --max-time (exit 28 is
+# expected once the replay is drained and the stream idles).
+printf '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"golden-watch-cm","namespace":"default"},"data":{"k":"v"}}' > "$TMP_CM"
+G15_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" --data-binary "@$TMP_CM" "$BASE/api/v1/namespaces/default/configmaps")"
+G15_BODY="$(curl -sN --max-time 3 "$BASE/api/v1/namespaces/default/configmaps?watch=1&resourceVersion=0" 2>/dev/null || true)"
+if [[ "$G15_CODE" == "201" ]] \
+   && printf '%s' "$G15_BODY" | grep -q '"type":"ADDED"' \
+   && printf '%s' "$G15_BODY" | grep -q 'golden-watch-cm'; then
+  ok "G15  GET /api/v1/namespaces/default/configmaps?watch=1&resourceVersion=0 -> replayed ADDED  (watch history replay, T2.2)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL G15  watch resourceVersion=0 did not replay history (create status $G15_CODE); body: $G15_BODY"
+  FAIL=$((FAIL+1))
+fi
+rm -f "$TMP_CM"
+
 echo
 echo "golden: $PASS passed, $FAIL failed"
 if [[ "$FAIL" -ne 0 ]]; then
