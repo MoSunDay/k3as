@@ -115,6 +115,190 @@ async fn endpoints_addresses(env: &Env) -> usize {
     .unwrap_or(0)
 }
 
+/// CAS-rewrite the deployment template's container image (new hash -> new
+/// target RS -> a real rollout).
+async fn set_deployment_image(env: &Env, image: &str) {
+    let key = Key::new("apps", "deployments", "default", "web");
+    let dep = env.client.get(&key).await.unwrap().unwrap();
+    let rv = dep["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut next = dep.clone();
+    next["spec"]["template"]["spec"]["containers"][0]["image"] = json!(image);
+    env.client.update(&key, next, Some(rv)).await.unwrap();
+}
+
+async fn get_deployment(env: &Env) -> Option<Value> {
+    env.client
+        .get(&Key::new("apps", "deployments", "default", "web"))
+        .await
+        .unwrap()
+}
+
+fn condition<'a>(dep: &'a Value, ctype: &str) -> Option<&'a Value> {
+    dep.pointer("/status/conditions")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("type").and_then(Value::as_str) == Some(ctype))
+}
+
+fn status_u64(dep: &Value, field: &str) -> Option<u64> {
+    dep.pointer(&format!("/status/{field}"))
+        .and_then(Value::as_u64)
+}
+
+fn progressing_is(dep: &Value, status: &str, reason: &str) -> bool {
+    condition(dep, "Progressing")
+        .map(|c| {
+            c.get("status").and_then(Value::as_str) == Some(status)
+                && c.get("reason").and_then(Value::as_str) == Some(reason)
+        })
+        .unwrap_or(false)
+}
+
+/// CAS-pin the single pod's Ready condition (breaks the ready-by-default
+/// assumption; `pod_is_ready` honors the explicit condition).
+async fn set_pod_ready_condition(env: &Env, ready: bool) {
+    let pod = pods(env).await.remove(0);
+    let pod_name = pod["metadata"]["name"].as_str().unwrap().to_string();
+    let rv = pod["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut next = pod.clone();
+    next["status"]["conditions"] = json!([{
+        "type": "Ready",
+        "status": if ready { "True" } else { "False" },
+    }]);
+    env.client
+        .update(&Key::new("", "pods", "default", &pod_name), next, Some(rv))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn rolling_update_replaces_pods_and_completes() {
+    let env = env();
+    create(
+        &env,
+        Key::new("apps", "deployments", "default", "web"),
+        deployment("nginx:1.28", 3),
+    )
+    .await;
+    eventually!(5000, async { pods(&env).await.len() == 3 });
+    let old_hash = pods(&env).await[0]
+        .pointer("/metadata/labels/pod-template-hash")
+        .and_then(Value::as_str)
+        .expect("pod carries pod-template-hash")
+        .to_string();
+
+    set_deployment_image(&env, "nginx:1.29").await;
+    eventually!(30000, async {
+        let Some(dep) = get_deployment(&env).await else {
+            return false;
+        };
+        let rs = replicasets(&env).await;
+        let pods = pods(&env).await;
+        rs.len() == 1 // old RS deleted
+            && pods.len() == 3
+            && pods.iter().all(|p| {
+                p.pointer("/metadata/labels/pod-template-hash").and_then(Value::as_str)
+                    != Some(old_hash.as_str())
+            })
+            && status_u64(&dep, "updatedReplicas") == Some(3)
+            && status_u64(&dep, "availableReplicas") == Some(3)
+            && status_u64(&dep, "readyReplicas") == Some(3)
+            && progressing_is(&dep, "True", "NewReplicaSetAvailable")
+            && condition(&dep, "Available")
+                .map(|c| c.get("status").and_then(Value::as_str) == Some("True"))
+                .unwrap_or(false)
+    });
+}
+
+#[tokio::test]
+async fn stuck_rollout_reports_progress_deadline_exceeded() {
+    let env = env();
+    // The deterministic stuck vector: maxSurge=0 + maxUnavailable=0 (a
+    // config upstream validation rejects) with a pod pinned not-Ready.
+    let mut dep = deployment("nginx:1.0", 1);
+    dep["spec"]["strategy"] = json!({
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 0},
+    });
+    dep["spec"]["progressDeadlineSeconds"] = json!(1);
+    create(&env, Key::new("apps", "deployments", "default", "web"), dep).await;
+    eventually!(5000, async { pods(&env).await.len() == 1 });
+
+    // Pin the only pod not-Ready and wait for the controller chain to
+    // observe it (deployment availableReplicas drops to 0).
+    set_pod_ready_condition(&env, false).await;
+    eventually!(5000, async {
+        get_deployment(&env)
+            .await
+            .and_then(|d| status_u64(&d, "availableReplicas"))
+            == Some(0)
+    });
+
+    // New template -> new RS, but the rollout is frozen below the
+    // availability floor; the 1s progress deadline expires.
+    set_deployment_image(&env, "nginx:2.0").await;
+    eventually!(15000, async {
+        get_deployment(&env)
+            .await
+            .map(|d| progressing_is(&d, "False", "ProgressDeadlineExceeded"))
+            .unwrap_or(false)
+    });
+
+    // Recovery: flip the pod back to Ready -- the swap unblocks and the
+    // rollout completes.
+    set_pod_ready_condition(&env, true).await;
+    eventually!(15000, async {
+        get_deployment(&env)
+            .await
+            .map(|d| {
+                status_u64(&d, "updatedReplicas") == Some(1)
+                    && status_u64(&d, "availableReplicas") == Some(1)
+                    && progressing_is(&d, "True", "NewReplicaSetAvailable")
+            })
+            .unwrap_or(false)
+    });
+}
+
+#[tokio::test]
+async fn recreate_strategy_rolls_fresh() {
+    let env = env();
+    let mut dep = deployment("nginx:1.0", 2);
+    dep["spec"]["strategy"] = json!({"type": "Recreate"});
+    create(&env, Key::new("apps", "deployments", "default", "web"), dep).await;
+    eventually!(5000, async { pods(&env).await.len() == 2 });
+
+    set_deployment_image(&env, "nginx:2.0").await;
+    eventually!(15000, async {
+        let Some(dep) = get_deployment(&env).await else {
+            return false;
+        };
+        let rs = replicasets(&env).await;
+        let pods = pods(&env).await;
+        rs.len() == 1
+            && rs[0]
+                .pointer("/spec/template/spec/containers/0/image")
+                .and_then(Value::as_str)
+                == Some("nginx:2.0")
+            && pods.len() == 2
+            && pods.iter().all(|p| {
+                p.pointer("/spec/containers/0/image")
+                    .and_then(Value::as_str)
+                    == Some("nginx:2.0")
+            })
+            && status_u64(&dep, "updatedReplicas") == Some(2)
+            && status_u64(&dep, "availableReplicas") == Some(2)
+            && progressing_is(&dep, "True", "NewReplicaSetAvailable")
+    });
+}
+
 #[tokio::test]
 async fn deployment_scale_1_3_1_converges() {
     let env = env();

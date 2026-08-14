@@ -1,13 +1,15 @@
-//! Controller set (T3.1a): ReplicaSet / Deployment / Endpoints.
+//! Controller set (T3.1a/T3.1b): ReplicaSet / Deployment / Endpoints.
 //!
 //! Scope note: StatefulSet, DaemonSet and garbage collection are **T3.1b**.
 //! Each controller is a pure-ish `reconcile(client, object)` function over
 //! `serde_json::Value` (JSON-only wire, Q10); desired-state convergence is
 //! driven externally by the runner's informers + workqueues (T3.2).
 
+pub mod conditions;
 pub mod deployment;
 pub mod endpoints;
 pub mod replicaset;
+pub mod rollout;
 
 use std::sync::Arc;
 

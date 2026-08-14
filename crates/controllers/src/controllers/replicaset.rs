@@ -1,10 +1,13 @@
-//! ReplicaSet controller (T3.1a).
+//! ReplicaSet controller (T3.1a; status extended in T3.1b).
 //!
 //! Level-driven pod reconciliation: `owned - desired` creates pods from
 //! `spec.template`; surplus pods are deleted preferring unscheduled ones
-//! (upstream victim ordering); `status.replicas`/`fullyLabeledReplicas` are
-//! written only on change (anti-oscillation). `readyReplicas` is NOT set in
-//! v1: pods never report Ready without kubelet (T4.2).
+//! (upstream victim ordering); `status.replicas`/`fullyLabeledReplicas`/
+//! `readyReplicas`/`availableReplicas` are written only on change
+//! (anti-oscillation). Ready/available both count owned, non-terminating
+//! pods that are [`crate::object::pod_is_ready`] -- pods are ready-by-
+//! default without kubelet (T4.2), so an explicit not-Ready condition is
+//! the only way a pod drops out of the counts.
 
 use serde_json::{json, Value};
 use storage::{Key, KeyPrefix};
@@ -13,7 +16,7 @@ use crate::client::Client;
 use crate::controllers::{is_terminating, owned_by};
 use crate::error::ControllerError;
 use crate::object::{
-    name, namespace, owner_reference, resource_version, selector_matches, semantic_eq,
+    name, namespace, owner_reference, pod_is_ready, resource_version, selector_matches, semantic_eq,
 };
 
 /// Reconcile one ReplicaSet toward its desired replica count.
@@ -97,7 +100,16 @@ pub async fn reconcile(
         .iter()
         .filter(|p| selector_matches(p, &selector))
         .count() as u64;
-    let new_status = json!({"replicas": count, "fullyLabeledReplicas": labeled});
+    // Ready/available: owned, non-terminating, pod_is_ready pods (T3.1b).
+    // Without kubelet pods carry no conditions and default to ready, so
+    // these normally equal `replicas`; an explicit Ready=False drops a pod.
+    let ready = owned.iter().filter(|p| pod_is_ready(p)).count() as u64;
+    let new_status = json!({
+        "replicas": count,
+        "fullyLabeledReplicas": labeled,
+        "readyReplicas": ready,
+        "availableReplicas": ready,
+    });
     let current = rs.get("status").cloned().unwrap_or(json!({}));
     if !semantic_eq(&current, &new_status) {
         let mut next = rs.clone();

@@ -14,7 +14,7 @@ use crate::client::Client;
 use crate::controllers::is_terminating;
 use crate::error::ControllerError;
 use crate::id::placeholder_pod_ip;
-use crate::object::{name, namespace, selector_matches, semantic_eq};
+use crate::object::{name, namespace, pod_is_ready, selector_matches, semantic_eq};
 
 /// Reconcile one Service's Endpoints. `endpoints` is the existing object, if
 /// any (caller reads it fresh); the write happens only on change.
@@ -134,18 +134,6 @@ fn selector_is_empty(sel: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|a| !a.is_empty());
     !(has_labels || has_exprs)
-}
-
-/// No conditions at all -> ready (v1 default, see module docs).
-fn pod_is_ready(pod: &Value) -> bool {
-    match pod.pointer("/status/conditions").and_then(Value::as_array) {
-        None => true,
-        Some(conditions) => conditions
-            .iter()
-            .find(|c| c.get("type").and_then(Value::as_str) == Some("Ready"))
-            .map(|c| c.get("status").and_then(Value::as_str) == Some("True"))
-            .unwrap_or(true),
-    }
 }
 
 fn resource_version_of(v: &Value) -> Option<u64> {
