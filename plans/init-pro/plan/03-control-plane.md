@@ -23,29 +23,53 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
     with the apiserver (**Q19**); the HTTP-backed impl arrives with
     T3.4/T1.3. Informer = LIST → cache → watch-from-max_revision with
     re-list on lag/close; workqueue has client-go dirty/processing dedup
-    + rate-limited requeue. Deployment rollout is Recreate-flavored v1
-    (instant scale-up + drain-down; `maxSurge` rolling is T3.1b).
+    + rate-limited requeue (the done/next hand-off is atomic — a
+    concurrent `add` during `done()` can no longer strand a key).
     Placeholder deterministic 10.42.x.y pod IPs from UID hash and
     ready-by-default-without-conditions are the documented v1 defaults
     until kubelet/CNI (T4.2/T4.3). Lease election tests use an injected
     `NowFn` clock for deterministic expiry.
+  - **As-built (T3.1b):** Deployment rolling update (`maxSurge`/
+    `maxUnavailable` off raw JSON specs, upstream 25%/25% defaults;
+    NewReplicaSetAvailable / ProgressDeadlineExceeded transitions;
+    `controllers/rollout.rs` + `conditions.rs`); `kubectl rollout
+    status` (**Q21**: pure `evaluate` + 250 ms poll loop, exit 0 rolled
+    out / 1 NotFound-or-deadline); StatefulSet (**Q22**: `<sts>-<ordinal>`
+    pods in order, OrderedReady gated on prior-ordinal readiness,
+    Parallel; one PVC object per claim template per ordinal, never
+    deleted on scale-down; every distinct template recorded as an
+    `apps/v1` ControllerRevision `<sts>-<hash10>`; RollingUpdate +
+    OnDelete); DaemonSet (Node list as source of truth; nodeSelector +
+    first nodeAffinity matchExpressions term; terminating nodes never
+    match; desired/current/ready/updated numbers); GC + namespace
+    lifecycle (**Q20**: managed-owner absence sweep on DELETE events +
+    2 s backstop, annotation-marked Orphan, namespace drain then
+    terminal delete); apiserver PUT now defaults/validates
+    `metadata.namespace` and the informer normalizes event namespaces
+    from the storage path (namespace-less watch events had desynced
+    caches into silent no-op reconciles).
 
 - **验收手段 / Acceptance**
-  - Golden (T0.6): scale a Deployment 1→3→1; pods converge; endpoints
-    reflect membership.
-  - `kubectl rollout status` parity.
+  - Golden (T0.6): G17 scale 1→3→1 + endpoints; G18 rolling update +
+    `kubectl rollout status` exit codes; G19 StatefulSet ordinal
+    identity + PVC retention; G20 DaemonSet per-node placement + node
+    lifecycle; G21 GC cascade + namespace drain/finalize.
 
-- **状态 / Status** — in-progress (T3.1a done, T3.1b remaining)
+- **状态 / Status** — done (T3.1a Sprint 13, T3.1b Sprint 14)
 - **证据 / Evidence** — Sprint 13 (T3.1a): `crates/controllers` —
   ReplicaSet/Deployment/Endpoints reconcilers over the informer/
-  workqueue framework; 399 workspace tests green (+39: 25 unit inline
-  + 14 integration; `tests/controllers.rs` runs 6 in-process e2e cases
-  incl. Deployment scale 1→3→1 convergence, Endpoints membership, and a
-  quiesce-after-convergence anti-oscillation gate). Golden 17/17 — G16
-  (apps/v1 byte diff) + G17 (real binary: scale 1→3→1 converges, pods
-  converge, Endpoints reflect membership).
-- **卡点 / Blockers** — GC owner-reference graph is intricate; scope v1.
-  (GC remains T3.1b, unchanged.)
+  workqueue framework; 399 workspace tests green (+39). Sprint 14
+  (T3.1b): rollout/conditions, StatefulSet (`statefulset.rs`,
+  `ordinal.rs`), DaemonSet, GC (`gc.rs`), namespace (`namespace.rs`),
+  `kubectl rollout status` (`crates/kubectl/src/rollout.rs`); 489
+  workspace tests green (+90 across S1-S5, incl. a workqueue
+  concurrent-done regression test); `scripts/golden-conformance.sh`
+  21/21 — G18 (rolling update + rollout status exit codes), G19
+  (ordinal identity + PVC retention), G20 (per-node placement + node
+  lifecycle), G21 (GC cascade + namespace drain/finalize) on the real
+  binary. clippy `-D warnings` + fmt clean.
+- **卡点 / Blockers** — none for v1 scope; PV binding for StatefulSet
+  PVCs arrives with T6.2 (**Q22**, Pending until then).
 - **依赖 / Depends on** — T1.2, T2.2
 
 ---

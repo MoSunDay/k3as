@@ -961,3 +961,66 @@ acts on owners it can verify).
   controllers will route through the apiserver instead.
 - → plan/03-control-plane.md T3.1b records the as-built GC/namespace
   controller set.
+
+## Q21 — kubectl rollout status transport: plain poll loop vs watch stream (T3.1b)
+
+**Date.** 2026-08-14 (Sprint 14, slice S2).
+
+**Context.**
+`kubectl rollout status` must be exit-code compatible with upstream
+(0 = rolled out, 1 = NotFound / progress deadline exceeded). Upstream
+kubectl holds a **watch** on the Deployment and prints waiting messages
+as they change. Our `kubectl` crate speaks plain HTTP with JSON-only
+wire (**Q10**) and has no watch-stream client.
+
+**Options.**
+- A) **Watch-stream client inside the kubectl crate.** Event-fresh, but
+  duplicates the apiserver watch framing (SSE/chunked parsing) into a
+  second crate for one subcommand.
+- B) **Pure poll loop (GET every 250ms) + a pure `evaluate` function**
+  implementing the rollout-status semantics; print each NEW waiting
+  message once; map the final state to an exit code.
+- C) **Reuse the controllers informer.** Wrong boundary: kubectl is a
+  standalone client process and must not link controller machinery.
+
+**Decision.** B — `crates/kubectl/src/rollout.rs` splits the problem:
+`evaluate` is a total function over the Deployment JSON
+(observedGeneration lag, ProgressDeadlineExceeded, complete, waiting
+messages — everything defaults, never panics on odd input), and
+`rollout_status` drives the Q21 poll loop. NotFound and deadline map to
+exit 1; "successfully rolled out" to exit 0.
+
+**Consequences.** No long-lived connections through proxies; ≤250ms
+message latency, invisible for a human-facing command; the pure
+`evaluate` core is directly unit-testable and watch-freshness can be
+added later without touching semantics.
+
+## Q22 — StatefulSet storage: real PVC + ControllerRevision objects, lazy binding until T6.2 (T3.1b)
+
+**Date.** 2026-08-14 (Sprint 14, slice S3).
+
+**Context.**
+StatefulSet identity requires per-ordinal PVC names
+(`<claim>-<sts>-<ordinal>`) that survive scale-down, plus
+ControllerRevision history so rollout/rollback has an auditable record.
+Real k3s has a PV binder; init-pro has no kubelet/CNI yet (T4.2/T4.3)
+and no PV controller (T6.2).
+
+**Options.**
+- A) **Virtual PVCs** synthesized at read time. No storage footprint,
+  but PVCs become invisible to REST list/get and to future binders.
+- B) **Real PVC objects created by the controller, left Pending**;
+  ControllerRevisions stored as real `apps/v1` objects
+  (`<sts>-<hash10>`, bumped `revision`).
+- C) **Ship a minimal binder now.** Premature: nothing consumes bound
+  volumes until T4.x.
+
+**Decision.** B — the controller materializes one PVC per
+claim-template per ordinal below `spec.replicas`, never deletes them on
+scale-down (retention = Retain, v1), and writes every distinct pod
+template as a ControllerRevision object.
+
+**Consequences.** PVCs/ControllerRevisions are listable via REST and binder-ready;
+`status.phase` stays Pending until T6.2 (documented v1 default);
+controller state stays stateless across restarts because history lives
+in storage, not memory.

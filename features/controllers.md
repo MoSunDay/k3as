@@ -1,65 +1,45 @@
 # controllers
 
-The kube-controller-manager-equivalent control loops (TODO **T3.1a**, first
-slice of T3.1). Lives in `crates/controllers/`; spawned by
-`crates/cli/src/runtime.rs` in the apiserver branch.
+The kube-controller-manager-equivalent control loops (TODO **T3.1**, done
+in T3.1a + T3.1b). Lives in `crates/controllers/`; spawned leader-gated
+by `crates/cli/src/runtime.rs` in the apiserver branch.
 
 ## What it is
 
 The client-go machinery every upstream controller is built on — informer,
-workqueue, leader election — plus the first three reconcilers that turn
-"API + storage" into a self-converging cluster: ReplicaSet, Deployment,
-Endpoints. The manager is leader-gated (only the Lease holder runs loops)
-and shares the apiserver's storage `Arc` in process (decision **Q19**).
+workqueue, Lease+CAS leader election (**Q18**) — plus the reconcilers that
+turn "API + storage" into a self-converging cluster: ReplicaSet,
+Deployment (incl. rolling update), StatefulSet, DaemonSet, Endpoints,
+garbage collector, and namespace lifecycle. The manager shares the
+apiserver's storage `Arc` in process (**Q19**).
 
 ## As-built map (crates/controllers/src/)
 
 | Module | Role |
 |--------|------|
 | `client.rs` | `Client` trait + `StorageClient` (in-process transport over `Arc<dyn StorageBackend>`, Q19); wire-identical `resourceVersion` projection. |
-| `informer.rs` | LIST → cache → watch-from-max_revision; re-list on lag/close; synthetic initial events; `ObjectStore` for sync-handler reads. |
-| `workqueue.rs` | client-go semantics: dirty/processing dedup, rate-limited requeue (pure `backoff_for`), forget. |
-| `leaderelection.rs` | Q18 as-built: coordination.k8s.io Lease — acquire=create, renew=CAS, expired=CAS takeover (`leaseTransitions++`); injected `NowFn` clock for deterministic tests. |
-| `object.rs` | JSON helpers: label selectors (matchLabels + matchExpressions), `controller_of`/ownerReference, `semantic_eq` write-if-changed guard, fnv template hash, rand suffix, placeholder pod IP. |
-| `controllers/replicaset.rs` | Count owned pods by controller ownerRef; create with 5-char suffix names; delete surplus preferring unscheduled. |
-| `controllers/deployment.rs` | Template-hash-named RS; instant scale-up + drain-down (Recreate-flavored v1); old RS deleted at `status.replicas==0`; status write-if-changed. |
-| `controllers/endpoints.rs` | Service selector matching (LabelSelector + plain-map); ready = Ready True or no conditions; write-if-changed. |
-| `runner.rs` | `ControllerManager::spawn` — leader-gated; 4 informers / 3 workqueues / 2 workers each; pod→owner-RS + matching-Service reverse enqueue; namespace bootstrap on becoming leader. |
-| `stop.rs`, `time.rs`, `id.rs`, `error.rs` | Latched `Stop` token; RFC3339 without chrono; random ids; error type. |
+| `informer.rs` | LIST → cache → watch-from-max_revision; re-list on lag/close; synthetic initial events; event namespace normalized from the storage path; `ObjectStore` for sync-handler reads. |
+| `workqueue.rs` | client-go semantics: dirty/processing dedup, rate-limited requeue (pure `backoff_for`), forget; **atomic done/next hand-off** (a concurrent `add` during `done()` can't strand a key). |
+| `leaderelection.rs` | Q18: coordination.k8s.io Lease — acquire=create, renew=CAS, expired=CAS takeover; injected `NowFn` clock. |
+| `object.rs` / `id.rs` / `time.rs` | JSON object semantics (selectors, ownership, `semantic_eq`, readiness); FNV template hash, label+suffix ids; RFC3339 without chrono. |
+| `controllers/replicaset.rs` | Count owned pods; 5-char suffix names; delete surplus preferring unscheduled. |
+| `controllers/deployment.rs` + `rollout.rs` + `conditions.rs` | Template-hash RS; `maxSurge`/`maxUnavailable` rolling pacing (raw JSON specs, upstream 25%/25% defaults); NewReplicaSetAvailable / ProgressDeadlineExceeded transitions. |
+| `controllers/statefulset.rs` + `ordinal.rs` | Q22: `<sts>-<ordinal>` identity, OrderedReady/Parallel; PVC object per claim template per ordinal (never deleted on scale-down); ControllerRevision `<sts>-<hash10>`; RollingUpdate/OnDelete. |
+| `controllers/daemonset.rs` | Node list as source of truth; nodeSelector + first nodeAffinity term; one pinned pod per matching node; status numbers track node lifecycle. |
+| `controllers/endpoints.rs` | Service selector matching; ready = Ready True or no conditions. |
+| `controllers/gc.rs` | Q20: managed-owner absence sweep (DELETE-driven + 2s backstop); annotation-marked Orphan. |
+| `controllers/namespace.rs` | Q20: drain every namespaced kind, then terminal delete. |
+| `runner.rs` | `ControllerManager::spawn` — leader-gated informers/workqueues/workers wiring. |
 
-## How acceptance is proven
+## Companion: `kubectl rollout status` (Q21)
 
-- `crates/controllers/tests/controllers.rs` — 6 in-process e2e cases
-  against the real `EmbeddedStorage` (no sockets): Deployment scale
-  1→3→1 converges, pods converge, Endpoints reflect membership, and a
-  quiesce-after-convergence anti-oscillation gate (no status churn once
-  steady).
-- Golden **G17** (`scripts/golden-conformance.sh`, 17/17): the real
-  `init-pro server` binary — scale a Deployment 1→3→1, pods converge,
-  Endpoints reflect membership. G16 pins the served apps/v1 group
-  byte-stable.
-- Plus `tests/informer.rs` (4) and `tests/leaderelection.rs` (4); 25 unit
-  tests inline. Workspace total 399.
+`crates/kubectl/src/rollout.rs`: pure `evaluate` fn (observedGeneration,
+deadline, complete, waiting messages — total, odd fields default) + a
+250 ms poll loop. Exit 0 = rolled out, 1 = NotFound / deadline.
 
-## Deliberately v1
+## Evidence
 
-- **Placeholder pod IPs** — deterministic 10.42.x.y hashed from the pod
-  UID, until kubelet/CNI own addressing (T4.2/T4.3).
-- **Ready-by-default** — a pod with NO conditions counts ready
-  (documented default without kubelet; a Ready condition is honored when
-  present).
-- **Recreate-flavored rollout** — instant scale-up + drain-down; the
-  `maxSurge` rolling strategy is T3.1b.
-- **In-process transport (Q19)** — controllers share the apiserver's
-  storage `Arc`; the HTTP-backed client swaps in at the `Client` trait
-  boundary with T3.4 (HA) and T1.3 (auth).
-
-## Status / next
-
-- Landed: T3.1a (SSOT status `in-progress (T3.1a done)`).
-- Remaining (T3.1b): StatefulSet, DaemonSet (schemas already served,
-  inert), garbage collector, `kubectl rollout status` parity, `maxSurge`
-  rolling update.
-
-SSOT: `plans/init-pro/plan/03-control-plane.md` (T3.1) · decisions
-**Q18** (Lease + CAS election) and **Q19** (in-process transport).
+489 workspace tests; golden **21/21** — G17 (scale 1→3→1 + endpoints),
+G18 (rolling update + rollout exit codes), G19 (ordinal identity + PVC
+retention), G20 (per-node placement + node lifecycle), G21 (GC cascade +
+namespace drain/finalize). SSOT: `plans/init-pro/index.md` (T3.1 done).

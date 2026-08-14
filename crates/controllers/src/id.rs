@@ -43,44 +43,6 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// Deep equality ignoring volatile metadata: `uid`, `resourceVersion`,
-/// `creationTimestamp`, `managedFields`. `status` IS compared (controllers
-/// use this for write-if-changed decisions).
-pub fn semantic_eq(a: &Value, b: &Value) -> bool {
-    strip_volatile(a) == strip_volatile(b)
-}
-
-const VOLATILE_META: [&str; 4] = [
-    "uid",
-    "resourceVersion",
-    "creationTimestamp",
-    "managedFields",
-];
-
-fn strip_volatile(v: &Value) -> Value {
-    match v {
-        Value::Object(m) => {
-            let mut out = serde_json::Map::new();
-            for (k, val) in m {
-                if k == "metadata" {
-                    if let Some(meta) = val.as_object() {
-                        let mut mm = meta.clone();
-                        for f in VOLATILE_META {
-                            mm.remove(f);
-                        }
-                        out.insert(k.clone(), Value::Object(mm));
-                        continue;
-                    }
-                }
-                out.insert(k.clone(), strip_volatile(val));
-            }
-            Value::Object(out)
-        }
-        Value::Array(a) => Value::Array(a.iter().map(strip_volatile).collect()),
-        other => other.clone(),
-    }
-}
-
 /// UTC `"YYYY-MM-DDTHH:MM:SSZ"` from unix seconds (no chrono; Hinnant
 /// `civil_from_days`).
 pub fn now_rfc3339(unix_secs: u64) -> String {
