@@ -28,7 +28,11 @@ pub fn api_app(
     store: Arc<dyn StorageBackend>,
     server_address: String,
 ) -> Router {
-    router(AppState { registry, store, server_address })
+    router(AppState {
+        registry,
+        store,
+        server_address,
+    })
 }
 
 /// Assemble the router over a ready [`AppState`] (shared with [`crate::serve`]).

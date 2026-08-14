@@ -14,10 +14,10 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod apply;
 mod collection;
 mod discovery_handlers;
 mod error;
-mod apply;
 mod item;
 mod serve;
 mod state;
@@ -27,7 +27,10 @@ pub use serve::serve;
 
 /// Discovery-only router kept for backward compatibility with the T1.2a tests:
 /// builds the full app over a throwaway embedded store. Prefer [`api_app`].
-pub fn discovery_app(registry: api::SchemaRegistry, server_address: impl Into<String>) -> axum::Router {
+pub fn discovery_app(
+    registry: api::SchemaRegistry,
+    server_address: impl Into<String>,
+) -> axum::Router {
     use std::sync::Arc;
     let store: Arc<dyn storage::StorageBackend> = Arc::new(storage::EmbeddedStorage::new());
     api_app(Arc::new(registry), store, server_address.into())

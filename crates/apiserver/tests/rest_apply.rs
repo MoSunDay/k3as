@@ -123,10 +123,7 @@ async fn apply_conflict_returns_409() {
     let (s2, resp) = apply_req(r, "ssa-conf", &body_b, "mgr-b", false).await;
     assert_eq!(s2, StatusCode::CONFLICT);
     assert_eq!(resp["reason"], "Conflict");
-    assert!(resp["message"]
-        .as_str()
-        .unwrap_or("")
-        .contains("conflict"));
+    assert!(resp["message"].as_str().unwrap_or("").contains("conflict"));
 }
 
 #[tokio::test]
@@ -158,8 +155,7 @@ async fn apply_response_has_managed_fields() {
 #[tokio::test]
 async fn apply_via_put_works() {
     let body = apply_body("ssa-put", json!({"k": "v"}));
-    let uri =
-        "/api/v1/namespaces/default/configmaps/ssa-put?fieldManager=put-mgr";
+    let uri = "/api/v1/namespaces/default/configmaps/ssa-put?fieldManager=put-mgr";
     let (s, resp) = send(
         app(),
         "PUT",
@@ -171,10 +167,7 @@ async fn apply_via_put_works() {
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
-    assert_eq!(
-        resp["metadata"]["managedFields"][0]["manager"],
-        "put-mgr"
-    );
+    assert_eq!(resp["metadata"]["managedFields"][0]["manager"], "put-mgr");
 }
 
 #[tokio::test]

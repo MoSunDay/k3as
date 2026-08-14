@@ -13,8 +13,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::Router;
 use api::SchemaRegistry;
+use axum::Router;
 use storage::StorageBackend;
 
 use crate::app::router;
@@ -37,11 +37,17 @@ where
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(target: "init-pro", addr = %addr, "apiserver discovery listening (HTTP)");
 
-    let app: Router = router(AppState { registry: Arc::new(registry), store, server_address });
+    let app: Router = router(AppState {
+        registry: Arc::new(registry),
+        store,
+        server_address,
+    });
 
     // axum::serve stops accepting as soon as the graceful-shutdown future
     // resolves, then drains in-flight requests before returning.
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     tracing::info!(target: "init-pro", "apiserver drained");
     Ok(())

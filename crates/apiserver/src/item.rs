@@ -19,8 +19,7 @@ use serde_json::Value;
 use crate::apply;
 use crate::error::{storage_error, ApiError};
 use crate::state::{
-    item_key, resolve, resource_revision, set_resource_version, set_type_meta,
-    AppState, Loc,
+    item_key, resolve, resource_revision, set_resource_version, set_type_meta, AppState, Loc,
 };
 
 /// `DELETE /<item>?resourceVersion=&dryRun=`.
@@ -49,7 +48,11 @@ pub(crate) async fn do_get(st: &AppState, loc: &Loc, name: &str) -> Response {
             set_resource_version(&mut v, entry.mod_revision);
             (StatusCode::OK, Json(v)).into_response()
         }
-        Ok(None) => ApiError::NotFound { kind: res.kind, name: name.to_string() }.into_response(),
+        Ok(None) => ApiError::NotFound {
+            kind: res.kind,
+            name: name.to_string(),
+        }
+        .into_response(),
         Err(e) => storage_error(e, &res.kind, name).into_response(),
     }
 }
@@ -75,7 +78,12 @@ pub(crate) async fn do_replace(st: &AppState, loc: &Loc, name: &str, mut body: V
     }
 }
 
-pub(crate) async fn do_delete(st: &AppState, loc: &Loc, name: &str, params: &DeleteParams) -> Response {
+pub(crate) async fn do_delete(
+    st: &AppState,
+    loc: &Loc,
+    name: &str,
+    params: &DeleteParams,
+) -> Response {
     let res = match resolve(&st.registry, &loc.group, &loc.version, &loc.resource) {
         Some(r) => r,
         None => return ApiError::NotFoundResource.into_response(),
@@ -84,7 +92,10 @@ pub(crate) async fn do_delete(st: &AppState, loc: &Loc, name: &str, params: &Del
         return ApiError::NotFoundResource.into_response();
     }
     let key = item_key(loc, &res, name);
-    let if_revision = params.resource_version.as_deref().and_then(|s| s.parse::<u64>().ok());
+    let if_revision = params
+        .resource_version
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok());
     match st.store.delete(&key, if_revision).await {
         Ok(Some(entry)) => {
             let mut v = entry.value;
@@ -92,7 +103,11 @@ pub(crate) async fn do_delete(st: &AppState, loc: &Loc, name: &str, params: &Del
             set_type_meta(&mut v, &res.api_version, &res.kind);
             (StatusCode::OK, Json(v)).into_response()
         }
-        Ok(None) => ApiError::NotFound { kind: res.kind, name: name.to_string() }.into_response(),
+        Ok(None) => ApiError::NotFound {
+            kind: res.kind,
+            name: name.to_string(),
+        }
+        .into_response(),
         Err(e) => storage_error(e, &res.kind, name).into_response(),
     }
 }
@@ -115,7 +130,11 @@ pub(crate) async fn do_patch(
     let current = match st.store.get(&key).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            return ApiError::NotFound { kind: res.kind, name: name.to_string() }.into_response()
+            return ApiError::NotFound {
+                kind: res.kind,
+                name: name.to_string(),
+            }
+            .into_response()
         }
         Err(e) => return storage_error(e, &res.kind, name).into_response(),
     };
@@ -197,10 +216,16 @@ pub(crate) async fn core_replace(
 ) -> Response {
     let ct = ct_default_json(&headers);
     if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
         return apply::do_apply(&st, &Loc::new("", "v1", resource, None), &name, desired, &q).await;
     }
-    let body = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
+    let body = match parse_json(&body) {
+        Some(v) => v,
+        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+    };
     do_replace(&st, &Loc::new("", "v1", resource, None), &name, body).await
 }
 
@@ -224,7 +249,10 @@ pub(crate) async fn core_patch(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/strategic-merge-patch+json");
     if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
         return apply::do_apply(&st, &Loc::new("", "v1", resource, None), &name, desired, &q).await;
     }
     do_patch(&st, &Loc::new("", "v1", resource, None), &name, ct, &body).await
@@ -248,10 +276,23 @@ pub(crate) async fn core_replace_ns(
 ) -> Response {
     let ct = ct_default_json(&headers);
     if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-        return apply::do_apply(&st, &Loc::new("", "v1", resource, Some(ns)), &name, desired, &q).await;
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
+        return apply::do_apply(
+            &st,
+            &Loc::new("", "v1", resource, Some(ns)),
+            &name,
+            desired,
+            &q,
+        )
+        .await;
     }
-    let body = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
+    let body = match parse_json(&body) {
+        Some(v) => v,
+        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+    };
     do_replace(&st, &Loc::new("", "v1", resource, Some(ns)), &name, body).await
 }
 
@@ -275,10 +316,27 @@ pub(crate) async fn core_patch_ns(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/strategic-merge-patch+json");
     if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-        return apply::do_apply(&st, &Loc::new("", "v1", resource, Some(ns)), &name, desired, &q).await;
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
+        return apply::do_apply(
+            &st,
+            &Loc::new("", "v1", resource, Some(ns)),
+            &name,
+            desired,
+            &q,
+        )
+        .await;
     }
-    do_patch(&st, &Loc::new("", "v1", resource, Some(ns)), &name, ct, &body).await
+    do_patch(
+        &st,
+        &Loc::new("", "v1", resource, Some(ns)),
+        &name,
+        ct,
+        &body,
+    )
+    .await
 }
 
 // --- grouped items ---
@@ -299,11 +357,30 @@ pub(crate) async fn grp_replace(
 ) -> Response {
     let ct = ct_default_json(&headers);
     if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-        return apply::do_apply(&st, &Loc::new(&group, &version, resource, None), &name, desired, &q).await;
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
+        return apply::do_apply(
+            &st,
+            &Loc::new(&group, &version, resource, None),
+            &name,
+            desired,
+            &q,
+        )
+        .await;
     }
-    let body = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-    do_replace(&st, &Loc::new(&group, &version, resource, None), &name, body).await
+    let body = match parse_json(&body) {
+        Some(v) => v,
+        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+    };
+    do_replace(
+        &st,
+        &Loc::new(&group, &version, resource, None),
+        &name,
+        body,
+    )
+    .await
 }
 
 pub(crate) async fn grp_delete(
@@ -326,10 +403,27 @@ pub(crate) async fn grp_patch(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/strategic-merge-patch+json");
     if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-        return apply::do_apply(&st, &Loc::new(&group, &version, resource, None), &name, desired, &q).await;
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
+        return apply::do_apply(
+            &st,
+            &Loc::new(&group, &version, resource, None),
+            &name,
+            desired,
+            &q,
+        )
+        .await;
     }
-    do_patch(&st, &Loc::new(&group, &version, resource, None), &name, ct, &body).await
+    do_patch(
+        &st,
+        &Loc::new(&group, &version, resource, None),
+        &name,
+        ct,
+        &body,
+    )
+    .await
 }
 
 // --- grouped, namespaced items ---
@@ -350,11 +444,30 @@ pub(crate) async fn grp_replace_ns(
 ) -> Response {
     let ct = ct_default_json(&headers);
     if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-        return apply::do_apply(&st, &Loc::new(&group, &version, resource, Some(ns)), &name, desired, &q).await;
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
+        return apply::do_apply(
+            &st,
+            &Loc::new(&group, &version, resource, Some(ns)),
+            &name,
+            desired,
+            &q,
+        )
+        .await;
     }
-    let body = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-    do_replace(&st, &Loc::new(&group, &version, resource, Some(ns)), &name, body).await
+    let body = match parse_json(&body) {
+        Some(v) => v,
+        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+    };
+    do_replace(
+        &st,
+        &Loc::new(&group, &version, resource, Some(ns)),
+        &name,
+        body,
+    )
+    .await
 }
 
 pub(crate) async fn grp_delete_ns(
@@ -362,7 +475,13 @@ pub(crate) async fn grp_delete_ns(
     Path((group, version, ns, resource, name)): Path<(String, String, String, String, String)>,
     Query(q): Query<DeleteParams>,
 ) -> Response {
-    do_delete(&st, &Loc::new(&group, &version, resource, Some(ns)), &name, &q).await
+    do_delete(
+        &st,
+        &Loc::new(&group, &version, resource, Some(ns)),
+        &name,
+        &q,
+    )
+    .await
 }
 
 pub(crate) async fn grp_patch_ns(
@@ -377,8 +496,25 @@ pub(crate) async fn grp_patch_ns(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/strategic-merge-patch+json");
     if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) { Some(v) => v, None => return ApiError::BadRequest("invalid JSON".into()).into_response() };
-        return apply::do_apply(&st, &Loc::new(&group, &version, resource, Some(ns)), &name, desired, &q).await;
+        let desired = match parse_json(&body) {
+            Some(v) => v,
+            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
+        };
+        return apply::do_apply(
+            &st,
+            &Loc::new(&group, &version, resource, Some(ns)),
+            &name,
+            desired,
+            &q,
+        )
+        .await;
     }
-    do_patch(&st, &Loc::new(&group, &version, resource, Some(ns)), &name, ct, &body).await
+    do_patch(
+        &st,
+        &Loc::new(&group, &version, resource, Some(ns)),
+        &name,
+        ct,
+        &body,
+    )
+    .await
 }

@@ -73,7 +73,11 @@ impl ApiError {
                 ),
                 json!({ "kind": kind, "name": name }),
             ),
-            ApiError::ApplyConflict { kind, name, conflicts } => {
+            ApiError::ApplyConflict {
+                kind,
+                name,
+                conflicts,
+            } => {
                 let causes: Vec<Value> = conflicts
                     .iter()
                     .map(|(path, mgr)| {
@@ -98,7 +102,10 @@ impl ApiError {
                     json!({ "kind": kind, "name": name, "causes": causes }),
                 )
             }
-            ApiError::Gone { requested, watermark } => (
+            ApiError::Gone {
+                requested,
+                watermark,
+            } => (
                 StatusCode::GONE,
                 "Expired",
                 format!("too old resource version: {requested} ({watermark})"),
@@ -110,12 +117,18 @@ impl ApiError {
                 format!("{kind} \"{message}\""),
                 json!({ "kind": kind }),
             ),
-            ApiError::BadRequest(msg) => {
-                (StatusCode::BAD_REQUEST, "BadRequest", msg.clone(), Value::Null)
-            }
-            ApiError::Internal(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "InternalError", msg.clone(), Value::Null)
-            }
+            ApiError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "BadRequest",
+                msg.clone(),
+                Value::Null,
+            ),
+            ApiError::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                msg.clone(),
+                Value::Null,
+            ),
         }
     }
 }
@@ -142,19 +155,32 @@ impl IntoResponse for ApiError {
 /// Map a [`StorageError`] to an [`ApiError`] for a given kind/name.
 pub(crate) fn storage_error(err: StorageError, kind: &str, name: &str) -> ApiError {
     match err {
-        StorageError::NotFound { .. } => {
-            ApiError::NotFound { kind: kind.to_string(), name: name.to_string() }
+        StorageError::NotFound { .. } => ApiError::NotFound {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        },
+        StorageError::AlreadyExists { .. } => ApiError::AlreadyExists {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        },
+        StorageError::Conflict {
+            expected: _,
+            have: _,
+            ..
+        } => ApiError::Conflict {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        },
+        StorageError::Compacted {
+            requested,
+            watermark,
+        } => ApiError::Gone {
+            requested,
+            watermark,
+        },
+        StorageError::InvalidKey { key } => {
+            ApiError::BadRequest(format!("invalid storage key: {key}"))
         }
-        StorageError::AlreadyExists { .. } => {
-            ApiError::AlreadyExists { kind: kind.to_string(), name: name.to_string() }
-        }
-        StorageError::Conflict { expected: _, have: _, .. } => {
-            ApiError::Conflict { kind: kind.to_string(), name: name.to_string() }
-        }
-        StorageError::Compacted { requested, watermark } => {
-            ApiError::Gone { requested, watermark }
-        }
-        StorageError::InvalidKey { key } => ApiError::BadRequest(format!("invalid storage key: {key}")),
         other => ApiError::Internal(other.to_string()),
     }
 }

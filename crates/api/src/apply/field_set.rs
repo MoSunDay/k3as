@@ -59,9 +59,7 @@ fn extract_tree_inner(val: &Value, strategy: &PatchStrategy, path: &mut Vec<Stri
             // Skip objects whose entire subtree was filtered (e.g. metadata
             // with only system fields).  Scalars always produce a non-empty
             // ownership marker.
-            if child.is_object()
-                && node.as_object().map(|o| o.is_empty()).unwrap_or(false)
-            {
+            if child.is_object() && node.as_object().map(|o| o.is_empty()).unwrap_or(false) {
                 continue;
             }
             tree.insert(format!("f:{key}"), node);
@@ -81,9 +79,14 @@ fn is_unowned_field(path: &[String], key: &str) -> bool {
     if path.len() == 1 && path[0] == "metadata" {
         return matches!(
             key,
-            "name" | "namespace" | "managedFields"
-                | "creationTimestamp" | "uid" | "resourceVersion"
-                | "generation" | "selfLink"
+            "name"
+                | "namespace"
+                | "managedFields"
+                | "creationTimestamp"
+                | "uid"
+                | "resourceVersion"
+                | "generation"
+                | "selfLink"
         );
     }
     false
@@ -231,7 +234,8 @@ fn insert_path(tree: &mut Map<String, Value>, path: &[Seg]) {
     let child = tree.entry(key).or_insert_with(|| Value::Object(Map::new()));
     if let Some(co) = child.as_object_mut() {
         if path.len() == 1 && matches!(path[0], Seg::Key(_)) {
-            co.entry(".".to_string()).or_insert(Value::Object(Map::new()));
+            co.entry(".".to_string())
+                .or_insert(Value::Object(Map::new()));
         } else if path.len() > 1 {
             insert_path(co, &path[1..]);
         }

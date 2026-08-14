@@ -22,8 +22,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{storage_error, ApiError};
 use crate::state::{
-    cluster_key, collection_prefix, namespaced_key, resolve,
-    set_namespace, set_resource_version, set_type_meta, AppState, Loc, Resolved,
+    cluster_key, collection_prefix, namespaced_key, resolve, set_namespace, set_resource_version,
+    set_type_meta, AppState, Loc, Resolved,
 };
 
 /// `GET /<collection>?watch=1&resourceVersion=&limit=&continue=`.
@@ -46,7 +46,10 @@ pub(crate) struct ListParams {
 
 impl ListParams {
     fn is_watch(&self) -> bool {
-        matches!(self.watch.as_deref(), Some("1") | Some("true") | Some("True"))
+        matches!(
+            self.watch.as_deref(),
+            Some("1") | Some("true") | Some("True")
+        )
     }
 }
 
@@ -209,12 +212,20 @@ async fn do_watch(
 fn watch_event_line(ev: &WatchEvent, api_version: &str, kind: &str) -> Option<String> {
     match ev {
         WatchEvent::Put(e) => {
-            let typ = if e.create_revision == e.mod_revision { "ADDED" } else { "MODIFIED" };
+            let typ = if e.create_revision == e.mod_revision {
+                "ADDED"
+            } else {
+                "MODIFIED"
+            };
             let mut obj = e.value.clone();
             set_resource_version(&mut obj, e.mod_revision);
             Some(serde_json::to_string(&json!({ "type": typ, "object": obj })).unwrap_or_default())
         }
-        WatchEvent::Delete { key, mod_revision, prev } => {
+        WatchEvent::Delete {
+            key,
+            mod_revision,
+            prev,
+        } => {
             // Upstream `DELETED` events carry the object's final state; the
             // deletion revision is stamped as its resourceVersion. Backends
             // that do not retain the previous value degrade to a minimal
@@ -228,7 +239,10 @@ fn watch_event_line(ev: &WatchEvent, api_version: &str, kind: &str) -> Option<St
                 }),
             };
             set_resource_version(&mut obj, *mod_revision);
-            Some(serde_json::to_string(&json!({ "type": "DELETED", "object": obj })).unwrap_or_default())
+            Some(
+                serde_json::to_string(&json!({ "type": "DELETED", "object": obj }))
+                    .unwrap_or_default(),
+            )
         }
     }
 }

@@ -68,7 +68,15 @@ async fn http(
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8_lossy(&buf);
-    let status: u16 = text.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+    let status: u16 = text
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
     let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(buf.len());
     (status, buf[body_start.min(buf.len())..].to_vec())
 }
@@ -99,7 +107,14 @@ async fn watch_streams_added_then_deleted() {
     // Seed one object before the watch opens (the embedded backend serves live
     // events from subscription, so this one is NOT replayed).
     let cm0 = br#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"seed","namespace":"default"},"data":{}}"#;
-    let (st, _) = http(addr, "POST", "/api/v1/namespaces/default/configmaps", Some("application/json"), Some(cm0)).await;
+    let (st, _) = http(
+        addr,
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        Some("application/json"),
+        Some(cm0),
+    )
+    .await;
     assert_eq!(st, 201);
 
     // Open the watch stream and keep the socket.
@@ -112,9 +127,23 @@ async fn watch_streams_added_then_deleted() {
 
     // Create + delete a second object from a separate connection.
     let cm1 = br#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"live","namespace":"default"},"data":{"k":"v"}}"#;
-    let (st, _) = http(addr, "POST", "/api/v1/namespaces/default/configmaps", Some("application/json"), Some(cm1)).await;
+    let (st, _) = http(
+        addr,
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        Some("application/json"),
+        Some(cm1),
+    )
+    .await;
     assert_eq!(st, 201);
-    let (st, _) = http(addr, "DELETE", "/api/v1/namespaces/default/configmaps/live", None, None).await;
+    let (st, _) = http(
+        addr,
+        "DELETE",
+        "/api/v1/namespaces/default/configmaps/live",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(st, 200);
 
     // Drain the watch stream until we observe ADDED(live) then DELETED(live).
@@ -129,23 +158,30 @@ async fn watch_streams_added_then_deleted() {
             Err(_) => break, // timeout
         }
         let events = extract_events(&buf);
-        let added = events.iter().any(|e| {
-            e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "live"
-        });
-        let deleted = events.iter().any(|e| {
-            e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "live"
-        });
+        let added = events
+            .iter()
+            .any(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "live");
+        let deleted = events
+            .iter()
+            .any(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "live");
         if added && deleted {
             let added_evt = events.iter().find(|e| e["type"] == "ADDED").unwrap();
             assert_eq!(added_evt["object"]["kind"], "ConfigMap");
-            assert!(added_evt["object"]["metadata"]["resourceVersion"].as_str().is_some());
+            assert!(added_evt["object"]["metadata"]["resourceVersion"]
+                .as_str()
+                .is_some());
             assert_eq!(added_evt["object"]["data"]["k"], "v");
             let del_evt = events.iter().find(|e| e["type"] == "DELETED").unwrap();
-            assert!(del_evt["object"]["metadata"]["resourceVersion"].as_str().is_some());
+            assert!(del_evt["object"]["metadata"]["resourceVersion"]
+                .as_str()
+                .is_some());
             return; // success
         }
     }
-    panic!("did not observe ADDED+DELETED for 'live'; got buffer:\n{}", String::from_utf8_lossy(&buf));
+    panic!(
+        "did not observe ADDED+DELETED for 'live'; got buffer:\n{}",
+        String::from_utf8_lossy(&buf)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +202,12 @@ async fn post_configmap(addr: std::net::SocketAddr, name: &str, data_value: &str
         Some(body.as_bytes()),
     )
     .await;
-    assert_eq!(st, 201, "POST {name} -> {st}: {}", String::from_utf8_lossy(&out));
+    assert_eq!(
+        st,
+        201,
+        "POST {name} -> {st}: {}",
+        String::from_utf8_lossy(&out)
+    );
     serde_json::from_slice(&out).unwrap()
 }
 
@@ -224,17 +265,24 @@ async fn watch_resource_version_zero_replays_history_then_live() {
     })
     .await;
     let added: Vec<&Value> = events.iter().filter(|e| e["type"] == "ADDED").collect();
-    assert_eq!(added.len(), 2, "expected only alpha+beta replay, got: {events:?}");
+    assert_eq!(
+        added.len(),
+        2,
+        "expected only alpha+beta replay, got: {events:?}"
+    );
     for (e, name) in added.iter().zip(["alpha", "beta"]) {
         assert_eq!(e["object"]["metadata"]["name"], name);
         assert_eq!(e["object"]["kind"], "ConfigMap");
-        assert!(e["object"]["metadata"]["resourceVersion"].as_str().is_some());
+        assert!(e["object"]["metadata"]["resourceVersion"]
+            .as_str()
+            .is_some());
     }
 
     // Live seam: a create after the watch opened flows on the same stream.
     post_configmap(addr, "gamma", "v").await;
     let events = read_watch_until(&mut watch, &mut buf, deadline, |evs| {
-        evs.iter().any(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "gamma")
+        evs.iter()
+            .any(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "gamma")
     })
     .await;
     let gamma = events
@@ -242,7 +290,9 @@ async fn watch_resource_version_zero_replays_history_then_live() {
         .find(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "gamma")
         .expect("gamma ADDED after replay");
     assert_eq!(gamma["object"]["kind"], "ConfigMap");
-    assert!(gamma["object"]["metadata"]["resourceVersion"].as_str().is_some());
+    assert!(gamma["object"]["metadata"]["resourceVersion"]
+        .as_str()
+        .is_some());
 }
 
 /// `resourceVersion=N` = "events AFTER N": a watch resuming at alpha's rv=1
@@ -260,7 +310,11 @@ async fn watch_resource_version_n_starts_after_n() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let events = read_watch_until(&mut watch, &mut buf, deadline, |evs| !evs.is_empty()).await;
 
-    assert!(!events.is_empty(), "watch after rv=1 produced no events; buffer:\n{}", String::from_utf8_lossy(&buf));
+    assert!(
+        !events.is_empty(),
+        "watch after rv=1 produced no events; buffer:\n{}",
+        String::from_utf8_lossy(&buf)
+    );
     for e in &events {
         assert_eq!(e["type"], "ADDED");
         assert_eq!(
@@ -268,7 +322,11 @@ async fn watch_resource_version_n_starts_after_n() {
             "events after revision 1 must not replay alpha: {events:?}"
         );
     }
-    assert_eq!(events.len(), 1, "expected exactly the beta event: {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly the beta event: {events:?}"
+    );
 }
 
 /// A watch start at or below the compaction watermark is 410 Gone with
@@ -296,7 +354,10 @@ async fn watch_too_old_resource_version_returns_410_expired() {
     assert_eq!(v["reason"], "Expired");
     assert_eq!(v["code"], 410);
     assert!(
-        v["message"].as_str().unwrap().contains("too old resource version"),
+        v["message"]
+            .as_str()
+            .unwrap()
+            .contains("too old resource version"),
         "message: {}",
         v["message"]
     );
@@ -323,24 +384,39 @@ async fn deleted_watch_event_carries_final_object() {
     )
     .await;
     assert_eq!(st, 200, "body: {}", String::from_utf8_lossy(&out));
-    assert_eq!(serde_json::from_slice::<Value>(&out).unwrap()["metadata"]["resourceVersion"], "2");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out).unwrap()["metadata"]["resourceVersion"],
+        "2"
+    );
 
     // Live watch, then delete (revision 3) from a second connection.
     let mut watch = open_watch(addr, "").await;
-    let (st, _) = http(addr, "DELETE", "/api/v1/namespaces/default/configmaps/delta", None, None).await;
+    let (st, _) = http(
+        addr,
+        "DELETE",
+        "/api/v1/namespaces/default/configmaps/delta",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(st, 200);
 
     let mut buf = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let events = read_watch_until(&mut watch, &mut buf, deadline, |evs| {
-        evs.iter().any(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "delta")
+        evs.iter()
+            .any(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "delta")
     })
     .await;
     let del = events
         .iter()
         .find(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "delta")
-        .unwrap_or_else(|| panic!("no DELETED for delta; buffer:\n{}", String::from_utf8_lossy(&buf)));
+        .unwrap_or_else(|| {
+            panic!(
+                "no DELETED for delta; buffer:\n{}",
+                String::from_utf8_lossy(&buf)
+            )
+        });
     assert_eq!(del["object"]["data"]["k"], "final2"); // final state, not "final"
     assert_eq!(del["object"]["metadata"]["resourceVersion"], "3"); // create=1 replace=2 delete=3
 }
-

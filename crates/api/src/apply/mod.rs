@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::patch::{strategic_merge, PatchStrategy};
-use field_set::{remove_path, format_path, build_tree_from_paths, flatten_field_tree, FieldPath};
+use field_set::{build_tree_from_paths, flatten_field_tree, format_path, remove_path, FieldPath};
 
 // ---------------------------------------------------------------------------
 // Wire model (matches k8s `metadata.managedFields[]`)
@@ -118,7 +118,10 @@ pub fn set_managed_fields(value: &mut Value, fields: Vec<ManagedFieldEntry>) {
     // Ensure metadata exists (the object may not have it yet).
     if value.get("metadata").is_none() {
         if let Some(obj) = value.as_object_mut() {
-            obj.insert("metadata".to_string(), Value::Object(serde_json::Map::new()));
+            obj.insert(
+                "metadata".to_string(),
+                Value::Object(serde_json::Map::new()),
+            );
         }
     }
     if let Some(m) = value.get_mut("metadata").and_then(|m| m.as_object_mut()) {
@@ -216,7 +219,12 @@ fn update_fields(
     } else {
         entries.push(new_entry);
     }
-    entries.retain(|e| !e.fields_v1.as_object().map(|o| o.is_empty()).unwrap_or(true));
+    entries.retain(|e| {
+        !e.fields_v1
+            .as_object()
+            .map(|o| o.is_empty())
+            .unwrap_or(true)
+    });
     entries
 }
 

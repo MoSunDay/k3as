@@ -112,7 +112,13 @@ mod tests {
         }
         let err = log.since(2).unwrap_err();
         assert!(
-            matches!(err, StorageError::Compacted { requested: 2, watermark: 2 }),
+            matches!(
+                err,
+                StorageError::Compacted {
+                    requested: 2,
+                    watermark: 2
+                }
+            ),
             "got {err:?}"
         );
         // The retained suffix replays cleanly.
@@ -139,7 +145,10 @@ mod tests {
         log.push(1, put_ev("k", 1));
         assert!(matches!(
             log.since(1).unwrap_err(),
-            StorageError::Compacted { requested: 1, watermark: 1 }
+            StorageError::Compacted {
+                requested: 1,
+                watermark: 1
+            }
         ));
     }
 }

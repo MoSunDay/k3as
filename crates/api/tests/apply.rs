@@ -4,7 +4,10 @@
 //! layer. Covers: create-via-apply, update-via-apply, conflict detection,
 //! force override, field pruning, and fieldsV1 tree extraction.
 
-use api::apply::{apply_object, extract_field_tree, get_managed_fields, set_managed_fields, ApplyOptions, Operation};
+use api::apply::{
+    apply_object, extract_field_tree, get_managed_fields, set_managed_fields, ApplyOptions,
+    Operation,
+};
 use api::patch::PatchStrategy;
 use serde_json::{json, Value};
 
@@ -122,15 +125,20 @@ fn force_steals_ownership() {
     assert!(r2.conflicts.is_empty());
     assert_eq!(r2.value["data"]["key"], "b-value");
 
-    let b = r2.managed_fields.iter()
+    let b = r2
+        .managed_fields
+        .iter()
         .find(|e| e.manager == "mgr-b" && e.operation == Operation::Apply)
         .expect("mgr-b entry");
     assert!(b.fields_v1["f:data"]["f:key"].is_object());
 
-    let a = r2.managed_fields.iter()
-        .find(|e| e.manager == "mgr-a");
+    let a = r2.managed_fields.iter().find(|e| e.manager == "mgr-a");
     if let Some(a) = a {
-        assert!(a.fields_v1.get("f:data").and_then(|d| d.get("f:key")).is_none());
+        assert!(a
+            .fields_v1
+            .get("f:data")
+            .and_then(|d| d.get("f:key"))
+            .is_none());
     }
 }
 
