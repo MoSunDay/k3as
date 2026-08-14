@@ -18,7 +18,9 @@ use api::apply::{apply_object, set_managed_fields, ApplyOptions};
 use api::patch::PatchStrategy;
 
 use crate::error::{storage_error, ApiError};
-use crate::state::{item_key, resolve, set_namespace, set_resource_version, set_type_meta, AppState, Loc};
+use crate::state::{
+    item_key, resolve, set_namespace, set_resource_version, set_type_meta, AppState, Loc,
+};
 
 /// Query parameters for server-side apply (`?fieldManager=&force=`).
 #[derive(Debug, Default, Deserialize)]
@@ -77,7 +79,12 @@ pub(crate) async fn do_apply(
         time: None, // RFC-3339 timestamp deferred
     };
     let strategy = PatchStrategy::kubernetes_defaults();
-    let result = apply_object(live_entry.as_ref().map(|e| &e.value), &body, &opts, &strategy);
+    let result = apply_object(
+        live_entry.as_ref().map(|e| &e.value),
+        &body,
+        &opts,
+        &strategy,
+    );
 
     // Conflict -> 409.
     if !result.conflicts.is_empty() {

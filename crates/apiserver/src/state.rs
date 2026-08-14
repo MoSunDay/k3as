@@ -126,23 +126,39 @@ pub(crate) fn set_resource_version(value: &mut Value, mod_revision: u64) {
         .entry("metadata")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
     if let Some(m) = meta.as_object_mut() {
-        m.insert("resourceVersion".into(), Value::String(mod_revision.to_string()));
+        m.insert(
+            "resourceVersion".into(),
+            Value::String(mod_revision.to_string()),
+        );
     }
 }
 
 /// Read `metadata.name` from a JSON object.
 pub(crate) fn object_name(value: &Value) -> Option<String> {
-    value.get("metadata")?.get("name")?.as_str().map(str::to_string)
+    value
+        .get("metadata")?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Read `metadata.namespace` from a JSON object (if present).
 pub(crate) fn object_namespace(value: &Value) -> Option<String> {
-    value.get("metadata")?.get("namespace")?.as_str().map(str::to_string)
+    value
+        .get("metadata")?
+        .get("namespace")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Read `metadata.resourceVersion` (numeric string) as a [`u64`] revision.
 pub(crate) fn resource_revision(value: &Value) -> Option<u64> {
-    value.get("metadata")?.get("resourceVersion")?.as_str()?.parse::<u64>().ok()
+    value
+        .get("metadata")?
+        .get("resourceVersion")?
+        .as_str()?
+        .parse::<u64>()
+        .ok()
 }
 
 /// Build a per-item storage key from a resolved location, honouring scope.
@@ -155,5 +171,4 @@ pub(crate) fn item_key(loc: &Loc, res: &Resolved, name: &str) -> Key {
 
 /// The error returned when a REST path names a resource that is not served
 /// (upstream: `404 the server could not find the requested resource`).
-pub(crate) const NOT_FOUND_RESOURCE_MSG: &str =
-    "the server could not find the requested resource";
+pub(crate) const NOT_FOUND_RESOURCE_MSG: &str = "the server could not find the requested resource";

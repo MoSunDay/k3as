@@ -77,8 +77,8 @@ mod tests {
     //! The HTTP-level behaviour is exercised end-to-end in
     //! `tests/discovery_http.rs` via `api_app` + axum's in-process transport.
     use crate::app::api_app;
-    use std::sync::Arc;
     use api::SchemaRegistry;
+    use std::sync::Arc;
     use storage::EmbeddedStorage;
 
     #[test]

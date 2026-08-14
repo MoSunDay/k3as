@@ -10,8 +10,8 @@
 //! exposes the T0.2 manifest contract + B5 runtime staging.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use common::embed::EmbeddedManifest;
 use infra::{Config, Shutdown};

@@ -33,7 +33,9 @@ async fn send(
     uri: &str,
     body: Option<(&str, Vec<u8>)>,
 ) -> (StatusCode, Value) {
-    let mut b = Request::builder().method(Method::from_bytes(method.as_bytes()).unwrap()).uri(uri);
+    let mut b = Request::builder()
+        .method(Method::from_bytes(method.as_bytes()).unwrap())
+        .uri(uri);
     if let Some((ct, _)) = body {
         b = b.header("content-type", ct);
     }
@@ -44,7 +46,9 @@ async fn send(
     .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let val = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, val)
 }
@@ -64,12 +68,19 @@ fn cm(name: &str, data: Value, rv: Option<&str>) -> Value {
 #[tokio::test]
 async fn create_get_roundtrip() {
     let r = app();
-    let (st, body) =
-        send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("cm1", json!({"k": "v"}), None))).await;
+    let (st, body) = send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("cm1", json!({"k": "v"}), None)),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(body["kind"], "ConfigMap");
     assert_eq!(body["metadata"]["namespace"], "default");
-    let rv = body["metadata"]["resourceVersion"].as_str().expect("resourceVersion set");
+    let rv = body["metadata"]["resourceVersion"]
+        .as_str()
+        .expect("resourceVersion set");
     assert!(!rv.is_empty());
     assert_eq!(body["data"]["k"], "v");
 
@@ -82,10 +93,21 @@ async fn create_get_roundtrip() {
 #[tokio::test]
 async fn create_already_exists_is_409() {
     let r = app();
-    let (st, _) =
-        send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("dup", json!({}), None))).await;
+    let (st, _) = send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("dup", json!({}), None)),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED);
-    let (st, body) = send(r, "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("dup", json!({}), None))).await;
+    let (st, body) = send(
+        r,
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("dup", json!({}), None)),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["reason"], "AlreadyExists");
 }
@@ -101,14 +123,32 @@ async fn get_not_found_is_404() {
 #[tokio::test]
 async fn list_empty_then_populated() {
     let r = app();
-    let (st, body) = send(r.clone(), "GET", "/api/v1/namespaces/default/configmaps", None).await;
+    let (st, body) = send(
+        r.clone(),
+        "GET",
+        "/api/v1/namespaces/default/configmaps",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["kind"], "ConfigMapList");
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
     assert!(body["metadata"]["resourceVersion"].as_str().is_some());
 
-    send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("a", json!({}), None))).await;
-    send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("b", json!({}), None))).await;
+    send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("a", json!({}), None)),
+    )
+    .await;
+    send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("b", json!({}), None)),
+    )
+    .await;
     let (st, body) = send(r, "GET", "/api/v1/namespaces/default/configmaps", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["items"].as_array().unwrap().len(), 2);
@@ -117,20 +157,38 @@ async fn list_empty_then_populated() {
 #[tokio::test]
 async fn update_cas_conflict_on_stale_resourceversion() {
     let r = app();
-    let (_, body) =
-        send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("c", json!({"a": "1"}), None))).await;
-    let rv = body["metadata"]["resourceVersion"].as_str().unwrap().to_string();
+    let (_, body) = send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("c", json!({"a": "1"}), None)),
+    )
+    .await;
+    let rv = body["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // correct rv -> 200, new rv assigned
-    let (st, body) =
-        send(r.clone(), "PUT", "/api/v1/namespaces/default/configmaps/c", json_body(&cm("c", json!({"a": "2"}), Some(&rv)))).await;
+    let (st, body) = send(
+        r.clone(),
+        "PUT",
+        "/api/v1/namespaces/default/configmaps/c",
+        json_body(&cm("c", json!({"a": "2"}), Some(&rv))),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     let rv2 = body["metadata"]["resourceVersion"].as_str().unwrap();
     assert_ne!(rv2, rv);
 
     // stale rv (the old one) -> 409 Conflict
-    let (st, body) =
-        send(r.clone(), "PUT", "/api/v1/namespaces/default/configmaps/c", json_body(&cm("c", json!({"a": "3"}), Some(&rv)))).await;
+    let (st, body) = send(
+        r.clone(),
+        "PUT",
+        "/api/v1/namespaces/default/configmaps/c",
+        json_body(&cm("c", json!({"a": "3"}), Some(&rv))),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["reason"], "Conflict");
 }
@@ -138,8 +196,20 @@ async fn update_cas_conflict_on_stale_resourceversion() {
 #[tokio::test]
 async fn delete_then_get_404() {
     let r = app();
-    send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("d", json!({}), None))).await;
-    let (st, body) = send(r.clone(), "DELETE", "/api/v1/namespaces/default/configmaps/d", None).await;
+    send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("d", json!({}), None)),
+    )
+    .await;
+    let (st, body) = send(
+        r.clone(),
+        "DELETE",
+        "/api/v1/namespaces/default/configmaps/d",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["kind"], "ConfigMap");
     let (st, _) = send(r, "GET", "/api/v1/namespaces/default/configmaps/d", None).await;
@@ -149,14 +219,23 @@ async fn delete_then_get_404() {
 #[tokio::test]
 async fn patch_strategic_merge_deep_merges_data() {
     let r = app();
-    send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("p", json!({"a": "1"}), None))).await;
+    send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("p", json!({"a": "1"}), None)),
+    )
+    .await;
 
     let patch = json!({ "data": { "b": "2" } });
     let (st, body) = send(
         r.clone(),
         "PATCH",
         "/api/v1/namespaces/default/configmaps/p",
-        Some(("application/strategic-merge-patch+json", serde_json::to_vec(&patch).unwrap())),
+        Some((
+            "application/strategic-merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -167,7 +246,13 @@ async fn patch_strategic_merge_deep_merges_data() {
 #[tokio::test]
 async fn patch_merge_patch_replaces_data() {
     let r = app();
-    send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("m", json!({"a": "1"}), None))).await;
+    send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("m", json!({"a": "1"}), None)),
+    )
+    .await;
 
     // RFC 7386 merge-patch on a scalar map merges too (data is a map of scalars).
     let patch = json!({ "data": { "b": "2" } });
@@ -175,7 +260,10 @@ async fn patch_merge_patch_replaces_data() {
         r,
         "PATCH",
         "/api/v1/namespaces/default/configmaps/m",
-        Some(("application/merge-patch+json", serde_json::to_vec(&patch).unwrap())),
+        Some((
+            "application/merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -186,14 +274,23 @@ async fn patch_merge_patch_replaces_data() {
 #[tokio::test]
 async fn patch_json_patch_adds_field() {
     let r = app();
-    send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm("j", json!({"a": "1"}), None))).await;
+    send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/configmaps",
+        json_body(&cm("j", json!({"a": "1"}), None)),
+    )
+    .await;
 
     let patch = json!([ { "op": "add", "path": "/data/b", "value": "2" } ]);
     let (st, body) = send(
         r,
         "PATCH",
         "/api/v1/namespaces/default/configmaps/j",
-        Some(("application/json-patch+json", serde_json::to_vec(&patch).unwrap())),
+        Some((
+            "application/json-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
@@ -218,7 +315,13 @@ async fn cluster_scoped_namespace_crud() {
 async fn scope_mismatch_yields_404() {
     let r = app();
     // namespaced resource via the cluster (no-namespace) create path -> 404
-    let (st, _) = send(r.clone(), "POST", "/api/v1/configmaps", json_body(&cm("x", json!({}), None))).await;
+    let (st, _) = send(
+        r.clone(),
+        "POST",
+        "/api/v1/configmaps",
+        json_body(&cm("x", json!({}), None)),
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     // cluster-scoped resource via the namespaced list path -> 404
     let (st, _) = send(r, "GET", "/api/v1/namespaces/default/nodes", None).await;
@@ -237,16 +340,34 @@ async fn unknown_resource_is_404() {
 async fn grouped_crd_crud() {
     let r = app();
     let lr = json!({ "apiVersion": "init-pro.io/v1", "kind": "LuaRouter", "metadata": { "name": "lr1", "namespace": "default" }, "spec": { "routes": [] } });
-    let (st, body) = send(r.clone(), "POST", "/apis/init-pro.io/v1/namespaces/default/luarouters", json_body(&lr)).await;
+    let (st, body) = send(
+        r.clone(),
+        "POST",
+        "/apis/init-pro.io/v1/namespaces/default/luarouters",
+        json_body(&lr),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(body["kind"], "LuaRouter");
 
-    let (st, body) = send(r.clone(), "GET", "/apis/init-pro.io/v1/namespaces/default/luarouters", None).await;
+    let (st, body) = send(
+        r.clone(),
+        "GET",
+        "/apis/init-pro.io/v1/namespaces/default/luarouters",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["kind"], "LuaRouterList");
     assert_eq!(body["items"].as_array().unwrap().len(), 1);
 
-    let (st, _) = send(r, "GET", "/apis/init-pro.io/v1/namespaces/default/luarouters/lr1", None).await;
+    let (st, _) = send(
+        r,
+        "GET",
+        "/apis/init-pro.io/v1/namespaces/default/luarouters/lr1",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
 }
 
@@ -254,14 +375,29 @@ async fn grouped_crd_crud() {
 async fn list_pagination_key_cursor() {
     let r = app();
     for i in 0..5 {
-        send(r.clone(), "POST", "/api/v1/namespaces/default/configmaps", json_body(&cm(&format!("c{i}"), json!({}), None))).await;
+        send(
+            r.clone(),
+            "POST",
+            "/api/v1/namespaces/default/configmaps",
+            json_body(&cm(&format!("c{i}"), json!({}), None)),
+        )
+        .await;
     }
     // page size 2 -> 2 items + a continue token
-    let (st, body) = send(r.clone(), "GET", "/api/v1/namespaces/default/configmaps?limit=2", None).await;
+    let (st, body) = send(
+        r.clone(),
+        "GET",
+        "/api/v1/namespaces/default/configmaps?limit=2",
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["items"].as_array().unwrap().len(), 2);
     let cont = body["metadata"]["continue"].as_str().unwrap();
-    assert!(!cont.is_empty(), "continue token must be set when more pages remain");
+    assert!(
+        !cont.is_empty(),
+        "continue token must be set when more pages remain"
+    );
 
     // follow the cursor -> next page
     let next = format!("/api/v1/namespaces/default/configmaps?limit=2&continue={cont}");
