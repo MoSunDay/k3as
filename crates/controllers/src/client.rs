@@ -61,7 +61,7 @@ impl StorageClient {
 
 /// Recover the namespace segment of a `/registry/[g/]r/[ns/]name` path.
 /// `group` disambiguates the 4-segment cluster-vs-namespaced case.
-fn namespace_of_path(path: &str, group: &str) -> Option<String> {
+pub(crate) fn namespace_of_path(path: &str, group: &str) -> Option<String> {
     let mut segs: Vec<&str> = path
         .strip_prefix("/registry/")
         .unwrap_or(path)
@@ -96,7 +96,7 @@ fn set_resource_version(value: &mut Value, mod_revision: u64) {
 }
 
 /// Set `metadata.namespace` (local copy of the apiserver helper).
-fn set_namespace(value: &mut Value, namespace: &str) {
+pub(crate) fn set_namespace(value: &mut Value, namespace: &str) {
     if let Some(obj) = value.as_object_mut() {
         let meta = obj
             .entry("metadata")

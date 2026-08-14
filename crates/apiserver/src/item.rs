@@ -21,7 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::apply;
 use crate::error::{storage_error, ApiError};
 use crate::state::{
-    item_key, resolve, resource_revision, set_resource_version, set_type_meta, AppState, Loc,
+    item_key, resolve, resource_revision, set_namespace, set_resource_version, set_type_meta,
+    AppState, Loc,
 };
 
 /// `DELETE /<item>?resourceVersion=&propagationPolicy=&dryRun=`.
@@ -75,6 +76,26 @@ pub(crate) async fn do_replace(st: &AppState, loc: &Loc, name: &str, mut body: V
     let key = item_key(loc, &res, name);
     let if_revision = resource_revision(&body);
     set_type_meta(&mut body, &res.api_version, &res.kind);
+    // Upstream parity: a replace on a namespaced path owns the namespace.
+    // Default it from the URI when the body omits it (kubectl replace/apply
+    // bodies routinely do) and reject a mismatch. Without the default the
+    // stored object -- and the watch event derived from it -- loses
+    // `metadata.namespace`, which desynced every informer cache keyed
+    // `ns/name` (the G18 golden hang: Deployment status never rewritten).
+    if let Some(ns) = &loc.namespace {
+        let body_ns = body
+            .pointer("/metadata/namespace")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if body_ns.is_empty() {
+            set_namespace(&mut body, ns);
+        } else if body_ns != ns {
+            return ApiError::BadRequest(format!(
+                "metadata.namespace: Invalid value: {body_ns}: must match the request namespace {ns}"
+            ))
+            .into_response();
+        }
+    }
     match st.store.update(&key, body, if_revision).await {
         Ok(entry) => {
             finalize_if_complete(st, &key, &entry).await;

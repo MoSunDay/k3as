@@ -79,18 +79,31 @@ impl WorkQueue {
             let mut rx = self.inner.receiver.lock().await;
             rx.recv().await?
         };
-        self.inner.dirty.lock().unwrap().remove(&key);
-        self.inner.processing.lock().unwrap().insert(key.clone());
+        // Same atomicity rule as `done`: keep `dirty` held while the key
+        // moves into `processing`, so a concurrent `add` cannot observe a
+        // key that is in neither set (a duplicate send is harmless; a lost
+        // one is not).
+        {
+            let mut dirty = self.inner.dirty.lock().unwrap();
+            dirty.remove(&key);
+            self.inner.processing.lock().unwrap().insert(key.clone());
+        }
         Some(key)
     }
 
     /// Mark a key finished; re-send it if it was re-added while processing.
     pub fn done(&self, key: &str) {
+        // Atomic hand-off: hold `dirty` while clearing `processing` (the
+        // documented dirty-before-processing order). Releasing `dirty` first
+        // would open a window where a concurrent `add` sees the key still
+        // processing, defers it into `dirty`, and nobody ever sends it --
+        // every later `add` early-returns on `dirty.contains` and the key
+        // is permanently undeliverable (the lost-wakeup zombie observed as
+        // G18's never-rewritten Deployment status).
         let dirty = self.inner.dirty.lock().unwrap();
         if dirty.contains(key) {
             let _ = self.inner.tx.send(key.to_string());
         }
-        drop(dirty);
         self.inner.processing.lock().unwrap().remove(key);
     }
 
@@ -152,6 +165,48 @@ mod tests {
         assert_eq!(q.next().await.as_deref(), Some("ns/a"));
         assert_eq!(q.len(), 0);
         q.done("ns/a");
+    }
+
+    /// Regression (T3.1b golden G18 hang): a concurrent `add` landing
+    /// between `done`'s dirty check and its `processing` removal used to
+    /// defer the key into `dirty` with no sender, making it permanently
+    /// undeliverable. Hammer `add` from threads while next/done churn to
+    /// prove the hand-off is lossless: every pending add must be delivered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_add_during_done_never_loses_keys() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let q = WorkQueue::new();
+        let alive = Arc::new(AtomicBool::new(true));
+        let adder = {
+            let q = q.clone();
+            let alive = alive.clone();
+            std::thread::spawn(move || {
+                while alive.load(Ordering::Relaxed) {
+                    q.add("ns/z".into());
+                }
+            })
+        };
+        // next/done churn against the concurrent adder: the queue is
+        // non-empty the whole time, so each iteration is fast.
+        for _ in 0..2_000 {
+            let got = tokio::time::timeout(Duration::from_millis(100), q.next()).await;
+            if let Ok(Some(k)) = got {
+                assert_eq!(k, "ns/z");
+                q.done("ns/z");
+            }
+        }
+        alive.store(false, Ordering::Relaxed);
+        adder.join().unwrap();
+        // After the adder stops, one final add must still be delivered --
+        // with the pre-fix lost hand-off the key stayed stuck in `dirty`.
+        q.add("ns/z".into());
+        let got = tokio::time::timeout(Duration::from_millis(500), q.next()).await;
+        assert_eq!(
+            got.expect("final add must be delivered").as_deref(),
+            Some("ns/z")
+        );
+        q.done("ns/z");
+        assert_eq!(q.len(), 0);
     }
 
     #[tokio::test]
