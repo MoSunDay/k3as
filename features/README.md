@@ -8,7 +8,7 @@ status of record lives in `plans/init-pro/index.md`.
 | discovery-api | done (T1.1 + T1.2a) | [card](discovery-api.md) | api, apiserver | `crates/api/src/discovery.rs`, `crates/apiserver/`, `golden/` |
 | router-data-plane | done / M1 (T5.1-T5.4) | [card](router-data-plane.md) | router | `crates/router/` |
 | storage-layer | landed (T2.1/T2.2) | [card](storage-layer.md) | storage | `crates/storage/` (`backend.rs`, `embedded.rs`) |
-| controllers | landed (T3.1a) | [card](controllers.md) | controllers | `crates/controllers/`, `crates/cli/src/runtime.rs` |
+| controllers | done (T3.1a+T3.1b) | [card](controllers.md) | controllers | `crates/controllers/`, `crates/cli/src/runtime.rs` |
 | multicall-cli | done (T0.1, T0.4) | - (see SSOT) | multicall, cli | `crates/multicall/`, `crates/cli/` |
 | build-bundling | done (T0.2) | - (see SSOT) | vendor | `crates/vendor/`, `crates/init-pro/build.rs` |
 

@@ -7,6 +7,73 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 14 — T3.1b: controller-manager closeout — rollout/STS/DS/GC/namespace, golden 21/21 (2026-08-14)
+
+**Goal:** finish T3.1 — everything the kube-controller-manager-equivalent
+slice owes for v1: rolling updates, `kubectl rollout status`,
+StatefulSet, DaemonSet, GC + namespace lifecycle, and the golden
+acceptances to prove them on the real binary.
+
+### S1 — Deployment rolling update (`controllers/rollout.rs`, `conditions.rs`)
+- `maxSurge`/`maxUnavailable` read off raw JSON specs (upstream defaults
+  25%/25%, garbage-tolerant); spec-replica-level availability-window
+  pacing; Progressing → NewReplicaSetAvailable and
+  ProgressDeadlineExceeded condition transitions.
+
+### S2 — `kubectl rollout status` (`crates/kubectl/src/rollout.rs`, Q21)
+- Pure `evaluate` fn over the Deployment JSON (observedGeneration lag,
+  deadline, complete, waiting messages — total function, odd fields
+  default) + a 250 ms poll loop; exit 0 = rolled out, 1 = NotFound /
+  deadline; each NEW waiting message printed once.
+
+### S3 — StatefulSet controller (`controllers/statefulset.rs`, `ordinal.rs`, Q22)
+- `<sts>-<ordinal>` identity, OrderedReady (gated on prior ordinal
+  ready) vs Parallel; one PVC object per claim template per ordinal,
+  never deleted on scale-down; ControllerRevision `<sts>-<hash10>` per
+  distinct template; RollingUpdate + OnDelete.
+
+### S4 — DaemonSet controller (`controllers/daemonset.rs`)
+- Node list as source of truth; one pinned pod per matching node
+  (nodeSelector + first nodeAffinity term, In/NotIn/Exists/
+  DoesNotExist); deleting/mismatching a node converges placement and
+  the desired/current/ready/updated status numbers.
+
+### S5 — GC + namespace lifecycle (`controllers/gc.rs`, `namespace.rs`, Q20)
+- Managed-owner absence sweep (DELETE-event driven + 2 s backstop);
+  annotation-marked Orphan; namespace controller drains every
+  namespaced kind then performs the terminal delete; `common/src/time.rs`
+  `NowFn` shim for deterministic tests.
+
+### S6 — golden G18-G21 → 21/21 (and two real bugs found)
+- **Workqueue hand-off race:** `done()` released the dirty lock before
+  removing the key from `processing`, so a concurrent `add` in that
+  window deferred the key into `dirty` with no notification — a
+  permanently undeliverable key and a zombie object that never
+  reconciled again. `done()`/`next()` now hold the dirty lock across
+  the processing mutation; regression test
+  `concurrent_add_during_done_never_loses_keys` (2 000 next/done
+  iterations against a racing adder thread).
+- **PUT dropped `metadata.namespace`:** `do_replace` stored the body
+  verbatim, so a namespace-less PUT (exactly what the golden script
+  sends) emitted watch events without a namespace — informers upserted
+  under a bare-name key, the real `ns/name` cache entry went stale, and
+  reconcile diffed equal-but-wrong objects into a silent no-op (status
+  never rewritten). PUT now defaults the namespace from the request
+  location and rejects mismatches with 400; the informer additionally
+  normalizes every event's namespace from the storage path.
+- Script hardening: expected-failure kubectl calls use `rc=0; cmd ||
+  rc=$?` (a bare `cmd; rc=$?` under `set -e` killed the whole run);
+  object counts parse JSON instead of grepping `"name"` (ownerReferences
+  inflate that count).
+
+### Numbers
+- Tests 399 → 489 (+51 S1, +8 S2, +11 S3, +19 S4, +19 S5, +1 workqueue
+  regression); clippy `-D warnings` 0; fmt clean; golden 21/21;
+  multicall-selftest, cli-flag-parity (16), discovery-parity,
+  graceful-shutdown all green.
+- T3.1 → **done**; unlocks T6.1/T7.3 on the DAG; next critical-path
+  gate: T3.2 (scheduler). Q21/Q22 recorded in `decisions.md`.
+
 ## Sprint 13 — T3.1a: controller-manager core loops (informer/workqueue/Lease election + ReplicaSet/Deployment/Endpoints) (2026-08-14)
 
 **Goal:** land the first slice of T3.1 — the kube-controller-manager-
