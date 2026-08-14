@@ -9,7 +9,7 @@
 //! consistency) while caches drive the fan-out.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use storage::{Key, KeyPrefix, StorageBackend, WatchEvent};
 use tokio::task::JoinHandle;
@@ -58,7 +58,7 @@ impl ControllerManager {
             identity: format!("init-pro-{}", crate::id::rand_suffix(5)),
             lease_duration: 30,
             retry_period: 500,
-            now,
+            now: now.clone(),
         };
         let (leader_handle, mut leader_rx) =
             LeaderElector::new(client.clone(), cfg).spawn(stop.clone());
@@ -85,7 +85,7 @@ impl ControllerManager {
                 }
                 tracing::info!("acquired leadership; starting controller set");
                 bootstrap_namespaces(&client).await;
-                let set = spawn_set(&client, &caches, &queues, stop.clone());
+                let set = spawn_set(&client, &caches, &queues, stop.clone(), now.clone());
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => {
@@ -141,6 +141,7 @@ fn spawn_set(
     caches: &Arc<Caches>,
     queues: &Arc<Queues>,
     stop: Stop,
+    now: NowFn,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -228,7 +229,15 @@ fn spawn_set(
         (queues.services.clone(), Kind::Service),
     ] {
         for _ in 0..2 {
-            spawn_worker(client, caches, &queue, kind, &stop, &mut handles);
+            spawn_worker(
+                client,
+                caches,
+                &queue,
+                kind,
+                &stop,
+                now.clone(),
+                &mut handles,
+            );
         }
     }
     handles
@@ -255,6 +264,7 @@ fn spawn_worker(
     queue: &Arc<WorkQueue>,
     kind: Kind,
     stop: &Stop,
+    now: NowFn,
     out: &mut Vec<JoinHandle<()>>,
 ) {
     let client = client.clone();
@@ -272,7 +282,7 @@ fn spawn_worker(
                     None => break,
                 },
             };
-            match reconcile_key(&client, &caches, kind, &key).await {
+            match reconcile_key(&client, &caches, &queue, kind, &key, &now).await {
                 Ok(()) => {
                     queue.forget(&key);
                     queue.done(&key);
@@ -299,11 +309,19 @@ fn spawn_worker(
     }));
 }
 
+/// Deployment resync period (T3.1b): progress-deadline evaluation is
+/// time-based, so quiesced (event-less) rollouts still need periodic
+/// reconciles. A no-op reconcile writes nothing, so the anti-oscillation
+/// gate holds.
+const DEPLOYMENT_RESYNC: Duration = Duration::from_secs(1);
+
 async fn reconcile_key(
     client: &Arc<dyn Client>,
     caches: &Caches,
+    queue: &Arc<WorkQueue>,
     kind: Kind,
     key: &str,
+    now: &NowFn,
 ) -> Result<(), ControllerError> {
     let (ns, name) = match key.split_once('/') {
         Some((ns, name)) => (ns, name),
@@ -314,7 +332,11 @@ async fn reconcile_key(
             let Some(dep) = caches.deployments.get(ns, name) else {
                 return Ok(()); // deleted from cache: nothing to do
             };
-            deployment::reconcile(client, &dep).await
+            deployment::reconcile(client, &dep, now()).await?;
+            // Resync (see DEPLOYMENT_RESYNC); the loop self-terminates once
+            // the object leaves the cache.
+            queue.add_after(key.to_string(), DEPLOYMENT_RESYNC);
+            Ok(())
         }
         Kind::ReplicaSet => {
             let Some(rs) = caches.replicasets.get(ns, name) else {

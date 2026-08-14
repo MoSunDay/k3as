@@ -124,6 +124,22 @@ pub fn owner_reference(name: &str, uid: &str, kind: &str, api_version: &str) -> 
     })
 }
 
+/// Pod readiness (moved here from the Endpoints controller for T3.1b: the
+/// ReplicaSet status and Deployment availability now share it). Pods with
+/// NO conditions at all are ready-by-default -- without kubelet (T4.2)
+/// nothing would ever report Ready and every count would stay at zero. A
+/// conditions array with an explicit `Ready` condition honors it.
+pub fn pod_is_ready(pod: &Value) -> bool {
+    match pod.pointer("/status/conditions").and_then(Value::as_array) {
+        None => true,
+        Some(conditions) => conditions
+            .iter()
+            .find(|c| c.get("type").and_then(Value::as_str) == Some("Ready"))
+            .map(|c| c.get("status").and_then(Value::as_str) == Some("True"))
+            .unwrap_or(true),
+    }
+}
+
 /// Deep equality ignoring volatile metadata: `uid`, `resourceVersion`,
 /// `creationTimestamp`, `managedFields`. `status` IS compared (controllers
 /// use this for write-if-changed decisions).
@@ -244,5 +260,23 @@ mod tests {
         assert!(!semantic_eq(&a, &c));
         let d = json!({"metadata": {}, "spec": {"x": 1}, "status": {"replicas": 3}});
         assert!(!semantic_eq(&a, &d), "status must be compared");
+    }
+
+    #[test]
+    fn pod_is_ready_defaults_to_ready_without_conditions() {
+        // No conditions at all -> ready (v1: no kubelet to report Ready).
+        assert!(pod_is_ready(&json!({"metadata": {"name": "p"}})));
+        // Explicit Ready condition honored both ways.
+        assert!(pod_is_ready(&json!({"status": {"conditions": [
+            {"type": "PodScheduled", "status": "True"},
+            {"type": "Ready", "status": "True"},
+        ]}})));
+        assert!(!pod_is_ready(&json!({"status": {"conditions": [
+            {"type": "Ready", "status": "False"},
+        ]}})));
+        // Conditions present but no Ready entry -> ready-by-default.
+        assert!(pod_is_ready(&json!({"status": {"conditions": [
+            {"type": "PodScheduled", "status": "True"},
+        ]}})));
     }
 }
