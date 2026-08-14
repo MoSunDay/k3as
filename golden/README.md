@@ -29,11 +29,16 @@ timestamps/uids/resourceVersions in discovery payloads).
 | G12 | `GET /api/v1/namespaces/default/configmaps?watch=1`           | (status 200)                | watch stream opens → 200                                 | T1.2b         |
 | G13 | `PATCH /api/v1/namespaces/default/configmaps/golden-apply-cm` | `apply-patch+yaml`          | creates golden-apply-cm → 201 (fieldManager=golden-test) | T1.2c         |
 | G14 | `PATCH /api/v1/namespaces/default/configmaps/golden-apply-cm` | `apply-patch+yaml`          | updates golden-apply-cm → 200 (fieldManager=golden-test) | T1.2c         |
+| G15 | `GET /api/v1/namespaces/default/configmaps?watch=1&resourceVersion=0` | (poll grep)                | watch replays retained history (ADDED)                   | T2.2          |
+| G16 | `GET /apis/apps/v1`                                           | `discovery-apps-v1.json`    | apps/v1 APIResourceList (deployments/replicasets/statefulsets/daemonsets) | T3.1a         |
+| G17 | `POST/PUT .../deployments/golden-dep` + pods/endpoints polls  | (convergence poll)          | Deployment scale 3→1 converges; Endpoints reflect membership | T3.1a         |
 
 ## Growing the suite
 
 This baseline now spans discovery (T1.2a) plus a CRUD/watch/server-side-apply
-round-trip over the embedded store (T1.2b); it started life as the
+round-trip over the embedded store (T1.2b), watch history replay (T2.2), and
+the apps/v1 discovery + Deployment-convergence acceptance of the in-process
+controller manager (T3.1a); it started life as the
 empty-cluster discovery-only contract (G01-G06). When a layer adds a
 wire-visible behavior, append its golden case here and to
 `scripts/golden-conformance.sh`, then commit the new fixture. Flaky cases are
