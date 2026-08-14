@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 use storage::{KeyPrefix, StoredEntry, WatchEvent};
 
-use crate::client::Client;
+use crate::client::{namespace_of_path, set_namespace, Client};
 use crate::object::{object_key, resource_version};
 use crate::stop::Stop;
 
@@ -144,6 +144,40 @@ pub fn event_object_key(ev: &WatchEvent) -> Option<String> {
     }
 }
 
+/// Defensive payload normalization: a writer that omits
+/// `metadata.namespace` (an apiserver replace path did before the URI
+/// defaulting landed) would otherwise upsert the cache under a bare `name`
+/// key while the real `ns/name` entry goes stale forever -- the reconcile
+/// then no-ops against the zombie object. Keying from the authoritative
+/// storage path (group-aware) closes the class for every writer.
+fn normalize_event_namespace(ev: WatchEvent, prefix: &KeyPrefix) -> WatchEvent {
+    match ev {
+        WatchEvent::Put(e) => {
+            let has_ns = e
+                .value
+                .pointer("/metadata/namespace")
+                .and_then(Value::as_str)
+                .is_some_and(|ns| !ns.is_empty());
+            if has_ns {
+                return WatchEvent::Put(e);
+            }
+            let Some(ns) = namespace_of_path(&e.key, &prefix.group) else {
+                return WatchEvent::Put(e); // cluster-scoped path shape
+            };
+            let mut value = e.value.clone();
+            set_namespace(&mut value, &ns);
+            WatchEvent::Put(Arc::new(StoredEntry {
+                key: e.key.clone(),
+                value,
+                create_revision: e.create_revision,
+                mod_revision: e.mod_revision,
+                version: e.version,
+            }))
+        }
+        other => other,
+    }
+}
+
 /// The object an event refers to (the new value, or the deleted one).
 pub fn event_object(ev: &WatchEvent) -> Option<Value> {
     match ev {
@@ -231,6 +265,7 @@ impl Informer {
                     _ = stop.cancelled() => return,
                     ev = w.recv() => match ev {
                         Some(ev) => {
+                            let ev = normalize_event_namespace(ev, &self.prefix);
                             let rev = ev.revision();
                             store.apply_event(&ev);
                             handler(&ev);
