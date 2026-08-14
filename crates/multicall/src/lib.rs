@@ -37,7 +37,9 @@ impl Action {
         }
     }
 
-    /// True for bundled-peer CLIs not yet implemented in Phase 1.
+    /// True for bundled-peer CLI aliases (external CLIs). kubectl has had a
+    /// real in-repo implementation since T3.1b but is still resolved — and
+    /// classified — as a peer alias; the rest remain stubs.
     pub const fn is_external(self) -> bool {
         matches!(
             self,
@@ -90,9 +92,13 @@ where
 
 /// Handle a bundled-peer alias invocation.
 ///
-/// Phase 1 has no embedded peers yet (that is T0.2/T0.4); until then we still
-/// answer `--help` with exit-success so the multicall contract holds, and
-/// reject anything else with a clear not-yet-implemented error.
+/// `kubectl` left this path in T3.1b — it now has a real in-repo
+/// implementation (`rollout status` over plain HTTP, Q21) and is dispatched
+/// before the stub in `init-pro`'s main. The stub remains for
+/// `ctr`/`crictl`/`containerd`/`etcd` until the bundling pipeline
+/// (T0.2/T0.4) embeds them; until then we still answer `--help` with
+/// exit-success so the multicall contract holds, and reject anything else
+/// with a clear not-yet-implemented error.
 pub fn external_stub(action: Action, args: &[String]) -> std::process::ExitCode {
     use std::process::ExitCode;
     debug_assert!(
