@@ -7,6 +7,103 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 13 — T3.1a: controller-manager core loops (informer/workqueue/Lease election + ReplicaSet/Deployment/Endpoints) (2026-08-14)
+
+**Goal:** land the first slice of T3.1 — the kube-controller-manager-
+equivalent framework (informer / workqueue / leader election) plus the
+ReplicaSet → Deployment → Endpoints reconciler chain, proven end-to-end on
+the real binary via a new golden acceptance (scale 1→3→1 converges).
+
+### New crate: controllers (`crates/controllers/`, 19 files, all ≤334 lines)
+- **`src/client.rs`** — small `Client` trait + `StorageClient`, the
+  in-process transport over the same `Arc<dyn StorageBackend>` the
+  apiserver uses (**Q19**, recorded this sprint); `resourceVersion` is
+  projected identically to the wire. The HTTP-backed impl arrives with
+  T3.4/T1.3 at the trait boundary.
+- **`src/workqueue.rs`** — client-go workqueue semantics: dirty/processing
+  dedup, rate-limited requeue with a pure `backoff_for`, forget.
+- **`src/informer.rs`** — LIST → cache → `watch` from `max_revision`;
+  re-list on lag/close; synthetic initial events; `ObjectStore`
+  (RwLock cache readable from sync handlers).
+- **`src/stop.rs` / `src/time.rs` / `src/id.rs` / `src/error.rs`** —
+  latched `Stop` token; RFC3339 without chrono; random suffix ids.
+- **`src/object.rs`** — JSON object helpers: label selectors
+  (matchLabels + matchExpressions), `controller_of`/owner-reference,
+  `semantic_eq` write-if-changed guard, fnv template hash, rand suffix,
+  placeholder pod IP.
+- **`src/leaderelection.rs`** — **Q18** as-built: coordination.k8s.io
+  Lease; acquire = create, renew = CAS, expired = CAS takeover with
+  `leaseTransitions++`; injected `NowFn` clock keeps expiry tests
+  deterministic.
+- **`src/runner.rs`** — `ControllerManager::spawn`, leader-gated: 4
+  informers (deployments/replicasets/pods/services), 3 workqueues, 2
+  workers each; pod → owner-RS + matching-Service reverse enqueue;
+  bootstrap of default/kube-system/kube-public/kube-node-lease
+  namespaces on becoming leader.
+- **`src/controllers/`** — the reconcilers:
+  - **ReplicaSet** — counts owned pods via the controller ownerRef,
+    creates with 5-char suffix names, deletes surplus preferring
+    unscheduled pods.
+  - **Deployment** — template-hash-named ReplicaSets; instant scale-up +
+    drain-down = Recreate-flavored v1 rollout (maxSurge rolling is
+    T3.1b); old RS deleted when `status.replicas==0`; status written
+    only-if-changed (`semantic_eq` guard).
+  - **Endpoints** — Service selector matching (both LabelSelector and
+    plain-map shapes); ready = Ready condition True or NO conditions
+    (documented v1 default without kubelet); placeholder deterministic
+    10.42.x.y pod IPs hashed from UID until kubelet/CNI (T4.2/T4.3);
+    write-if-changed.
+
+### Wiring (`crates/cli/`)
+- **`src/discovery.rs`** — serves apps/v1 (Deployment/ReplicaSet + inert
+  StatefulSet/DaemonSet schema for T3.1b), core/v1 endpoints, and
+  coordination.k8s.io/v1 leases.
+- **`src/runtime.rs`** — spawns the `ControllerManager` in the apiserver
+  branch sharing the same storage `Arc`; drains it on shutdown.
+  `--disable-apiserver` ⇒ no controllers.
+
+### Golden (T0.6)
+- New fixtures: `discovery-apis.json` (apps + coordination.k8s.io groups),
+  `discovery-core-v1.json` (+endpoints), new `discovery-apps-v1.json`.
+- **G16** — apps/v1 group is byte-stable against its fixture.
+- **G17** — T3.1a acceptance on the real binary: Deployment scale
+  1→3→1 converges, pods converge, Endpoints reflect membership.
+- Suite: **17/17** (was 15/15).
+
+### Tests & gates (fresh runs)
+- 399 passed / 0 failed (was 360; **+39**): 25 unit inline in the
+  controllers crate + 14 integration — `tests/informer.rs` (4),
+  `tests/leaderelection.rs` (4), `tests/controllers.rs` (6 in-process e2e
+  incl. scale 1→3→1 convergence, Endpoints membership, and a
+  quiesce-after-convergence anti-oscillation gate).
+
+| Gate | Result |
+|------|--------|
+| `cargo build --workspace --locked` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 0 warnings |
+| `cargo test --workspace` | 399 / 0 |
+| `scripts/golden-conformance.sh` | 17/17 |
+| `scripts/multicall-selftest.sh` | green |
+| `scripts/cli-flag-parity-test.sh` | green |
+| `scripts/apiserver-discovery-parity-test.sh` | green |
+| `scripts/graceful-shutdown-test.sh` | green (controllers drained) |
+
+### Decisions & SSOT
+- **Q19 locked:** controller-manager transport = in-process `Client`
+  trait over the shared storage `Arc` for v1 (zero boot-order/auth
+  coupling, socket-free tests); HTTP-backed client swaps in at the trait
+  boundary with T3.4 (HA / out-of-process) and T1.3 (auth). Controllers
+  bypass admission/validation until such a layer exists (none does yet).
+- `index.md` + `plan/03-control-plane.md`: T3.1 not-started →
+  **in-progress (T3.1a done, T3.1b remaining)**. `features/controllers.md`
+  card created. Next gates: **T3.1b** completion, then **T3.2**
+  (scheduler); T4.1 early risk-spike still recommended.
+
+### Deferred to T3.1b
+- StatefulSet + DaemonSet controllers (schemas already served, inert).
+- Garbage collector (owner-reference graph).
+- `kubectl rollout status` parity; `maxSurge`/rolling update strategy.
+
 ## Sprint 12 — T2.2 closeout: watch historical replay + compaction (2026-08-14)
 
 **Goal:** finish the last in-progress TODO on the critical path — bring
