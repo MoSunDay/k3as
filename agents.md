@@ -12,7 +12,7 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 `crictl` | `containerd` | `etcd` (symlink deployment just works). It has a
 first-class built-in Lua Router - an openresty-style programmable HTTP
 data plane driven by Lua via mlua - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (10 crates).
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (11 crates).
 
 ## The SSOT (single source of truth)
 
@@ -21,7 +21,7 @@ is complete; Phase 2 (persistence + control plane) is in progress. The Cargo wor
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q18
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q19
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -84,6 +84,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
 | `api` | Resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1). |
 | `apiserver` | HTTP discovery + REST CRUD/watch/SSA over the storage trait (T1.2 done). |
+| `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers (T3.1a). |
 | `router` | Built-in Lua data plane: phase pipeline, resty.*, Ingress->route compiler, balancer, reverse proxy, TLS (T5.1-T5.4). |
 | `storage` | `StorageBackend` trait + embedded etcd-semantics store incl. watch replay + compaction (T2.1/T2.2 done). |
 
@@ -100,9 +101,12 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   etcd revision/CAS semantics, watch historical replay + compaction);
   durability + alternative backends are T2.3 (Q17). Leader election is
   Lease-object + CAS, not etcd leases (Q18).
-- Next gate on the critical path: T3.1 (controller loops / informers) -
-  unblocked since T1.2 + T2.2 are done. T4.1 (containerd bundling) is the
-  longest unstarted chain to M3 and worth an early risk-spike.
+- Next gate on the critical path: T3.1a landed (the `controllers` crate +
+  golden G17 acceptance: Deployment scale 1->3->1 converges, Endpoints
+  reflect membership); remaining T3.1b = StatefulSet/DaemonSet/GC/
+  rollout-status parity. Next gates: T3.1b completion, then T3.2
+  (scheduler). T4.1 (containerd bundling) is the longest unstarted chain
+  to M3 and still worth an early risk-spike.
 - The server serves real REST CRUD/watch/SSA over the embedded store
   (kubectl-compatible); zero-restart durability arrives with T2.3.
 
@@ -118,4 +122,4 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - Q12/Q13/Q14 - Router VM model, coroutine<->async bridge, per-phase
   coroutines and filter semantics.
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q18).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q19).

@@ -866,3 +866,44 @@ backend-private primitives. `StorageBackend` does not grow leases.
   not hardware-timed like etcd TTLs — acceptable for v1; T3.4 revisits
   fencing if HA demands stronger guarantees.
 - → plan/03-control-plane.md T3.1 updated accordingly.
+
+---
+
+## Q19 — Controller-manager transport: in-process storage trait vs HTTP client (T3.1a)
+
+**Date.** 2026-08-14 (Sprint 13).
+
+**Context.**
+T3.1 controllers need a Kubernetes API client. Upstream controllers talk
+HTTPS to the apiserver; init-pro v1 is a single binary where apiserver +
+controllers share one process and one storage `Arc` (Q1, Q17).
+
+**Options.**
+- A) **HTTP client loopback through the apiserver.** Wire-faithful and it
+  exercises the HTTP stack — but it needs auth (T1.3 not started), TLS
+  (deferred per Q11), serialization overhead per hop, and adds a
+  self-dependency loop at boot (controllers ⇄ apiserver ⇄ controllers).
+- B) **In-process `Client` trait over `Arc<dyn StorageBackend>` shared with
+  the apiserver.** Same object store, same CAS/watch semantics, zero
+  network.
+- C) **Both behind a trait; the HTTP impl is deferred.**
+
+**Decision.**
+C-shape now: define the small `Client` trait in the controllers crate, ship
+the `StorageClient` (in-process) for v1; the HTTP-backed implementation
+arrives with T3.4 (HA / out-of-process controllers) and T1.3 (auth) — swap
+at the trait boundary.
+
+**Consequences.**
+- `+` Zero boot-order/auth coupling: the manager starts whenever the
+  storage `Arc` exists, no sockets required.
+- `+` Tests run the full manager against `EmbeddedStorage` in-process,
+  without sockets (deterministic, fast — 14 controllers integration tests).
+- `+` The trait keeps T3.4 honest: out-of-process controllers are an impl
+  swap, not a rewrite.
+- `−` Controllers bypass apiserver admission/validation — no such layer
+  exists yet in init-pro; when T1.3+ adds admission, the HTTP client or
+  in-process admission hooks must be revisited.
+- `−` `resourceVersion` semantics must be projected identically to the
+  wire (`client.rs` does this explicitly).
+- → plan/03-control-plane.md T3.1 records the as-built transport.

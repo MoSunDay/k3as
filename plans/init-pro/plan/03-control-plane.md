@@ -18,15 +18,34 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
   - Per-controller reconcile with upstream-identical status fields.
   - Leader election via `coordination.k8s.io` Lease + resourceVersion
     CAS (Q18) so only one server runs them — no etcd-lease dependency.
+  - **As-built (T3.1a):** the client is a small `Client` trait with an
+    in-process `StorageClient` over the `Arc<dyn StorageBackend>` shared
+    with the apiserver (**Q19**); the HTTP-backed impl arrives with
+    T3.4/T1.3. Informer = LIST → cache → watch-from-max_revision with
+    re-list on lag/close; workqueue has client-go dirty/processing dedup
+    + rate-limited requeue. Deployment rollout is Recreate-flavored v1
+    (instant scale-up + drain-down; `maxSurge` rolling is T3.1b).
+    Placeholder deterministic 10.42.x.y pod IPs from UID hash and
+    ready-by-default-without-conditions are the documented v1 defaults
+    until kubelet/CNI (T4.2/T4.3). Lease election tests use an injected
+    `NowFn` clock for deterministic expiry.
 
 - **验收手段 / Acceptance**
   - Golden (T0.6): scale a Deployment 1→3→1; pods converge; endpoints
     reflect membership.
   - `kubectl rollout status` parity.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — in-progress (T3.1a done, T3.1b remaining)
+- **证据 / Evidence** — Sprint 13 (T3.1a): `crates/controllers` —
+  ReplicaSet/Deployment/Endpoints reconcilers over the informer/
+  workqueue framework; 399 workspace tests green (+39: 25 unit inline
+  + 14 integration; `tests/controllers.rs` runs 6 in-process e2e cases
+  incl. Deployment scale 1→3→1 convergence, Endpoints membership, and a
+  quiesce-after-convergence anti-oscillation gate). Golden 17/17 — G16
+  (apps/v1 byte diff) + G17 (real binary: scale 1→3→1 converges, pods
+  converge, Endpoints reflect membership).
 - **卡点 / Blockers** — GC owner-reference graph is intricate; scope v1.
+  (GC remains T3.1b, unchanged.)
 - **依赖 / Depends on** — T1.2, T2.2
 
 ---
