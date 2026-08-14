@@ -1,0 +1,16 @@
+[package]
+name = "kubectl"
+description = "In-repo kubectl surface: `rollout status` over a minimal HTTP/1.1 client (T3.1b, Q21)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

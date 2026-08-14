@@ -629,6 +629,7 @@ version = "0.2.0"
 dependencies = [
  "cli",
  "common",
+ "kubectl",
  "multicall",
  "vendor",
 ]
@@ -741,6 +742,14 @@ dependencies = [
  "serde-value",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "kubectl"
+version = "0.2.0"
+dependencies = [
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

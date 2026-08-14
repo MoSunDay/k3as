@@ -17,6 +17,7 @@ path = "src/main.rs"
 multicall = { workspace = true }
 cli = { workspace = true }
 common = { workspace = true }
+kubectl = { workspace = true }
 
 [build-dependencies]
 vendor = { workspace = true }

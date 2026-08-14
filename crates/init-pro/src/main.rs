@@ -33,6 +33,9 @@ fn main() -> ExitCode {
         // Forced init-pro subcommands via alias name.
         Some(Action::Server) => cli::run_forced("server", &extra, &manifest),
         Some(Action::Agent) => cli::run_forced("agent", &extra, &manifest),
+        // kubectl grew a real in-repo surface in T3.1b (`rollout status`
+        // over plain HTTP, Q21) — split out of the external_stub catch-all.
+        Some(Action::Kubectl) => kubectl::run(&extra),
         // Bundled-peer aliases: Phase 1 stubs.
         Some(external) => multicall::external_stub(external, &extra),
     }
