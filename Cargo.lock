@@ -85,6 +85,7 @@ version = "0.2.0"
 dependencies = [
  "api",
  "axum",
+ "common",
  "k8s-openapi",
  "serde",
  "serde_json",
@@ -315,6 +316,7 @@ name = "controllers"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "common",
  "serde",
  "serde_json",
  "storage",

@@ -91,6 +91,12 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
     if res.scope.is_namespaced() {
         set_namespace(&mut body, &namespace);
     }
+    // Upstream apiserver parity (T3.1b, Q20): every Namespace is created with
+    // the `kubernetes` finalizer so deletion is gated on the namespace
+    // controller draining all namespaced content first.
+    if res.kind == "Namespace" {
+        ensure_namespace_finalizer(&mut body);
+    }
     match st.store.create(&key, body).await {
         Ok(entry) => {
             let mut out = entry.value;
@@ -135,6 +141,27 @@ pub(crate) async fn do_list(st: &AppState, loc: &Loc, params: &ListParams) -> Re
         "items": items,
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+/// Set `metadata.finalizers = ["kubernetes"]` when absent/empty (namespace
+/// creation; upstream injects this spec finalizer on every Namespace).
+fn ensure_namespace_finalizer(body: &mut Value) {
+    let already_set = body
+        .pointer("/metadata/finalizers")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    if already_set {
+        return;
+    }
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let meta = obj
+        .entry("metadata")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(m) = meta.as_object_mut() {
+        m.insert("finalizers".into(), json!(["kubernetes"]));
+    }
 }
 
 /// Key-cursor pagination over a list sorted by storage key.

@@ -1,6 +1,12 @@
 //! Controller-manager wiring (T3.1a, T3.2): leader election (Q18) + one
 //! informer per resource + workqueues + reconciler workers.
 //!
+//! T3.1b additions (decision **Q20**): a Namespace informer/queue drives the
+//! namespace lifecycle controller (drain + terminal delete); owner DELETE
+//! events (Deployment/ReplicaSet/Service/StatefulSet/DaemonSet) spawn the
+//! garbage collector (`gc::handle_owner_deleted`), with a 2s periodic
+//! backstop sweep that also re-enqueues terminating namespaces.
+//!
 //! Event fan-out: Deployment events enqueue the Deployment; RS events enqueue
 //! the RS **and** its owner Deployment; StatefulSet events enqueue the
 //! StatefulSet; DaemonSet events enqueue the DaemonSet; Node events (the
@@ -22,7 +28,9 @@ use storage::{Key, KeyPrefix, StorageBackend, WatchEvent};
 use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
-use crate::controllers::{daemonset, deployment, endpoints, replicaset, statefulset, Caches};
+use crate::controllers::{
+    daemonset, deployment, endpoints, gc, namespace, replicaset, statefulset, Caches,
+};
 use crate::error::ControllerError;
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
 use crate::leaderelection::{LeaderElector, LeaseConfig, NowFn};
@@ -39,6 +47,7 @@ struct Queues {
     statefulsets: Arc<WorkQueue>,
     daemonsets: Arc<WorkQueue>,
     services: Arc<WorkQueue>,
+    namespaces: Arc<WorkQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +57,7 @@ enum Kind {
     StatefulSet,
     DaemonSet,
     Service,
+    Namespace,
 }
 
 impl ControllerManager {
@@ -81,6 +91,7 @@ impl ControllerManager {
             statefulsets: Arc::new(WorkQueue::new()),
             daemonsets: Arc::new(WorkQueue::new()),
             services: Arc::new(WorkQueue::new()),
+            namespaces: Arc::new(WorkQueue::new()),
         });
 
         let supervisor = tokio::spawn(async move {
@@ -158,23 +169,29 @@ fn spawn_set(
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
-    // Deployment events -> deployment queue.
+    // Deployment events -> deployment queue (+ GC handoff on DELETE, Q20).
     let q = queues.deployments.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
     let dep_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if let Some(k) = event_object_key(ev) {
             q.add(k);
         }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
 
-    // RS events -> RS queue + owner Deployment queue.
+    // RS events -> RS queue + owner Deployment queue (+ GC handoff).
     let q_rs = queues.replicasets.clone();
     let q_dep = queues.deployments.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
     let rs_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         let Some(k) = event_object_key(ev) else {
             return;
         };
         q_rs.add(k.clone());
         enqueue_owner(&q_dep, ev, "Deployment");
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
 
     // Pod events -> owner RS queue, owner StatefulSet queue (ordered rollout
@@ -203,25 +220,46 @@ fn spawn_set(
         }
     });
 
-    // Service events -> service queue.
+    // Service events -> service queue (+ GC handoff: Services own nothing
+    // in the sweep universe, but the hook keeps the owner set uniform).
     let q = queues.services.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
     let svc_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if let Some(k) = event_object_key(ev) {
             q.add(k);
         }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
 
-    // StatefulSet events (T3.1b) -> statefulset queue.
+    // StatefulSet events (T3.1b) -> statefulset queue (+ GC handoff).
     let q = queues.statefulsets.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
     let sts_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if let Some(k) = event_object_key(ev) {
             q.add(k);
         }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
 
-    // DaemonSet events (T3.1b) -> daemonset queue (deployment pattern).
+    // DaemonSet events (T3.1b) -> daemonset queue (deployment pattern, +
+    // GC handoff).
     let q = queues.daemonsets.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
     let ds_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q.add(k);
+        }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
+    });
+
+    // Namespace events (T3.1b, Q20) -> namespace queue. Cluster-scoped: the
+    // queue key is the bare object name (see the Kind::Namespace arm in
+    // reconcile_key).
+    let q = queues.namespaces.clone();
+    let ns_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if let Some(k) = event_object_key(ev) {
             q.add(k);
         }
@@ -292,6 +330,11 @@ fn spawn_set(
             caches.services.clone(),
             svc_handler,
         ),
+        (
+            KeyPrefix::new("", "namespaces", None),
+            caches.namespaces.clone(),
+            ns_handler,
+        ),
     ];
     for (prefix, store, handler) in sets {
         let informer = Informer::new(prefix);
@@ -308,6 +351,7 @@ fn spawn_set(
         (queues.statefulsets.clone(), Kind::StatefulSet),
         (queues.daemonsets.clone(), Kind::DaemonSet),
         (queues.services.clone(), Kind::Service),
+        (queues.namespaces.clone(), Kind::Namespace),
     ] {
         for _ in 0..2 {
             spawn_worker(
@@ -321,7 +365,54 @@ fn spawn_set(
             );
         }
     }
+
+    // GC backstop (T3.1b, Q20): owner-DELETE hooks drive the common path;
+    // this 2s interval sweeps anything they missed (dangling ownerRefs
+    // written outside the manager, missed events) and re-enqueues
+    // terminating namespaces so the drain always progresses.
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
+    let gc_ns_queue = queues.namespaces.clone();
+    let gc_stop = stop.clone();
+    handles.push(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            tokio::select! {
+                _ = gc_stop.cancelled() => return,
+                _ = tick.tick() => {
+                    if let Err(e) = gc::sweep(&gc_client, &gc_caches).await {
+                        tracing::debug!(error = %e, "gc backstop sweep failed");
+                    }
+                    for ns in gc_caches.namespaces.list(None) {
+                        if ns.pointer("/metadata/deletionTimestamp").is_some() {
+                            if let Some(name) = object::name(&ns) {
+                                gc_ns_queue.add(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }));
     handles
+}
+
+/// Fire-and-forget GC handoff on an owner DELETE event (Q20): the informer
+/// applies the event to its cache BEFORE invoking the handler, so the owner
+/// is already absent when the spawned cascade sweep runs. EventHandler is a
+/// sync closure; spawning is the bridge.
+fn spawn_gc_on_delete(client: &Arc<dyn Client>, caches: &Arc<Caches>, ev: &WatchEvent) {
+    if let WatchEvent::Delete {
+        prev: Some(prev), ..
+    } = ev
+    {
+        let client = client.clone();
+        let caches = caches.clone();
+        let owner = prev.value.clone();
+        tokio::spawn(async move {
+            gc::handle_owner_deleted(&client, &caches, &owner).await;
+        });
+    }
 }
 
 /// Enqueue the controller-owner of the event object (if it is a `kind`).
@@ -404,6 +495,20 @@ async fn reconcile_key(
     key: &str,
     now: &NowFn,
 ) -> Result<(), ControllerError> {
+    // Namespaces are cluster-scoped: their queue key is the BARE object
+    // name (no `ns/` prefix), so they must not go through the namespaced
+    // split below.
+    if let Kind::Namespace = kind {
+        let Some(ns) = caches
+            .namespaces
+            .list(None)
+            .into_iter()
+            .find(|n| object::name(n) == Some(key))
+        else {
+            return Ok(()); // deleted from cache: nothing to do
+        };
+        return namespace::reconcile(client, &ns).await;
+    }
     let (ns, name) = match key.split_once('/') {
         Some((ns, name)) => (ns, name),
         None => ("default", key),
@@ -445,5 +550,8 @@ async fn reconcile_key(
             let existing = client.get(&ep_key).await?;
             endpoints::reconcile(client, &svc, existing.as_ref()).await
         }
+        // Handled by the cluster-scoped early return above; the namespaced
+        // split is meaningless for a bare-name key.
+        Kind::Namespace => Ok(()),
     }
 }
