@@ -29,22 +29,30 @@ and the test double.
   mirrors etcd's `KeyValue`.
 - Optimistic concurrency: `update`/`delete` take an `if_revision` CAS
   (`kubectl apply` stale-revision conflicts).
-- Watch via tokio broadcast.
+- Watch: live events via tokio broadcast; `watch(prefix, Some(n))` REPLAYS
+  retained history (bounded ring, default 10k revisions) from revision `n`
+  (etcd-inclusive) before continuing live -- one lock-ordered seam, no
+  gaps/dups (Sprint 12, T2.2).
+- Compaction: `compact(rev)` advances the watermark; a watch start at/below
+  it errors `Compacted` (upstream 410 Gone / Expired).
+- `DELETED` watch events carry the object's final state (`prev`).
+- Leader election does NOT use this layer's leases (none exist): see Q18
+  (coordination.k8s.io Lease + resourceVersion CAS).
 
 ## Module map (crates/storage/src/)
 
 `backend.rs` (`StorageBackend`, `Watch`) | `embedded.rs`
 (`EmbeddedStorage`) | `entry.rs` (`Revision`, `StoredEntry`, `WatchEvent`)
-| `key.rs` (`Key`, `KeyPrefix`) | `error.rs` (`StorageError`). Re-exported
-at the crate root.
+| `history.rs` (event log + compaction watermark, private) | `key.rs`
+(`Key`, `KeyPrefix`) | `error.rs` (`StorageError`). Re-exported at the
+crate root.
 
 ## Status / next
 
-- Landed: trait + `EmbeddedStorage` + 15 integration tests
-  (`crates/storage/tests/embedded_storage.rs`). NOTE: the SSOT
-  `plans/init-pro/index.md` status table still shows T2.1/T2.2
-  "not-started" - stale, needs a lock-step update.
-- Next: REST CRUD wiring (T1.2) so the discovery-only apiserver gains
-  persistence; then the real etcd-backed impl.
-- Current limitation: the embedded backend is live-watch only (no
-  historical replay / compaction window).
+- Landed: trait + `EmbeddedStorage` + 26 integration tests + 4 history unit
+  tests (replay, compaction, seam losslessness; T2.1 + T2.2 both done in
+  the SSOT).
+- Wired into the apiserver since T1.2b (REST CRUD/watch/SSA); k8s watch
+  `resourceVersion` semantics mapped at the REST layer ("events after N").
+- Remaining limitation: in-memory / non-durable, and no real etcd-gRPC
+  client - both are T2.3 (Q17).

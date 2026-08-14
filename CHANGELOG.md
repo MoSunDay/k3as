@@ -7,6 +7,72 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 12 — T2.2 closeout: watch historical replay + compaction (2026-08-14)
+
+**Goal:** finish the last in-progress TODO on the critical path — bring
+`EmbeddedStorage` up to "enough etcd semantics to feed Layer 3 controller
+loops" (informer reconnect without event loss), then flip the SSOT to done
+and unblock T3.1.
+
+### Storage (`crates/storage/`)
+- **New `src/history.rs`** — bounded revision event log: ring-style capacity
+  (default 10,000 revisions; tunable via `EmbeddedStorage::with_history_capacity`),
+  explicit `compact()` watermark, `since(start)` serving the retained suffix.
+  4 unit tests.
+- **Watch replay (T2.2 core gap)** — `watch(prefix, Some(n))` now snapshots
+  history AND subscribes to the broadcast under one lock, then replays the
+  snapshot before draining live events: a single lock-ordered seam, so the
+  replay→live transition is lossless and duplicate-free by construction.
+  `start_revision` at/below the watermark → `StorageError::Compacted`
+  (etcd `ErrCompacted`). Live consumers that lag past the broadcast capacity
+  get the stream closed (forcing re-list + re-watch) instead of a silent
+  skip.
+- **`compact(revision)` added to `StorageBackend`** — advances the watermark,
+  drops retained history at/below it; reads unaffected. The embedded impl
+  clamps future revisions down to the current one.
+- **`WatchEvent::Delete` now carries `prev`** — the final stored object, so
+  upstream-parity `DELETED` events (and the future GC controller's
+  ownerReference walks) see full state.
+
+### APIServer (`crates/apiserver/`)
+- **Bug found by the new tests:** `ListParams.resource_version` lacked
+  `rename = "resourceVersion"`, so serde silently dropped the wire param —
+  every watch was effectively live-only regardless of the storage layer.
+  Fixed; sibling `DeleteParams` already had the rename.
+- **k8s ↔ etcd watch semantics:** `resourceVersion=N` now maps to storage
+  start `N+1` ("events after N"), `resourceVersion=0` → start of retained
+  history, absent → live-only.
+- **`Compacted` → `410 Gone`** with Status reason `Expired` and message
+  "too old resource version: {requested} ({watermark})" — the informer
+  re-list trigger.
+- **`DELETED` events render the full final object** (resourceVersion =
+  deletion revision; minimal stub only as backend fallback).
+
+### Tests & gates (fresh runs)
+- 360 total (was 341): +11 storage integration (replay order; seam
+  losslessness across 50 replayed + 50 concurrent live writes with strict
+  revision uniqueness; prefix filtering; future start; explicit compact
+  watermarking; get/list intact after compact; future-revision clamp; ring
+  eviction; delete replay with final object; independent multi-watcher),
+  +4 history unit, +4 apiserver watch-over-real-TCP (rv=0 replay then live
+  on one stream; rv=N starts after N; compacted → 410 Expired; DELETED
+  carries final object).
+- Golden conformance 15/15 (was 14/14): new **G15** —
+  `?watch=1&resourceVersion=0` replays prior ADDED history on a real server.
+- Manual smoke over the real binary: 2 replayed ADDED + live MODIFIED +
+  DELETED (final object) in one stream, revisions strictly 1..4, no gaps.
+
+### Decisions & SSOT
+- **Q18 locked:** leader election = `coordination.k8s.io` Lease +
+  resourceVersion CAS (client-go semantics), NOT etcd TTL leases — keeps
+  `StorageBackend` lease-free and election backend-agnostic. T3.1/T3.4
+  wording in plan/03 updated; Q17's "live-watch only" consequence annotated
+  as superseded.
+- T2.2 → done in index.md + plan/02-storage.md (durability / etcd-gRPC /
+  retention policy → T2.3, unchanged per Q17). Next critical-path gate:
+  **T3.1** (controller loops), plus a recommended early risk-spike on T4.1
+  (containerd bundling — longest unstarted chain to M3).
+
 ## Sprint 11 — Server-Side Apply field-manager (T1.2c) (2026-08-04)
 
 **Focus:** Implement server-side apply (SSA) so `kubectl apply` works

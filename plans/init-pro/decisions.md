@@ -819,10 +819,50 @@ on-disk single-server store; the apiserver code is unchanged across all three.
   restart is expected until T2.3 (SQLite/KINE) or a real-etcd impl lands.
 - `−` The embedded store does **live-watch only** (no historical replay from a
   past revision); resource-version-based historical replay is an
-  etcd-gRPC-backend capability, deferred to T2.3.
+  etcd-gRPC-backend capability, deferred to T2.3. *(Superseded in Sprint 12
+  / T2.2 closeout: replay + compaction now ship in `EmbeddedStorage` behind
+  the same trait — see `crates/storage/src/history.rs`. Only durability and
+  the etcd-gRPC client remain T2.3.)*
 - `−` Multi-server HA (leader election, raft) is **out of scope for the embedded
   impl** entirely; it arrives with the real-etcd backend and T3.4
   (multi-server).
 - → unblocks **T1.2** (the next gate), which now programs to
   `StorageBackend`; T2.3 slots alternative impls in behind
   `--datastore-endpoint` with no apiserver churn.
+
+
+---
+
+## Q18 — Leader election without etcd leases: coordination.k8s.io Lease + resourceVersion CAS (T3.1)
+
+**Context.**
+plan/03 originally sketched "leader election via etcd lease (T2.2)" for the
+controller loops. That couples election to one backend capability (etcd TTL
+leases) that the embedded pure-Rust store (Q17) deliberately does not
+implement — and T3.1 must run on the embedded backend.
+
+**Options.**
+1. Implement etcd-lease semantics (TTL, keep-alive, expiry) in the embedded
+   backend, then lease-based election.
+2. Upstream semantics: leader election via `coordination.k8s.io` `Lease`
+   objects — acquire = optimistic CAS on `spec.holderName` +
+   `resourceVersion`, renew = periodic update, all plain storage operations
+   every backend already has. This is exactly what client-go's
+   `leaderelection` does on top of the API.
+3. No election in v1 (single-server only) — but T3.4 needs the seam anyway.
+
+**Decision.**
+Option 2. Elections are expressed as ordinary API resources + CAS, never as
+backend-private primitives. `StorageBackend` does not grow leases.
+
+**Consequences.**
+- `+` Backend-agnostic: works identically on the embedded store (v1), KINE/
+  SQLite, and real etcd (T2.3+), because it only uses create/update/CAS.
+- `+` Upstream-faithful: `kubectl get leases -n kube-system` shows real
+  election state; client-go tooling interoperates.
+- `+` Keeps the trait minimal (Q17); no TTL timers or keep-alive loops
+  inside the storage layer.
+- `−` Lease expiry is cooperative (renewal deadline checked on read/update),
+  not hardware-timed like etcd TTLs — acceptable for v1; T3.4 revisits
+  fencing if HA demands stronger guarantees.
+- → plan/03-control-plane.md T3.1 updated accordingly.
