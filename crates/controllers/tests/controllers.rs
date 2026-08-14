@@ -484,3 +484,277 @@ async fn quiesce_after_convergence() {
         "no storage writes after convergence (write-if-changed must hold)"
     );
 }
+
+// --- StatefulSet (T3.1b slice S3) -----------------------------------------
+
+fn statefulset(replicas: u64) -> Value {
+    json!({
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {"name": "web", "namespace": "default"},
+        "spec": {
+            "replicas": replicas,
+            "serviceName": "web-svc",
+            "selector": {"matchLabels": {"app": "web"}},
+            "template": {
+                "metadata": {"labels": {"app": "web"}},
+                "spec": {"containers": [{"name": "c", "image": "nginx:1.28"}]},
+            },
+            "volumeClaimTemplates": [{
+                "metadata": {"name": "data"},
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": "1Gi"}},
+                },
+            }],
+        },
+    })
+}
+
+async fn get_statefulset(env: &Env) -> Option<Value> {
+    env.client
+        .get(&Key::new("apps", "statefulsets", "default", "web"))
+        .await
+        .unwrap()
+}
+
+/// CAS-mutate the StatefulSet (scale / template / strategy rewrites).
+async fn update_statefulset(env: &Env, f: impl FnOnce(&mut Value)) {
+    let key = Key::new("apps", "statefulsets", "default", "web");
+    let sts = env.client.get(&key).await.unwrap().unwrap();
+    let rv = sts["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut next = sts.clone();
+    f(&mut next);
+    env.client.update(&key, next, Some(rv)).await.unwrap();
+}
+
+async fn named_pod(env: &Env, name: &str) -> Option<Value> {
+    env.client
+        .get(&Key::new("", "pods", "default", name))
+        .await
+        .unwrap()
+}
+
+async fn pvcs(env: &Env) -> Vec<Value> {
+    env.client
+        .list(&KeyPrefix::new(
+            "",
+            "persistentvolumeclaims",
+            Some("default".into()),
+        ))
+        .await
+        .unwrap()
+}
+
+async fn revisions(env: &Env) -> Vec<Value> {
+    env.client
+        .list(&KeyPrefix::new(
+            "apps",
+            "controllerrevisions",
+            Some("default".into()),
+        ))
+        .await
+        .unwrap()
+}
+
+fn names_of(objs: &[Value]) -> Vec<&str> {
+    objs.iter()
+        .filter_map(|o| o["metadata"]["name"].as_str())
+        .collect()
+}
+
+fn pod_revision_hash(pod: &Value) -> Option<&str> {
+    pod.pointer("/metadata/labels/controller-revision-hash")
+        .and_then(Value::as_str)
+}
+
+#[tokio::test]
+async fn statefulset_ordered_scale_up_creates_named_pods_and_pvcs() {
+    let env = env();
+    create(
+        &env,
+        Key::new("apps", "statefulsets", "default", "web"),
+        statefulset(3),
+    )
+    .await;
+    eventually!(30000, async {
+        let pods = pods(&env).await;
+        if names_of(&pods) != ["web-0", "web-1", "web-2"] {
+            return false;
+        }
+        let pvcs = pvcs(&env).await;
+        if names_of(&pvcs) != ["data-web-0", "data-web-1", "data-web-2"] {
+            return false;
+        }
+        // The PVC carries the claim template spec + the STS controller ref.
+        let pvc = &pvcs[0];
+        pvc.pointer("/spec/resources/requests/storage").and_then(Value::as_str)
+            == Some("1Gi")
+            && pvc.pointer("/metadata/ownerReferences/0/kind").and_then(Value::as_str)
+                == Some("StatefulSet")
+            // Status: fully converged at one revision.
+            && get_statefulset(&env)
+                .await
+                .and_then(|s| s.pointer("/status").cloned())
+                .map(|st| {
+                    st["replicas"] == json!(3)
+                        && st["readyReplicas"] == json!(3)
+                        && st["availableReplicas"] == json!(3)
+                        && st["updatedReplicas"] == json!(3)
+                        && st["currentRevision"] == st["updateRevision"]
+                        && st["currentRevision"].as_str().map(|r| r.starts_with("web-"))
+                            == Some(true)
+                })
+                == Some(true)
+            // Revision history: one ControllerRevision, revision >= 1.
+            && revisions(&env).await.iter().any(|rev| {
+                rev.pointer("/revision").and_then(Value::as_u64) >= Some(1)
+                    && rev.pointer("/metadata/ownerReferences/0/name").and_then(Value::as_str)
+                        == Some("web")
+            })
+    });
+    // Stable pod identity: hostname/subdomain land in the pod spec.
+    let web0 = named_pod(&env, "web-0").await.unwrap();
+    assert_eq!(web0["spec"]["hostname"], "web-0");
+    assert_eq!(web0["spec"]["subdomain"], "web-svc");
+}
+
+#[tokio::test]
+async fn statefulset_scale_down_keeps_pvcs_and_deletes_high_ordinals_first() {
+    let env = env();
+    create(
+        &env,
+        Key::new("apps", "statefulsets", "default", "web"),
+        statefulset(3),
+    )
+    .await;
+    eventually!(15000, async { pods(&env).await.len() == 3 });
+
+    update_statefulset(&env, |s| s["spec"]["replicas"] = json!(1)).await;
+    eventually!(15000, async {
+        let pods = pods(&env).await;
+        pods.len() == 1
+            && pods[0]["metadata"]["name"] == "web-0"
+            && get_statefulset(&env)
+                .await
+                .and_then(|s| s.pointer("/status/replicas").cloned())
+                == Some(json!(1))
+    });
+    // Retention: every claim from the scaled-down ordinals survives.
+    let binding = pvcs(&env).await;
+    let mut kept = names_of(&binding);
+    kept.sort_unstable();
+    assert_eq!(kept, ["data-web-0", "data-web-1", "data-web-2"]);
+}
+
+/// CAS-pin one pod's Ready condition (pod_is_ready honors the explicit
+/// condition, breaking the ready-by-default assumption).
+async fn set_named_pod_ready(env: &Env, pod_name: &str, ready: bool) {
+    let pod = named_pod(env, pod_name).await.unwrap();
+    let rv = pod["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut next = pod.clone();
+    next["status"]["conditions"] = json!([{
+        "type": "Ready",
+        "status": if ready { "True" } else { "False" },
+    }]);
+    env.client
+        .update(&Key::new("", "pods", "default", pod_name), next, Some(rv))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn statefulset_ordered_ready_gates_creation() {
+    let env = env();
+    create(
+        &env,
+        Key::new("apps", "statefulsets", "default", "web"),
+        statefulset(1),
+    )
+    .await;
+    eventually!(15000, async { named_pod(&env, "web-0").await.is_some() });
+
+    // web-0 not ready -> scaling to 3 must NOT create web-1.
+    set_named_pod_ready(&env, "web-0", false).await;
+    update_statefulset(&env, |s| s["spec"]["replicas"] = json!(3)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(
+        named_pod(&env, "web-1").await.is_none(),
+        "OrderedReady must gate web-1 on web-0 readiness"
+    );
+
+    // Flipping web-0 ready unblocks the ordered chain: 1 then 2.
+    set_named_pod_ready(&env, "web-0", true).await;
+    eventually!(30000, async {
+        named_pod(&env, "web-1").await.is_some() && named_pod(&env, "web-2").await.is_some()
+    });
+}
+
+#[tokio::test]
+async fn statefulset_rolling_update_partition() {
+    let env = env();
+    create(
+        &env,
+        Key::new("apps", "statefulsets", "default", "web"),
+        statefulset(2),
+    )
+    .await;
+    eventually!(15000, async { pods(&env).await.len() == 2 });
+    let old_hash = pods(&env)
+        .await
+        .iter()
+        .find(|p| p["metadata"]["name"] == "web-0")
+        .and_then(|p| pod_revision_hash(p))
+        .expect("pod carries controller-revision-hash")
+        .to_string();
+
+    // New template image + partition=1: only ordinal >= 1 rolls.
+    update_statefulset(&env, |s| {
+        s["spec"]["template"]["spec"]["containers"][0]["image"] = json!("nginx:1.29");
+        s["spec"]["updateStrategy"] =
+            json!({"type": "RollingUpdate", "rollingUpdate": {"partition": 1}});
+    })
+    .await;
+    eventually!(30000, async {
+        let Some(web1) = named_pod(&env, "web-1").await else {
+            return false;
+        };
+        let Some(sts) = get_statefulset(&env).await else {
+            return false;
+        };
+        pod_revision_hash(&web1).map(|h| h != old_hash) == Some(true)
+            && named_pod(&env, "web-0")
+                .await
+                .and_then(|p| pod_revision_hash(&p).map(|h| h == old_hash))
+                == Some(true)
+            && status_u64(&sts, "updatedReplicas") == Some(1)
+            && sts.pointer("/status/updateRevision") != sts.pointer("/status/currentRevision")
+    });
+
+    // partition=0: web-0 rolls too; currentRevision catches up.
+    update_statefulset(&env, |s| {
+        s["spec"]["updateStrategy"]["rollingUpdate"]["partition"] = json!(0);
+    })
+    .await;
+    eventually!(30000, async {
+        let Some(web0) = named_pod(&env, "web-0").await else {
+            return false;
+        };
+        let Some(sts) = get_statefulset(&env).await else {
+            return false;
+        };
+        pod_revision_hash(&web0).map(|h| h != old_hash) == Some(true)
+            && sts.pointer("/status/currentRevision") == sts.pointer("/status/updateRevision")
+            && status_u64(&sts, "updatedReplicas") == Some(2)
+    });
+    // History accumulates: both revisions are retained (no limit in v1).
+    assert_eq!(revisions(&env).await.len(), 2);
+}

@@ -2,10 +2,14 @@
 //! informer per resource + workqueues + reconciler workers.
 //!
 //! Event fan-out: Deployment events enqueue the Deployment; RS events enqueue
-//! the RS **and** its owner Deployment; Pod events enqueue the owner RS and
-//! every Service in the same namespace whose selector matches the pod (this
-//! is the convergence path for Services created after Pods); Service events
-//! enqueue the Service. Reconcilers read through the [`Client`] (storage
+//! the RS **and** its owner Deployment; StatefulSet events enqueue the
+//! StatefulSet; ControllerRevision events enqueue the owner StatefulSet (the
+//! revision is created by the STS reconciler itself -- this closes the loop
+//! when a revision is created by another writer); Pod events enqueue the
+//! owner RS, the owner StatefulSet (ordered rollout gates), and every
+//! Service in the same namespace whose selector matches the pod (this is the
+//! convergence path for Services created after Pods); Service events enqueue
+//! the Service. Reconcilers read through the [`Client`] (storage
 //! consistency) while caches drive the fan-out.
 
 use std::sync::Arc;
@@ -15,7 +19,7 @@ use storage::{Key, KeyPrefix, StorageBackend, WatchEvent};
 use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
-use crate::controllers::{deployment, endpoints, replicaset, Caches};
+use crate::controllers::{deployment, endpoints, replicaset, statefulset, Caches};
 use crate::error::ControllerError;
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
 use crate::leaderelection::{LeaderElector, LeaseConfig, NowFn};
@@ -29,6 +33,7 @@ pub struct ControllerManager;
 struct Queues {
     deployments: Arc<WorkQueue>,
     replicasets: Arc<WorkQueue>,
+    statefulsets: Arc<WorkQueue>,
     services: Arc<WorkQueue>,
 }
 
@@ -36,6 +41,7 @@ struct Queues {
 enum Kind {
     Deployment,
     ReplicaSet,
+    StatefulSet,
     Service,
 }
 
@@ -67,6 +73,7 @@ impl ControllerManager {
         let queues = Arc::new(Queues {
             deployments: Arc::new(WorkQueue::new()),
             replicasets: Arc::new(WorkQueue::new()),
+            statefulsets: Arc::new(WorkQueue::new()),
             services: Arc::new(WorkQueue::new()),
         });
 
@@ -164,14 +171,17 @@ fn spawn_set(
         enqueue_owner(&q_dep, ev, "Deployment");
     });
 
-    // Pod events -> owner RS queue + every same-namespace Service whose
-    // selector matches the pod (late-Service convergence).
+    // Pod events -> owner RS queue, owner StatefulSet queue (ordered rollout
+    // gates: each created/deleted pod unblocks the next ordinal) + every
+    // same-namespace Service whose selector matches the pod.
     let q_rs = queues.replicasets.clone();
+    let q_sts = queues.statefulsets.clone();
     let q_svc = queues.services.clone();
     let pod_caches = caches.clone();
     let pod_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         let Some(obj) = event_object(ev) else { return };
         enqueue_owner(&q_rs, ev, "ReplicaSet");
+        enqueue_owner(&q_sts, ev, "StatefulSet");
         let ns = object::namespace(&obj).unwrap_or("default");
         for svc in pod_caches.services.list(Some(ns)) {
             if let Some(sel) = svc.pointer("/spec/selector") {
@@ -192,6 +202,22 @@ fn spawn_set(
         }
     });
 
+    // StatefulSet events (T3.1b) -> statefulset queue.
+    let q = queues.statefulsets.clone();
+    let sts_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q.add(k);
+        }
+    });
+
+    // ControllerRevision events -> owner StatefulSet queue. No cache is
+    // needed (the STS reconciler lists revisions through the client), but
+    // `Informer::run` requires an ObjectStore: a dummy one, never read.
+    let q_sts = queues.statefulsets.clone();
+    let rev_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        enqueue_owner(&q_sts, ev, "StatefulSet");
+    });
+
     let sets: Vec<(KeyPrefix, Arc<crate::informer::ObjectStore>, EventHandler)> = vec![
         (
             KeyPrefix::new("apps", "deployments", None),
@@ -202,6 +228,17 @@ fn spawn_set(
             KeyPrefix::new("apps", "replicasets", None),
             caches.replicasets.clone(),
             rs_handler,
+        ),
+        (
+            KeyPrefix::new("apps", "statefulsets", None),
+            caches.statefulsets.clone(),
+            sts_handler,
+        ),
+        (
+            KeyPrefix::new("apps", "controllerrevisions", None),
+            // Dummy store (see the rev_handler note): filled, never read.
+            Arc::new(crate::informer::ObjectStore::new()),
+            rev_handler,
         ),
         (
             KeyPrefix::new("", "pods", None),
@@ -226,6 +263,7 @@ fn spawn_set(
     for (queue, kind) in [
         (queues.deployments.clone(), Kind::Deployment),
         (queues.replicasets.clone(), Kind::ReplicaSet),
+        (queues.statefulsets.clone(), Kind::StatefulSet),
         (queues.services.clone(), Kind::Service),
     ] {
         for _ in 0..2 {
@@ -343,6 +381,12 @@ async fn reconcile_key(
                 return Ok(());
             };
             replicaset::reconcile(client, &rs).await
+        }
+        Kind::StatefulSet => {
+            let Some(sts) = caches.statefulsets.get(ns, name) else {
+                return Ok(());
+            };
+            statefulset::reconcile(client, &sts).await
         }
         Kind::Service => {
             let Some(svc) = caches.services.get(ns, name) else {
