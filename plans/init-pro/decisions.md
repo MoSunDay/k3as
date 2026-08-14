@@ -907,3 +907,57 @@ at the trait boundary.
 - `−` `resourceVersion` semantics must be projected identically to the
   wire (`client.rs` does this explicitly).
 - → plan/03-control-plane.md T3.1 records the as-built transport.
+
+---
+
+## Q20 — Garbage collection + namespace lifecycle semantics (T3.1b)
+
+**Date.** 2026-08-14 (Sprint 14, slice S5).
+
+**Context.**
+T3.1b must define what DELETE means: ownerReferences cascade
+(Deployment → ReplicaSet → Pod), `propagationPolicy` (Background /
+Foreground / Orphan), finalizer-gated soft delete, and Namespace
+termination. In-process controllers bypass the apiserver (Q19), so the
+delete bookkeeping cannot live only on the wire layer.
+
+**Options.**
+- A) **Upstream-faithful solid/weak owner graph with uid tombstones +
+  foreground blocking deletion.** Full parity, but needs uid assignment,
+  foreground finalizer injection, and a graph re-solver — heavy for v1
+  where nothing assigns uids yet.
+- B) **Declarative drain only** (each controller deletes its own children
+  on owner delete). No orphan support, no dangling-ownerRef cleanup, and
+  namespace teardown would need per-controller special cases.
+- C) **Simplified GC: cache-verified owner existence + annotation-marked
+  Orphan + namespace controller drain.** DELETE of a finalizer-carrying
+  object soft-deletes (deletionTimestamp); hard DELETE with
+  `propagationPolicy=Orphan` stamps `init-pro.io/deletion-propagation` on
+  the way out so the DELETE event carries it; the controllers' GC sweeps
+  dependents whose *managed* controller owner is absent from its informer
+  cache (event-driven on owner DELETE + 2s periodic backstop); a namespace
+  controller drains every namespaced kind then performs the terminal
+  delete itself (finalizer completion on PUT/PATCH lives in the apiserver
+  for kubectl-driven flows).
+
+**Decision.**
+C. Background cascade is the default; Foreground is treated as Background
+in v1; Orphan strips matching controller ownerReferences (kind+name, uid
+when set). Managed owner kinds: Deployment, ReplicaSet, Service,
+StatefulSet, DaemonSet. Unknown owner kinds are skipped (upstream GC only
+acts on owners it can verify).
+
+**Consequences.**
+- `+` kubectl-visible semantics land (soft delete, finalizers, namespace
+  `kubernetes` finalizer injection, orphan keeps dependents) without the
+  uid/tombstone machinery.
+- `+` GC is event-driven (owner DELETE hooks) with a cheap 2s backstop;
+  terminating namespaces always progress via the backstop re-enqueue.
+- `−` Accepted v1 race: a just-created owner may be briefly absent from an
+  informer cache, so a dependent can be deleted and recreated by its
+  controller — self-healing, no durable divergence.
+- `−` In-process controllers own the namespace terminal delete (they
+  bypass the apiserver's finalizer-completion rule); T3.4's HTTP-client
+  controllers will route through the apiserver instead.
+- → plan/03-control-plane.md T3.1b records the as-built GC/namespace
+  controller set.
