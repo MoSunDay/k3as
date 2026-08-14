@@ -27,6 +27,22 @@ pub struct StoredEntry {
 pub enum WatchEvent {
     /// A key was created or updated.
     Put(Arc<StoredEntry>),
-    /// A key was deleted.
-    Delete { key: String, mod_revision: Revision },
+    /// A key was deleted. `prev` is the final stored object (upstream watch
+    /// `DELETED` events carry the full last state); `mod_revision` is the
+    /// deletion revision.
+    Delete {
+        key: String,
+        mod_revision: Revision,
+        prev: Option<Arc<StoredEntry>>,
+    },
+}
+
+impl WatchEvent {
+    /// The cluster revision this event occurred at.
+    pub fn revision(&self) -> Revision {
+        match self {
+            WatchEvent::Put(e) => e.mod_revision,
+            WatchEvent::Delete { mod_revision, .. } => *mod_revision,
+        }
+    }
 }

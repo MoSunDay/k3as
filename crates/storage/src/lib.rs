@@ -33,6 +33,7 @@ pub mod backend;
 pub mod embedded;
 pub mod entry;
 pub mod error;
+mod history;
 pub mod key;
 
 pub use backend::{StorageBackend, Watch};

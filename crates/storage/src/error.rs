@@ -21,6 +21,10 @@ pub enum StorageError {
         expected: Option<Revision>,
         have: Option<Revision>,
     },
+    /// A watch requested a start revision at or below the history-compaction
+    /// watermark (etcd `ErrCompacted`; surfaces upstream as watch `410 Gone`).
+    #[error("requested revision {requested} is compacted (watermark {watermark})")]
+    Compacted { requested: Revision, watermark: Revision },
     #[error("invalid storage key: {key}")]
     InvalidKey { key: String },
     /// The backend (or its watch channel) has been closed.

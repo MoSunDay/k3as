@@ -1,4 +1,9 @@
 //! In-process embedded storage backend (T2.1 spike + T2.2 default impl).
+//!
+//! Watch semantics (T2.2): `watch(prefix, Some(n))` replays retained history
+//! from revision `n` (etcd-inclusive) and then continues with live events
+//! from a single lock-ordered seam; `compact(rev)` bounds the retained
+//! history (see [`crate::history`]).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -6,20 +11,30 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{broadcast, Mutex};
 
-use crate::backend::{StorageBackend, Watch};
+use crate::backend::{event_in_prefix, StorageBackend, Watch};
 use crate::entry::{Revision, StoredEntry, WatchEvent};
 use crate::error::StorageError;
+use crate::history::EventLog;
 use crate::key::{validate, Key, KeyPrefix};
 
 /// Broadcast channel capacity per backend. Generous to avoid `Lagged` under
-/// bursty multi-watcher workloads; the watch handle tolerates lag by skipping.
+/// bursty multi-watcher workloads; a lagging consumer has its stream closed
+/// so it re-lists and re-watches rather than silently missing events.
 const WATCH_CAP: usize = 1024;
+
+/// Retained watch-history length (revisions). Deliberately generous: it is
+/// the disconnect window an informer can bridge with a replayed watch
+/// instead of a full re-list. Events are cheap (`Arc` payloads); real
+/// policy-grade retention arrives with T2.3.
+const HISTORY_CAPACITY: usize = 10_000;
 
 struct Inner {
     /// Monotonic cluster-wide revision; bumped once per successful write.
     revision: Revision,
     /// Full `/registry/...` path -> entry.
     entries: BTreeMap<String, StoredEntry>,
+    /// Retained event history for watch replay + compaction (T2.2).
+    log: EventLog,
     /// Fan-out for watchers. A dropped backend closes all watches.
     tx: broadcast::Sender<WatchEvent>,
 }
@@ -32,11 +47,18 @@ pub struct EmbeddedStorage {
 
 impl EmbeddedStorage {
     pub fn new() -> Self {
+        Self::with_history_capacity(HISTORY_CAPACITY)
+    }
+
+    /// Like [`new`] but with an explicit retained-history capacity (exposed
+    /// for tests and retention tuning).
+    pub fn with_history_capacity(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel::<WatchEvent>(WATCH_CAP);
         Self {
             inner: Mutex::new(Inner {
                 revision: 0,
                 entries: BTreeMap::new(),
+                log: EventLog::new(capacity),
                 tx,
             }),
         }
@@ -72,7 +94,9 @@ impl StorageBackend for EmbeddedStorage {
             version: 1,
         };
         g.entries.insert(path.clone(), entry.clone());
-        let _ = g.tx.send(WatchEvent::Put(Arc::new(entry.clone())));
+        let ev = WatchEvent::Put(Arc::new(entry.clone()));
+        g.log.push(rev, ev.clone());
+        let _ = g.tx.send(ev);
         Ok(entry)
     }
 
@@ -130,7 +154,9 @@ impl StorageBackend for EmbeddedStorage {
             version: cur.version + 1,
         };
         g.entries.insert(path.clone(), updated.clone());
-        let _ = g.tx.send(WatchEvent::Put(Arc::new(updated.clone())));
+        let ev = WatchEvent::Put(Arc::new(updated.clone()));
+        g.log.push(rev, ev.clone());
+        let _ = g.tx.send(ev);
         Ok(updated)
     }
 
@@ -157,10 +183,13 @@ impl StorageBackend for EmbeddedStorage {
         g.revision += 1;
         let rev = g.revision;
         g.entries.remove(&path);
-        let _ = g.tx.send(WatchEvent::Delete {
+        let ev = WatchEvent::Delete {
             key: path,
             mod_revision: rev,
-        });
+            prev: Some(Arc::new(cur.clone())),
+        };
+        g.log.push(rev, ev.clone());
+        let _ = g.tx.send(ev);
         Ok(Some(cur))
     }
 
@@ -173,13 +202,26 @@ impl StorageBackend for EmbeddedStorage {
         prefix: &KeyPrefix,
         start_revision: Option<Revision>,
     ) -> Result<Watch, StorageError> {
-        // start_revision is accepted for API parity; the embedded backend
-        // delivers live events from subscription (historical replay is an
-        // etcd-backend capability).
-        let _ = start_revision;
         let g = self.inner.lock().await;
-        let rx = g.tx.subscribe();
         let p = format!("{}/", prefix.as_path());
-        Ok(Watch::new(rx, p))
+        match start_revision {
+            None | Some(0) => Ok(Watch::live(g.tx.subscribe(), p)),
+            Some(n) => {
+                // Snapshot history AND subscribe under one lock: events
+                // pushed after this point flow via the broadcast only, so the
+                // replay -> live seam is lossless and duplicate-free.
+                let mut replay = g.log.since(n)?;
+                replay.retain(|ev| event_in_prefix(ev, &p));
+                Ok(Watch::with_replay(g.tx.subscribe(), p, replay, n))
+            }
+        }
+    }
+
+    async fn compact(&self, revision: Revision) -> Result<Revision, StorageError> {
+        let mut g = self.inner.lock().await;
+        // Fold future requests to the current revision (documented on the
+        // trait): a periodic policy would reach this watermark anyway.
+        let target = revision.min(g.revision);
+        Ok(g.log.compact(target))
     }
 }
