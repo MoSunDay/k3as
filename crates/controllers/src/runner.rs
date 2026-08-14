@@ -3,14 +3,17 @@
 //!
 //! Event fan-out: Deployment events enqueue the Deployment; RS events enqueue
 //! the RS **and** its owner Deployment; StatefulSet events enqueue the
-//! StatefulSet; ControllerRevision events enqueue the owner StatefulSet (the
-//! revision is created by the STS reconciler itself -- this closes the loop
-//! when a revision is created by another writer); Pod events enqueue the
-//! owner RS, the owner StatefulSet (ordered rollout gates), and every
-//! Service in the same namespace whose selector matches the pod (this is the
-//! convergence path for Services created after Pods); Service events enqueue
-//! the Service. Reconcilers read through the [`Client`] (storage
-//! consistency) while caches drive the fan-out.
+//! StatefulSet; DaemonSet events enqueue the DaemonSet; Node events (the
+//! DaemonSet placement source of truth) enqueue EVERY cached DaemonSet --
+//! the node -> DaemonSet fan-out, the same list-and-enqueue shape as pod ->
+//! Service below; ControllerRevision events enqueue the owner StatefulSet
+//! (the revision is created by the STS reconciler itself -- this closes the
+//! loop when a revision is created by another writer); Pod events enqueue
+//! the owner RS, the owner StatefulSet (ordered rollout gates), the owner
+//! DaemonSet, and every Service in the same namespace whose selector
+//! matches the pod (this is the convergence path for Services created after
+//! Pods); Service events enqueue the Service. Reconcilers read through the
+//! [`Client`] (storage consistency) while caches drive the fan-out.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,7 +22,7 @@ use storage::{Key, KeyPrefix, StorageBackend, WatchEvent};
 use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
-use crate::controllers::{deployment, endpoints, replicaset, statefulset, Caches};
+use crate::controllers::{daemonset, deployment, endpoints, replicaset, statefulset, Caches};
 use crate::error::ControllerError;
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
 use crate::leaderelection::{LeaderElector, LeaseConfig, NowFn};
@@ -34,6 +37,7 @@ struct Queues {
     deployments: Arc<WorkQueue>,
     replicasets: Arc<WorkQueue>,
     statefulsets: Arc<WorkQueue>,
+    daemonsets: Arc<WorkQueue>,
     services: Arc<WorkQueue>,
 }
 
@@ -42,6 +46,7 @@ enum Kind {
     Deployment,
     ReplicaSet,
     StatefulSet,
+    DaemonSet,
     Service,
 }
 
@@ -74,6 +79,7 @@ impl ControllerManager {
             deployments: Arc::new(WorkQueue::new()),
             replicasets: Arc::new(WorkQueue::new()),
             statefulsets: Arc::new(WorkQueue::new()),
+            daemonsets: Arc::new(WorkQueue::new()),
             services: Arc::new(WorkQueue::new()),
         });
 
@@ -172,16 +178,19 @@ fn spawn_set(
     });
 
     // Pod events -> owner RS queue, owner StatefulSet queue (ordered rollout
-    // gates: each created/deleted pod unblocks the next ordinal) + every
+    // gates: each created/deleted pod unblocks the next ordinal), owner
+    // DaemonSet queue (placement/status counts) + every
     // same-namespace Service whose selector matches the pod.
     let q_rs = queues.replicasets.clone();
     let q_sts = queues.statefulsets.clone();
+    let q_ds = queues.daemonsets.clone();
     let q_svc = queues.services.clone();
     let pod_caches = caches.clone();
     let pod_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         let Some(obj) = event_object(ev) else { return };
         enqueue_owner(&q_rs, ev, "ReplicaSet");
         enqueue_owner(&q_sts, ev, "StatefulSet");
+        enqueue_owner(&q_ds, ev, "DaemonSet");
         let ns = object::namespace(&obj).unwrap_or("default");
         for svc in pod_caches.services.list(Some(ns)) {
             if let Some(sel) = svc.pointer("/spec/selector") {
@@ -210,6 +219,29 @@ fn spawn_set(
         }
     });
 
+    // DaemonSet events (T3.1b) -> daemonset queue (deployment pattern).
+    let q = queues.daemonsets.clone();
+    let ds_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q.add(k);
+        }
+    });
+
+    // Node events (T3.1b) -> EVERY cached DaemonSet. Nodes are the
+    // DaemonSet placement source of truth, so any node create/delete or
+    // label change must re-evaluate each DaemonSet (node -> DS fan-out;
+    // the same list-and-enqueue shape as pod -> matching Services).
+    let q_ds = queues.daemonsets.clone();
+    let ds_caches = caches.clone();
+    let node_handler: EventHandler = Arc::new(move |_ev: &WatchEvent| {
+        for ds in ds_caches.daemonsets.list(None) {
+            if let Some(name) = object::name(&ds) {
+                let ns = object::namespace(&ds).unwrap_or("default");
+                q_ds.add(format!("{ns}/{name}"));
+            }
+        }
+    });
+
     // ControllerRevision events -> owner StatefulSet queue. No cache is
     // needed (the STS reconciler lists revisions through the client), but
     // `Informer::run` requires an ObjectStore: a dummy one, never read.
@@ -233,6 +265,16 @@ fn spawn_set(
             KeyPrefix::new("apps", "statefulsets", None),
             caches.statefulsets.clone(),
             sts_handler,
+        ),
+        (
+            KeyPrefix::new("apps", "daemonsets", None),
+            caches.daemonsets.clone(),
+            ds_handler,
+        ),
+        (
+            KeyPrefix::new("", "nodes", None),
+            caches.nodes.clone(),
+            node_handler,
         ),
         (
             KeyPrefix::new("apps", "controllerrevisions", None),
@@ -264,6 +306,7 @@ fn spawn_set(
         (queues.deployments.clone(), Kind::Deployment),
         (queues.replicasets.clone(), Kind::ReplicaSet),
         (queues.statefulsets.clone(), Kind::StatefulSet),
+        (queues.daemonsets.clone(), Kind::DaemonSet),
         (queues.services.clone(), Kind::Service),
     ] {
         for _ in 0..2 {
@@ -387,6 +430,12 @@ async fn reconcile_key(
                 return Ok(());
             };
             statefulset::reconcile(client, &sts).await
+        }
+        Kind::DaemonSet => {
+            let Some(ds) = caches.daemonsets.get(ns, name) else {
+                return Ok(());
+            };
+            daemonset::reconcile(client, &ds).await
         }
         Kind::Service => {
             let Some(svc) = caches.services.get(ns, name) else {
