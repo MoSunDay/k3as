@@ -757,6 +757,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kubelet"
+version = "0.2.0"
+dependencies = [
+ "api",
+ "apiserver",
+ "async-trait",
+ "axum",
+ "common",
+ "infra",
+ "k8s-openapi",
+ "runtime",
+ "serde_json",
+ "storage",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
