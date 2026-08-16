@@ -83,14 +83,73 @@ and node registration.
   - Readiness/liveness/startup probes; graceful pod termination.
   - Node condition + capacity/allocatable reporting.
 
+  - **As-built (Sprint 17, Scope A):** new `crates/kubelet` (15th
+    workspace crate, pure-functional; 11 src files + 3 test files):
+    `kubelet::spawn(cfg: KubeletConfig, cri: Arc<dyn CriBackend>,
+    shutdown: infra::Shutdown) -> Vec<JoinHandle<()>>`,
+    `KubeletConfig::new(server_url, node_name, data_dir)` (+
+    `sandbox_image` from `INIT_PRO_SANDBOX_IMAGE`), and
+    `kubelet::default_node_name()`. Minimal HTTP/1.1 client (`http.rs`
+    + `framing.rs` chunked decoder) and watch stream (`watch.rs`):
+    LIST+watch `/api/v1/pods` keeping a desired map filtered by
+    `spec.nodeName == node` — own HTTP stack because the crate must
+    stay dependency-light and the apiserver is HTTP-only (Q21).
+    Level-driven sync loop (`sync.rs`/`exec.rs`) diffing desired vs
+    CRI snapshot → sandbox/container actions; status builder
+    (`status.rs`: phase Running/Pending, PodScheduled+Ready
+    conditions, containerStatuses with `cri://` ids,
+    restartCount=attempt); node registration + kube-node-lease Lease
+    heartbeat (`node.rs`); status writes via `PUT pods/status`.
+    CRI via the vendored crictl (**Q26** route B): `crates/runtime`
+    gains `cri.rs` + `cri_json.rs` — a `CriCtl` driver implementing
+    12 CRI ops (runp/stopp/rmp/create/start/stop/rm/ps/pods/images/
+    import/pull/version-class) over the staged binary, plus a serde
+    layer over `crictl -o json`; v1.31.1 quirks codified (`stop`/`rm`
+    verb names, explicit `stopp` before `rmp`, default 2 s RPC
+    timeout flake → explicit `--timeout` on stop).
+    apiserver side: `PUT /api/v1/namespaces/<ns>/pods/<name>/status`
+    subresource (`crates/apiserver/src/pod_status.rs`: read-first,
+    merge only `.status`, CAS; 404/422/409 semantics). Agent wiring:
+    `--node-name` flag; kubelet spawned from the agent branch when
+    `--server` is `http://` (https:// URLs rejected with a warning
+    and the kubelet skipped — keeps golden G24 green); subcommand-
+    aware flag-strip filter; drain order kubelet → runtime →
+    apiserver → controllers → scheduler.
+    Workload image per **Q27**: `scripts/build-pause-image.sh` builds
+    a static pause binary (gcc `-static -Os`) into a hand-assembled
+    OCI layout — ref `init-pro.local/pause:0.1`, imported via the
+    staged `ctr` into namespace k8s.io (`INIT_PRO_DATA_DIR=<dd>
+    init-pro ctr -n k8s.io images import <tar>`), agent started with
+    `INIT_PRO_SANDBOX_IMAGE=init-pro.local/pause:0.1`. CNI
+    requirement: containerd CRI hard-fails `runp` unless the sandbox
+    gets an eth0 IP → `crates/runtime/src/stage.rs` conflist changed
+    loopback-only → bridge + host-local (10.42.0.0/24 subnet).
+    Two bugs fixed (both exposed by G25): `pods/status` +
+    `pods/binding` CASed on the stored blob's embedded
+    `metadata.resourceVersion`, which lags `mod_revision` after any
+    client read-modify-write (deterministic 409 loop) — now CAS on
+    `entry.mod_revision`; apiserver graceful drain waited forever on
+    open watch streams (the kubelet holds one) — now a 2 s
+    `DRAIN_GRACE` deadline in `serve.rs`.
+
 - **验收手段 / Acceptance**
   - Golden (T0.6): run a Deployment pod to `Running`+`Ready`; kill the
     container, observe restart; delete pod, observe terminated.
+  - As-built (Scope A): golden **G25** — exactly those three
+    assertions (pod Running+Ready on the agent node; killed container
+    restarted with a new id; deployment delete tears down to zero
+    sandboxes), gated on vendor bundle + `cc`, SKIP-not-fail like
+    G24. Tests: 551 → 631 workspace (kubelet 53; apiserver 48 → 51
+    incl. +5 pods/status wire tests; +17 runtime CRI driver incl.
+    live-containerd integration; new `tests/drain_deadline.rs`).
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — Volume plugin breadth (emptyDir/configMap/secret
-    first; CSI later).
+- **状态 / Status** — in-progress (Scope A done, Sprint 17)
+- **证据 / Evidence** — kubelet 53 / apiserver 51 / runtime +17 tests;
+  golden G25 (27/27 with vendor + `cc`); Q27 ADR
+- **卡点 / Blockers** — Scope B/C remainder: probes
+  (readiness/liveness/startup), volumes (emptyDir/configMap/secret
+  first; CSI later), real image pull path, exec/logs/attach, local
+  deploy.
 - **依赖 / Depends on** — T4.1, T3.2
 
 ---

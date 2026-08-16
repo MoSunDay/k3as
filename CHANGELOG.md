@@ -32,6 +32,85 @@ driving the T4.1 CRI seam — Deployment → real containers Running+Ready
   `fmt --check` / 551 tests / golden 24/24 (+ VENDOR=0 sim) / all five
   e2e scripts.
 
+### S1 — CRI driver layer (`crates/runtime/cri.rs` + `cri_json.rs`)
+- `CriCtl` driver implementing 12 CRI ops — runp/stopp/rmp/create/
+  start/stop/rm/ps/pods/images/import/pull/version-class — over the
+  staged vendored crictl (Q26 route B), plus a serde layer over
+  `crictl -o json`.
+- crictl v1.31.1 quirks codified: `stop`/`rm` verb names, explicit
+  `stopp` before `rmp`, default 2 s RPC timeout flake → explicit
+  `--timeout` on stop.
+- +17 tests, incl. live-containerd integration.
+
+### S2 — new `crates/kubelet` (15th workspace crate, 53 tests)
+- Pure-functional kubelet-equivalent (11 src files + 3 test files).
+  Public API: `kubelet::spawn(cfg: KubeletConfig, cri: Arc<dyn
+  CriBackend>, shutdown: infra::Shutdown) -> Vec<JoinHandle<()>>`,
+  `KubeletConfig::new(server_url, node_name, data_dir)` (+
+  `sandbox_image` from `INIT_PRO_SANDBOX_IMAGE`),
+  `kubelet::default_node_name()`.
+- Minimal HTTP/1.1 client (`http.rs` + `framing.rs` chunked decoder)
+  and watch stream (`watch.rs`): LIST+watch `/api/v1/pods` keeping a
+  desired map filtered by `spec.nodeName == node`. Own HTTP stack
+  because the crate must stay dependency-light and the apiserver is
+  HTTP-only (Q21).
+- Level-driven sync loop (`sync.rs`/`exec.rs`) diffing desired vs CRI
+  snapshot → sandbox/container actions; status builder (`status.rs`:
+  phase Running/Pending, PodScheduled+Ready conditions,
+  containerStatuses with `cri://` ids, restartCount=attempt); node
+  registration + kube-node-lease Lease heartbeat (`node.rs`); status
+  writes via `PUT pods/status`.
+
+### S3 — wiring: `pods/status` subresource + agent spawn path
+- `crates/apiserver/src/pod_status.rs`: `PUT /api/v1/namespaces/<ns>/
+  pods/<name>/status` — read-first, merge only `.status`, CAS;
+  404/422/409 semantics (+5 wire tests).
+- CLI: agent `--node-name` flag; kubelet spawned from the agent branch
+  when `--server` is `http://`; `https://` URLs are rejected with a
+  warning and the kubelet skipped (keeps golden G24 green); flag-strip
+  filter made subcommand-aware; agent drain order kubelet → runtime →
+  apiserver → controllers → scheduler.
+- Snapshot `tests/snapshots/agent-help.txt` +
+  `scripts/cli-flag-parity-test.sh` updated.
+
+### S4 — airgap workload image (Q27) + CNI bridge fix
+- `scripts/build-pause-image.sh` builds a static pause binary (gcc
+  `-static -Os`) and hand-assembles an OCI image layout — no registry:
+  registry.k8s.io's CDN (`europe-west4-docker.pkg.dev`) and docker.io
+  are blocked in this environment, ghcr.io has no pause. Ref
+  `init-pro.local/pause:0.1`; imported through the staged `ctr` into
+  namespace k8s.io (`INIT_PRO_DATA_DIR=<dd> init-pro ctr -n k8s.io
+  images import <tar>`); agent started with
+  `INIT_PRO_SANDBOX_IMAGE=init-pro.local/pause:0.1`.
+- CNI fix: containerd CRI hard-fails `runp` unless the sandbox gets an
+  eth0 IP → `crates/runtime/src/stage.rs` CNI conflist changed
+  loopback-only → bridge + host-local (10.42.0.0/24 subnet).
+
+### S5 — golden G25 + the two bugs it exposed
+- **G25** (`scripts/golden-conformance.sh`, 3 assertions): pod
+  Running+Ready on the agent node; killed container restarted with a
+  new id; deployment delete tears down to zero sandboxes. Gated on
+  vendor bundle + `cc`, SKIP-not-fail like G24.
+- **Bug 1 — stale-RV CAS:** the `pods/status` + `pods/binding`
+  handlers CASed on the stored blob's embedded
+  `metadata.resourceVersion`, which lags `mod_revision` after any
+  client read-modify-write → deterministic infinite 409 loop, pods
+  stuck non-Ready. Fixed to CAS on `entry.mod_revision`
+  (`crates/apiserver/src/pod_status.rs` + `binding.rs`; regression
+  tests in `tests/pod_status.rs` + `tests/binding.rs`).
+- **Bug 2 — unbounded drain:** apiserver graceful drain waited forever
+  on open watch streams (the kubelet holds one) → SIGTERM hung
+  >10 min. Fixed in `crates/apiserver/src/serve.rs` with a 2 s
+  `DRAIN_GRACE` deadline after the shutdown signal (fits the 5 s
+  graceful-shutdown-test.sh contract); new `tests/drain_deadline.rs`
+  proves serve returns with an open watch.
+
+**Totals:** 551 → 631 workspace tests passed, 0 failed (kubelet 53;
+apiserver 48 → 51; +17 runtime CRI incl. live-containerd integration).
+Golden 27/27 with vendor + `cc` (G25 adds 3), SKIPs otherwise; e2e
+scripts unchanged & green. Scope B/C (probes, volumes, real image
+pull, exec/logs/attach) remain — sprint stays in progress.
+
 ## Sprint 16 — T4.1: containerd bundling + CRI wiring (2026-08-15)
 
 **Goal:** turn the Q24 spike into production node-runtime wiring —
