@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 
 use crate::collection;
@@ -60,6 +60,12 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/api/v1/namespaces/{namespace}/pods/{name}/binding",
             post(crate::binding::bind_pod),
+        )
+        // T4.2: pod status subresource (upstream `pods/status`; the kubelet
+        // PUTs the full pod — only `.status` is writable through this route).
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}/status",
+            put(crate::pod_status::put_pod_status),
         )
         .route(
             "/api/v1/namespaces/{namespace}/{resource}/{name}",

@@ -20,6 +20,7 @@ mod collection;
 mod discovery_handlers;
 mod error;
 mod item;
+pub(crate) mod pod_status;
 mod serve;
 mod state;
 
