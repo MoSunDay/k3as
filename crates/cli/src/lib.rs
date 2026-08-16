@@ -134,6 +134,9 @@ where
                     runtime::ServerBind {
                         addr,
                         disable_apiserver: svc.disable_apiserver,
+                        disable_controllers: svc.disable_controller_manager,
+                        disable_scheduler: svc.disable_scheduler,
+                        scheduler_args: svc.kube_scheduler_arg.clone(),
                     },
                 ),
                 Err(e) => {

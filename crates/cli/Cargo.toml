@@ -13,7 +13,9 @@ infra = { workspace = true }
 api = { workspace = true }
 apiserver = { workspace = true }
 controllers = { workspace = true }
+scheduler = { workspace = true }
 storage = { workspace = true }
+runtime = { workspace = true }
 k8s-openapi = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

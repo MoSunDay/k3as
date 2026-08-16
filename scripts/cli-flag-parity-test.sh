@@ -104,7 +104,7 @@ check_help "$SNAP/server-help.txt" "server" \
   --disable --disable-etcd --disable-apiserver --disable-agent \
   --disable-controller-manager --disable-scheduler --disable-cloud-controller \
   --disable-kube-proxy --disable-network-policy --disable-helm-controller \
-  --datastore-endpoint --cluster-init
+  --datastore-endpoint --cluster-init --kube-scheduler-arg
 check_help "$SNAP/agent-help.txt" "agent" \
   --config --data-dir --debug --token --server --prefer-bundled-bin
 

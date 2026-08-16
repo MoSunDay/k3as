@@ -93,7 +93,6 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("etcd-arg", None, true),
     nf("kube-controller-manager-arg", None, true),
     nf("kube-controller-arg", None, true),
-    nf("kube-scheduler-arg", None, true),
     nf("kube-cloud-controller-manager-arg", None, true),
     nf("kube-cloud-controller-arg", None, true),
     nf("helm-controller-arg", None, true),
