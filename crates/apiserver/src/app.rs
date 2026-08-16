@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::collection;
@@ -54,6 +54,12 @@ pub(crate) fn router(state: AppState) -> Router {
                 .put(item::core_replace)
                 .delete(item::core_delete)
                 .patch(item::core_patch),
+        )
+        // T3.2: pod binding subresource (upstream `pods/binding`; the
+        // in-process scheduler drives the same do_bind semantics).
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}/binding",
+            post(crate::binding::bind_pod),
         )
         .route(
             "/api/v1/namespaces/{namespace}/{resource}/{name}",
