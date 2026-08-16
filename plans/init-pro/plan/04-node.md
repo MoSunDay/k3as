@@ -19,12 +19,53 @@ and node registration.
   - CRI plugin enabled; init-pro kubelet uses the CRI gRPC API.
   - Default runtime class + image pull policy defaults.
 
+  - **Spike (Sprint 15, Q24 — superseded by the as-built below):**
+    `scripts/t41-containerd-spike.sh` (5/5) proved the chain — vendored
+    containerd 1.7.20 + runc 1.1.13 + cni-plugins 1.5.1 staged k3s-style
+    and booted through the multicall seam, CRI plugin `ok`.
+
+  - **As-built (Sprint 16, Q25/Q26):** new `crates/runtime`:
+    `config.rs` renders TOML v2 from `ContainerdConfigVars::for_data_dir`
+    (CRI plugin enabled; `sandbox_image` from `INIT_PRO_SANDBOX_IMAGE`,
+    default `registry.k8s.io/pause:3.10`); `stage.rs` does idempotent
+    SHA-256 staging of the containerd tree (containerd, ctr, shims,
+    runc, crictl, `aux/` cni-plugins) plus the CNI loopback conflist
+    `10-init-pro.conflist`, with `vendor_bin_root` resolving
+    `INIT_PRO_VENDOR_BIN` -> exe-relative `../../vendor/bin` -> cwd;
+    `supervisor.rs` gates boot on socket health (UnixStream poll), backs
+    off `base << restarts` capped at 5 s, resets the ladder after
+    STABLE_AFTER 30 s, and drains via SIGKILL + bounded 10 s wait —
+    deliberately **no SIGTERM step** (containerd child-reaping is not
+    guaranteed for a foreign runtime; k3s kills the tree too — Q25).
+    `infra::signal::Shutdown` is now **sticky** (fired flag +
+    `Notified::enable`), fixing lost wakeups during select gaps for
+    every consumer. CLI agent wiring calls `start_agent_runtime` and
+    drains the runtime FIRST on shutdown; `init-pro crictl ...` /
+    `init-pro ctr ...` are intercepted pre-clap and re-exec the staged
+    peer with endpoint injection (`crictl_endpoint_args` /
+    `ctr_address_args` in multicall). `crictl` v1.31.1 is pinned in
+    `vendor/versions.toml` (sha256
+    `0a03ba6b1e4c253d63627f8d210b2ea07675a8712587e697657b236d06d7d231`,
+    staged like every peer).
+    CRI client strategy per **Q26**: route B (crictl subprocess) now,
+    route A (native gRPC, ~100-crate dep cost) only when T4.2 needs
+    streaming/watch.
+
 - **验收手段 / Acceptance**
   - `init-pro crictl ps` / `init-pro ctr` round-trips; a sandbox container runs.
+  - As-built: runtime 17 unit + 2 integration tests
+    (`crates/runtime/tests/supervisor_integration.rs`: kill -9 rebirth +
+    crictl round-trip over the live CRI socket; SKIP, not fail, when the
+    vendor bin is absent), multicall 15, golden **G24**
+    (`scripts/golden-conformance.sh` — agent supervises containerd,
+    `crictl version`/`ps` over CRI; sandbox-pull smoke SKIPs when the
+    registry is unreachable).
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **状态 / Status** — done
+- **证据 / Evidence** — runtime 17+2 / multicall 15 / infra 29 tests;
+  golden G24; Q25/Q26 ADRs
+- **卡点 / Blockers** — none (debt for T4.2: image pre-pull/airgap
+  store, cgroup delegation, native CRI client trigger per Q26)
 - **依赖 / Depends on** — T0.2
 
 ---

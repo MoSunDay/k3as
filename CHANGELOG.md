@@ -7,6 +7,184 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 17 — T4.2 kubelet equivalent (2026-08-16, in progress)
+
+**Goal:** pod lifecycle core (Scope A): a kubelet-equivalent sync loop
+driving the T4.1 CRI seam — Deployment → real containers Running+Ready
+(G25), on-node restart, and clean pod teardown.
+
+### S0 — merge-gate gap-fix pass (Sprint 16 review carry-over)
+- **G24 vendor gate:** `golden-conformance.sh` now mirrors
+  `runtime::stage::vendor_bin_root()` detection (`INIT_PRO_VENDOR_BIN`
+  → exe-relative → cwd) and SKIPs the whole G24 block when no vendor
+  bundle is present — aligned with the Q25 SKIP-not-fail policy so the
+  CI `lint-test` job (VENDOR=0) no longer hard-fails; vendor presence
+  stays a hard FAIL. Verified both modes: 24/24 with vendor, 23+SKIP
+  without.
+- **CHANGELOG debt note:** the Sprint 16 clippy/fmt debt is marked
+  resolved in-sprint (both gates re-verified green).
+- **Cargo.toml:** explicit `crates/runtime` workspace member (was only
+  pulled in implicitly as a path dependency).
+- **agents.md repair-on-touch:** 14 crates + scheduler/runtime/kubectl
+  workspace-map rows; stale "next gate" bullets refreshed (T3.1/T3.2/
+  T4.1 done → T4.2 next).
+- All gates re-run green at S0: build / clippy `-D warnings` /
+  `fmt --check` / 551 tests / golden 24/24 (+ VENDOR=0 sim) / all five
+  e2e scripts.
+
+## Sprint 16 — T4.1: containerd bundling + CRI wiring (2026-08-15)
+
+**Goal:** turn the Q24 spike into production node-runtime wiring —
+Rust-native config/stage/supervise of the bundled containerd, a real
+`init-pro crictl`, and clean agent shutdown (T4.1 → done).
+
+### S1 — `crates/runtime` (config + stage + supervisor, Q25)
+- `config.rs`: `ContainerdConfigVars::for_data_dir` renders containerd
+  TOML v2 (CRI plugin enabled); `sandbox_image` overridable via
+  `INIT_PRO_SANDBOX_IMAGE` (default `registry.k8s.io/pause:3.10`);
+  unit tests parse the render back through `toml` (dev-dep only).
+- `stage.rs`: idempotent SHA-256 staging of the vendored tree
+  (containerd, ctr, shims, runc, crictl, `aux/` cni-plugins) plus the
+  CNI loopback conflist `10-init-pro.conflist`; `vendor_bin_root`
+  resolves `INIT_PRO_VENDOR_BIN` → exe-relative `../../vendor/bin` →
+  cwd.
+- `supervisor.rs`: spawn → socket-health gate (UnixStream poll) →
+  exponential backoff `base << restarts` capped at 5 s, ladder reset
+  after STABLE_AFTER 30 s; drain = SIGKILL + bounded 10 s wait —
+  deliberately **no SIGTERM step** (containerd child-reaping is not
+  guaranteed for a foreign runtime; k3s kills the tree too — Q25).
+
+### S2 — sticky `Shutdown` (infra correctness fix)
+- `infra::signal::Shutdown` now carries a fired flag +
+  `Notified::enable`: the old memoryless `notify_waiters` could lose
+  wakeups during select gaps. Regression test added (a waiter
+  registered after fire must not hang); all 29 infra tests green.
+  Semantics change for every consumer, strictly more correct.
+
+### S3 — agent CLI + multicall passthrough
+- `cli/runtime.rs`: the agent path calls `start_agent_runtime` (stage →
+  render → supervise) and drains the runtime FIRST on shutdown, before
+  the API surface and controllers. The server keeps the runtime off by
+  default (single-node UX arrives with T4.5).
+- `init-pro crictl ...` / `init-pro ctr ...` are intercepted pre-clap and
+  re-exec'd as the staged peer with the agent socket injected
+  (`--runtime-endpoint` / `--address`) unless the user supplied one —
+  `multicall::crictl_endpoint_args` / `ctr_address_args` (+5 tests).
+- `crictl` v1.31.1 pinned in `vendor/versions.toml` (SHA-256 verified
+  against the official checksum; staged like every other peer).
+
+### S4 — CRI client spike → Q26
+- Both routes measured against a live agent CRI socket: A) native
+  tonic 0.12 gRPC is sub-millisecond but pulls a **100-crate** dep
+  tree, needs vendored `cri-api` protos + protoc (absent here), and
+  has `ready().await` footguns; B) the vendored-crictl subprocess is
+  ~20 ms/call, zero new deps, covers ps/pods/images/pull/run/exec
+  incl. stdio passthrough.
+- **Q26: route B now, route A later** — the native client (leaf
+  `cri-client` crate behind a feature flag) waits for an explicit
+  streaming/watch trigger from T4.2 (sandbox events, pull progress,
+  port-forward), not convenience.
+
+### S5 — golden
+- **G24**: boot `init-pro agent` on a temp data dir → supervisor
+  brings containerd healthy → `init-pro crictl version` / `ps`
+  round-trip over the CRI socket. 24/24; the sandbox-image pull smoke
+  SKIPs (registry egress-gated here, cf. the Q24 note).
+
+### S6 — SSOT lock-step
+- index.md T4.1 → done (17/33); plan/04 as-built; **Q25/Q26**
+  recorded; this entry; `features/containerd-runtime.md`.
+
+**Totals:** 551 workspace tests green (was 526; +17 runtime unit,
++2 runtime integration — kill -9 rebirth + crictl round-trip, SKIP not
+fail when `vendor/bin/containerd` is absent, +5 multicall
+endpoint-injection, +1 infra sticky-shutdown regression), flag parity
+16/16, golden 24/24 (G24; the sandbox-pull smoke SKIPs,
+registry-gated). Merge-gate debt at entry time — **resolved
+in-sprint**: the clippy deny (`never_loop`,
+`crates/runtime/src/supervisor.rs`) and the fmt import-order diff in
+`crates/cli/src/runtime.rs` were fixed before closeout; `cargo clippy
+-D warnings` and `cargo fmt --all --check` are green at head.
+
+## Sprint 15 — T3.2 kube-scheduler equivalent + T4.1 timeboxed spike (2026-08-15)
+
+**Goal:** ship the scheduler (T3.2) — filter/score plugin framework,
+default plugins, HTTP extender seam, in-process per Q19 — plus a
+timeboxed de-risk of the containerd chain (T4.1, Q24).
+
+### S1 — T4.1 spike (`scripts/t41-containerd-spike.sh`, Q24)
+- Vendored containerd 1.7.20 / runc 1.1.13 / cni-plugins 1.5.1 staged
+  k3s-style (`agent/containerd/`, `agent/etc/containerd/config.toml`,
+  `agent/etc/cni/net.d`, `agent/containerd/aux`).
+- **Multicall seam:** `containerd`/`ctr` aliases re-exec the staged
+  `<data-dir>/agent/containerd/<name>` when present (Q1; located via
+  `INIT_PRO_DATA_DIR`; `crictl` intentionally stays a stub).
+- Verified through the seam: daemon boot, socket, `ctr version`, CRI
+  plugin `ok`, runc.v2 loads. Spike 5/5; image-pull smoke is
+  best-effort (docker.io / registry.k8s.io unreachable here; ghcr.io ok).
+- T4.1 stays in-progress: runtime config templating, supervisor,
+  crictl/airgap decisions remain (recorded in Q24).
+
+### S2 — Binding subresource (`crates/apiserver/src/binding.rs`)
+- `POST /api/v1/namespaces/{ns}/pods/{name}/binding` with upstream
+  semantics: 201 created, 404 unknown pod, 409 already-bound (message
+  includes the winning node), 422 binding to an unknown node;
+  write-if-changed `spec.nodeName` + `PodScheduled=True` (4 tests).
+
+### S3-S5 — `crates/scheduler` (plugin framework + defaults + extender seam)
+- Pure-function plugins: `Filter`/`Score` traits over an immutable
+  `Snapshot` (nodes, assigned pods, PVCs); 7 default filters — NodeName,
+  NodeUnschedulable (cordon), TaintToleration, NodeAffinity (incl.
+  `spec.nodeSelector`, full OR-terms/AND-expressions required
+  nodeAffinity, preferred weights), PodAntiAffinity (required topology
+  segments + preferred penalties), ResourceFit (quantity math: decimal +
+  binary SI, milli/micro/nano; init containers summed as the safe
+  bound), VolumeBinding passthrough (PVC `spec.nodeAffinity` honored);
+  3 default scores — LeastRequested (avg of cpu+memory free %),
+  NodeAffinityPreferred, PodAntiAffinityPreferred.
+- **Q23 semantics:** controllers-framework reuse (pods/nodes/PVCs
+  informers, one pending-pod workqueue, Lease+CAS election
+  `init-pro-scheduler`, Q18/Q19); **logical nodes** (no
+  `status.allocatable`) unbounded + log-once; Unschedulable written
+  write-if-changed and requeued **only** on pod/node events or the 30 s
+  backstop (anti-oscillation; integration test asserts revision quiesce).
+- Extenders: upstream wire shape (`urlPrefix`, `filterVerb`,
+  `prioritizeVerb`, `weight`, `ignorable`, `nodeCacheCapable`),
+  HTTP-only (TcpStream + chunked, Q21 pattern; `https://` rejected in
+  v1), ignorable-degrade vs fail-the-attempt; axum-stub integration
+  tests cover filter-reject-all and prioritize-steer.
+- Bugs fixed on first compile/test pass: pointer paths missing the
+  leading `/` (pod_request silently 0), JSON-pointer label lookups
+  breaking on keys containing `/` (`kubernetes.io/hostname`), and a
+  test-logic AND/OR inversion in the registry-shape check.
+
+### S6 — wiring + golden
+- `cli/runtime.rs`: scheduler spawned behind `--disable-scheduler`,
+  drains after the controllers; `--disable-controller-manager` now
+  honored (was recorded but unused).
+- `--kube-scheduler-arg config=<file>` (real k3s flag, moved from no-op
+  Table C.7 to the wired surface; snapshot + parity list updated — 16/16).
+- Golden **23/23**: G22 nodeSelector placement + PodScheduled=True +
+  Unschedulable settle; G23 python3 stub extender steering placement on
+  a second server booted with `--kube-scheduler-arg`.
+
+### S7 — SSOT lock-step
+- index.md T3.2 → done (T4.1 dep waived by the spike), T4.1 →
+  in-progress; plan/03 + plan/04 as-built; **Q23/Q24** recorded;
+  flag-matrix updated; this entry; `features/scheduler.md`.
+
+**Totals:** 526 workspace tests green (was 489; +26 scheduler unit,
++5 scheduler integration, +4 binding subresource, +1 multicall
+staged-peer, +1 fixture), clippy `-D warnings` 0, fmt clean, flag
+parity 16/16, multicall selftest green, golden 23/23.
+
+Known flake (pre-existing, out of T3.2 scope): router
+`content_phase::concurrent_requests_keep_distinct_context` panicked
+once with `async fn resumed after completion` (pipeline/mod.rs:91)
+under heavy machine load — the Q12/Q13 coroutine bridge can re-poll a
+completed serve future; reproduces ~1/5 under load, passes in
+isolation and in the full-suite rerun. Left for the router owners.
+
 ## Sprint 14 — T3.1b: controller-manager closeout — rollout/STS/DS/GC/namespace, golden 21/21 (2026-08-14)
 
 **Goal:** finish T3.1 — everything the kube-controller-manager-equivalent
