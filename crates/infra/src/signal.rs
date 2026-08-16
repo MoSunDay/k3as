@@ -4,30 +4,56 @@
 //! triggers it on SIGTERM or SIGINT (k3s uses the same pair), so every
 //! long-lived component can `.await` [`Shutdown::cancelled`] and drain.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
 /// Cancellation token shared across components.
+///
+/// One-shot and *sticky*: once [`trigger`](Self::trigger) fires, every later
+/// `cancelled()` resolves immediately. (Plain `Notify` is memoryless — a
+/// `notify_waiters` during a waiter's gap between two `select!` evaluations
+/// was silently lost; the T4.1 supervisor loop was the first re-awaiting
+/// consumer to hit that, so the token now carries a fired flag.)
 #[derive(Clone, Debug)]
 pub struct Shutdown {
     inner: Arc<Notify>,
+    fired: Arc<AtomicBool>,
 }
 
 impl Shutdown {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Notify::new()),
+            fired: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Fire the token; all waiters wake.
+    /// Fire the token; all current waiters wake and all future ones resolve.
     pub fn trigger(&self) {
+        self.fired.store(true, Ordering::Release);
         self.inner.notify_waiters()
+    }
+
+    /// True once the token has been fired (poll-friendly).
+    pub fn is_triggered(&self) -> bool {
+        self.fired.load(Ordering::Acquire)
     }
 
     /// Resolve when the token is fired (or never, if it never is).
     pub async fn cancelled(&self) {
-        self.inner.notified().await;
+        if self.is_triggered() {
+            return;
+        }
+        let mut notified = std::pin::pin!(self.inner.notified());
+        // Register interest before re-checking so a trigger racing between
+        // the flag check and the await still wakes us (tokio's documented
+        // `enable()` pattern for lossless one-shot notify).
+        notified.as_mut().enable();
+        if self.is_triggered() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -82,6 +108,20 @@ mod tests {
         // Must not hang.
         let r = tokio::time::timeout(std::time::Duration::from_secs(1), s.cancelled()).await;
         assert!(r.is_ok(), "cancelled() must resolve after trigger()");
+    }
+
+    #[tokio::test]
+    async fn trigger_before_await_still_resolves() {
+        // Regression (T4.1): a waiter that starts AFTER the token fired must
+        // not hang — Notify alone is memoryless, the flag makes it sticky.
+        let s = Shutdown::new();
+        s.trigger();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(1), s.cancelled()).await;
+        assert!(r.is_ok(), "late cancelled() must resolve once triggered");
+        assert!(s.is_triggered());
+        // And a second, concurrent waiter also resolves.
+        let r2 = tokio::time::timeout(std::time::Duration::from_secs(1), s.cancelled()).await;
+        assert!(r2.is_ok());
     }
 
     #[tokio::test]
