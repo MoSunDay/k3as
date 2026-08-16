@@ -16,6 +16,7 @@ controllers = { workspace = true }
 scheduler = { workspace = true }
 storage = { workspace = true }
 runtime = { workspace = true }
+kubelet = { workspace = true }
 k8s-openapi = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

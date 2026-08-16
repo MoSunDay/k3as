@@ -108,6 +108,8 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("disable-default-registry-endpoint", None, false),
     nf("airgap-extra-registry", None, true),
     // C.9 Node identity / kubelet
+    // (`node-name` is wired for `agent` since T4.2; the strip filter keeps
+    // it accept-no-op-warn for `server`/`stage` only.)
     nf("node-name", None, true),
     nf("with-node-id", None, false),
     nf("node-label", None, true),
@@ -171,6 +173,8 @@ mod tests {
     #[test]
     fn no_long_name_collides_with_wired() {
         // Wired flag long names (Table A) must NOT appear in the no-op set.
+        // (`node-name` is the one exception: wired for `agent` only since
+        // T4.2 — the strip filter special-cases it by subcommand.)
         let wired = [
             "data-dir",
             "debug",

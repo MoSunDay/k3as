@@ -6,9 +6,10 @@
 //! Since T3.1a the server also runs the controller manager against the same
 //! storage Arc as the apiserver, in-process (decision **Q19**), stopping it
 //! after the API surface has drained.
-//! `agent` installs the handler and supervises the bundled containerd
-//! runtime (T4.1, Q25) until the kubelet equivalent lands in T4.2. `stage`
-//! exposes the T0.2 manifest contract + B5 runtime staging.
+//! `agent` installs the handler, supervises the bundled containerd runtime
+//! (T4.1, Q25), and runs the kubelet equivalent (T4.2 Scope A) when a join
+//! URL is given. `stage` exposes the T0.2 manifest contract + B5 runtime
+//! staging.
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -31,16 +32,23 @@ pub struct ServerBind {
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
-    run_supervised("server", cfg, Some(bind))
+    run_supervised("server", cfg, Some(bind), None, None)
 }
 
-pub fn run_agent(cfg: Config) -> ExitCode {
-    run_supervised("agent", cfg, None)
+pub fn run_agent(cfg: Config, server_url: Option<String>, node_name: Option<String>) -> ExitCode {
+    run_supervised("agent", cfg, None, server_url, node_name)
 }
 
-/// `server` serves discovery when given a [`ServerBind`]; `agent` only idles
-/// until Layers 3–4 land.
-fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> ExitCode {
+/// `server` serves discovery when given a [`ServerBind`]; `agent` supervises
+/// the bundled containerd runtime (T4.1) and, with `server_url` + a staged
+/// crictl, the kubelet loops (T4.2 Scope A) under `node_name`.
+fn run_supervised(
+    role: &'static str,
+    cfg: Config,
+    bind: Option<ServerBind>,
+    server_url: Option<String>,
+    node_name: Option<String>,
+) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name(role)
@@ -90,6 +98,57 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
                     "containerd source unavailable; agent degraded (T4.2 will \
                      hard-require the runtime): {e}"
                 ),
+            }
+        }
+        // T4.2 Scope A: with a join URL the agent also runs the kubelet
+        // equivalent — pod watch + sync over CRI + node/lease registration —
+        // against the apiserver HTTP surface (Q21). The kubelet stays off
+        // (agent keeps booting) when the staged crictl tree (T4.1) or a
+        // v1-compatible http:// URL is missing.
+        let mut kubelet_drain: Option<Vec<tokio::task::JoinHandle<()>>> = None;
+        if bind.is_none() {
+            if let Some(url) = server_url {
+                let node = node_name.unwrap_or_else(kubelet::default_node_name);
+                let paths = node_runtime::AgentRuntimePaths::for_data_dir(&cfg.data_dir);
+                match node_runtime::CriCtl::for_paths(&paths) {
+                    Some(cri) => {
+                        // The kubelet http client is plain-http only in v1
+                        // (Q21; TLS lands with T1.3) — reject anything else
+                        // up front so https join URLs degrade, not fail.
+                        if kubelet::http::HttpJson::parse_url(&url).is_err() {
+                            tracing::warn!(
+                                target: "init-pro",
+                                role,
+                                "kubelet needs an http:// --server URL in v1 (Q21); \
+                                 kubelet disabled"
+                            );
+                        } else {
+                            let kc = kubelet::KubeletConfig::new(
+                                url.clone(),
+                                node.clone(),
+                                cfg.data_dir.clone(),
+                            );
+                            let handles = kubelet::spawn(
+                                kc,
+                                Arc::new(kubelet::CriCtlBackend::new(cri)),
+                                shutdown.clone(),
+                            );
+                            tracing::info!(
+                                target: "init-pro",
+                                role,
+                                node = %node,
+                                server = %url,
+                                "kubelet started (T4.2)"
+                            );
+                            kubelet_drain = Some(handles);
+                        }
+                    }
+                    None => tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "no staged crictl; kubelet off (T4.1 tree missing)"
+                    ),
+                }
             }
         }
         let server_join = match &bind {
@@ -182,7 +241,16 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
 
         shutdown.cancelled().await;
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining");
-        // T4.1: drain the containerd supervisor first (kill + bounded wait),
+        // T4.2: drain the kubelet loops BEFORE the runtime — the kubelet
+        // must stop driving CRI before containerd dies (the shared Shutdown
+        // token has already stopped both; this only orders the joins).
+        if let Some(handles) = kubelet_drain {
+            for h in handles {
+                let _ = h.await;
+            }
+            tracing::info!(target: "init-pro", role, "kubelet drained");
+        }
+        // T4.1: then drain the containerd supervisor (kill + bounded wait),
         // mirroring k3s stopping the runtime before the control plane.
         if let Some(h) = runtime_drain {
             let _ = h.await;

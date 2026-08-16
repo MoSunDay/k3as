@@ -208,7 +208,10 @@ mod tests {
 
     #[test]
     fn agent_requires_token() {
-        let a = AgentCmd { shared: shared() };
+        let a = AgentCmd {
+            shared: shared(),
+            node_name: None,
+        };
         let err = validate_agent(&a).unwrap_err();
         assert_eq!(err.0, "--token is required");
     }
@@ -217,7 +220,10 @@ mod tests {
     fn agent_requires_server() {
         let mut sh = shared();
         sh.token = Some("t".to_string());
-        let a = AgentCmd { shared: sh };
+        let a = AgentCmd {
+            shared: sh,
+            node_name: None,
+        };
         let err = validate_agent(&a).unwrap_err();
         assert_eq!(err.0, "--server is required");
     }
@@ -227,7 +233,10 @@ mod tests {
         let mut sh = shared();
         sh.token = Some("t".to_string());
         sh.server = Some("https://x".to_string());
-        let a = AgentCmd { shared: sh };
+        let a = AgentCmd {
+            shared: sh,
+            node_name: None,
+        };
         assert!(validate_agent(&a).is_ok());
     }
 

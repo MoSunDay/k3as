@@ -106,7 +106,7 @@ check_help "$SNAP/server-help.txt" "server" \
   --disable-kube-proxy --disable-network-policy --disable-helm-controller \
   --datastore-endpoint --cluster-init --kube-scheduler-arg
 check_help "$SNAP/agent-help.txt" "agent" \
-  --config --data-dir --debug --token --server --prefer-bundled-bin
+  --config --data-dir --debug --token --server --prefer-bundled-bin --node-name
 
 echo "----"
 echo "parity: $pass passed, $fail failed"

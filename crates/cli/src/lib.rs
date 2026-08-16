@@ -150,7 +150,7 @@ where
         }
         Some(Command::Agent(ag)) => {
             tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);
-            runtime::run_agent(cfg)
+            runtime::run_agent(cfg, ag.shared.server.clone(), ag.node_name.clone())
         }
         Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, manifest),
         None => {
@@ -216,7 +216,13 @@ mod tests {
             .expect("agent subcommand exists")
             .clone();
         let agent_help = agent.render_help().to_string();
-        for flag in ["--config", "--token", "--server", "--prefer-bundled-bin"] {
+        for flag in [
+            "--config",
+            "--token",
+            "--server",
+            "--prefer-bundled-bin",
+            "--node-name",
+        ] {
             assert!(
                 agent_help.contains(flag),
                 "agent --help missing wired flag {flag}"
