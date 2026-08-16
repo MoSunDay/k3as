@@ -23,11 +23,16 @@ pub const RUNTIME_FILES: &[&str] = &[
     "runc",
 ];
 
-/// Loopback-only CNI conf for v1 wiring (flannel lands with T4.3).
+/// CNI conf written into `cni/net.d` (flannel lands with T4.3).
 pub const CNI_CONF_NAME: &str = "10-init-pro.conflist";
 /// The CNI network configuration written into `cni/net.d`.
-pub const CNI_CONF: &str =
-    r#"{"cniVersion":"1.0.0","name":"init-pro","plugins":[{"type":"loopback"}]}"#;
+///
+/// bridge + host-local gives the sandbox a real `eth0` IP — containerd 1.7
+/// CRI hard-fails `RunPodSandbox` unless the CNI result carries an IP on the
+/// default interface (`eth0`), so a loopback-only chain can never run pods.
+/// Fully offline: only needs the staged `bridge`/`host-local` plugins (k3s
+/// pod-CIDR-style 10.42.0.0/24 per-node subnet).
+pub const CNI_CONF: &str = r#"{"cniVersion":"1.0.0","name":"init-pro","plugins":[{"type":"bridge","bridge":"cni0","isGateway":true,"ipMasq":true,"hairpinMode":true,"ipam":{"type":"host-local","ranges":[[{"subnet":"10.42.0.0/24"}]],"routes":[{"dst":"0.0.0.0/0"}]}}]}"#;
 
 /// What one staging pass did (logged by the agent bootstrap).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -167,7 +172,7 @@ fn stage_aux_dir(vendor: &Path, dest: &Path, out: &mut StageOutcome) -> io::Resu
     Ok(())
 }
 
-/// Write the loopback CNI conf (idempotent). Returns `true` when written.
+/// Write the CNI conf (idempotent). Returns `true` when written.
 pub fn write_cni_conf(cni_conf_dir: &Path) -> io::Result<bool> {
     let path = cni_conf_dir.join(CNI_CONF_NAME);
     if path.is_file() {
@@ -266,7 +271,7 @@ mod tests {
         assert!(!write_cni_conf(&conf).unwrap(), "second write is a no-op");
         let text = fs::read_to_string(conf.join(CNI_CONF_NAME)).unwrap();
         assert!(text.contains(r#""name":"init-pro""#));
-        assert!(text.contains("loopback"));
+        assert!(text.contains("bridge") && text.contains("host-local"));
         assert!(
             text.starts_with('{') && text.ends_with('}'),
             "valid JSON object"
