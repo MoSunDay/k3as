@@ -26,7 +26,7 @@ apiserver's storage `Arc` in process (**Q19**).
 | `controllers/deployment.rs` + `rollout.rs` + `conditions.rs` | Template-hash RS; `maxSurge`/`maxUnavailable` rolling pacing (raw JSON specs, upstream 25%/25% defaults); NewReplicaSetAvailable / ProgressDeadlineExceeded transitions. |
 | `controllers/statefulset.rs` + `ordinal.rs` | Q22: `<sts>-<ordinal>` identity, OrderedReady/Parallel; PVC object per claim template per ordinal (never deleted on scale-down); ControllerRevision `<sts>-<hash10>`; RollingUpdate/OnDelete. |
 | `controllers/daemonset.rs` | Node list as source of truth; nodeSelector + first nodeAffinity term; one pinned pod per matching node; status numbers track node lifecycle. |
-| `controllers/endpoints.rs` | Service selector matching; ready = Ready True or no conditions. |
+| `controllers/endpoints.rs` | Service selector matching; ready = Ready True or no conditions; `resolve_target_port` (absent→identity, numeric→verbatim, named→containerPort lookup, unresolvable→port omitted) + real kubelet podIPs preferred over the 10.42.x.y placeholder (Sprint 18, feeds the Q28 NodePort plane). |
 | `controllers/gc.rs` | Q20: managed-owner absence sweep (DELETE-driven + 2s backstop); annotation-marked Orphan. |
 | `controllers/namespace.rs` | Q20: drain every namespaced kind, then terminal delete. |
 | `runner.rs` | `ControllerManager::spawn` — leader-gated informers/workqueues/workers wiring. |

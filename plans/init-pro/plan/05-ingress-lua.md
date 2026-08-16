@@ -217,12 +217,29 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
   - Reuses upstream pools / health checks from T5.4.
   - Allocates/announces the LB VIP, integrates with T4.3 dataplane.
 
+  - **As-built (Sprint 18, Q28 NodePort scope):** the kube-proxy-
+    equivalent lives in the Router — `crates/router/src/endpoints.rs`
+    + `endpoints_watch.rs` run LIST→WATCH reflectors over
+    services+endpoints on the shared storage `Arc` feeding an
+    `UpstreamResolver`; `nodeport.rs` starts one reverse-proxy
+    listener per allocated nodePort (503 on empty Endpoints; listener
+    retired on Service delete; Endpoints updates re-target without
+    restart). On by default in the server; `--disable-kube-proxy`
+    opts out. No ClusterIP dataplane (decision **Q28**).
+
 - **验收手段 / Acceptance**
   - Golden: a TCP Service gets a VIP and load-balances across endpoints.
+  - As-built (NodePort scope): `crates/router/tests/nodeport_plane.rs`
+    (live proxy / 503 / re-target / retire over real TCP backends) +
+    `scripts/service-traffic-e2e.sh` ST1–ST6 on a real local cluster.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **状态 / Status** — in-progress (NodePort plane done, Sprint 18, Q28)
+- **证据 / Evidence** — router +9 unit (endpoints reflector/resolver)
+  + `nodeport_plane` 4 integration (Sprint 18 S4); service-traffic
+  e2e ST1–ST6 (S6); Q28 ADR
+- **卡点 / Blockers** — remaining scope: LB VIP allocate/announce +
+    TCP/SNI stream routing need the T4.3 dataplane; ClusterIP
+    dataplane deferred (Q28).
 - **依赖 / Depends on** — T5.4, T4.3
 
 ---

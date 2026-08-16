@@ -131,6 +131,12 @@ and node registration.
     `entry.mod_revision`; apiserver graceful drain waited forever on
     open watch streams (the kubelet holds one) — now a 2 s
     `DRAIN_GRACE` deadline in `serve.rs`.
+    Sprint 18 (S1) extension: the kubelet reports podIP/podIPs +
+    hostIP=127.0.0.1 — `crates/runtime/src/cri_json.rs` parses
+    `crictl inspectp` output (`PodSandboxInspect` + `cri.rs`
+    `inspect_pod_sandbox`) and `crates/kubelet/src/status.rs`
+    surfaces `status.network.ip`; the node object gained an
+    InternalIP address (`crates/kubelet/src/objects.rs`).
 
 - **验收手段 / Acceptance**
   - Golden (T0.6): run a Deployment pod to `Running`+`Ready`; kill the
@@ -168,6 +174,12 @@ and node registration.
   - kube-proxy-equivalent iptables/nftables (or eBPF) for Service ClusterIP.
   - ServiceLB: DSR/local L4 LB for `LoadBalancer` Services on bare metal
     (k3s `servicelb`).
+
+    Note (Sprint 18, **Q28**): the Service NodePort plane does NOT
+    live here — it is carried by the built-in Router (`crates/router`:
+    one reverse-proxy listener per allocated nodePort, on by default,
+    `--disable-kube-proxy` opts out). T4.3 still owns the pod-network
+    CNI and any future ClusterIP dataplane.
 
 - **验收手段 / Acceptance**
   - Golden: pod-to-pod across nodes; ClusterIP reachable; LoadBalancer

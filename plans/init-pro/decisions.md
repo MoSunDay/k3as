@@ -1259,3 +1259,74 @@ golden SKIPs G25 without it, exactly like G24's vendor gate. The same
 script is the template for future airgap workload images. Registry
 pulls (the Q26-era `crictl images pull` path) remain for connected
 environments.
+
+## Q28 — Service traffic: NodePort-only plane in the built-in Router (no ClusterIP dataplane) (Sprint 18)
+
+**Date.** 2026-08-17 (Sprint 18, recorded at S7 — "decision D" in the
+slice commits).
+
+**Context.**
+Sprint 18 made pods reachable end to end: the kubelet emits real podIPs
+from the CRI sandbox (S1), Endpoints resolve targetPort and carry those
+podIPs (S2), the apiserver auto-allocates nodePorts (S3), and
+`scripts/local-up.sh` boots a real single-node cluster (S0). The
+cluster now needs a Service dataplane — something must carry traffic
+from a stable Service entry point to the live pod set. k3s runs
+kube-proxy (iptables/IPVS) plus servicelb for this. Q4 already commits
+to the built-in Router as a first-class platform primitive, and the
+sprint's acceptance (S6, `scripts/service-traffic-e2e.sh`) needs real
+HTTP traffic through a Service on this machine, where no netns/iptables
+dataplane machinery exists yet.
+
+**Options.**
+- A) **Full kube-proxy equivalent** — ClusterIP iptables/IPVS rules
+  plus NodePort/LoadBalancer handling. The faithful k3s port, but a
+  large netns/iptables/nftables surface that no current test needs;
+  ClusterIP forwarding is pointless before pod-to-pod networking
+  outgrows the single-node bridge anyway. Defers the visible value
+  (Service traffic that works) behind weeks of kernel-rule machinery.
+- B) **NodePort-only plane in the built-in Router** — one reverse-proxy
+  listener per allocated nodePort, upstreams resolved from live
+  Endpoints; ClusterIP Services stay creatable/storable but
+  non-forwarding (`--service-cidr` remains a noop). Reuses the proven
+  T5.4 proxy/balancer machinery, pure userspace, testable in-process
+  and end to end.
+- C) **Delegate to an external kube-proxy/CNI plugin** (supervised
+  upstream binary). Contradicts Q4 (first-class built-in Router) and
+  Q1 (single multicall binary); adds a dependency absent from
+  `vendor/versions.toml` with no offline source in this environment.
+
+**Decision.** B. As-built (Sprint 18, S4):
+- `crates/router/src/endpoints.rs` + `endpoints_watch.rs`: LIST→WATCH
+  reflectors over services + endpoints on the SAME embedded-storage
+  `Arc` the apiserver uses (gap-free, revision-ordered, informer-style
+  re-LIST on stream close), folded into a `ResolverState` that
+  implements T5.4's `UpstreamResolver` (numeric/named/identity
+  targetPort; ns/name + bare-name lookup).
+- `crates/router/src/nodeport.rs`: one reverse-proxy listener per
+  allocated nodePort of every NodePort/LoadBalancer Service, managed by
+  a reconcile loop on a dedicated worker thread (current-thread runtime
+  + `LocalSet`, matching `serve_proxy`'s spawn_local model); Endpoints
+  updates re-target without restart, Service delete retires the
+  listener, shutdown drains the plane.
+- Wired in `crates/cli/src/runtime.rs`. The plane is **on by default**
+  in the server; `--disable-kube-proxy` (a pre-parsed noop until this
+  sprint, kept for k3s flag parity) turns it off. The Router gained
+  `infra` + `storage` workspace dependencies only.
+
+**Consequences.**
+Service traffic works end to end on a local cluster today
+(`scripts/local-up.sh` + `scripts/service-traffic-e2e.sh` ST1–ST6, a CI
+gate that SKIPs itself — exit 0 — without a vendor bundle or `cc`,
+G24/G25 parity). Polarity is deliberate: plane ON by default,
+`--disable-kube-proxy` opts out, zero config churn otherwise. Empty
+Endpoints answer **503** (not connection reset), so scale-to-zero is
+observable (ST5); Service delete retires the listener (ST6: refused).
+LoadBalancer-type Services get nodePorts from the same S3 allocator but
+no external VIP yet — VIP announce is the remaining T5.6 scope and
+needs the T4.3 dataplane. Deferred to future work: the ClusterIP
+dataplane (`--service-cidr` stays a noop; ClusterIP Services are
+creatable/storable but non-forwarding), LoadBalancer external VIPs,
+sessionAffinity, UDP, externalTrafficPolicy. If a ClusterIP dataplane
+is ever required it lands as a Router/T4.3 extension, not a forked
+iptables kube-proxy — Q4's single-dataplane story holds.

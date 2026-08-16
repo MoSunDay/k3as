@@ -42,6 +42,13 @@ status) is done; probes/volumes/exec/pulls (Scope B/C) are not built.
 - Backed by a new apiserver subresource `PUT pods/status`
   (`crates/apiserver/src/pod_status.rs`): read-first, merges ONLY
   `.status`, CAS on the entry's `mod_revision`.
+- Sprint 18 (S1): podIP/podIPs + hostIP=127.0.0.1 emission — every
+  SANDBOX_READY sandbox is enriched with `crictl inspectp -o json`
+  (`runtime::cri_json::PodSandboxInspect` + `cri.rs`
+  `inspect_pod_sandbox`), and `status.rs` surfaces
+  `status.network.ip`; podIP is part of the semantic-change key so a
+  late-arriving CNI address re-triggers the PUT. The Node object
+  advertises an InternalIP address (`objects.rs`).
 
 ## CRI seam + airgap image (Q26/Q27)
 
@@ -74,8 +81,9 @@ capacity/status richness.
 
 ## Proof
 
-- 53 tests in `crates/kubelet/` (incl. a fake-CRI end-to-end over a
-  real HTTP fake apiserver); 631 workspace green.
+- 56 tests in `crates/kubelet/` (incl. a fake-CRI end-to-end over a
+  real HTTP fake apiserver); 674 workspace green (Sprint 18: +3
+  status tests for podIP/podIPs/hostIP).
 - Golden G25 — 3 assertions: pod Running+Ready on the agent node;
   killed container restarted with a new id; Deployment delete → zero
   sandboxes. Gated on the vendor bundle + `cc`, SKIPs otherwise.

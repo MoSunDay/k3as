@@ -21,7 +21,7 @@ is complete; Phase 2 (persistence + control plane) is in progress. The Cargo wor
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q19
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q28
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -47,7 +47,9 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - `cargo clippy --workspace --all-targets -- -D warnings` -> must be zero.
 - e2e scripts under `scripts/` run a PRE-BUILT binary: build first, then
   e.g. `scripts/multicall-selftest.sh`. Other gates:
-  `scripts/golden-conformance.sh`, `scripts/cli-flag-parity-test.sh`.
+  `scripts/golden-conformance.sh`, `scripts/cli-flag-parity-test.sh`,
+  `scripts/service-traffic-e2e.sh` (Service NodePort traffic, ST1-ST6;
+  SKIPs itself without a vendor bundle/cc).
 - `--locked` is mandatory for CI/release; dependencies are caret-only.
 - Toolchain: stable (`rust-toolchain.toml`), MSRV 1.89, edition 2021.
 - `crates/init-pro/build.rs` defaults to Auto acquire (no network) + empty
@@ -87,7 +89,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers (T3.1). |
 | `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q19). |
 | `runtime` | Agent-side containerd: config templating, idempotent vendor staging, supervisor + CRI plumbing (T4.1, Q24-Q26). |
-| `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer (T4.2 Scope A). |
+| `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer incl. podIP/podIPs/hostIP emission (T4.2 Scope A). |
 | `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
 | `router` | Built-in Lua data plane: phase pipeline, resty.*, Ingress->route compiler, balancer, reverse proxy, TLS (T5.1-T5.4). |
 | `storage` | `StorageBackend` trait + embedded etcd-semantics store incl. watch replay + compaction (T2.1/T2.2 done). |
