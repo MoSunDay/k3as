@@ -12,7 +12,7 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 `crictl` | `containerd` | `etcd` (symlink deployment just works). It has a
 first-class built-in Lua Router - an openresty-style programmable HTTP
 data plane driven by Lua via mlua - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (14 crates).
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (15 crates).
 
 ## The SSOT (single source of truth)
 
@@ -87,6 +87,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers (T3.1). |
 | `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q19). |
 | `runtime` | Agent-side containerd: config templating, idempotent vendor staging, supervisor + CRI plumbing (T4.1, Q24-Q26). |
+| `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer (T4.2 Scope A). |
 | `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
 | `router` | Built-in Lua data plane: phase pipeline, resty.*, Ingress->route compiler, balancer, reverse proxy, TLS (T5.1-T5.4). |
 | `storage` | `StorageBackend` trait + embedded etcd-semantics store incl. watch replay + compaction (T2.1/T2.2 done). |
@@ -106,11 +107,11 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   etcd revision/CAS semantics, watch historical replay + compaction);
   durability + alternative backends are T2.3 (Q17). Leader election is
   Lease-object + CAS, not etcd leases (Q18).
-- Next gate on the critical path: T4.2 (kubelet equivalent — pod
-  lifecycle + status reporting) is the last big node before M3
-  end-to-end; it builds on T4.1's CRI seam (Q26: vendored-crictl
-  subprocess now, native gRPC later). T2.3 (durability) is the other
-  open Layer 2 item.
+- Next gate on the critical path: T4.2 Scope A is done — the kubelet
+  drives real pods to Running+Ready over the T4.1 CRI seam (golden
+  G25). Remaining on the path: T4.2 Scope B/C (probes, volumes, local
+  deploy), T4.3 (CNI), and T2.3 (durability, the other open Layer 2
+  item).
 - The server serves real REST CRUD/watch/SSA over the embedded store
   (kubectl-compatible); zero-restart durability arrives with T2.3.
 

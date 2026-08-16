@@ -1221,3 +1221,41 @@ kubectl-parity node ops today with proven semantics (Q25). The trigger
 for route A is explicit (streaming/watch need), not convenience. When it
 fires, budget for vendoring `cri-api` protos and a build-time protoc
 strategy (or prost-build with a checked-in prebuilt descriptor set).
+
+## Q27 — Airgap workload image: local OCI assembly for the pause sandbox (T4.2)
+
+**Date.** 2026-08-16 (Sprint 17, T4.2 Scope A).
+
+**Context.**
+G25 needs a real workload image to drive a pod to Running+Ready. Every
+registry route is closed in this environment: registry.k8s.io redirects
+to a blocked `europe-west4-docker.pkg.dev` CDN, docker.io is blocked
+outright (cf. the Q24 egress note), and ghcr.io has no pause repo. The
+sandbox image must arrive with zero network.
+
+**Options.**
+- A) **Vendor a pause image tarball** into the repo/build. Commits a
+  binary blob to git, grows the checkout, and still needs an import
+  step at the agent.
+- B) **Build a minimal pause locally** at deploy/test time into a
+  hand-assembled OCI layout, then import it through the staged `ctr`.
+- C) **Runtime HTTP pull from a mirror.** Requires a reachable mirror
+  (none exists here) and reintroduces network dependence into the
+  golden path.
+
+**Decision.** B. As-built:
+- `scripts/build-pause-image.sh` compiles a static pause binary (gcc
+  `-static -Os`) and hand-assembles an OCI image layout — no registry
+  round-trip anywhere. Ref `init-pro.local/pause:0.1`.
+- Imported through the staged `ctr` into namespace k8s.io
+  (`INIT_PRO_DATA_DIR=<dd> init-pro ctr -n k8s.io images import <tar>`);
+  the agent honors `INIT_PRO_SANDBOX_IMAGE` (the Q25 seam), started
+  with `init-pro.local/pause:0.1` for G25.
+
+**Consequences.**
+Zero network + zero binary blob committed — the image is reproducible
+from source at image-build time. Needs `cc` at image-build time;
+golden SKIPs G25 without it, exactly like G24's vendor gate. The same
+script is the template for future airgap workload images. Registry
+pulls (the Q26-era `crictl images pull` path) remain for connected
+environments.
