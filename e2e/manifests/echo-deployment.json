@@ -1,0 +1,46 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "echo",
+    "namespace": "default",
+    "labels": {
+      "app": "echo"
+    }
+  },
+  "spec": {
+    "replicas": 2,
+    "selector": {
+      "matchLabels": {
+        "app": "echo"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app": "echo"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "echo",
+            "image": "init-pro.local/echo:0.1",
+            "env": [
+              {
+                "name": "PORT",
+                "value": "8080"
+              }
+            ],
+            "ports": [
+              {
+                "name": "http",
+                "containerPort": 8080
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
