@@ -1093,7 +1093,10 @@ name = "runtime"
 version = "0.2.0"
 dependencies = [
  "infra",
+ "serde",
+ "serde_json",
  "sha2",
+ "thiserror",
  "tokio",
  "toml",
  "tracing",
