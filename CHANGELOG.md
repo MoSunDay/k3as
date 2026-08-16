@@ -106,7 +106,7 @@ driving the T4.1 CRI seam — Deployment → real containers Running+Ready
   proves serve returns with an open watch.
 
 **Totals:** 551 → 631 workspace tests passed, 0 failed (kubelet 53;
-apiserver 48 → 51; +17 runtime CRI incl. live-containerd integration).
+apiserver 43 → 51; +17 runtime CRI incl. live-containerd integration).
 Golden 27/27 with vendor + `cc` (G25 adds 3), SKIPs otherwise; e2e
 scripts unchanged & green. Scope B/C (probes, volumes, real image
 pull, exec/logs/attach) remain — sprint stays in progress.
