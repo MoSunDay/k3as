@@ -8,6 +8,7 @@ members = [
     "crates/multicall",
     "crates/cli",
     "crates/kubectl",
+    "crates/kubelet",
     "crates/infra",
     "crates/vendor",
     "crates/api",
@@ -36,6 +37,7 @@ common = { path = "crates/common" }
 multicall = { path = "crates/multicall" }
 cli = { path = "crates/cli" }
 kubectl = { path = "crates/kubectl" }
+kubelet = { path = "crates/kubelet" }
 infra = { path = "crates/infra" }
 vendor = { path = "crates/vendor" }
 api = { path = "crates/api" }
