@@ -104,15 +104,17 @@ async fn endpoints_addresses(env: &Env) -> usize {
         .get(&Key::new("", "endpoints", "default", "web"))
         .await
         .unwrap();
-    ep.map(|e| {
-        e["subsets"]
-            .as_array()
-            .and_then(|s| s.first())
-            .and_then(|s| s["addresses"].as_array())
-            .map(|a| a.len())
-            .unwrap_or(0)
-    })
-    .unwrap_or(0)
+    ep.map(|e| subset_addresses(&e)).unwrap_or(0)
+}
+
+/// Address count of the first Endpoints subset (0 when absent/empty).
+fn subset_addresses(ep: &Value) -> usize {
+    ep["subsets"]
+        .as_array()
+        .and_then(|s| s.first())
+        .and_then(|s| s["addresses"].as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
 }
 
 /// CAS-rewrite the deployment template's container image (new hash -> new
@@ -344,7 +346,8 @@ async fn endpoints_reflect_membership() {
     scale_deployment(&env, 1).await;
     eventually!(5000, async { endpoints_addresses(&env).await == 1 });
 
-    // Endpoints carry placeholder IPs (10.42/16) + service ports w/o targetPort.
+    // Endpoints carry placeholder IPs (10.42/16; no kubelet in this suite)
+    // + resolved target ports (Sprint 18 / S2).
     let ep = env
         .client
         .get(&Key::new("", "endpoints", "default", "web"))
@@ -358,7 +361,7 @@ async fn endpoints_reflect_membership() {
         addr["ip"]
     );
     assert!(addr["hostname"].as_str().is_some());
-    assert_eq!(ep["subsets"][0]["ports"][0]["port"], 80);
+    assert_eq!(ep["subsets"][0]["ports"][0]["port"], 8080);
     assert!(ep["subsets"][0]["ports"][0].get("targetPort").is_none());
 }
 
