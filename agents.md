@@ -12,7 +12,7 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 `crictl` | `containerd` | `etcd` (symlink deployment just works). It has a
 first-class built-in Lua Router - an openresty-style programmable HTTP
 data plane driven by Lua via mlua - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (11 crates).
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (14 crates).
 
 ## The SSOT (single source of truth)
 
@@ -84,7 +84,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
 | `api` | Resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1). |
 | `apiserver` | HTTP discovery + REST CRUD/watch/SSA over the storage trait (T1.2 done). |
-| `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers (T3.1a). |
+| `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers (T3.1). |
+| `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q19). |
+| `runtime` | Agent-side containerd: config templating, idempotent vendor staging, supervisor + CRI plumbing (T4.1, Q24-Q26). |
+| `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
 | `router` | Built-in Lua data plane: phase pipeline, resty.*, Ingress->route compiler, balancer, reverse proxy, TLS (T5.1-T5.4). |
 | `storage` | `StorageBackend` trait + embedded etcd-semantics store incl. watch replay + compaction (T2.1/T2.2 done). |
 
@@ -95,18 +98,19 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - De-risk path (Q5): T0.1 -> T0.3 -> T5.1 -> T5.2 -> T5.4 (the M1 spike).
 - T0.6 (golden conformance) is a merge gate, not a node: every TODO must
   keep `scripts/golden-conformance.sh` green.
-- Done: Layer 0 (T0.1-T0.6), T1.1, and the Layer 5 M1 slice (T5.1-T5.4).
-  Phase 1 (M0 + M1) is complete.
+- Done: Layer 0 (T0.1-T0.6), T1.1/T1.2 (api + apiserver), T2.1/T2.2
+  (storage), T3.1/T3.2 (controllers + scheduler), T4.1 (containerd
+  bundling), and the Layer 5 M1 slice (T5.1-T5.4). Phase 1 (M0 + M1)
+  is complete; 17/33 TODOs done.
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   durability + alternative backends are T2.3 (Q17). Leader election is
   Lease-object + CAS, not etcd leases (Q18).
-- Next gate on the critical path: T3.1a landed (the `controllers` crate +
-  golden G17 acceptance: Deployment scale 1->3->1 converges, Endpoints
-  reflect membership); remaining T3.1b = StatefulSet/DaemonSet/GC/
-  rollout-status parity. Next gates: T3.1b completion, then T3.2
-  (scheduler). T4.1 (containerd bundling) is the longest unstarted chain
-  to M3 and still worth an early risk-spike.
+- Next gate on the critical path: T4.2 (kubelet equivalent — pod
+  lifecycle + status reporting) is the last big node before M3
+  end-to-end; it builds on T4.1's CRI seam (Q26: vendored-crictl
+  subprocess now, native gRPC later). T2.3 (durability) is the other
+  open Layer 2 item.
 - The server serves real REST CRUD/watch/SSA over the embedded store
   (kubectl-compatible); zero-restart durability arrives with T2.3.
 

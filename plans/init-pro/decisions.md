@@ -1024,3 +1024,200 @@ template as a ControllerRevision object.
 `status.phase` stays Pending until T6.2 (documented v1 default);
 controller state stays stateless across restarts because history lives
 in storage, not memory.
+
+---
+
+## Q23 — kube-scheduler v1: controllers-framework reuse, logical nodes, HTTP-only extenders (T3.2)
+
+**Date.** 2026-08-15 (Sprint 15).
+
+**Context.**
+T3.2 needs a kube-scheduler equivalent inside the single binary. Upstream
+ships a plugin framework (Filter/Score/Reserve/Bind extension points) with
+default plugins, plus an HTTP extender protocol; k3s runs the stock
+scheduler. init-pro had a working informer/workqueue/leader-election
+framework from T3.1 (the `controllers` crate), no kubelet (so Nodes may
+carry no `status.capacity`), and needs an AI-agent policy seam for Layer 7
+(Q3).
+
+**Options.**
+- A) **Third framework copy** — a scheduler-private client/informer stack.
+  Duplication of ~600 tested lines for no new behavior.
+- B) **Embed kube-scheduler / a Rust port of the whole framework**
+  (Reserve/Permit/PreBind/Binder extension points, profile config).
+  Massive surface for a v1 with no volume/permit use.
+- C) **Reuse the controllers crate's machinery; a small pure-function
+  plugin layer (Filter + Score + Bind) with the default plugins; upstream
+  wire-shape HTTP extenders only.**
+
+**Decision.** C, with three v1 semantics pinned:
+1. **Framework reuse** — `SchedulerManager::spawn` mirrors
+   `ControllerManager::spawn` (Q19 in-process storage, Q18 Lease+CAS
+   election under `init-pro-scheduler`, pods/nodes/PVCs informers, one
+   pending-pod workqueue, 2 workers). Extenders are **HTTP-only**
+   (`TcpStream` + chunked decode, kubectl-Q21 pattern; no gRPC dep);
+   `https://` URLs are rejected in v1.
+2. **Logical nodes** — a Node without `status.allocatable`/`capacity`
+   is treated as **unbounded** (logged once per node name): v1 test /
+   headless clusters register bare Node objects. ResourceFit passes them
+   and LeastRequested scores them a flat 100.
+3. **Anti-oscillation** — `Unschedulable` is written write-if-changed
+   (`semantic_eq` + preserved `lastTransitionTime`); a pod is re-enqueued
+   **only** by pod/node events or a 30 s backstop sweep, never by the
+   worker loop (the Sprint-13 quiesce pattern; covered by a dedicated
+   integration test asserting revision stability).
+Extenders wire through the real k3s flag `--kube-scheduler-arg
+config=<KubeSchedulerConfiguration.json>` (moved from the no-op table to
+the wired surface); the extender JSON matches upstream field names
+(`urlPrefix`, `filterVerb`, `prioritizeVerb`, `weight`, `ignorable`,
+`nodeCacheCapable`). The apiserver also serves
+`pods/{name}/binding` (201/404/409/422 semantics) so both in-process and
+HTTP clients bind identically.
+
+**Consequences.**
+One framework to maintain; the plugin layer is pure
+`(pod, node, snapshot) -> verdict|score` (repo rule: no OOP state).
+Deferred vs upstream: inter-pod affinity (only anti-affinity in v1),
+volume binding (v1 passthrough honors a PVC `spec.nodeAffinity`
+init-pro extension), Permit/PreBind phases, profile config, score
+weighting config. G22/G23 gate the behavior (23/23 golden).
+
+## Q24 — T4.1 spike: vendored containerd is supervisable through the multicall seam (timeboxed)
+
+**Date.** 2026-08-15 (Sprint 15, timeboxed risk spike — T4.1 stays in-progress).
+
+**Context.**
+T4.1 (containerd bundling + CRI) is the longest unstarted chain to M3
+(T4.1 → T4.2 → T4.3/T4.5). The riskiest unknowns: do the pinned artifacts
+(containerd 1.7.20, runc 1.1.13, cni-plugins 1.5.1) actually run under the
+multicall/exec model, and can the k3s-style supervise + CRI socket be
+reached without new runtime deps?
+
+**Options.**
+- A) **Start T4.1 properly** (config templating + supervisor in the
+  server runtime). Blocks T3.2 sequencing and exceeds the sprint.
+- B) **Timeboxed spike**: stage → config → boot via `init-pro containerd`
+  → verify daemon/CRI/`ctr`, record findings, leave T4.1 in-progress.
+
+**Decision.** B. Findings (all verified by
+`scripts/t41-containerd-spike.sh`, 5/5):
+- The vendored bundle **boots through the multicall seam**: peer aliases
+  `containerd`/`ctr` now re-exec `<data-dir>/agent/containerd/<name>`
+  when staged (Q1 symlink deployment; `INIT_PRO_DATA_DIR` locates the
+  data dir; crictl stays a stub — not vendored by decision).
+- k3s layout works as-is: binaries under `agent/containerd/`, config
+  under `agent/etc/containerd/config.toml`, CNI conf `agent/etc/cni/net.d`,
+  cni-plugins in `agent/containerd/aux`, socket `<dd>/run/containerd/containerd.sock`.
+- A ~20-line TOML (`version = 2` + CRI plugin block) yields
+  `io.containerd.grpc.v1 cri … ok`; `ctr version` round-trips through the
+  seam; runc 1.1.13 loads as `io.containerd.runc.v2`.
+- Egress: ghcr.io reachable; docker.io / registry.k8s.io unreachable from
+  this environment — the image-pull smoke is best-effort and skipped
+  (Q: airgap mode implications for T4.2 e2e; SBOM/license gate already
+  passed per T0.2).
+Remaining for full T4.1: config templating in the server runtime,
+supervisor with restart/backoff, `crictl` decision (pin vs CRI-only),
+image pre-pull/airgap strategy, CRI client wiring for T4.2.
+
+**Consequences.**
+The riskiest T4.1 assumption (supervising a foreign runtime through the
+multicall binary) is de-risked with ~90 lines of script + a 30-line seam
+in `multicall`. T4.2 unblocks once T4.1's runtime wiring lands; no new
+workspace dependencies were added.
+
+## Q25 — T4.1 production wiring: Rust-native runtime crate, vendored crictl, sticky shutdown (T4.1)
+
+**Date.** 2026-08-15 (Sprint 16; supersedes Q24's "crictl stays a stub"
+note — T4.1 now vendors crictl).
+
+**Context.**
+Q24 proved vendored containerd is supervisable through the multicall
+seam. T4.1 proper must turn the spike into production wiring: config
+templating without shell scripts, supervision with restart/backoff, a
+real `crictl` (acceptance is literally `init-pro crictl ps`), and clean
+integration with the agent CLI + graceful shutdown.
+
+**Options.**
+- A) **k3s-style shell wrappers** around the vendored tree. Hidden /bin/sh
+  dependency, unfollowable in `#![forbid(unsafe_code)]` audit, breaks the
+  single-binary story.
+- B) **Rust-native `runtime` crate** (config + stage + supervisor),
+  crictl vendored through the existing T0.2 pin/verify pipeline,
+  crictl/ctr passthrough via the multicall seam.
+
+**Decision.** B. As-built:
+- New `runtime` crate. `config.rs`: `ContainerdConfigVars::for_data_dir`
+  renders TOML v2 (CRI plugin enabled); `sandbox_image` overridable via
+  `INIT_PRO_SANDBOX_IMAGE` (default `registry.k8s.io/pause:3.10`). Unit
+  tests parse the render back with `toml` (dev-dep only).
+- `stage.rs`: idempotent SHA-256 staging of the containerd tree
+  (containerd, ctr, shims, runc, crictl, `aux/` cni-plugins), CNI
+  loopback conflist `10-init-pro.conflist`. `vendor_bin_root` resolves
+  `INIT_PRO_VENDOR_BIN` → exe-relative `../../vendor/bin` → cwd.
+- `supervisor.rs`: spawn → socket-health gate (UnixStream poll) →
+  exponential backoff `base << restarts` capped 5s; STABLE_AFTER 30s
+  resets the ladder; drain = SIGKILL + bounded 10s wait. Deliberately
+  **no SIGTERM step**: containerd's child reaping is not guaranteed for
+  a foreign runtime, and k3s kills the tree too.
+- `infra::signal::Shutdown` made **sticky** (fired flag +
+  `Notified::enable`): the old memoryless `notify_waiters` could lose
+  wakeups during select gaps; regression test added, all 29 infra tests
+  green. This is a correctness fix for every Shutdown consumer.
+- CLI: agent branch calls `start_agent_runtime`; runtime drains FIRST on
+  shutdown. `init-pro crictl …`/`init-pro ctr …` are intercepted
+  pre-clap and re-exec the staged peer with endpoint injection
+  (`--runtime-endpoint` / `--address`) unless the user supplied one.
+- `crictl` v1.31.1 pinned in `vendor/versions.toml` (SHA-256 verified
+  against the official `.sha256`); staged like every other peer.
+- Acceptance: `init-pro crictl ps` / `pods` / `version` round-trip over
+  the CRI socket (live smoke + `crates/runtime/tests/supervisor_integration.rs`
+  incl. kill -9 → rebirth); sandbox-image pull smoke is best-effort SKIP
+  (registry auth-gated in this environment; see Q24 egress note).
+
+**Consequences.**
+The agent now owns a real node runtime and `crictl` is a first-class ops
+verb; T4.2 (kubelet) inherits the socket + config seam. Debt recorded
+for T4.2: no image pre-pull/airgap store yet, no cgroup delegation, and
+drain is kill-first (acceptable for v1, revisit if containerd adds
+graceful drain hooks). Sticky `Shutdown` changes semantics for all
+consumers — strictly more correct (idempotent, no lost wakeups).
+
+## Q26 — CRI client strategy: vendored-crictl subprocess now, native gRPC later (T4.1 → T4.2)
+
+**Date.** 2026-08-15 (Sprint 16, timeboxed dual-route spike; conclusions
+only — spike lived outside the workspace, no new deps).
+
+**Context.**
+T4.2 (kubelet) and golden gates need CRI calls. Two viable routes,
+measured in Sprint 16 against a live agent's CRI socket:
+
+**Options.**
+- A) **Native gRPC client** (tonic 0.12 `transport+codegen+prost` +
+  prost 0.13, hand-rolled message structs, UDS connector via
+  `tower::service_fn` + `hyper_util::rt::TokioIo`): measured
+  `runtime.v1.RuntimeService/Version` round-trip **sub-millisecond**;
+  **100 unique crates** in the dep tree; ~15s cold build for just that
+  subset. Full CRI surface (runtime + image services, ~dozens of
+  messages, streaming Exec/Attach, PodSandboxEvents watch) needs
+  vendored `cri-api` protos + tonic-build + protoc — protoc is NOT
+  present in this environment — or maintained hand-rolled structs with
+  field-number drift risk. Also: `tonic::client::Grpc` requires
+  `ready().await` before `unary` (buffer layer panics otherwise).
+- B) **Subprocess through the vendored crictl**: zero new deps,
+  **~20ms/call** (process spawn dominated), covers ps/pods/images/pull/
+  run/exec incl. `exec` stdio passthrough; gaps: per-call spawn cost, no
+  watch/stream subscriptions, output is text/JSON not typed structs.
+
+**Decision.** B now, A later. crictl is the ops verb and the T4.2
+interim client. Introduce a native gRPC client only when T4.2 actually
+needs in-process streaming/watch (sandbox events, pull progress,
+port-forward), scoped to a leaf `cri-client` crate behind a feature flag
+so the 100-crate dep cost is opt-in. The UDS-connector + sticky-shutdown
+patterns from the spike are recorded above for that day.
+
+**Consequences.**
+No new workspace dependencies in Phase 2; `init-pro crictl` gives
+kubectl-parity node ops today with proven semantics (Q25). The trigger
+for route A is explicit (streaming/watch need), not convenience. When it
+fires, budget for vendoring `cri-api` protos and a build-time protoc
+strategy (or prost-build with a checked-in prebuilt descriptor set).

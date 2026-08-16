@@ -86,18 +86,48 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
     framework (Filter/Score/Bind phases).
   - Default plugins: `NodeName`, `TaintToleration`, `NodeAffinity`,
     `PodAntiAffinity`, `ResourceFit`, `VolumeBinding`.
-  - Extender seam: out-of-process gRPC/HTTP scheduler extender
+  - Extender seam: out-of-process HTTP scheduler extender
     (upstream-compatible) — Layer 7 hooks here.
   - Bind via API (T1.2); leader-elected single active scheduler.
+  - **As-built (Sprint 15, Q23):** `crates/scheduler` — pure-function
+    plugin layer (`Filter`/`Score` traits over an immutable `Snapshot`),
+    7 default filters (NodeName, NodeUnschedulable, TaintToleration,
+    NodeAffinity incl. `spec.nodeSelector`, PodAntiAffinity, ResourceFit,
+    VolumeBinding passthrough honoring PVC `spec.nodeAffinity`), 3 default
+    scores (LeastRequested, NodeAffinityPreferred,
+    PodAntiAffinityPreferred); quantity math (decimal + binary SI,
+    milli/micro/nano). Runner reuses the controllers crate (**Q23**):
+    pods/nodes/PVCs informers + one pending-pod workqueue + Lease+CAS
+    election `init-pro-scheduler` (Q18) over the in-process client (Q19).
+    **Logical nodes** (no `status.allocatable`) are unbounded, logged
+    once. Unschedulable is write-if-changed; requeue only on pod/node
+    events or a 30 s backstop (anti-oscillation, revision-quiesce test).
+    **Extenders are HTTP-only** (`https://` rejected in v1), upstream
+    field names (`urlPrefix`, `filterVerb`, `prioritizeVerb`, `weight`,
+    `ignorable`, `nodeCacheCapable`), ignorable-degrade vs
+    fail-the-attempt semantics; wired via the real k3s flag
+    `--kube-scheduler-arg config=<KubeSchedulerConfiguration.json>`.
+    The apiserver serves `pods/{name}/binding` (201/404/409/422); the
+    scheduler binds in-process (write-if-changed `spec.nodeName` +
+    `PodScheduled=True`). Inter-pod affinity, Permit/PreBind, profile
+    config: documented out of v1.
 
 - **验收手段 / Acceptance**
-  - Golden: a pod with `nodeSelector` lands only on matching nodes.
-  - Extender test: a stub extender rejects/accepts a pod deterministically.
+  - Golden: a pod with `nodeSelector` lands only on matching nodes (G22:
+    placement + PodScheduled=True + Unschedulable settle — 23/23).
+  - Extender test: a stub extender rejects/accepts a pod deterministically
+    (G23: python3 stub via a second server + `--kube-scheduler-arg`;
+    in-process axum-stub integration tests cover filter-reject-all and
+    prioritize-steer).
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
+- **状态 / Status** — done
+- **证据 / Evidence** — `crates/scheduler` (26 unit + 5 integration
+  tests), `crates/apiserver/src/binding.rs` + tests (4),
+  `scripts/golden-conformance.sh` G22/G23, `--kube-scheduler-arg` wired
+  (snapshot + parity 16/16); 526 workspace tests green.
 - **卡点 / Blockers** — none
-- **依赖 / Depends on** — T1.2, T4.1
+- **依赖 / Depends on** — T1.2, T4.1 (runtime dependency waived by the
+  Q24 spike: scheduling operates on Node objects, not on containerd)
 
 ---
 

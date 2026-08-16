@@ -48,6 +48,7 @@ behavior. All others degrade to no-op-warn or fatal.
 | `--token`, `-t` | S+A | string | Cluster join secret (recorded; auth = T1.3/T3.3). env `INIT_PRO_TOKEN`. | `server.go:129`, `agent.go:69` |
 | `--server`, `-s` | S+A | string | Server URL to join (recorded; agent/client wiring = T4.5). env `INIT_PRO_URL`. | `server.go:323`, `agent.go:283` |
 | `--cluster-init` | S | bool | Bootstrap cluster (recorded; etcd init = T2.1/T3.4). env `INIT_PRO_CLUSTER_INIT`. | `server.go:330` |
+| `--kube-scheduler-arg` | S | string-slice | Scheduler arg passthrough (`KEY=VALUE`, repeatable). `config=<path>` loads a KubeSchedulerConfiguration JSON whose `extenders` wire the HTTP extender seam (T3.2, Q23); other keys warn no-op. | `server.go:173` |
 
 **`--disable` valid tokens (`DisableItems`, `pkg/cli/cmds/stage.go:9`):**
 `coredns`, `servicelb`, `traefik`, `local-storage`, `metrics-server`,
@@ -179,7 +180,6 @@ deduped WARN. Grouped by function; one row per flag.
 | `--etcd-arg` | S | string-slice | `server.go:168` |
 | `--kube-controller-manager-arg` | S | string-slice | `server.go:178` |
 | `--kube-controller-arg` | S | string-slice | `server.go:652` (hidden alias) |
-| `--kube-scheduler-arg` | S | string-slice | `server.go:173` |
 | `--kube-cloud-controller-manager-arg` | S | string-slice | `server.go:347` |
 | `--kube-cloud-controller-arg` | S | string-slice | `server.go:658` (hidden alias) |
 | `--helm-controller-arg` | S | string-slice | `server.go:183` |
