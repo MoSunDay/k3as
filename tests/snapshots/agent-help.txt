@@ -3,11 +3,12 @@ Run the node agent
 Usage: init-pro agent [OPTIONS]
 
 Options:
-  -c, --config <FILE>       Config file (pre-clap pre-scan, Q8). env `INIT_PRO_CONFIG_FILE` [env: INIT_PRO_CONFIG_FILE=]
-  -d, --data-dir <DIR>      Data directory (k3s `-d` / `--data-dir` parity)
-      --debug               Turn on debug logging (k3s `--debug` parity)
-  -t, --token <TOKEN>       Cluster join secret. env `INIT_PRO_TOKEN` [env: INIT_PRO_TOKEN=]
-  -s, --server <SERVER>     Server URL to join. env `INIT_PRO_URL` [env: INIT_PRO_URL=]
-      --prefer-bundled-bin  Flip child PATH ordering: `bin/aux` ahead of host PATH (Q6 stage)
-  -h, --help                Print help
-  -V, --version             Print version
+  -c, --config <FILE>          Config file (pre-clap pre-scan, Q8). env `INIT_PRO_CONFIG_FILE` [env: INIT_PRO_CONFIG_FILE=]
+  -d, --data-dir <DIR>         Data directory (k3s `-d` / `--data-dir` parity)
+      --debug                  Turn on debug logging (k3s `--debug` parity)
+  -t, --token <TOKEN>          Cluster join secret. env `INIT_PRO_TOKEN` [env: INIT_PRO_TOKEN=]
+  -s, --server <SERVER>        Server URL to join. env `INIT_PRO_URL` [env: INIT_PRO_URL=]
+      --prefer-bundled-bin     Flip child PATH ordering: `bin/aux` ahead of host PATH (Q6 stage)
+      --node-name <NODE_NAME>  Node name to register (k3s `--node-name` parity); defaults to the hostname
+  -h, --help                   Print help
+  -V, --version                Print version

@@ -1,9 +1,11 @@
 //! Pre-clap no-op flag strip filter + one-time WARN deduper (Q9, A3).
 //!
 //! accept-no-op-warn flags (Table C) are identified and removed from argv
-//! *before* clap parses, so the clap surface stays at the 17 wired flags (R1)
+//! *before* clap parses, so the clap surface stays at the wired flags (R1)
 //! and operators' k3s scripts keep working. Each distinct no-op flag seen is
-//! logged exactly once at WARN.
+//! logged exactly once at WARN. Stripping is subcommand-aware: since T4.2,
+//! `--node-name` is wired for `agent` (kept for clap) while staying a no-op
+//! for `server`/`stage`.
 
 pub mod conflicts;
 pub mod noop;
@@ -34,6 +36,7 @@ pub fn strip_noop(argv: &[String]) -> StripResult {
     }
 
     let tokens: Vec<&String> = iter.collect();
+    let sub = detect_subcommand(&tokens);
     let mut i = 0;
     while i < tokens.len() {
         let tok = tokens[i].as_str();
@@ -53,14 +56,18 @@ pub fn strip_noop(argv: &[String]) -> StripResult {
                 None => (rest, false),
             };
             if let Some(f) = find_long(name) {
-                record_seen(&mut seen, f.long);
-                if f.takes_value && !tok.contains('=') {
-                    // Consume the separate value token (if present).
-                    i += 2;
-                } else {
-                    i += 1;
+                // T4.2: `--node-name` is wired for `agent` — keep it so clap
+                // sees it; it stays accept-no-op-warn for `server`/`stage`.
+                if !(f.long == "node-name" && sub == Some("agent")) {
+                    record_seen(&mut seen, f.long);
+                    if f.takes_value && !tok.contains('=') {
+                        // Consume the separate value token (if present).
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                    continue;
                 }
-                continue;
             }
             out.push(tokens[i].clone());
             i += 1;
@@ -107,6 +114,49 @@ fn record_seen(seen: &mut Vec<String>, long: &str) {
     if !seen.iter().any(|s| s == long) {
         seen.push(long.to_string());
     }
+}
+
+/// Top-level subcommands (the multicall dispatcher keys off the same set).
+const SUBCOMMANDS: &[&str] = &["server", "agent", "stage"];
+
+/// First known subcommand in the token stream, skipping flags and their
+/// values (globals may precede the subcommand, e.g. `--data-dir /x agent`).
+/// Needed because stripping is subcommand-aware since T4.2: `--node-name`
+/// is wired for `agent` but stays accept-no-op-warn elsewhere.
+fn detect_subcommand(tokens: &[&String]) -> Option<&'static str> {
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i].as_str();
+        if tok == "--" {
+            return None;
+        }
+        if let Some(rest) = tok.strip_prefix("--") {
+            if !rest.contains('=') {
+                // `--flag VALUE`: skip the separate value token.
+                let takes_value =
+                    rest == "data-dir" || find_long(rest).is_some_and(|f| f.takes_value);
+                if takes_value {
+                    i += 1;
+                }
+            }
+        } else if tok.len() > 1 && tok.starts_with('-') {
+            let c = tok.chars().nth(1).unwrap();
+            let attached = tok.len() > 2; // -dVAL / -d=VAL carry the value.
+            let takes_value = c == 'd' || find_short(c).is_some_and(|f| f.takes_value);
+            if takes_value && !attached {
+                i += 1;
+            }
+        } else {
+            for s in SUBCOMMANDS {
+                if tok == *s {
+                    return Some(*s);
+                }
+            }
+            return None; // unknown positional: not a subcommand we route.
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -181,6 +231,7 @@ mod tests {
 
     #[test]
     fn mixed_noop_and_wired() {
+        // T4.2: `--node-name` is wired for `agent` — it must reach clap.
         let r = strip_noop(&argv(&[
             "init-pro",
             "agent",
@@ -188,13 +239,57 @@ mod tests {
             "secret",
             "--node-name",
             "n1",
+            "--rootless",
             "--debug",
         ]));
         assert_eq!(
             r.argv,
-            argv(&["init-pro", "agent", "--token", "secret", "--debug"])
+            argv(&[
+                "init-pro",
+                "agent",
+                "--token",
+                "secret",
+                "--node-name",
+                "n1",
+                "--debug"
+            ])
         );
-        assert_eq!(r.seen, vec!["node-name".to_string()]);
+        assert_eq!(r.seen, vec!["rootless".to_string()]);
+    }
+
+    #[test]
+    fn node_name_stays_noop_outside_agent() {
+        // `server`/`stage` keep the accept-no-op-warn behavior (Table C).
+        for sub in ["server", "stage"] {
+            let r = strip_noop(&argv(&["init-pro", sub, "--node-name", "n1"]));
+            assert_eq!(r.argv, argv(&["init-pro", sub]));
+            assert_eq!(r.seen, vec!["node-name".to_string()]);
+        }
+    }
+
+    #[test]
+    fn node_name_wired_with_globals_before_subcommand() {
+        // Subcommand detection must skip the `--data-dir` value token.
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "--data-dir",
+            "/dd",
+            "agent",
+            "--node-name",
+            "n1",
+        ]));
+        assert_eq!(
+            r.argv,
+            argv(&[
+                "init-pro",
+                "--data-dir",
+                "/dd",
+                "agent",
+                "--node-name",
+                "n1"
+            ])
+        );
+        assert!(r.seen.is_empty());
     }
 
     #[test]

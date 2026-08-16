@@ -294,6 +294,7 @@ dependencies = [
  "controllers",
  "infra",
  "k8s-openapi",
+ "kubelet",
  "runtime",
  "scheduler",
  "sha2",
