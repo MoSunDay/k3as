@@ -24,6 +24,9 @@ pub struct SandboxView {
     pub name: String,
     pub namespace: String,
     pub uid: String,
+    /// CNI IP of the sandbox (`crictl inspectp status.network.ip`);
+    /// None until the sandbox is READY / Sprint 18 S1.
+    pub ip: Option<String>,
 }
 
 /// One observed container, flattened from `crictl ps -a -o json`.
@@ -100,6 +103,7 @@ fn sandbox_view(s: &CriSandbox) -> SandboxView {
             s.metadata.uid.clone()
         },
         labels: s.labels.clone(),
+        ip: None,
     }
 }
 
@@ -144,7 +148,22 @@ impl CriBackend for CriCtlBackend {
             .list_pod_sandboxes()
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(sandboxes.into_iter().map(|s| sandbox_view(&s)).collect())
+        let mut views: Vec<SandboxView> = sandboxes.into_iter().map(|s| sandbox_view(&s)).collect();
+        // The listing carries no IP; ask inspectp per READY sandbox (Sprint 18
+        // / S1) so pod status reports the real CNI address.
+        for view in views.iter_mut() {
+            if view.state == "SANDBOX_READY" {
+                if let Ok(inspect) = self.inner.inspect_pod_sandbox(&view.id).await {
+                    view.ip = inspect
+                        .status
+                        .network
+                        .as_ref()
+                        .and_then(|n| n.ip.clone())
+                        .filter(|ip| !ip.is_empty());
+                }
+            }
+        }
+        Ok(views)
     }
 
     async fn list_containers(&self) -> Result<Vec<ContainerView>, String> {

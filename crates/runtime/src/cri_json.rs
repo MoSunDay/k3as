@@ -146,6 +146,29 @@ pub struct CriSandbox {
     pub created_at: String,
 }
 
+/// `crictl inspectp <id> -o json` envelope (CRI PodSandboxStatus subset).
+/// Sprint 18 / S1: only `status.network` is needed — the pod sandbox IP the
+/// kubelet reports as `podIP` (real CNI address, replacing placeholders).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PodSandboxInspect {
+    pub status: PodSandboxInspectStatus,
+}
+
+/// `status` subtree of an inspectp envelope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PodSandboxInspectStatus {
+    pub network: Option<SandboxNetwork>,
+}
+
+/// CRI PodSandboxNetworkStatus (`status.network`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SandboxNetwork {
+    pub ip: Option<String>,
+}
+
 /// `crictl images -o json` envelope.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -192,6 +215,11 @@ pub fn parse_sandboxes(stdout: &str) -> Result<Vec<CriSandbox>, String> {
         .map_err(|e| parse_err("sandboxes", e, stdout))
 }
 
+/// Parse `crictl inspectp <id> -o json` stdout (Sprint 18 / S1).
+pub fn parse_inspect_pod_sandbox(stdout: &str) -> Result<PodSandboxInspect, String> {
+    serde_json::from_str::<PodSandboxInspect>(stdout).map_err(|e| parse_err("inspectp", e, stdout))
+}
+
 /// Parse `crictl images -o json` stdout into image rows.
 pub fn parse_images(stdout: &str) -> Result<Vec<CriImage>, String> {
     serde_json::from_str::<ListImages>(stdout)
@@ -208,6 +236,9 @@ mod tests {
     const CONTAINERS_EMPTY: &str = r#"{"containers":[]}"#;
     const SANDBOXES_ONE: &str = r#"{"items":[{"id":"sb1","state":"SANDBOX_READY","metadata":{"name":"p","namespace":"default","uid":"u1","attempt":0},"labels":{},"createdAt":"2026-08-16T10:00:00Z"}]}"#;
     const IMAGES_ONE: &str = r#"{"images":[{"id":"sha256:0f0","repoTags":["init-pro.local/pause:0.1"],"repoDigests":[]}]}"#;
+    // Real `crictl inspectp` capture (containerd 1.7.20): only
+    // `status.network` matters here, everything else must be tolerated.
+    const INSPECTP_ONE: &str = r#"{"status":{"id":"d2e7","metadata":{"name":"demo","namespace":"default","uid":"u","attempt":0},"state":"SANDBOX_READY","createdAt":"2026-08-16T15:00:00Z","network":{"ip":"10.42.0.10","additionalIps":[]},"labels":{},"annotations":{},"runtimeHandler":"","linux":{}},"info":{}}"#;
 
     #[test]
     fn parse_containers_running_fixture() {
@@ -254,6 +285,27 @@ mod tests {
     #[test]
     fn parse_sandboxes_empty_envelope() {
         assert!(parse_sandboxes(r#"{"items":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_inspect_pod_sandbox_fixture_ip() {
+        let p = parse_inspect_pod_sandbox(INSPECTP_ONE).unwrap();
+        assert_eq!(
+            p.status.network.as_ref().and_then(|n| n.ip.as_deref()),
+            Some("10.42.0.10")
+        );
+    }
+
+    #[test]
+    fn parse_inspect_pod_sandbox_missing_network() {
+        let p = parse_inspect_pod_sandbox(r#"{"status":{}}"#).unwrap();
+        assert!(p.status.network.is_none(), "no network -> no ip");
+    }
+
+    #[test]
+    fn parse_inspect_pod_sandbox_garbage_errors() {
+        let err = parse_inspect_pod_sandbox("not json").unwrap_err();
+        assert!(err.contains("inspectp"), "{err}");
     }
 
     #[test]

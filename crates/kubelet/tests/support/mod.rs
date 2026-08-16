@@ -41,6 +41,23 @@ pub fn sandbox(ns: &str, name: &str, uid: &str, id: &str, state: &str) -> Sandbo
         name: name.into(),
         namespace: ns.into(),
         uid: uid.into(),
+        ip: None,
+    }
+}
+
+/// Same as [`sandbox`] but carrying a CNI IP (Sprint 18 / S1: READY
+/// sandboxes report `status.network.ip` from `crictl inspectp`).
+pub fn sandbox_with_ip(
+    ns: &str,
+    name: &str,
+    uid: &str,
+    id: &str,
+    state: &str,
+    ip: &str,
+) -> SandboxView {
+    SandboxView {
+        ip: Some(ip.into()),
+        ..sandbox(ns, name, uid, id, state)
     }
 }
 
@@ -193,6 +210,9 @@ impl CriBackend for FakeCri {
         let mut st = self.st.lock().unwrap();
         st.next += 1;
         let id = format!("sb{}", st.next);
+        // Real CNI assigns the IP during runp; the fake mirrors that
+        // deterministically (Sprint 18 / S1).
+        let ip = format!("10.42.0.{}", st.next);
         st.calls.push(format!("runp:{}", cfg.metadata.uid));
         st.sandboxes.push(SandboxView {
             id: id.clone(),
@@ -201,6 +221,7 @@ impl CriBackend for FakeCri {
             name: cfg.metadata.name.clone(),
             namespace: cfg.metadata.namespace.clone(),
             uid: cfg.metadata.uid.clone(),
+            ip: Some(ip),
         });
         Ok(id)
     }

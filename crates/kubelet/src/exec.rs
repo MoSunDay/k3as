@@ -101,6 +101,7 @@ mod tests {
             name: "p".into(),
             namespace: "ns".into(),
             uid: "u".into(),
+            ip: None,
         };
         let c1 = ContainerView {
             id: "c2".into(),

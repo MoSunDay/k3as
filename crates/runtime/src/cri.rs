@@ -18,8 +18,8 @@ use thiserror::Error;
 use tokio::process::Command;
 
 use crate::cri_json::{
-    parse_containers, parse_images, parse_sandboxes, ContainerConfig, CriContainer, CriImage,
-    CriSandbox, PodSandboxConfig,
+    parse_containers, parse_images, parse_inspect_pod_sandbox, parse_sandboxes, ContainerConfig,
+    CriContainer, CriImage, CriSandbox, PodSandboxConfig, PodSandboxInspect,
 };
 use crate::AgentRuntimePaths;
 
@@ -237,6 +237,15 @@ impl CriCtl {
     pub async fn list_pod_sandboxes(&self) -> Result<Vec<CriSandbox>, CriError> {
         let out = self.run(&self.argv("pods", &["-o", "json"])).await?;
         parse_sandboxes(&out).map_err(CriError::Parse)
+    }
+
+    /// `crictl inspectp <id> -o json` — full sandbox status incl. CNI IP
+    /// (Sprint 18 / S1; `status.network.ip`).
+    pub async fn inspect_pod_sandbox(&self, id: &str) -> Result<PodSandboxInspect, CriError> {
+        let out = self
+            .run(&self.argv("inspectp", &["-o", "json", id]))
+            .await?;
+        parse_inspect_pod_sandbox(&out).map_err(CriError::Parse)
     }
 }
 

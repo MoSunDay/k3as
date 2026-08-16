@@ -156,6 +156,7 @@ pub fn node_object(name: &str, now: &str) -> Value {
                 "lastHeartbeatTime": now,
                 "lastTransitionTime": now,
             }],
+            "addresses": [{"type": "InternalIP", "address": "127.0.0.1"}],
             "nodeInfo": {
                 "kubeletVersion": "init-pro-0.2.0",
                 "containerRuntimeVersion": "containerd://1.7.20",
@@ -271,6 +272,10 @@ mod tests {
         assert_eq!(
             n["status"]["conditions"][0]["lastHeartbeatTime"],
             "2026-08-16T00:00:00Z"
+        );
+        assert_eq!(
+            n["status"]["addresses"][0],
+            json!({"type": "InternalIP", "address": "127.0.0.1"})
         );
         assert_eq!(n["status"]["nodeInfo"]["kubeletVersion"], "init-pro-0.2.0");
     }

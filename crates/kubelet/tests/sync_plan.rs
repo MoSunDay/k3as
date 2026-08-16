@@ -192,6 +192,7 @@ fn garbage_sandbox_without_identity_is_ignored() {
             name: String::new(),
             namespace: String::new(),
             uid: String::new(),
+            ip: None,
         }],
         ..Default::default()
     };

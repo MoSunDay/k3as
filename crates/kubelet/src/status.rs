@@ -12,10 +12,11 @@ use crate::sync::Snapshot;
 
 /// Build the `.status` subtree for one pod from the observed CRI state.
 pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
-    let sandbox_ready = snap
+    let ready_sandbox = snap
         .sandboxes
         .iter()
-        .any(|sb| sb.uid == pod.uid && sb.state == "SANDBOX_READY");
+        .find(|sb| sb.uid == pod.uid && sb.state == "SANDBOX_READY");
+    let sandbox_ready = ready_sandbox.is_some();
     let mut statuses: Vec<Value> = Vec::new();
     let mut all_running = !pod.containers.is_empty();
     for spec in &pod.containers {
@@ -59,7 +60,8 @@ pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
     } else {
         "Pending"
     };
-    json!({
+    let pod_ip = ready_sandbox.and_then(|sb| sb.ip.clone());
+    let mut status = json!({
         "phase": phase,
         "conditions": [
             {
@@ -78,7 +80,15 @@ pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
             },
         ],
         "containerStatuses": statuses,
-    })
+    });
+    if let Some(ip) = &pod_ip {
+        // hostIP: single-node clusters advertise loopback (the agent and the
+        // pod sandbox share one host); mirrored in objects::node_object.
+        status["podIP"] = json!(ip);
+        status["podIPs"] = json!([{ "ip": ip }]);
+        status["hostIP"] = json!("127.0.0.1");
+    }
+    status
 }
 
 /// True when the container's labels mark it as belonging to `pod`.
@@ -100,11 +110,13 @@ pub fn status_semantically_eq(a: &Value, b: &Value) -> bool {
     semantic_key(a) == semantic_key(b)
 }
 
-/// (phase, sorted conditions, container outcomes) — the semantic status core.
+/// (phase, sorted conditions, container outcomes, podIP) — the semantic
+/// status core.
 type SemanticKey = (
     String,
     Vec<(String, String, String)>,
     Vec<(String, u64, String)>,
+    String,
 );
 
 fn semantic_key(v: &Value) -> SemanticKey {
@@ -174,7 +186,12 @@ fn semantic_key(v: &Value) -> SemanticKey {
         })
         .unwrap_or_default();
     containers.sort();
-    (phase, conditions, containers)
+    let pod_ip = v
+        .pointer("/podIP")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    (phase, conditions, containers, pod_ip)
 }
 
 /// Clone `pod` with `.status` replaced — the body the `/status` route PUTs
@@ -213,6 +230,7 @@ mod tests {
                 name: "web".into(),
                 namespace: "default".into(),
                 uid: "u1".into(),
+                ip: None,
             }],
             containers: vec![ContainerView {
                 id: "cid1".into(),
@@ -291,6 +309,41 @@ mod tests {
         let mut e = a.clone();
         e["phase"] = json!("Pending");
         assert!(!status_semantically_eq(&a, &e), "phase must matter");
+    }
+
+    #[test]
+    fn ready_sandbox_ip_surfaces_as_pod_ip() {
+        let mut snap = snap("CONTAINER_RUNNING");
+        snap.sandboxes[0].ip = Some("10.42.0.10".into());
+        let s = build_pod_status(&pod(), &snap, "T");
+        assert_eq!(s["phase"], "Running");
+        assert_eq!(s["podIP"], "10.42.0.10");
+        assert_eq!(s["podIPs"][0]["ip"], "10.42.0.10");
+        assert_eq!(s["hostIP"], "127.0.0.1");
+    }
+
+    #[test]
+    fn ready_sandbox_without_ip_omits_pod_ip() {
+        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T");
+        assert_eq!(s["phase"], "Running");
+        assert!(s.get("podIP").is_none(), "no ip -> no podIP key: {s}");
+        assert!(s.get("podIPs").is_none());
+        assert!(s.get("hostIP").is_none());
+    }
+
+    #[test]
+    fn semantic_eq_detects_pod_ip_change() {
+        let snap = snap("CONTAINER_RUNNING");
+        let without = build_pod_status(&pod(), &snap, "T");
+        let mut with_ip = snap.clone();
+        with_ip.sandboxes[0].ip = Some("10.42.0.10".into());
+        let with = build_pod_status(&pod(), &with_ip, "T");
+        assert!(
+            !status_semantically_eq(&without, &with),
+            "late-arriving podIP must trigger a status re-write"
+        );
+        let same = build_pod_status(&pod(), &with_ip, "T2");
+        assert!(status_semantically_eq(&with, &same));
     }
 
     #[test]
