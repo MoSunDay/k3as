@@ -4,12 +4,16 @@
 //! templating ([`config`]), idempotent vendor staging ([`stage`]), and a
 //! supervising runner with socket health, exponential backoff and drain
 //! ([`supervisor`]). [`start_agent_runtime`] composes the three for the
-//! `init-pro agent` path (Sprint 16); the CRI client itself stays a
-//! timeboxed spike until Q26 lands with T4.2.
+//! `init-pro agent` path (Sprint 16). The CRI driver landed with T4.2
+//! (decision **Q26** route B): [`cri_json`] models the crictl JSON wire
+//! shapes and [`cri`] drives the vendored crictl as a subprocess against
+//! the supervisor's socket.
 
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod cri;
+pub mod cri_json;
 pub mod stage;
 pub mod supervisor;
 
@@ -21,6 +25,8 @@ use infra::Shutdown;
 use tokio::sync::watch;
 
 pub use config::{render, ContainerdConfigVars, DEFAULT_SANDBOX_IMAGE};
+pub use cri::{staged_crictl, CriCtl, CriError};
+pub use cri_json::{ContainerConfig, PodSandboxConfig};
 pub use stage::{stage_containerd_tree, vendor_bin_root, StageOutcome};
 pub use supervisor::{
     backoff_delay, supervise, supervisor_args, wait_socket, SuperviseStats, SupervisorSpec,
