@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{storage_error, ApiError};
+use crate::service;
 use crate::state::{
     cluster_key, collection_prefix, namespaced_key, resolve, set_namespace, set_resource_version,
     set_type_meta, AppState, Loc, Resolved,
@@ -97,8 +98,26 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
     if res.kind == "Namespace" {
         ensure_namespace_finalizer(&mut body);
     }
+    // Sprint 18 / S3: Service defaulting — spec.type defaults to ClusterIP;
+    // NodePort/LoadBalancer services get nodePorts allocated (30000-32767).
+    if res.kind == "Service" {
+        if let Err(service::ServiceError::Invalid(message)) =
+            service::prepare(&st.store, &mut body).await
+        {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
+    }
     match st.store.create(&key, body).await {
         Ok(entry) => {
+            let entry = if res.kind == "Service" {
+                service::heal_nodeport_collision(&st.store, &key, entry).await
+            } else {
+                entry
+            };
             let mut out = entry.value;
             set_resource_version(&mut out, entry.mod_revision);
             (StatusCode::CREATED, Json(out)).into_response()
