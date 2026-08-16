@@ -7,7 +7,142 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
-## Sprint 17 — T4.2 kubelet equivalent (2026-08-16, in progress)
+## Sprint 18 — Service traffic end-to-end: NodePort plane in the Router (2026-08-17)
+
+**Goal:** make Service traffic real on a local cluster. Sprint 17 left
+pods Running+Ready (G25); Sprint 18 closes the loop from Deployment to
+HTTP bytes through a Service — a one-command local cluster (S0), real
+podIPs (S1), Endpoints a dataplane can consume (S2), nodePort
+allocation (S3), the kube-proxy-equivalent NodePort plane in the
+built-in Router (S4), an offline echo workload image (S5), and a
+manifest-driven e2e suite asserting the whole path (S6). Locked as
+**decision D → Q28**: NodePort-only plane, no ClusterIP dataplane
+(`--service-cidr` stays a noop; ClusterIP Services are
+creatable/storable but non-forwarding). T4.2 Scope B/C (probes,
+volumes, exec/logs/attach) continues beyond this sprint.
+
+### S0 — `scripts/local-up.sh` (one-command local cluster)
+- Interactive single-node boot: one `server` + one `agent` over the
+  bundled containerd (T4.1) with the Q27 airgap pause image;
+  node-Ready gate before handing control back; clean Ctrl-C/SIGTERM
+  teardown incl. shim reap + lazy umount sweep.
+- In-memory store until T2.3: every boot is a fresh cluster, data dir
+  is mktemp and removed on exit. The interactive, long-lived twin of
+  the golden G25 recipe. Scripts-only slice (631 tests, unchanged).
+
+### S1 — kubelet reports podIP/podIPs/hostIP from the CRI sandbox
+- `crictl pods` carries no IP, so every SANDBOX_READY sandbox is now
+  enriched with `crictl inspectp -o json` — flags before the id
+  (crictl is positional-order sensitive): `crates/runtime/src/
+  cri_json.rs` gained `PodSandboxInspect` parsing, `cri.rs` gained
+  `inspect_pod_sandbox`.
+- `crates/kubelet/src/status.rs` surfaces `status.network.ip` as
+  podIP/podIPs + hostIP=127.0.0.1 (single-node v1); podIP joins the
+  semantic-change key so a late-arriving CNI address re-triggers the
+  PUT. The node object gained an InternalIP address
+  (`crates/kubelet/src/objects.rs`). This unblocks real Endpoints
+  addresses (the 10.42.x.y placeholder goes away with S2).
+- Tests: +3 runtime cri_json parse tests (real containerd 1.7.20
+  capture) +3 kubelet status tests; kubelet_http_integration now
+  asserts the podIP round-trip. 631 → 637.
+
+### S2 — Endpoints emit resolved targetPort + prefer real podIP
+- k8s semantics: `subsets[].ports[].port` is the container port (the
+  Service port's resolved targetPort), not the Service port — the old
+  code dropped targetPort, so every non-identity Service would have
+  forwarded to the wrong port once a dataplane consumed Endpoints.
+  `resolve_target_port`: absent → identity; numeric / numeric-string
+  → verbatim; named → looked up in the selected pods' containerPorts
+  (first pod wins, upstream parity); unresolvable name → port omitted.
+- Real kubelet podIPs (S1) now win over the 10.42.x.y placeholder,
+  which remains only for kubelet-less clusters (golden suite).
+- Tests: +6 resolve_target_port unit tests (controllers lib 62 → 68);
+  new in-process integration tests (real-podIP preference, named-port
+  resolution) split into `tests/endpoints.rs` to keep controllers.rs
+  under the 800-line cap. 637 → 645.
+
+### S3 — apiserver nodePort allocation (NodePort/LoadBalancer Services)
+- `crates/apiserver/src/service.rs`: Service create defaults
+  `spec.type=ClusterIP`; NodePort/LoadBalancer Services get every
+  missing `spec.ports[].nodePort` allocated lowest-free from
+  30000–32767 (scan of existing Services, per (protocol, port));
+  explicit nodePorts validated for range/uniqueness (422 otherwise);
+  a bounded CAS heal pass fixes the LIST-vs-CREATE race (concurrent
+  writer took the same (protocol, nodePort) → newcomer re-allocated
+  onto a free port). No `spec.clusterIP` assignment — decision D.
+- Tests: +9 service.rs unit tests (allocation, validation, heal;
+  apiserver lib 2 → 11) + 7 HTTP integration tests in new
+  `tests/service_nodeport.rs`. 645 → 661.
+
+### S4 — NodePort service plane: the Router carries Service traffic
+- Built-in kube-proxy-equivalent (decision D, recorded as **Q28**):
+  the server watches Services + Endpoints over the SAME embedded
+  storage `Arc` as the apiserver — `crates/router/src/endpoints.rs`
+  (ResolverState fold, ServiceView/EndpointsView parsing,
+  UpstreamResolver: numeric/named/identity targetPort, ns/name +
+  bare-name lookup) + `endpoints_watch.rs` (gap-free revision-ordered
+  reflectors with informer-style re-LIST on stream close,
+  `supervise()`), and `nodeport.rs` runs ONE reverse-proxy listener
+  per allocated nodePort (dedicated worker thread, current-thread
+  runtime + LocalSet matching `serve_proxy`'s spawn_local model;
+  reconcile loop starts/retires listeners; drain on shutdown).
+- Semantics: empty Endpoints → **503**; Service delete retires the
+  listener; Endpoints updates re-target without restart.
+- Polarity: **on by default**; `--disable-kube-proxy` (pre-parsed
+  noop until now, kept for k3s flag parity) turns it OFF — zero
+  snapshot churn. Wired in `crates/cli` (`ServerBind.disable_kube_proxy`
+  + runtime.rs: store cloned before `apiserver::serve` consumes it;
+  plane drained after the agent runtime, before the API surface).
+  Router gained `infra` + `storage` workspace deps only.
+- Tests: +13 — 7+2 router unit (endpoints resolver + watch), 4
+  integration in `tests/nodeport_plane.rs` (live proxy / 503 /
+  re-target / retire over real TCP echo backends). 661 → 674.
+
+### S5 — `scripts/build-echo-image.sh` (deterministic offline echo image)
+- Clone of the proven `build-pause-image.sh` pattern (Q27): packages
+  a static C HTTP/1.1 echo server (sequential accept loop, no
+  threads) as an OCI layout tar for `ctr images import` — registry
+  egress is blocked, so the S6 workload image is assembled locally.
+  Fixed mtimes, zero owners, sorted entries → byte-identical
+  archives across runs.
+- Response facts: ECHO/LOCAL/METHOD/PATH/HEADER*/BODY. **LOCAL** =
+  the accepted socket's local address = the podIP — the per-replica
+  discriminator, because the kubelet does not plumb
+  `PodSandboxConfig.hostname` through CRI yet (every pod inherits
+  the node hostname).
+- Scripts-only slice: no new Rust tests (674).
+
+### S6 — `scripts/service-traffic-e2e.sh` (ST1–ST6) + CI wiring
+- 289-line manifest-driven suite in golden house style (prebuilt
+  binary, pick_port, bounded polls, ok/FAIL counters, cleanup trap;
+  TERM teardown — nohup/setsid inherits SIGINT-ignored —,
+  zero-sandbox convergence wait before agent TERM to avoid leaking
+  shims/mounts, pipefail-safe mount sweep). Boots the single-node
+  cluster, builds pause + echo images, POSTs
+  `e2e/manifests/{echo-deployment,echo-service}.json` verbatim
+  (JSON-only, Q10).
+- ST1 pods Running+Ready; ST2 nodePort auto-allocated in
+  30000–32767; ST3 Endpoints parity with the podIPs; ST4 10× GET
+  all-200 + ≥2 distinct LOCALs (round-robin across replicas) + POST
+  body echo; ST5 scale-to-zero converges to router 503; ST6 Service
+  delete → connection refused.
+- CI SKIP policy (G24/G25 parity): without a vendor bundle or `cc`,
+  print SKIP + exit 0 — CI's `INIT_PRO_VENDOR=0` hits exactly this
+  path; `.github/workflows/ci.yml` gained the step after golden
+  conformance. `e2e/README.md` documents the suite incl. the
+  LOCAL-discriminator rationale. Scripts-only slice (674).
+
+**Totals:** 631 → 674 workspace tests passed, 0 failed (+6 S1:
+runtime cri_json +3 / kubelet status +3; +8 S2: controllers lib +6 /
+tests/endpoints.rs +2; +16 S3: apiserver lib +9 / service_nodeport
++7; +13 S4: router unit +9 / nodeport_plane +4; S5/S6 scripts-only).
+Gates: golden 27/27, cli-flag-parity 16/16, graceful-shutdown OK with
+the plane default-on, service-traffic-e2e 6/6 + SKIP path exercised.
+T5.6 → in-progress (NodePort plane done, Q28); remaining: LB VIP
+scope (T5.6/T4.3), ClusterIP dataplane (deferred), T4.2 Scope B/C,
+T2.3.
+
+## Sprint 17 — T4.2 kubelet equivalent (2026-08-16)
 
 **Goal:** pod lifecycle core (Scope A): a kubelet-equivalent sync loop
 driving the T4.1 CRI seam — Deployment → real containers Running+Ready
@@ -109,7 +244,7 @@ driving the T4.1 CRI seam — Deployment → real containers Running+Ready
 apiserver 43 → 51; +17 runtime CRI incl. live-containerd integration).
 Golden 27/27 with vendor + `cc` (G25 adds 3), SKIPs otherwise; e2e
 scripts unchanged & green. Scope B/C (probes, volumes, real image
-pull, exec/logs/attach) remain — sprint stays in progress.
+pull, exec/logs/attach) remain — carried into Sprint 18 and beyond.
 
 ## Sprint 16 — T4.1: containerd bundling + CRI wiring (2026-08-15)
 

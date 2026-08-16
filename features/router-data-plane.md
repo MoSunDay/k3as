@@ -22,6 +22,9 @@ it is releasable independently as an ingress gateway. Lives in
   `UpstreamResolver`, Rust reverse proxy (`serve_proxy`), TLS termination /
   SNI (rustls `ring` provider, ADR Q16), and a hot-reload seam
   (`ConfigSource` / `reload_channel` / `RouteStore`).
+- T5.6 (in progress) - NodePort service plane (Sprint 18, Q28): the
+  kube-proxy-equivalent lives here — see the dedicated section below.
+  LB VIP scope remains.
 
 ## Module map (crates/router/src/)
 
@@ -30,12 +33,39 @@ it is releasable independently as an ingress gateway. Lives in
 `route.rs` (`RouteTable`, matchers) | `balancer.rs` (`Balancer`, `pick_peer`)
 | `proxy.rs` (`serve_proxy`, `ProxyOptions`) | `tls.rs`
 (`SniCertResolver`, `build_server_config`) | `config.rs` (reload seam) |
-`serve.rs` (`serve`, `ephemeral_listener`) | `context.rs` (`RequestContext`).
+`serve.rs` (`serve`, `ephemeral_listener`) | `context.rs` (`RequestContext`)
+| `endpoints.rs` / `endpoints_watch.rs` (Services+Endpoints reflectors,
+Sprint 18) | `nodeport.rs` (per-nodePort listeners, Q28).
+
+## NodePort service plane (Sprint 18, Q28)
+
+Service traffic is carried by the Router, NodePort-only — there is NO
+ClusterIP dataplane (`--service-cidr` stays a noop; ClusterIP Services
+are creatable/storable but non-forwarding).
+
+- `endpoints.rs` + `endpoints_watch.rs` — LIST→WATCH reflectors over
+  services+endpoints on the SAME storage `Arc` as the apiserver
+  (gap-free, revision-ordered, informer-style re-LIST on stream
+  close), folded into a `ResolverState` that implements T5.4's
+  `UpstreamResolver` (numeric/named/identity targetPort).
+- `nodeport.rs` — one reverse-proxy listener per allocated nodePort of
+  every NodePort/LoadBalancer Service (dedicated worker thread +
+  LocalSet, matching `serve_proxy`'s spawn_local model); Endpoints
+  updates re-target without restart, Service delete retires the
+  listener, empty Endpoints → **503**.
+- On by default in the server; `--disable-kube-proxy` (k3s-parity
+  flag, pre-parsed noop until Sprint 18) turns it off. Wired in
+  `crates/cli/src/runtime.rs`; the router gained `infra` + `storage`
+  workspace deps only.
+- Proof: `tests/nodeport_plane.rs` (live proxy / 503 / re-target /
+  retire over real TCP backends) + `scripts/service-traffic-e2e.sh`
+  ST1-ST6 on a real local cluster.
 
 ## Acceptance
 
 Integration tests in `crates/router/tests/`: `proxy_routing`, `tls_routing`,
-`hot_reload` (the M1 spike verdict, Q5), plus `concurrency`, `phase_chain`,
+`hot_reload` (the M1 spike verdict, Q5), `nodeport_plane` (Sprint 18, Q28),
+plus `concurrency`, `phase_chain`,
 `content_phase`, `cosocket_echo`, `sleep_latency`, and `resty_stdlib`.
 
 ## Status / next
