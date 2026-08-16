@@ -15,6 +15,7 @@
 
 mod app;
 mod apply;
+pub(crate) mod binding;
 mod collection;
 mod discovery_handlers;
 mod error;
