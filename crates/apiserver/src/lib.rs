@@ -22,6 +22,7 @@ mod error;
 mod item;
 pub(crate) mod pod_status;
 mod serve;
+mod service;
 mod state;
 
 pub use app::api_app;
