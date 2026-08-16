@@ -2,7 +2,9 @@
 //!
 //! In-process axum transport (rest_crud.rs pattern) over a shared
 //! `EmbeddedStorage`: 201 + `spec.nodeName` write-through on first bind,
-//! 409 on double bind, 404 on a missing pod, 422 on a target-less body.
+//! 409 on double bind, 404 on a missing pod, 422 on a target-less body,
+//! and bind success even when the stored pod's embedded `resourceVersion`
+//! lags its `mod_revision` (scheduler read-modify-write divergence).
 
 use std::sync::Arc;
 
@@ -47,6 +49,25 @@ fn pod(name: &str) -> Value {
         "metadata": {"name": name, "namespace": "default"},
         "spec": {"containers": [{"name": "c", "image": "img"}]}
     })
+}
+
+async fn put(uri: &str, body: Value, store: Arc<EmbeddedStorage>) -> (StatusCode, Value) {
+    let resp = app(store)
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let code = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (code, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
 #[tokio::test]
@@ -148,4 +169,47 @@ async fn bind_without_target_is_422() {
     .await;
     assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["reason"], "Invalid");
+}
+
+#[tokio::test]
+async fn bind_succeeds_after_stale_embedded_rv() {
+    let store = Arc::new(EmbeddedStorage::new());
+    let (code, created) = post("/api/v1/namespaces/default/pods", pod("p9"), store.clone()).await;
+    assert_eq!(code, StatusCode::CREATED);
+    let projected_rv = created["metadata"]["resourceVersion"].clone();
+    assert!(projected_rv.is_string());
+
+    // Plain replace stores the body verbatim: the embedded resourceVersion
+    // (the stale projected RV) now lags the entry's mod_revision. Before the
+    // mod_revision CAS fix the subsequent bind 409'd on this stale RV.
+    let mut replace = pod("p9");
+    replace["metadata"]["resourceVersion"] = projected_rv;
+    let (code, _) = put("/api/v1/namespaces/default/pods/p9", replace, store.clone()).await;
+    assert_eq!(code, StatusCode::OK);
+
+    let binding = json!({
+        "apiVersion": "v1", "kind": "Binding",
+        "metadata": {"name": "p9", "namespace": "default"},
+        "target": {"apiVersion": "v1", "kind": "Node", "name": "node-a"}
+    });
+    let (code, body) = post(
+        "/api/v1/namespaces/default/pods/p9/binding",
+        binding,
+        store.clone(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED);
+    assert_eq!(body["kind"], "Binding");
+    assert_eq!(body["metadata"]["name"], "p9");
+
+    // The pod itself now carries spec.nodeName (read through storage).
+    let stored = store
+        .get(&storage::Key::new("", "pods", "default", "p9"))
+        .await
+        .unwrap()
+        .expect("pod present");
+    assert_eq!(
+        stored.value.pointer("/spec/nodeName"),
+        Some(&json!("node-a"))
+    );
 }

@@ -11,7 +11,7 @@
 //!  - pod already carries `spec.nodeName` -> `409 Conflict` ("pod ... is
 //!    already assigned to node ..."); node existence is NOT checked here —
 //!    the scheduler filters nodes itself before binding.
-//!  - stale `resourceVersion` CAS during the write -> `409 Conflict`.
+//!  - concurrent writer between the read and the CAS -> `409 Conflict`.
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -21,7 +21,7 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::error::{storage_error, ApiError};
-use crate::state::{namespaced_key, resource_revision, set_namespace, set_type_meta, AppState};
+use crate::state::{namespaced_key, set_namespace, set_type_meta, AppState};
 
 /// Extract the target node name from a Binding body.
 ///
@@ -51,8 +51,8 @@ pub(crate) async fn do_bind(
         .into_response();
     };
 
-    let mut pod = match st.store.get(&key).await {
-        Ok(Some(e)) => e.value,
+    let (mut pod, mod_rev) = match st.store.get(&key).await {
+        Ok(Some(e)) => (e.value, e.mod_revision),
         Ok(None) => {
             return ApiError::NotFound {
                 kind: "pods".into(),
@@ -80,14 +80,15 @@ pub(crate) async fn do_bind(
     }
 
     // Write spec.nodeName, preserving everything else, CAS on the revision we
-    // just read so a concurrent binder wins the race visibly (409).
+    // just read (the entry's mod_revision, NOT the embedded
+    // metadata.resourceVersion, which lags after any client read-modify-write
+    // and would 409 forever) so a concurrent binder wins the race visibly.
     if let Some(spec) = pod.get_mut("spec").and_then(|s| s.as_object_mut()) {
         spec.insert("nodeName".into(), Value::String(node));
     } else {
         pod["spec"] = json!({ "nodeName": node });
     }
-    let rev = resource_revision(&pod);
-    match st.store.update(&key, pod, rev).await {
+    match st.store.update(&key, pod, Some(mod_rev)).await {
         Ok(entry) => {
             // Echo the Binding (upstream returns the stored Binding, 201).
             let mut binding = body.clone();
