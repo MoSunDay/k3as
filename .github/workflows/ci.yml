@@ -61,6 +61,9 @@ jobs:
           scripts/apiserver-discovery-parity-test.sh
           scripts/golden-conformance.sh
 
+      - name: e2e — service traffic (Sprint 18, decision D)
+        run: scripts/service-traffic-e2e.sh
+
   bundle:
     name: INIT_PRO_EMBED=1 build + stage test
     runs-on: ubuntu-latest
