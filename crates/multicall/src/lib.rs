@@ -90,16 +90,99 @@ where
         .any(|a| matches!(a.as_ref(), "-h" | "--help" | "help"))
 }
 
+/// Staged-peer lookup (T4.1, Q24): bundled runtime binaries live k3s-style
+/// under `<data-dir>/agent/containerd/<name>`. The data dir resolves from
+/// `INIT_PRO_DATA_DIR` (CLI `--data-dir` is not parsed on the peer path —
+/// peers take raw passthrough args, mirroring k3s).
+pub fn staged_peer_in(data_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let p = data_dir.join("agent").join("containerd").join(name);
+    p.is_file().then_some(p)
+}
+
+/// The data dir used to locate staged peers: env override, else default.
+fn peer_data_dir() -> std::path::PathBuf {
+    std::env::var_os("INIT_PRO_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/init-pro"))
+}
+
+/// The agent's containerd/CRI socket under a data dir (matches the layout
+/// `runtime::AgentRuntimePaths` renders — T4.1/Q25; kept duplicated here so
+/// the multicall crate stays dependency-free).
+pub fn containerd_socket_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir
+        .join("run")
+        .join("containerd")
+        .join("containerd.sock")
+}
+
+/// Prepend `--runtime-endpoint unix://<sock>` for a staged `crictl` unless
+/// the caller already supplied one (`--runtime-endpoint`, `-r` or the `=`
+/// form) or asked for help. Pure; unit-tested.
+pub fn crictl_endpoint_args(args: &[String], data_dir: &Path) -> Vec<String> {
+    if wants_help(args.iter())
+        || args
+            .iter()
+            .any(|a| a == "--runtime-endpoint" || a == "-r" || a.starts_with("--runtime-endpoint="))
+    {
+        return args.to_vec();
+    }
+    let mut out = vec![
+        "--runtime-endpoint".to_string(),
+        format!("unix://{}", containerd_socket_path(data_dir).display()),
+    ];
+    out.extend_from_slice(args);
+    out
+}
+
+/// Prepend `--address <sock>` for a staged `ctr` unless the caller already
+/// supplied one (`--address`, `-a` or the `=` form) or asked for help.
+pub fn ctr_address_args(args: &[String], data_dir: &Path) -> Vec<String> {
+    if wants_help(args.iter())
+        || args
+            .iter()
+            .any(|a| a == "--address" || a == "-a" || a.starts_with("--address="))
+    {
+        return args.to_vec();
+    }
+    let mut out = vec![
+        "--address".to_string(),
+        containerd_socket_path(data_dir).display().to_string(),
+    ];
+    out.extend_from_slice(args);
+    out
+}
+
 /// Handle a bundled-peer alias invocation.
 ///
 /// `kubectl` left this path in T3.1b — it now has a real in-repo
 /// implementation (`rollout status` over plain HTTP, Q21) and is dispatched
-/// before the stub in `init-pro`'s main. The stub remains for
-/// `ctr`/`crictl`/`containerd`/`etcd` until the bundling pipeline
-/// (T0.2/T0.4) embeds them; until then we still answer `--help` with
-/// exit-success so the multicall contract holds, and reject anything else
-/// with a clear not-yet-implemented error.
+/// before the stub in `init-pro`'s main. `containerd`, `ctr` and `crictl`
+/// re-exec the staged binary when present (T4.1, Q24/Q25); crictl/ctr get
+/// the agent socket injected unless the caller supplies their own endpoint
+/// (Q1 symlink deployment parity). The remaining aliases stay stubs until
+/// the bundling pipeline (T0.2/T0.4) embeds them — they answer `--help`
+/// with exit-success so the multicall contract holds, and reject anything
+/// else with a clear not-yet-implemented error.
 pub fn external_stub(action: Action, args: &[String]) -> std::process::ExitCode {
+    if matches!(action, Action::Containerd | Action::Ctr | Action::Crictl) {
+        let name = action.as_str();
+        if let Some(bin) = staged_peer_in(&peer_data_dir(), name) {
+            let data_dir = peer_data_dir();
+            let exec_args = match action {
+                Action::Crictl => crictl_endpoint_args(args, &data_dir),
+                Action::Ctr => ctr_address_args(args, &data_dir),
+                _ => args.to_vec(),
+            };
+            match exec_peer(&bin, &exec_args) {
+                Ok(never) => match never {},
+                Err(e) => {
+                    eprintln!("init-pro: exec {} failed: {e}", bin.display());
+                    return std::process::ExitCode::from(3);
+                }
+            }
+        }
+    }
     use std::process::ExitCode;
     debug_assert!(
         action.is_external(),
@@ -136,6 +219,21 @@ pub fn reexec_as(alias: &str, extra_args: &[String]) -> std::io::Result<std::con
     cmd.args(extra_args);
     // exec() returns Err(io::Error) only on failure; it never returns on success.
     Err(cmd.exec())
+}
+
+/// Exec an external staged binary with passthrough args (T4.1). On success
+/// the process image is replaced and this never returns.
+#[cfg(unix)]
+fn exec_peer(bin: &Path, args: &[String]) -> std::io::Result<std::convert::Infallible> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args);
+    Err(cmd.exec())
+}
+
+#[cfg(not(unix))]
+fn exec_peer(_bin: &Path, _args: &[String]) -> std::io::Result<std::convert::Infallible> {
+    Err(std::io::Error::other("peer exec is unix-only"))
 }
 
 #[cfg(not(unix))]
@@ -263,5 +361,89 @@ mod tests {
         assert_eq!(resolve("crictl"), Some(Action::Crictl));
         assert_eq!(resolve("containerd"), Some(Action::Containerd));
         assert_eq!(resolve("etcd"), Some(Action::Etcd));
+    }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+
+    #[test]
+    fn staged_peer_in_finds_only_agent_containerd_layout() {
+        let dir = std::env::temp_dir().join(format!("mc-peer-{}", std::process::id()));
+        let peer_dir = dir.join("agent").join("containerd");
+        std::fs::create_dir_all(&peer_dir).unwrap();
+        std::fs::write(peer_dir.join("containerd"), b"fake").unwrap();
+        assert!(staged_peer_in(&dir, "containerd").is_some());
+        assert!(staged_peer_in(&dir, "ctr").is_none()); // not staged
+        assert!(staged_peer_in(&dir.join("missing"), "containerd").is_none());
+        // T4.1: crictl stages beside containerd once the pin is fetched.
+        std::fs::write(peer_dir.join("crictl"), b"fake").unwrap();
+        assert!(staged_peer_in(&dir, "crictl").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod endpoint_args_tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn crictl_gets_endpoint_injected_by_default() {
+        let out = crictl_endpoint_args(&s(&["ps"]), Path::new("/dd"));
+        assert_eq!(
+            out,
+            s(&[
+                "--runtime-endpoint",
+                "unix:///dd/run/containerd/containerd.sock",
+                "ps"
+            ])
+        );
+    }
+
+    #[test]
+    fn crictl_explicit_endpoint_wins() {
+        for user in [
+            vec!["--runtime-endpoint", "unix:///other.sock", "ps"],
+            vec!["-r", "unix:///other.sock", "ps"],
+            vec!["--runtime-endpoint=unix:///other.sock", "ps"],
+        ] {
+            assert_eq!(crictl_endpoint_args(&s(&user), Path::new("/dd")), s(&user));
+        }
+    }
+
+    #[test]
+    fn crictl_help_passes_through_untouched() {
+        assert_eq!(
+            crictl_endpoint_args(&s(&["--help"]), Path::new("/dd")),
+            s(&["--help"])
+        );
+    }
+
+    #[test]
+    fn ctr_gets_address_injected_by_default() {
+        let out = ctr_address_args(&s(&["version"]), Path::new("/dd"));
+        assert_eq!(
+            out,
+            s(&["--address", "/dd/run/containerd/containerd.sock", "version"])
+        );
+        assert_eq!(
+            ctr_address_args(&s(&["-a", "/x.sock", "version"]), Path::new("/dd")),
+            s(&["-a", "/x.sock", "version"])
+        );
+    }
+
+    #[test]
+    fn socket_path_matches_agent_layout() {
+        // Layout twin of runtime::AgentRuntimePaths (Q25): if one moves, this
+        // test reminds the mover to fix the other.
+        assert_eq!(
+            containerd_socket_path(Path::new("/dd")),
+            Path::new("/dd/run/containerd/containerd.sock")
+        );
     }
 }

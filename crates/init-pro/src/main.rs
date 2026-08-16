@@ -26,6 +26,18 @@ fn main() -> ExitCode {
     let argv0 = std::env::args().next().unwrap_or_default();
     let extra: Vec<String> = std::env::args().skip(1).collect();
 
+    // T4.1 (Q25): `init-pro crictl ps` / `init-pro ctr ...` passthrough —
+    // intercepted pre-clap (k3s-style subcommand surface) so peer flags
+    // never touch the flag strip filter; the multicall seam re-execs the
+    // staged binary with the agent socket injected.
+    if let Some(action) = match extra.first().map(String::as_str) {
+        Some("crictl") => Some(Action::Crictl),
+        Some("ctr") => Some(Action::Ctr),
+        _ => None,
+    } {
+        return multicall::external_stub(action, &extra[1..]);
+    }
+
     match resolve(&argv0) {
         // init-pro itself (or an unknown name) -> drive the CLI; clap will
         // print help/version as appropriate.
