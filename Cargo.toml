@@ -13,6 +13,8 @@ members = [
     "crates/api",
     "crates/apiserver",
     "crates/controllers",
+    "crates/scheduler",
+    "crates/runtime",
     "crates/router",
     "crates/storage",
 ]
@@ -39,6 +41,8 @@ vendor = { path = "crates/vendor" }
 api = { path = "crates/api" }
 apiserver = { path = "crates/apiserver" }
 controllers = { path = "crates/controllers" }
+scheduler = { path = "crates/scheduler" }
+runtime = { path = "crates/runtime" }
 router = { path = "crates/router" }
 storage = { path = "crates/storage" }
 

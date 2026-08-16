@@ -56,6 +56,12 @@ pub struct ServerCmd {
     #[arg(long = "disable-scheduler")]
     pub disable_scheduler: bool,
 
+    /// kube-scheduler arg passthrough (`KEY=VALUE`, repeatable). `config=<path>`
+    /// loads a KubeSchedulerConfiguration JSON whose `extenders` wire the HTTP
+    /// extender seam (T3.2, Q3/Q23); other keys are accepted as no-ops for now.
+    #[arg(long = "kube-scheduler-arg", value_name = "KEY=VALUE")]
+    pub kube_scheduler_arg: Vec<String>,
+
     /// Disable the k3s cloud-controller-manager.
     #[arg(long = "disable-cloud-controller")]
     pub disable_cloud_controller: bool,

@@ -6,20 +6,28 @@
 //! Since T3.1a the server also runs the controller manager against the same
 //! storage Arc as the apiserver, in-process (decision **Q19**), stopping it
 //! after the API surface has drained.
-//! `agent` installs the handler and idles until Layers 3–4 land. `stage`
+//! `agent` installs the handler and supervises the bundled containerd
+//! runtime (T4.1, Q25) until the kubelet equivalent lands in T4.2. `stage`
 //! exposes the T0.2 manifest contract + B5 runtime staging.
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use ::runtime as node_runtime;
 use common::embed::EmbeddedManifest;
 use infra::{Config, Shutdown};
 
-/// Server-only wiring: where to bind the discovery API + whether it is disabled.
+/// Server-only wiring: where to bind the discovery API + which in-process
+/// control-plane components are enabled (Q19).
 pub struct ServerBind {
     pub addr: SocketAddr,
     pub disable_apiserver: bool,
+    pub disable_controllers: bool,
+    pub disable_scheduler: bool,
+    /// `--kube-scheduler-arg KEY=VALUE` passthrough (`config=<path>` wires
+    /// HTTP extenders, T3.2/Q3).
+    pub scheduler_args: Vec<String>,
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
@@ -61,6 +69,29 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
             Vec<tokio::task::JoinHandle<()>>,
             controllers::Stop,
         )> = None;
+        let mut scheduler_drain: Option<(
+            Vec<tokio::task::JoinHandle<()>>,
+            controllers::Stop,
+        )> = None;
+        // T4.1 (Q25): the agent supervises the bundled containerd (stage ->
+        // render config -> supervise with backoff). The server keeps the
+        // runtime off by default (single-node UX arrives with T4.5/e2e).
+        let mut runtime_drain: Option<tokio::task::JoinHandle<()>> = None;
+        if bind.is_none() {
+            match node_runtime::start_agent_runtime(&cfg.data_dir, shutdown.clone()) {
+                Ok(task) => {
+                    runtime_drain = Some(tokio::spawn(async move {
+                        let _ = task.await;
+                    }))
+                }
+                Err(e) => tracing::warn!(
+                    target: "init-pro",
+                    role,
+                    "containerd source unavailable; agent degraded (T4.2 will \
+                     hard-require the runtime): {e}"
+                ),
+            }
+        }
         let server_join = match &bind {
             Some(b) if !b.disable_apiserver => {
                 let reg = crate::discovery::served_schema();
@@ -76,11 +107,52 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
                 // storage Arc (Q19); leader-elected via a Lease + CAS (Q18).
                 // Only the full apiserver path runs controllers —
                 // `--disable-apiserver` keeps single-process server semantics.
-                let cm_stop = controllers::Stop::new();
-                let cm_handles =
-                    controllers::ControllerManager::spawn(store.clone(), cm_stop.clone());
-                tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
-                controllers_drain = Some((cm_handles, cm_stop));
+                if !b.disable_controllers {
+                    let cm_stop = controllers::Stop::new();
+                    let cm_handles =
+                        controllers::ControllerManager::spawn(store.clone(), cm_stop.clone());
+                    tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
+                    controllers_drain = Some((cm_handles, cm_stop));
+                }
+                // T3.2 (Q23): the scheduler reuses the controllers framework
+                // (informer/workqueue/leader-election) over the same storage
+                // Arc — one more in-process component, no loopback HTTP.
+                if !b.disable_scheduler {
+                    let mut sched_cfg = scheduler::SchedulerConfig::new();
+                    for arg in &b.scheduler_args {
+                        match arg.split_once('=') {
+                            Some(("config", value)) => {
+                                match scheduler::SchedulerConfig::load_extenders(
+                                    std::path::Path::new(value),
+                                ) {
+                                    Ok(loaded) => {
+                                        let count = loaded.extenders.len();
+                                        sched_cfg.extenders = loaded.extenders;
+                                        tracing::info!(target: "init-pro", role,
+                                            count,
+                                            "scheduler extenders loaded from {value}");
+                                    }
+                                    Err(e) => {
+                                        return Err(std::io::Error::other(format!(
+                                            "--kube-scheduler-arg config={value}: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => tracing::warn!(target: "init-pro", role,
+                                arg = %arg,
+                                "--kube-scheduler-arg accepted but not implemented for this key; no-op"),
+                        }
+                    }
+                    let sched_stop = controllers::Stop::new();
+                    let sched_handles = scheduler::SchedulerManager::spawn(
+                        store.clone(),
+                        sched_cfg,
+                        sched_stop.clone(),
+                    );
+                    tracing::info!(target: "init-pro", role, "scheduler started (leader-elected via Lease, Q18)");
+                    scheduler_drain = Some((sched_handles, sched_stop));
+                }
                 let server_shutdown = shutdown.clone();
                 let addr = b.addr;
                 Some(tokio::spawn(async move {
@@ -110,6 +182,12 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
 
         shutdown.cancelled().await;
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining");
+        // T4.1: drain the containerd supervisor first (kill + bounded wait),
+        // mirroring k3s stopping the runtime before the control plane.
+        if let Some(h) = runtime_drain {
+            let _ = h.await;
+            tracing::info!(target: "init-pro", role, "containerd runtime drained (supervisor exited)");
+        }
         if let Some(jh) = server_join {
             let _ = jh.await;
         }
@@ -122,6 +200,15 @@ fn run_supervised(role: &'static str, cfg: Config, bind: Option<ServerBind>) -> 
                 let _ = h.await;
             }
             tracing::info!(target: "init-pro", role, "controller manager drained");
+        }
+        // T3.2: drain the scheduler after the controllers (it only observes
+        // pods/nodes; controllers may still bind ReplicaSet-owned pods).
+        if let Some((sched_handles, sched_stop)) = scheduler_drain {
+            sched_stop.trigger();
+            for h in sched_handles {
+                let _ = h.await;
+            }
+            tracing::info!(target: "init-pro", role, "scheduler drained");
         }
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining complete");
         Ok::<(), std::io::Error>(())

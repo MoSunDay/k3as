@@ -106,6 +106,7 @@ mod tests {
             disable_agent: false,
             disable_controller_manager: false,
             disable_scheduler: false,
+            kube_scheduler_arg: vec![],
             disable_cloud_controller: false,
             disable_kube_proxy: false,
             disable_network_policy: false,

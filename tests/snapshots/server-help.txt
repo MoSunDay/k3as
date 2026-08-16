@@ -31,6 +31,8 @@ Options:
           Disable kube-controller-manager
       --disable-scheduler
           Disable kube-scheduler
+      --kube-scheduler-arg <KEY=VALUE>
+          kube-scheduler arg passthrough (`KEY=VALUE`, repeatable). `config=<path>` loads a KubeSchedulerConfiguration JSON whose `extenders` wire the HTTP extender seam (T3.2, Q3/Q25); other keys are accepted as no-ops for now
       --disable-cloud-controller
           Disable the k3s cloud-controller-manager
       --disable-kube-proxy
