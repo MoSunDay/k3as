@@ -15,6 +15,11 @@
 //!   [`balancer::Balancer`] + upstream resolver, a Rust HTTP reverse proxy
 //!   ([`proxy::serve_proxy`]), TLS termination with SNI ([`tls`]), and a
 //!   no-restart hot-reload seam ([`config`]). `Phase::Balancer` is wired.
+//! - **Sprint 18 / S4** (Q28): the NodePort service plane — Services +
+//!   Endpoints reflectors over the storage backend ([`endpoints_watch`]),
+//!   live peer resolution ([`endpoints`]) and per-nodePort reverse-proxy
+//!   listeners ([`nodeport`]), wired into the `server` runtime by default
+//!   (`--disable-kube-proxy` turns it off).
 //!
 //! Cosocket (`ngx.socket.tcp`), TLS/SNI, and hot reload are all in. Live
 //! `kube-rs` informer config sourcing + dynamic Lua cert issuance are deferred
@@ -26,8 +31,11 @@ mod config;
 mod conn;
 mod context;
 mod cosocket;
+pub mod endpoints;
+pub mod endpoints_watch;
 mod ingress;
 mod ngx;
+pub mod nodeport;
 mod pipeline;
 mod proxy;
 mod resty;
@@ -39,7 +47,10 @@ mod vm;
 pub use balancer::{pick_peer, Balancer, StaticResolver, UpstreamResolver};
 pub use config::{reload_channel, ConfigSource, RouteStore, StaticConfigSource};
 pub use context::RequestContext;
+pub use endpoints::{EndpointsResolver, EndpointsView, ResolverState, ServiceView};
+pub use endpoints_watch::{endpoints_prefix, services_prefix, supervise};
 pub use ingress::compile_ingress;
+pub use nodeport::{spawn as spawn_nodeport_plane, NodePortConfig, NodePortPlane};
 pub use pipeline::{build_response, Phase, PhaseOutcome, Pipeline, PipelineBuilder};
 pub use proxy::{serve_proxy, ProxyOptions};
 pub use route::{HostMatcher, PathMatcher, PortRef, RouteRule, RouteTable, UpstreamRef};

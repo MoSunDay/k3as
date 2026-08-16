@@ -26,6 +26,11 @@ pub struct ServerBind {
     pub disable_apiserver: bool,
     pub disable_controllers: bool,
     pub disable_scheduler: bool,
+    /// `--disable-kube-proxy` turns the NodePort service plane OFF
+    /// (Sprint 18 / **S4**, Q28). By default the built-in Router carries
+    /// Service traffic — one reverse-proxy listener per allocated nodePort,
+    /// peers resolved live from Endpoints (the kube-proxy-equivalent).
+    pub disable_kube_proxy: bool,
     /// `--kube-scheduler-arg KEY=VALUE` passthrough (`config=<path>` wires
     /// HTTP extenders, T3.2/Q3).
     pub scheduler_args: Vec<String>,
@@ -80,6 +85,13 @@ fn run_supervised(
         let mut scheduler_drain: Option<(
             Vec<tokio::task::JoinHandle<()>>,
             controllers::Stop,
+        )> = None;
+        // Sprint 18 / S4 (Q28): the Router NodePort service plane — the
+        // kube-proxy-equivalent, on by default; `--disable-kube-proxy` turns
+        // it off. Drained after the agent runtime, before the API surface.
+        let mut service_plane_drain: Option<(
+            router::NodePortPlane,
+            Vec<tokio::task::JoinHandle<()>>,
         )> = None;
         // T4.1 (Q25): the agent supervises the bundled containerd (stage ->
         // render config -> supervise with backoff). The server keeps the
@@ -212,6 +224,25 @@ fn run_supervised(
                     tracing::info!(target: "init-pro", role, "scheduler started (leader-elected via Lease, Q18)");
                     scheduler_drain = Some((sched_handles, sched_stop));
                 }
+                // Sprint 18 / S4 (Q28): the NodePort service plane runs by
+                // default — LIST->WATCH reflectors over the SAME storage Arc
+                // plus one reverse-proxy listener per allocated nodePort
+                // (the kube-proxy-equivalent; `--disable-kube-proxy` is the
+                // k3s-parity escape hatch that turns it off).
+                if !b.disable_kube_proxy {
+                    let (resolver, reflectors) =
+                        router::supervise(store.clone(), shutdown.clone());
+                    service_plane_drain = Some((
+                        router::spawn_nodeport_plane(
+                            resolver,
+                            router::NodePortConfig::default(),
+                            shutdown.clone(),
+                        ),
+                        reflectors,
+                    ));
+                    tracing::info!(target: "init-pro", role,
+                        "service plane started: Router carries nodePort traffic (Sprint 18 / S4, Q28)");
+                }
                 let server_shutdown = shutdown.clone();
                 let addr = b.addr;
                 Some(tokio::spawn(async move {
@@ -255,6 +286,16 @@ fn run_supervised(
         if let Some(h) = runtime_drain {
             let _ = h.await;
             tracing::info!(target: "init-pro", role, "containerd runtime drained (supervisor exited)");
+        }
+        // Sprint 18 / S4 (Q28): drain the Router service plane AFTER the
+        // agent runtime and BEFORE the API surface — nodePort listeners stop
+        // serving, then the reflectors join on the shared shutdown token.
+        if let Some((plane, reflectors)) = service_plane_drain {
+            plane.drain().await;
+            for h in reflectors {
+                let _ = h.await;
+            }
+            tracing::info!(target: "init-pro", role, "service plane drained");
         }
         if let Some(jh) = server_join {
             let _ = jh.await;

@@ -17,6 +17,12 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 getrandom = "0.4"
+# Sprint 18 / S4 (Q28): the NodePort service plane — live Endpoints/Services
+# reflectors over the storage backend + per-nodePort reverse-proxy listeners.
+# No new external dependencies: infra (Shutdown) + storage (workspace crates).
+infra = { workspace = true }
+storage = { workspace = true }
+serde_json = { workspace = true }
 # Layer 5 T5.4: Ingress -> route-table compilation uses the networking/v1 types.
 k8s-openapi = { workspace = true }
 # T5.4 Scope B: TLS termination (server SNI) + cosocket TLS (client).

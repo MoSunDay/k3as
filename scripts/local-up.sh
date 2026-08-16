@@ -63,6 +63,8 @@ echo "local-up: building the Q27 airgap pause image ..."
 "$SCRIPT_DIR/build-pause-image.sh" "$PAUSE_TAR" "$PAUSE_REF" >/dev/null
 
 echo "local-up: starting server on $BASE (data dir: $DD) ..."
+# Sprint 18 / S4 (Q28): the NodePort service plane is on by default — the
+# Router binds one listener per allocated nodePort, backed by live Endpoints.
 "$BIN" server --data-dir "$DD/server" --bind-address 127.0.0.1 \
   --https-listen-port "$API_PORT" >"$DD/server.log" 2>&1 &
 SERVER_PID=$!

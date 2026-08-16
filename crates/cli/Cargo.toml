@@ -17,6 +17,9 @@ scheduler = { workspace = true }
 storage = { workspace = true }
 runtime = { workspace = true }
 kubelet = { workspace = true }
+# Sprint 18 / S4 (Q28): the built-in Router's NodePort service plane carries
+# Service traffic by default (--disable-kube-proxy turns it off).
+router = { workspace = true }
 k8s-openapi = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
