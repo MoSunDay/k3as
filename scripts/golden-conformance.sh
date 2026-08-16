@@ -14,6 +14,12 @@
 # (T1.2, T2.x, T3.x), their golden cases are appended below — each TODO tags
 # which cases it must keep green (plan/00-foundation.md T0.6, Q2 merge gate).
 #
+# Later suites appended below: storage semantics G02-G11 (T2.1/T2.2),
+# control plane G12-G23 (T3.1/T3.2), and the node layer G24-G25
+# (T4.1 containerd supervision; T4.2 Scope A kubelet drives Deployment
+# pods to Running+Ready over real containerd with the Q27 airgap pause
+# image; G24/G25 SKIP without the vendor bundle, G25 also needs cc).
+#
 # Volatility: the only non-deterministic field is APIVersions.serverAddress
 # (the bind host:port); it is normalized to the token @@PORT@@ before diffing.
 set -euo pipefail
@@ -576,6 +582,93 @@ else
   fi
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
   rm -rf "$G24TMP" "$LOG24"
+fi
+
+# --- T4.2: kubelet runs a real pod end-to-end (G25) ---
+# Same vendor gate as G24 (SKIP without a vendored containerd) plus a `cc`
+# gate: the workload image is the Q27 airgap pause — assembled locally from
+# a static binary (scripts/build-pause-image.sh), imported through the
+# staged `ctr`, never pulled from a registry. Flow: Deployment -> RS -> pod
+# -> scheduler binds g25-node -> kubelet drives CRI -> Running+Ready;
+# kill the container -> kubelet restarts it; delete the Deployment -> GC +
+# kubelet teardown empty every sandbox.
+if [[ -z "$G24_VENDOR_BIN" ]]; then
+  echo "SKIP G25 kubelet end-to-end (no vendored containerd)"
+elif ! command -v cc >/dev/null 2>&1; then
+  echo "SKIP G25 kubelet end-to-end (no cc for the airgap pause image, Q27)"
+else
+  G25TMP="$(mktemp -d)"; G25SRV="$(mktemp)"; G25AG="$(mktemp)"
+  G25_PORT="$(pick_port)"
+  "$BIN" server --data-dir "$G25TMP/srv" --bind-address 127.0.0.1 --https-listen-port "$G25_PORT" >"$G25SRV" 2>&1 &
+  SRV2=$!
+  for _ in $(seq 1 60); do grep -q "discovery listening" "$G25SRV" && break; sleep 0.1; done
+  BASE25="http://127.0.0.1:${G25_PORT}"
+  PAUSE_REF="init-pro.local/pause:0.1"
+  G25_IMG="$G25TMP/pause.tar"
+  "$SCRIPT_DIR/build-pause-image.sh" "$G25_IMG" "$PAUSE_REF" >/dev/null 2>&1 || true
+  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G25TMP/ag" --token dev \
+      --server "$BASE25" --node-name g25-node >"$G25AG" 2>&1 &
+  AGENT_PID=$!
+  for _ in $(seq 1 300); do grep -q "containerd healthy" "$G25AG" && break; sleep 0.1; done
+  INIT_PRO_DATA_DIR="$G25TMP/ag" "$BIN" ctr -n k8s.io images import "$G25_IMG" >/dev/null 2>&1 || true
+  curl -s -o /dev/null -X POST -H "Content-Type: application/json" \
+    -d '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"g25-dep","namespace":"default"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"g25"}},"template":{"metadata":{"labels":{"app":"g25"}},"spec":{"containers":[{"name":"pause","image":"'"$PAUSE_REF"'"}]}}}}' \
+    "$BASE25/apis/apps/v1/namespaces/default/deployments"
+  G25A=0
+  for _ in $(seq 1 240); do
+    S="$(curl -s "$BASE25/api/v1/namespaces/default/pods" | python3 -c 'import json,sys
+try: items=json.load(sys.stdin).get("items",[])
+except Exception: sys.exit(0)
+for p in items:
+  st=p.get("status",{})
+  conds={c.get("type"):c.get("status") for c in st.get("conditions",[])}
+  if st.get("phase")=="Running" and conds.get("Ready")=="True": print("READY"); break' 2>/dev/null || true)"
+    [[ "$S" == "READY" ]] && { G25A=1; break; }
+    sleep 0.5
+  done
+  if [[ "$G25A" -eq 1 ]]; then
+    ok "G25  deployment pod Running+Ready on the agent node  (kubelet, T4.2)"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL G25a pod never Running+Ready (server: $G25SRV agent: $G25AG)"
+    FAIL=$((FAIL+1))
+  fi
+  G25B=0
+  if [[ "$G25A" -eq 1 ]]; then
+    CID="$(INIT_PRO_DATA_DIR="$G25TMP/ag" "$BIN" crictl ps -q 2>/dev/null | head -1)"
+    if [[ -n "$CID" ]]; then
+      INIT_PRO_DATA_DIR="$G25TMP/ag" "$BIN" crictl stop --timeout 5 "$CID" >/dev/null 2>&1 || true
+      for _ in $(seq 1 120); do
+        NID="$(INIT_PRO_DATA_DIR="$G25TMP/ag" "$BIN" crictl ps -q 2>/dev/null | head -1)"
+        if [[ -n "$NID" && "$NID" != "$CID" ]]; then G25B=1; break; fi
+        sleep 0.5
+      done
+    fi
+  fi
+  if [[ "$G25B" -eq 1 ]]; then
+    ok "G25  killed container restarted by the kubelet  (kubelet, T4.2)"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL G25b container restart (agent log: $G25AG)"
+    FAIL=$((FAIL+1))
+  fi
+  G25C=0
+  curl -s -o /dev/null -X DELETE "$BASE25/apis/apps/v1/namespaces/default/deployments/g25-dep"
+  for _ in $(seq 1 120); do
+    CNT="$(INIT_PRO_DATA_DIR="$G25TMP/ag" "$BIN" crictl pods -o json 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("items",[])))' 2>/dev/null || echo 99)"
+    [[ "$CNT" == "0" ]] && { G25C=1; break; }
+    sleep 0.5
+  done
+  if [[ "$G25C" -eq 1 ]]; then
+    ok "G25  deployment delete tears pods down to zero sandboxes  (kubelet, T4.2)"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL G25c teardown left sandboxes (count=$CNT; agent log: $G25AG)"
+    FAIL=$((FAIL+1))
+  fi
+  kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
+  kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
+  rm -rf "$G25TMP" "$G25SRV" "$G25AG"
 fi
 
 echo
