@@ -1,11 +1,12 @@
 //! Endpoints controller (T3.1a).
 //!
-//! Reflects Service selector membership into an Endpoints object. Placeholder
-//! IPs: v1 pods have no kubelet/CNI addresses yet, so each address is the
-//! deterministic `10.42.x.y` derived from the pod identity (T4.2/T4.3 replace
-//! this with real podIPs). Readiness: pods without ANY conditions count as
-//! ready -- without kubelet nothing would ever report Ready and Endpoints
-//! would stay empty.
+//! Reflects Service selector membership into an Endpoints object. As of Sprint
+//! 18 the kubelet reports real podIPs (S1), so addresses carry the real CNI
+//! IPs when present; the deterministic `10.42.x.y` placeholder derived from
+//! the pod identity remains only for kubelet-less clusters (golden
+//! conformance). Readiness: pods without ANY conditions count as ready --
+//! without kubelet nothing would ever report Ready and Endpoints would stay
+//! empty.
 
 use serde_json::{json, Value};
 use storage::Key;
@@ -56,6 +57,8 @@ pub async fn reconcile(
             .and_then(Value::as_str)
             .filter(|u| !u.is_empty())
             .unwrap_or(pod_name);
+        // Real kubelet-reported podIP wins (Sprint 18 / S1); the
+        // deterministic placeholder is only for kubelet-less clusters.
         let ip = pod
             .pointer("/status/podIP")
             .and_then(Value::as_str)
@@ -69,20 +72,25 @@ pub async fn reconcile(
         }
     }
 
+    // k8s Endpoints semantics: `port` is the resolved container port
+    // (targetPort), not the Service port; `name` carries the Service port
+    // name. Sprint 18 / S2: previously the targetPort was dropped, which
+    // forwarded every non-identity Service to the wrong port.
     let ports: Vec<Value> = service
         .pointer("/spec/ports")
         .and_then(Value::as_array)
         .map(|ps| {
             ps.iter()
-                .map(|p| {
-                    let mut port = json!({
-                        "port": p.get("port").cloned().unwrap_or(json!(0)),
+                .filter_map(|p| {
+                    let port = resolve_target_port(p, &pods)?;
+                    let mut out = json!({
+                        "port": port,
                         "protocol": p.get("protocol").cloned().unwrap_or(json!("TCP")),
                     });
                     if let Some(n) = p.get("name") {
-                        port["name"] = n.clone(); // targetPort is dropped
+                        out["name"] = n.clone();
                     }
-                    port
+                    Some(out)
                 })
                 .collect()
         })
@@ -121,6 +129,43 @@ pub async fn reconcile(
     Ok(())
 }
 
+/// Resolve one Service port to the container port Endpoints must carry
+/// (Sprint 18 / S2). Missing `targetPort` = identity; numeric (or numeric
+/// string) = used verbatim; a name is looked up in the selected pods'
+/// `spec.containers[].ports` (first pod wins, k8s-style). An unresolvable
+/// name yields None -> the port is omitted from Endpoints (upstream drops
+/// it too rather than guessing).
+fn resolve_target_port(port_entry: &Value, pods: &[Value]) -> Option<u16> {
+    let target = port_entry.get("targetPort");
+    match target {
+        None => port_entry.get("port")?.as_u64()?.try_into().ok(),
+        Some(Value::Number(n)) => n.as_u64()?.try_into().ok(),
+        Some(Value::String(s)) => {
+            if let Ok(n) = s.parse::<u16>() {
+                return Some(n);
+            }
+            for pod in pods {
+                let Some(containers) = pod.pointer("/spec/containers").and_then(Value::as_array)
+                else {
+                    continue;
+                };
+                for c in containers {
+                    let Some(ports) = c.get("ports").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for cp in ports {
+                        if cp.get("name").and_then(Value::as_str) == Some(s.as_str()) {
+                            return cp.get("containerPort")?.as_u64()?.try_into().ok();
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Some(_) => None,
+    }
+}
+
 /// True when the selector carries no constraints (selects nothing). Handles
 /// both shapes: a plain label map (Service `spec.selector`) and a
 /// LabelSelector (`matchLabels`/`matchExpressions`).
@@ -145,4 +190,63 @@ fn resource_version_of(v: &Value) -> Option<u64> {
     v.pointer("/metadata/resourceVersion")
         .and_then(Value::as_str)
         .and_then(|s| s.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_target_port;
+    use serde_json::{json, Value};
+
+    fn pod_with_named_port() -> Value {
+        json!({
+            "metadata": {"name": "p", "namespace": "default"},
+            "spec": {"containers": [{"name": "c", "image": "x", "ports": [
+                {"name": "web", "containerPort": 9000},
+            ]}]},
+        })
+    }
+
+    #[test]
+    fn resolve_target_port_identity_when_missing() {
+        assert_eq!(resolve_target_port(&json!({"port": 80}), &[]), Some(80));
+    }
+
+    #[test]
+    fn resolve_target_port_numeric() {
+        assert_eq!(
+            resolve_target_port(&json!({"port": 80, "targetPort": 8080}), &[]),
+            Some(8080)
+        );
+    }
+
+    #[test]
+    fn resolve_target_port_numeric_string() {
+        assert_eq!(
+            resolve_target_port(&json!({"port": 80, "targetPort": "8080"}), &[]),
+            Some(8080)
+        );
+    }
+
+    #[test]
+    fn resolve_target_port_named_from_pod() {
+        let pods = [pod_with_named_port()];
+        assert_eq!(
+            resolve_target_port(&json!({"port": 80, "targetPort": "web"}), &pods),
+            Some(9000)
+        );
+    }
+
+    #[test]
+    fn resolve_target_port_named_unmatched_is_none() {
+        let pods = [pod_with_named_port()];
+        assert_eq!(
+            resolve_target_port(&json!({"port": 80, "targetPort": "nope"}), &pods),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_target_port_missing_port_is_none() {
+        assert_eq!(resolve_target_port(&json!({"name": "http"}), &[]), None);
+    }
 }
