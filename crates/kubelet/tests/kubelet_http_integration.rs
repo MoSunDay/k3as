@@ -226,6 +226,25 @@ async fn kubelet_runs_pod_via_fake_cri_and_tears_down_on_delete() {
     )
     .await;
 
+    // Sprint 18 / S1: the READY sandbox's CNI IP surfaces in the kubelet's
+    // /status writes (podIP + podIPs + hostIP all present).
+    let with_ip = wait_for(
+        &client,
+        "/api/v1/namespaces/default/pods/web",
+        "pod podIP",
+        |v| {
+            v["status"]["podIP"].is_string()
+                && v["status"]["podIPs"][0]["ip"] == v["status"]["podIP"]
+                && v["status"]["hostIP"] == "127.0.0.1"
+        },
+    )
+    .await;
+    assert_eq!(
+        with_ip["status"]["podIP"].as_str(),
+        cri.peek_sandboxes()[0].ip.as_deref(),
+        "reported podIP is the sandbox CNI IP"
+    );
+
     let calls = cri.peek_calls();
     for prefix in ["pull:", "runp:", "create:", "start:"] {
         assert!(
