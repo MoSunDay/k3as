@@ -64,6 +64,9 @@ jobs:
       - name: e2e — service traffic (Sprint 18, decision D)
         run: scripts/service-traffic-e2e.sh
 
+      - name: e2e — durability across restart (T2.3, Sprint 19)
+        run: scripts/durability-e2e.sh
+
   bundle:
     name: INIT_PRO_EMBED=1 build + stage test
     runs-on: ubuntu-latest

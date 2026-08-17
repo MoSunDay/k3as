@@ -56,8 +56,8 @@ progress** — the `storage` crate landed (T2.1) and the apiserver now serves
 | 1 | T1.2 | APIServer: discovery (T1.2a) + REST CRUD & watch (T1.2b) done; SSA (T1.2c) deferred | 🟡 in-progress |
 | 1 | T1.3 | authn/authz (kubeconfig / token / RBAC) | ⬜ |
 | 2 | T2.1 | embedded storage backend + `StorageBackend` trait (Q17) | ✅ done |
-| 2 | T2.2 | storage data plane wired into apiserver | 🟡 in-progress |
-| 2 | T2.3 | SQLite / KINE alternative backend | ⬜ |
+| 2 | T2.2 | storage data plane wired into apiserver | ✅ done |
+| 2 | T2.3 | SQLite / KINE alternative backend (`--datastore-endpoint sqlite://<path>`, opt-in; default stays embedded) | ✅ done |
 | 3 | T3.1–T3.4 | controller-manager, scheduler, bootstrap/certs, HA | ⬜ |
 | 4 | T4.1–T4.5 | containerd/CRI, kubelet, CNI, netpol, node tunnel | ⬜ |
 | 5 | T5.1–T5.4 | Lua bridge, phase pipeline, `resty.*`, Ingress→route + TLS | ✅ done |

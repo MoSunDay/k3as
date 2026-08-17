@@ -21,7 +21,7 @@ is complete; Phase 2 (persistence + control plane) is in progress. The Cargo wor
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q28
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q29
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -101,21 +101,26 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - De-risk path (Q5): T0.1 -> T0.3 -> T5.1 -> T5.2 -> T5.4 (the M1 spike).
 - T0.6 (golden conformance) is a merge gate, not a node: every TODO must
   keep `scripts/golden-conformance.sh` green.
-- Done: Layer 0 (T0.1-T0.6), T1.1/T1.2 (api + apiserver), T2.1/T2.2
-  (storage), T3.1/T3.2 (controllers + scheduler), T4.1 (containerd
-  bundling), and the Layer 5 M1 slice (T5.1-T5.4). Phase 1 (M0 + M1)
-  is complete; 17/33 TODOs done.
+- Done: Layer 0 (T0.1-T0.6), T1.1/T1.2 (api + apiserver), Layer 2
+  (T2.1/T2.2/T2.3 - storage, Q29), T3.1/T3.2 (controllers + scheduler),
+  T4.1 (containerd bundling), and the Layer 5 M1 slice (T5.1-T5.4).
+  Phase 1 (M0 + M1) is complete; 18/33 TODOs done.
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
-  durability + alternative backends are T2.3 (Q17). Leader election is
-  Lease-object + CAS, not etcd leases (Q18).
+  T2.3 done — `SqliteStorage` (libsql core-only, kine-style append-only
+  `kv` table) delivers zero-restart durability as an opt-in
+  `--datastore-endpoint sqlite://<path>` backend; the default stays
+  `EmbeddedStorage` (Q17/Q29). Leader election is Lease-object + CAS,
+  not etcd leases (Q18). The real etcd-gRPC client is re-scoped to T3.4
+  (HA multi-server, its only consumer).
 - Next gate on the critical path: T4.2 Scope A is done — the kubelet
   drives real pods to Running+Ready over the T4.1 CRI seam (golden
   G25). Remaining on the path: T4.2 Scope B/C (probes, volumes, local
-  deploy), T4.3 (CNI), and T2.3 (durability, the other open Layer 2
-  item).
-- The server serves real REST CRUD/watch/SSA over the embedded store
-  (kubectl-compatible); zero-restart durability arrives with T2.3.
+  deploy) and T4.3 (CNI).
+- The server serves real REST CRUD/watch/SSA (kubectl-compatible); with
+  T2.3, zero-restart durability arrived as an explicit opt-in
+  (`sqlite://` endpoint; `scripts/durability-e2e.sh` D1-D4 gates it),
+  while the default embedded store stays in-memory.
 
 ## Decisions that matter (Q-codes)
 

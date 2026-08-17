@@ -817,6 +817,9 @@ on-disk single-server store; the apiserver code is unchanged across all three.
 - `−` The embedded store is **in-memory, per-process, non-durable**: it is the
   default and the test double, *not* an HA/durable production backend. Loss on
   restart is expected until T2.3 (SQLite/KINE) or a real-etcd impl lands.
+  *(Superseded in Sprint 19 / T2.3 closeout: restart persistence is delivered
+  opt-in by the libsql/SQLite backend (`sqlite://<path>`); the embedded store
+  stays the in-memory default — see Q29.)*
 - `−` The embedded store does **live-watch only** (no historical replay from a
   past revision); resource-version-based historical replay is an
   etcd-gRPC-backend capability, deferred to T2.3. *(Superseded in Sprint 12
@@ -830,6 +833,14 @@ on-disk single-server store; the apiserver code is unchanged across all three.
   `StorageBackend`; T2.3 slots alternative impls in behind
   `--datastore-endpoint` with no apiserver churn.
 
+**Partially superseded (Sprint 19 / T2.3, 2026-08-17).** Everything above
+stands — the trait abstraction, the embedded in-memory default, the no-FFI/
+no-subprocess posture — except the "real etcd-gRPC client someday" tail:
+that client's only consumer is HA multi-server (T3.4), so it is re-scoped
+to T3.4 (previously parked under T2.3). Durability itself is now delivered
+opt-in by the libsql/SQLite backend (`--datastore-endpoint
+sqlite://<path>`, Q29); the embedded store remains the default and the
+test double. See Q29.
 
 ---
 
@@ -1330,3 +1341,90 @@ creatable/storable but non-forwarding), LoadBalancer external VIPs,
 sessionAffinity, UDP, externalTrafficPolicy. If a ClusterIP dataplane
 is ever required it lands as a Router/T4.3 extension, not a forked
 iptables kube-proxy — Q4's single-dataplane story holds.
+
+---
+
+## Q29 — Durable storage: libsql/SQLite backend, local-file only, opt-in via `--datastore-endpoint` (T2.3 / Sprint 19)
+
+**Date.** 2026-08-17 (Sprint 19, recorded at S6).
+
+**Context.**
+Layer 2 closed its last gap with T2.3: the embedded store is in-memory,
+so every boot was a fresh cluster. k3s solves single-server durability
+with kine — a SQLite (or dqlite/postgres) shim exposing the etcd v3
+API surface. init-pro already has the etcd *semantics* behind the
+`StorageBackend` trait (Q17), so the task reduces to a second trait
+impl over a durable local-file substrate, selected by the existing
+`--datastore-endpoint` flag (k3s parity). The async Rust SQLite
+landscape offered three honest candidates, and the choice had to keep
+`#![forbid(unsafe_code)]` in our crates, avoid a network stack on the
+critical build, and stay inside the caret-only dependency contract.
+
+**Options.**
+- A) **libsql with `default-features = false, features = ["core"]`.** The
+  SQLite fork kine-adjacent tooling uses, with a native async API and no
+  tokio blocking bridge of our own. Core-only mode compiles out the
+  remote/replication/sync/tls machinery (no hyper/prost/tonic on the
+  critical build); the FFI lives behind libsql's own `-sys`/`-ffi`
+  crates, outside our `#![forbid(unsafe_code)]` surface. Maintainer
+  decision: libsql is a hard requirement.
+- B) **rusqlite + `spawn_blocking` wrapper.** The zero-async-native
+  classic. Rejected: every call becomes a threadpool hop, watch fan-out
+  ordering ("broadcast strictly post-COMMIT under one connection
+  mutex") gets racy to reason about, and it buys nothing libsql core
+  doesn't already provide locally.
+- C) **sqlx (compile-time checked queries) or full libsql with remote
+  features.** sqlx pulls a macro/compile-time database harness for a
+  schema this small; full libsql drags the Turso remote/replication
+  stack (hyper/prost/tonic + auth) that single-node durability does not
+  need onto every build.
+
+**Decision.** A, as built (Sprint 19):
+- `crates/storage/src/sqlite/` — `SqliteStorage` on libsql 0.9,
+  core-only. Kine-style schema: one append-only `kv` event table
+  (row `id` = global revision AUTOINCREMENT; key; value as JSON TEXT;
+  `create_revision`; `prev_revision`; `deleted`; `version`) plus a
+  `meta` table (schema_version / revision / compact_revision). PRAGMAs
+  `journal_mode=WAL`, `synchronous=FULL`, `busy_timeout=5000ms`; the
+  revision counter is restored at open from max(meta.revision,
+  MAX(kv.id)).
+- Hybrid watch: in-process broadcast fan-out (cap 1024, `WATCH_CAP`
+  parity with the embedded store) sent strictly **post-COMMIT** under a
+  single connection mutex — broadcast order == commit order == revision
+  order — while historical replay is plain SQL
+  (`SELECT id >= start ORDER BY id`), so replay survives restart.
+  Compaction keeps the latest row per key (get/list unaffected) and
+  persists the watermark to `meta`; watch at/below the watermark →
+  `StorageError::Compacted` (410 Gone). The backend assumes a single
+  writer on a single connection, consistent with the Q17/Q18
+  single-server posture.
+- Explicit `version` column (etcd `KeyValue.version` parity: create=1,
+  update=prev+1, tombstone carries the final version) — replacing a
+  COUNT-derived value that shrank after compaction (mid-sprint defect).
+- Default backend **unchanged**: empty/`None` `--datastore-endpoint`
+  keeps `EmbeddedStorage` (Q17 opt-in posture); `sqlite://<path>`
+  selects `SqliteStorage`; unsupported schemes are fatal, classified by
+  the pure `classify_dsn`. Flipping to sqlite-by-default is a possible
+  future decision, explicitly NOT taken here.
+- The contract suite doubles as the parity gate: the 26 embedded tests
+  were extracted into `crates/storage/tests/contract/` — 26 portable
+  cases instantiated for BOTH backends via `storage_contract!`
+  (1 embedded-only history-eviction case stays) — plus 5 file-backed
+  durability tests and 8 unit tests.
+
+**Consequences.**
+A single-node cluster is now durable when the operator opts in:
+restart preserves entries and revisions (resourceVersions identical
+across restart), watch replays across restart, and the compaction
+watermark survives — the "every boot is a fresh cluster" era ends
+(`scripts/local-up.sh` boots `sqlite://$DD/server/state.db`;
+`scripts/durability-e2e.sh` D1–D4 gates it in CI). Cost: +31 Cargo.lock
+packages via libsql core (libsql/libsql-sys/libsql-ffi, bindgen, cmake,
+futures, parking_lot, zerocopy, regex, ...), caret-only unchanged, and
+a build-time cmake/cc dependency on the sqlite artifact (vendored-bundle
+SKIP parity, as with G24/G25). The backend is local-file only by
+design: no remote/replication/sync/tls, and no HA — multi-server
+remains T3.4 with the real etcd-gRPC client (Q17 supersede note).
+`--kine-tls`/`datastore-*` stay noops (flag-matrix §C.6). The embedded
+store keeps its role as default and test double, so every existing test
+and golden fixture runs unchanged.

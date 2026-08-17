@@ -42,8 +42,8 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
 - **核心实现 / Core implementation**
   - Backend contract = `StorageBackend` trait (Q17): the embedded pure-Rust
     impl is the v1 default; a real etcd v3 gRPC client remains an
-    alternative trait impl (deferred to T2.3 — not needed on the critical
-    path).
+    alternative trait impl (re-scoped to T3.4 — its only consumer is HA
+    multi-server; see the Q17 supersede note + Q29).
   - Key layout `/registry/...` (upstream parity).
   - Transactions for CAS on `resourceVersion` (`if_revision`).
   - Watch: bounded revision event log (`src/history.rs`, default 10k
@@ -71,7 +71,7 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
 
 - **状态 / Status** — done
 - **证据 / Evidence** — Sprint 10: trait + `EmbeddedStorage` (etcd `KeyValue` parity, `/registry/...` layout) + 15 integration tests. Sprint 10.5: wired into REST CRUD/watch (T1.2b). Sprint 12: watch historical replay + compaction closeout — `crates/storage/src/history.rs` (event log + watermark, 4 unit tests), replay-then-live seam under one lock, `compact` on the trait, `Compacted` → 410 Gone mapping in the apiserver, k8s↔etcd `resourceVersion` translation fixed (`ListParams` was silently dropping the wire param). 26 storage integration tests (11 new: replay order/ seam losslessness under concurrent writes / prefix filtering / future start / compacted errors / eviction / prev-object-on-delete / multi-watcher) + 4 unit; 4 new apiserver watch-replay tests over real TCP; 360 total, golden 15/15 (G15).
-- **卡点 / Blockers** — none for v1 scope. Durability (restart persistence), policy-grade retention/compaction scheduling, and the real etcd-gRPC client are T2.3 (Q17). Policy note: the 10k-revision default retention is deliberately generous; aggressive compaction would starve slow informers.
+- **卡点 / Blockers** — none for v1 scope. Durability (restart persistence) is delivered by T2.3 (`SqliteStorage`, opt-in via `--datastore-endpoint sqlite://<path>`); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede note, Q29). Policy-grade retention/compaction scheduling remains open. Policy note: the 10k-revision default retention is deliberately generous; aggressive compaction would starve slow informers.
 - **依赖 / Depends on** — T2.1, T1.1
 
 ---
@@ -80,20 +80,58 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
 
 - **目标 / Goal**
   A non-etcd backend (SQLite via KINE-equivalent) for the single-node /
-  embedded flavor — k3s `--datastore-endpoint` parity.
+  embedded flavor — k3s `--datastore-endpoint` parity — that is **durable
+  across restarts** (entries, revisions, watch history, compaction
+  watermark).
 
 - **核心实现 / Core implementation**
-  - KINE-style abstraction: a generic `StorageBackend` trait
-    (`Watch`/`List`/`Create`/`Update`/`Delete`) with etcd and SQLite impls.
-  - SQLite (via `rusqlite`/`sqlx`) with a `kv` table + revision column;
-    change feed for watch.
-  - Selected when `--datastore-endpoint` is a SQLite DSN or `--disable-etcd`.
+  - `crates/storage/src/sqlite/` (`mod.rs` 373 lines, `schema.rs`,
+    `watch.rs`, `tests.rs`): `SqliteStorage` on **libsql 0.9**
+    (`default-features = false, features = ["core"]` = local-file only;
+    NO remote/replication/sync/tls features compiled in). libsql is a
+    hard requirement per maintainer decision (Q29) — a
+    rusqlite+spawn_blocking fallback was explicitly rejected.
+  - Kine-style schema: one append-only `kv` event table (row `id` = global
+    revision AUTOINCREMENT, key, value JSON TEXT, `create_revision`,
+    `prev_revision`, `deleted`, `version`) + a `meta` table
+    (schema_version / revision / compact_revision). PRAGMAs:
+    `journal_mode=WAL`, `synchronous=FULL`, `busy_timeout=5000ms`.
+    Revision counter restored at open from max(meta.revision, MAX(kv.id)).
+  - Full `StorageBackend` impl: CRUD+CAS inside explicit
+    `BEGIN IMMEDIATE` transactions; broadcast fan-out (cap 1024,
+    `WATCH_CAP` parity) sent strictly post-COMMIT under a single
+    connection mutex (broadcast order == commit order == revision order);
+    watch replay = `SELECT id >= start ORDER BY id` (cross-restart);
+    compact keeps the latest row per key (get/list unaffected) and
+    persists the watermark to `meta`; watch at/below watermark →
+    `StorageError::Compacted` (410 Gone).
+  - Explicit `version` column (etcd `KeyValue.version` parity:
+    create=1, update=prev+1, tombstone carries the final version) — a
+    mid-sprint defect fix: the original COUNT-derived `version` shrank
+    after compaction.
+  - Selection: `--datastore-endpoint` (crates/cli/src/runtime.rs) —
+    empty/None → `EmbeddedStorage` default unchanged (Q17; explicit
+    opt-in only); `sqlite://<path>` → `SqliteStorage`; fatal on
+    unsupported schemes (e.g. `mysql://`), classified by the pure
+    `classify_dsn`. `--kine-tls`/`datastore-*` remain noops
+    (flag-matrix §C.6).
 
 - **验收手段 / Acceptance**
-  - Same T0.6 golden storage cases pass on SQLite backend.
-  - Doc test: switch backend via flag only, no code change.
+  - Contract parity: the 26 embedded tests extracted into a shared suite
+    (`crates/storage/tests/contract/`) — 26 portable cases run against
+    BOTH backends via the `storage_contract!` macro; 1 embedded-only
+    history-eviction case stays.
+  - 5 file-backed durability tests: reopen preserves entries+revisions;
+    revision strictly monotonic across restart; watch replays across
+    restart; compaction watermark survives restart; WAL mode verified
+    via a second handle. Plus 8 in-module unit tests (incl. post-review
+    tx self-heal + failed-COMMIT pins).
+  - `scripts/durability-e2e.sh` D1–D4: boot+seed / SIGTERM drain /
+    restart persistence with identical resourceVersions / revision
+    continuity + watch replay across restart + controller resync smoke
+    (CI gate).
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — SQLite watch latency / correctness under load.
+- **状态 / Status** — done
+- **证据 / Evidence** — Sprint 19: `SqliteStorage` + contract suite landed; storage crate reports lib 12 (4 history + 8 sqlite unit), embedded_storage 27, sqlite_storage 31 (26 contract + 5 durability); workspace 674 → 717 tests green (post-review hardening: tx self-heal + unrepresentable-revision clamp, each pinned by a test proven to fail unfixed). Gates: clippy `-D warnings` zero, fmt clean, golden 27/27, cli-flag-parity 16/16, graceful-shutdown green, service-traffic-e2e 6/6, durability-e2e D1–D4 in ci.yml. Cargo.lock +31 packages via libsql core, caret-only unchanged. `scripts/local-up.sh` boots `sqlite://$DD/server/state.db`. Layer 2 = 3/3 complete.
+- **卡点 / Blockers** — none. Default backend stays `EmbeddedStorage` (flipping to sqlite-by-default is a possible future decision, NOT taken); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede note).
 - **依赖 / Depends on** — T2.2

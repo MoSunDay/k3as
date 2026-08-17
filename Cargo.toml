@@ -55,6 +55,9 @@ clap = { version = "4", features = ["derive", "env", "help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# SQLite storage backend (T2.3, Q29). Local-file mode only: no remote /
+# replication / sync / TLS features -- the server owns the single DB file.
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 # Layer 1 resource model (T1.1). JSON-only for v1 (Q10).
 kube-core = { version = "4.2", default-features = false, features = ["json-patch"] }
 k8s-openapi = { version = "0.28", features = ["v1_32"] }

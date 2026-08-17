@@ -9,8 +9,10 @@
 #   INIT_PRO_BIN=...       reuse a pre-built binary (default: build if missing)
 #   INIT_PRO_API_PORT=...  fixed apiserver port (default: pick a free one)
 #
-# The embedded store is in-memory until T2.3 lands, so every boot is a fresh
-# cluster and the data dir is a mktemp dir removed on exit.
+# The datastore is SQLite on disk since T2.3 (Q29): the server is started
+# with `--datastore-endpoint sqlite://$DD/server/state.db`, so the local
+# cluster is RESTARTABLE within a run — data persists across server
+# restarts. The data dir is still a mktemp dir removed on exit.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,7 +67,11 @@ echo "local-up: building the Q27 airgap pause image ..."
 echo "local-up: starting server on $BASE (data dir: $DD) ..."
 # Sprint 18 / S4 (Q28): the NodePort service plane is on by default — the
 # Router binds one listener per allocated nodePort, backed by live Endpoints.
+# Sprint 19 / T2.3 (Q29): durable SQLite datastore under the data dir, so a
+# server restart inside this run keeps the cluster state.
+mkdir -p "$DD/server"
 "$BIN" server --data-dir "$DD/server" --bind-address 127.0.0.1 \
+  --datastore-endpoint "sqlite://$DD/server/state.db" \
   --https-listen-port "$API_PORT" >"$DD/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 120); do grep -q "discovery listening" "$DD/server.log" 2>/dev/null && break; sleep 0.25; done

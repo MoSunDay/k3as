@@ -138,6 +138,7 @@ where
                         disable_scheduler: svc.disable_scheduler,
                         disable_kube_proxy: svc.disable_kube_proxy,
                         scheduler_args: svc.kube_scheduler_arg.clone(),
+                        datastore_endpoint: svc.datastore_endpoint.clone(),
                     },
                 ),
                 Err(e) => {

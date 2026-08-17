@@ -24,8 +24,8 @@ const WATCH_CAP: usize = 1024;
 
 /// Retained watch-history length (revisions). Deliberately generous: it is
 /// the disconnect window an informer can bridge with a replayed watch
-/// instead of a full re-list. Events are cheap (`Arc` payloads); real
-/// policy-grade retention arrives with T2.3.
+/// instead of a full re-list. Events are cheap (`Arc` payloads); policy-grade
+/// retention scheduling remains open work (T2.3 delivered persistence, Q29).
 const HISTORY_CAPACITY: usize = 10_000;
 
 struct Inner {
