@@ -7,7 +7,7 @@ status of record lives in `plans/init-pro/index.md`.
 |---------|--------|------|-------------|-----------|
 | discovery-api | done (T1.1 + T1.2a) | [card](discovery-api.md) | api, apiserver | `crates/api/src/discovery.rs`, `crates/apiserver/`, `golden/` |
 | router-data-plane | done / M1 (T5.1-T5.4) | [card](router-data-plane.md) | router | `crates/router/` |
-| storage-layer | landed (T2.1/T2.2) | [card](storage-layer.md) | storage | `crates/storage/` (`backend.rs`, `embedded.rs`) |
+| storage-layer | landed (T2.1/T2.2/T2.3) | [card](storage-layer.md) | storage | `crates/storage/` (`backend.rs`, `embedded.rs`, `sqlite/`) |
 | controllers | done (T3.1a+T3.1b) | [card](controllers.md) | controllers | `crates/controllers/`, `crates/cli/src/runtime.rs` |
 | scheduler | done (T3.2) | [card](scheduler.md) | scheduler | `crates/scheduler/`, `crates/apiserver/src/binding.rs` |
 | containerd-runtime | done (T4.1) | [card](containerd-runtime.md) | runtime, multicall | `crates/runtime/`, `crates/multicall/src/lib.rs`, `vendor/versions.toml` |

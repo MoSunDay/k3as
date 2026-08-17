@@ -53,8 +53,8 @@ init-pro  server | agent | kubectl | ctr | crictl | containerd | etcd
 | 1 | T1.2 | APIServer：discovery（T1.2a）+ REST CRUD 与 watch（T1.2b）完成；SSA（T1.2c）延后 | 🟡 进行中 |
 | 1 | T1.3 | 认证授权（kubeconfig / token / RBAC） | ⬜ |
 | 2 | T2.1 | 嵌入式存储后端 + `StorageBackend` trait（Q17） | ✅ 完成 |
-| 2 | T2.2 | 存储数据面接入 apiserver | 🟡 进行中 |
-| 2 | T2.3 | SQLite / KINE 替代后端 | ⬜ |
+| 2 | T2.2 | 存储数据面接入 apiserver | ✅ 完成 |
+| 2 | T2.3 | SQLite / KINE 替代后端（`--datastore-endpoint sqlite://<path>`，可选启用；默认仍为嵌入式） | ✅ 完成 |
 | 3 | T3.1–T3.4 | controller-manager、调度器、bootstrap/证书、HA | ⬜ |
 | 4 | T4.1–T4.5 | containerd/CRI、kubelet、CNI、netpol、节点隧道 | ⬜ |
 | 5 | T5.1–T5.4 | Lua 桥、phase 管线、`resty.*`、Ingress→route + TLS | ✅ 完成 |

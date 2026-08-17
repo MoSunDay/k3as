@@ -7,6 +7,112 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 19 — T2.3: libsql/SQLite persistence; Layer 2 closed (2026-08-17)
+
+**Goal:** close Layer 2's last gap — durability. The embedded store is
+in-memory, so every boot was a fresh cluster. Sprint 19 delivers a
+second `StorageBackend` impl over a durable local-file substrate
+(k3s `--datastore-endpoint` parity): schema substrate (S1), the full
+CRUD/CAS/watch/compact semantics (S2/S3), a shared cross-backend
+contract suite (S4), CLI selection + local cluster wiring (S5), and a
+restart-persistence e2e gate (S6). Locked as **Q29**: libsql 0.9
+core-only (local-file; no remote/replication/sync/tls) as a hard
+requirement, rusqlite+spawn_blocking explicitly rejected as a fallback;
+the default backend stays `EmbeddedStorage` — `sqlite://` is opt-in
+(flipping the default is a possible future decision, NOT taken). With
+T2.3 done, Layer 2 is 3/3 and the etcd-gRPC real client re-scopes to
+T3.4 (its only consumer) — Q17 partially superseded.
+
+### S1 — kine-style schema substrate (`crates/storage/src/sqlite/`)
+- `SqliteStorage` on **libsql 0.9** (`default-features = false,
+  features = ["core"]`): local-file only — no remote, replication,
+  sync, or TLS features are compiled in (no hyper/prost/tonic on the
+  critical build). libsql is a hard requirement per maintainer
+  decision (Q29).
+- Append-only `kv` event table: row `id` = global revision
+  (AUTOINCREMENT), key, value JSON TEXT, `create_revision`,
+  `prev_revision`, `deleted`, `version`; plus a `meta` table
+  (schema_version / revision / compact_revision). PRAGMAs:
+  `journal_mode=WAL`, `synchronous=FULL`, `busy_timeout=5000ms`.
+- The revision counter is restored at open from
+  max(meta.revision, MAX(kv.id)) — a restarted process continues the
+  revision sequence instead of resetting it.
+
+### S2 — CRUD + CAS: `BEGIN IMMEDIATE`, post-COMMIT broadcast
+- Every write path runs inside an explicit `BEGIN IMMEDIATE`
+  transaction: append the `kv` row, bump the persisted `meta.revision`
+  counter in the same tx. Optimistic concurrency = the trait's
+  `if_revision` CAS, identical conflict semantics to the embedded
+  store.
+- Watch fan-out (broadcast, cap 1024 — `WATCH_CAP` parity) is sent
+  strictly **post-COMMIT** while still holding the single connection
+  mutex, so broadcast order == commit order == revision order; slow
+  watchers get the same Lagged→close semantics as embedded.
+- Mid-sprint defect found & fixed: `version` was COUNT-derived and
+  shrank after compaction → replaced by the explicit `version` column
+  (create=1, update=prev+1, tombstone carries the final version) —
+  etcd `KeyValue.version` parity, compaction-proof.
+
+### S3 — watch replay + compaction on SQL
+- Historical replay = `SELECT id >= start ORDER BY id` — because
+  history is rows in the file, replay survives restart (the embedded
+  store can only replay what its in-memory ring retained).
+- `compact` keeps the latest row per key (get/list unaffected) and
+  persists the watermark to `meta.compact_revision`; a watch start
+  at/below the watermark → `StorageError::Compacted`, surfaced by the
+  apiserver as 410 Gone — same as embedded (T2.2).
+
+### S4 — shared contract suite (`crates/storage/tests/contract/`)
+- The 26 embedded integration tests were extracted into a portable
+  suite: **25 contract cases** expressed as generic functions over any
+  `StorageBackend`, instantiated for BOTH backends via the
+  `storage_contract!` macro (`embedded`, `sqlite_memory` on a fresh
+  `:memory:` db per case); the 1 embedded-only history-eviction case
+  (pins `with_history_capacity`, not on the trait) stays put.
+- SQLite adds **5 file-backed durability tests**: reopen preserves
+  entries + revisions; revision strictly monotonic across restart;
+  watch replays across restart; compaction watermark survives restart;
+  WAL mode verified via a second handle. Plus 6 in-module unit tests
+  (schema/watch internals).
+
+### S5 — CLI selection + local cluster wiring
+- `--datastore-endpoint` is wired in `crates/cli/src/runtime.rs`:
+  empty/None → `EmbeddedStorage` default UNCHANGED (Q17; explicit
+  opt-in only); `sqlite://<path>` → `SqliteStorage`; anything else
+  (e.g. `mysql://`, or bare `sqlite://`) is fatal — unsupported
+  scheme, classified by the pure `classify_dsn` (3 unit tests).
+  `ServerBind.datastore_endpoint` plumbed from `crates/cli/src/lib.rs`.
+  `--kine-tls` and the other `datastore-*` flags remain noops
+  (flag-matrix §C.6).
+- `scripts/local-up.sh` now boots the server with
+  `sqlite://$DD/server/state.db` — the local cluster is restartable
+  within a run (data survives the server's own restarts).
+
+### S6 — durability e2e gate + docs
+- NEW `scripts/durability-e2e.sh` **D1–D4**, added to
+  `.github/workflows/ci.yml`: D1 boot + seed real objects; D2 SIGTERM
+  drain (graceful-shutdown parity); D3 restart → identical
+  resourceVersions (entries + revisions preserved); D4 revision
+  continuity + watch replay across restart + controller resync smoke.
+- SSOT lock-step: index.md + plan/02-storage.md T2.3 → done,
+  decisions.md Q29 + Q17 supersede note, this entry.
+
+**Totals:** 674 → 717 workspace tests passed, 0 failed (+40 storage:
+lib 4 → 12 [+8 sqlite unit], sqlite_storage +31 [26 contract + 5
+durability], embedded_storage 26 → 27 [+1 shared contract case];
++3 cli `classify_dsn` unit). Post-review hardening folded into the
+same change: tx self-heal (`is_autocommit` + ROLLBACK at write/compact
+entry; ROLLBACK on failed COMMIT) so an aborted write or COMMIT failure
+cannot poison the single connection until restart, and replay clamps
+`Revision > i64::MAX` instead of wrapping negative (full-log replay);
+both pinned by tests proven to fail on the unfixed code. Gates: Gates: clippy `-D warnings` zero, fmt clean, golden 27/27,
+cli-flag-parity 16/16, graceful-shutdown green, service-traffic-e2e
+6/6 + SKIP path, durability-e2e D1–D4 in CI. Cargo.lock +31 packages
+via libsql core (libsql/libsql-sys/libsql-ffi, bindgen, cmake,
+futures, parking_lot, zerocopy, regex, ...), caret-only unchanged.
+T2.3 → done (Layer 2 = 3/3; 18/33 TODOs). Remaining: T4.2 Scope B/C,
+T4.3 (CNI), T5.6 LB VIP scope; the etcd-gRPC client is now T3.4.
+
 ## Sprint 18 — Service traffic end-to-end: NodePort plane in the Router (2026-08-17)
 
 **Goal:** make Service traffic real on a local cluster. Sprint 17 left

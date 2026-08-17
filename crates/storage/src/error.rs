@@ -1,4 +1,4 @@
-//! Storage errors (T2.2).
+//! Storage errors (T2.2; backend-agnostic failure variant added in T2.3).
 
 use thiserror::Error;
 
@@ -30,6 +30,9 @@ pub enum StorageError {
     },
     #[error("invalid storage key: {key}")]
     InvalidKey { key: String },
+    /// A backend-specific failure (SQLite/libsql IO or SQL error, T2.3).
+    #[error("storage backend error: {0}")]
+    Backend(String),
     /// The backend (or its watch channel) has been closed.
     #[error("storage backend closed")]
     Closed,

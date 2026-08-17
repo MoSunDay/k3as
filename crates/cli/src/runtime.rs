@@ -12,6 +12,7 @@
 //! staging.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -34,6 +35,11 @@ pub struct ServerBind {
     /// `--kube-scheduler-arg KEY=VALUE` passthrough (`config=<path>` wires
     /// HTTP extenders, T3.2/Q3).
     pub scheduler_args: Vec<String>,
+    /// DSN selecting the storage backend (**T2.3**, decision **Q29**):
+    /// `None`/empty = the embedded default (**Q17**); `sqlite://<path>` =
+    /// the libsql/SQLite `SqliteStorage` backend; other schemes are fatal
+    /// (etcd-gRPC is deferred to T3.4).
+    pub datastore_endpoint: Option<String>,
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
@@ -170,10 +176,15 @@ fn run_supervised(
                 let summary = crate::discovery::served_groups_summary(&reg, &advertised);
                 tracing::info!(target: "init-pro", role, "T1.1 {summary}");
                 // T1.2b: default backend = the zero-dependency embedded store
-                // (ADR Q17). Real etcd-gRPC (T2.2) / SQLite-KINE (T2.3) slot in
-                // as alternative StorageBackend impls behind --datastore-endpoint.
-                let store: Arc<dyn storage::StorageBackend> =
-                    Arc::new(storage::EmbeddedStorage::new());
+                // (Q17); `sqlite://` opts into SqliteStorage (T2.3, Q29) —
+                // etcd-gRPC remains deferred to T3.4.
+                let store = match open_store(b.datastore_endpoint.as_deref()).await {
+                    Ok(store) => store,
+                    Err(e) => {
+                        tracing::error!(target: "init-pro", role, "{e}");
+                        return Err(e);
+                    }
+                };
                 // T3.1a: spawn the controller manager against the same
                 // storage Arc (Q19); leader-elected via a Lease + CAS (Q18).
                 // Only the full apiserver path runs controllers —
@@ -332,6 +343,61 @@ fn run_supervised(
     }
 }
 
+/// `--datastore-endpoint` classification (**T2.3**, decision **Q29**): the
+/// pure DSN-to-backend selector [`open_store`] switches on.
+#[derive(Debug, PartialEq, Eq)]
+enum Dsn {
+    /// Unset or empty: the zero-dependency embedded default (**Q17**).
+    Embedded,
+    /// `sqlite://<path>`: the libsql/SQLite backend (`SqliteStorage`).
+    Sqlite(PathBuf),
+    /// Anything else (including bare `sqlite://`): fatal, unsupported.
+    Unsupported(String),
+}
+
+/// Classify a `--datastore-endpoint` DSN (**T2.3/Q29**). Pure: no I/O, no
+/// side effects — the openable cases stay distinguishable for tests.
+fn classify_dsn(dsn: Option<&str>) -> Dsn {
+    match dsn {
+        None | Some("") => Dsn::Embedded,
+        Some(s) if s.starts_with("sqlite://") => match &s["sqlite://".len()..] {
+            "" => Dsn::Unsupported(s.to_string()),
+            path => Dsn::Sqlite(PathBuf::from(path)),
+        },
+        Some(s) => Dsn::Unsupported(s.to_string()),
+    }
+}
+
+/// Open the storage backend selected by `--datastore-endpoint` (**T2.3**,
+/// decision **Q29**). Unset/empty keeps the embedded default (**Q17**) —
+/// sqlite is an explicit opt-in, never a silent behavior change;
+/// `sqlite://<path>` opens the libsql/SQLite backend; other schemes are
+/// fatal (etcd-gRPC is deferred to T3.4).
+async fn open_store(dsn: Option<&str>) -> std::io::Result<Arc<dyn storage::StorageBackend>> {
+    match classify_dsn(dsn) {
+        Dsn::Embedded => Ok(Arc::new(storage::EmbeddedStorage::new())),
+        Dsn::Sqlite(path) => {
+            let store = storage::SqliteStorage::open(&path)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            tracing::info!(target: "init-pro", path = %path.display(),
+                "SQLite datastore (libsql, WAL) — T2.3/Q29");
+            Ok(Arc::new(store))
+        }
+        Dsn::Unsupported(s) => {
+            let msg = if s == "sqlite://" {
+                "--datastore-endpoint sqlite:// requires a file path".to_string()
+            } else {
+                format!(
+                    "unsupported --datastore-endpoint scheme (got {s:?}); \
+                     supported: sqlite://<path> (T2.3); empty = embedded default"
+                )
+            };
+            Err(std::io::Error::other(msg))
+        }
+    }
+}
+
 /// `stage --dry-run` lists the embedded manifest + hashes without writing.
 /// `stage` (no dry-run) performs the live atomic staging (B5).
 pub fn run_stage(cfg: Config, dry_run: bool, manifest: &EmbeddedManifest) -> ExitCode {
@@ -390,4 +456,45 @@ fn print_dry_run(cfg: &Config, manifest: &EmbeddedManifest) {
     let links_lines = manifest.data_links.lines().count();
     println!(".sha256sums: {} entries", sums_lines);
     println!(".links: {} entries", links_lines);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T2.3/Q29: unset or empty DSN must keep the embedded default (Q17) -
+    /// sqlite is explicit opt-in only.
+    #[test]
+    fn classify_dsn_empty_is_embedded() {
+        assert_eq!(classify_dsn(None), Dsn::Embedded);
+        assert_eq!(classify_dsn(Some("")), Dsn::Embedded);
+    }
+
+    #[test]
+    fn classify_dsn_sqlite_paths() {
+        assert_eq!(
+            classify_dsn(Some("sqlite:///tmp/a.db")),
+            Dsn::Sqlite(PathBuf::from("/tmp/a.db"))
+        );
+        assert_eq!(
+            classify_dsn(Some("sqlite://rel.db")),
+            Dsn::Sqlite(PathBuf::from("rel.db"))
+        );
+    }
+
+    #[test]
+    fn classify_dsn_rejects_bare_sqlite_and_foreign_schemes() {
+        assert_eq!(
+            classify_dsn(Some("sqlite://")),
+            Dsn::Unsupported("sqlite://".to_string())
+        );
+        assert_eq!(
+            classify_dsn(Some("mysql://x")),
+            Dsn::Unsupported("mysql://x".to_string())
+        );
+        assert_eq!(
+            classify_dsn(Some("postgres://y")),
+            Dsn::Unsupported("postgres://y".to_string())
+        );
+    }
 }
