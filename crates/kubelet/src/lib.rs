@@ -28,14 +28,16 @@ pub mod probes;
 pub mod runner;
 pub mod status;
 pub mod sync;
+pub mod volumes;
 pub mod watch;
 
 pub use cri_backend::{ContainerView, CriBackend, CriCtlBackend, SandboxView};
 pub use exec::{execute, snapshot};
 pub use http::{HttpError, HttpJson};
-pub use objects::{node_object, pod_view, ContainerSpec, PodView};
+pub use objects::{node_object, pod_view, ContainerSpec, PodView, VolumeKind, VolumeMount, VolumeSpec};
 pub use probes::{HttpGetSpec, ProbeSpec, PodProbeState};
 pub use runner::{default_node_name, spawn, KubeletConfig};
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 pub use sync::{plan, Action, Snapshot};
+pub use volumes::{cleanup_volumes, empty_dir_path, ensure_volumes, resolve_mounts, volume_root};
 pub use watch::WatchConn;

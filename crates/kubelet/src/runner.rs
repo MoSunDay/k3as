@@ -21,6 +21,7 @@ use crate::objects::{self, PodView};
 use crate::probes::{run_http_probe, PodProbeState, ProbeKind};
 use crate::status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 use crate::sync::{plan, Snapshot};
+use crate::volumes;
 
 /// Configuration for [`spawn`]. All knobs are public so callers (the
 /// `agent` CLI wiring) can override; [`KubeletConfig::new`] gives k3s-like
@@ -281,6 +282,13 @@ async fn sync_once(
     probe_pass(&wanted, &snap, probes, now).await;
     let keep: BTreeSet<String> = wanted.keys().cloned().collect();
     probes.prune(&keep);
+    // Volume pass (Sprint 20 S2, T4.2 Scope B): materialize emptyDir dirs
+    // and fingerprint-refreshed configMap/secret files BEFORE plan so the
+    // CRI create (which mounts these host paths) sees them. Failures are
+    // logged; the cycle retries.
+    if let Err(e) = volumes::ensure_volumes(client, &wanted, &cfg.log_root()).await {
+        tracing::warn!(target: "init-pro", error = %e, "kubelet: volume pass failed");
+    }
     let actions = plan(&wanted, &snap, &cfg.sandbox_image, &cfg.log_root(), probes);
     // Deleted pods needing no further teardown drop out of the desired map.
     {
@@ -290,6 +298,16 @@ async fn sync_once(
     for (action, res) in execute(cri, actions).await {
         if let Err(e) = res {
             tracing::warn!(target: "init-pro", action = ?action, error = %e, "kubelet: CRI action failed");
+        }
+    }
+    // Volume cleanup (S2): pods whose sandbox is already gone release
+    // their volume root. The PRE-execute snap is used deliberately: a pod
+    // torn down this cycle still shows its sandbox there, so cleanup lands
+    // one cycle later — race-free. Pods that never existed simply have no
+    // dir (cleanup tolerates NotFound).
+    for (key, uid) in cleanup_candidates(&wanted, &snap) {
+        if let Err(e) = volumes::cleanup_volumes(&cfg.log_root(), &uid).await {
+            tracing::warn!(target: "init-pro", pod = %key, error = %e, "kubelet: volume cleanup failed");
         }
     }
     // Status pass: PUT only when the semantic status actually changed.
@@ -406,6 +424,34 @@ async fn probe_pass(
     }
 }
 
+/// Pods whose volumes may be released (Sprint 20 S2): deleted pods still
+/// in the desired map (tombstones carry the uid) plus sandboxed pods
+/// absent from it (hard-deleted or rescheduled away — the uid comes from
+/// the sandbox). Sorted + deduped so cleanup runs once per pod.
+fn cleanup_candidates(
+    wanted: &BTreeMap<String, PodView>,
+    snap: &Snapshot,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (key, view) in wanted {
+        if view.deleted {
+            out.push((key.clone(), view.uid.clone()));
+        }
+    }
+    for sb in &snap.sandboxes {
+        if sb.name.is_empty() || sb.uid.is_empty() {
+            continue; // garbage sandbox without identity: nothing to clean
+        }
+        let key = format!("{}/{}", sb.namespace, sb.name);
+        if !wanted.contains_key(&key) {
+            out.push((key, sb.uid.clone()));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Unix seconds now; 0 on clock errors (degrades to "immediately due",
 /// which is safe: probe scheduling only ever fires early).
 fn unix_now() -> u64 {
@@ -462,5 +508,43 @@ mod tests {
     #[test]
     fn default_node_name_is_never_empty() {
         assert!(!default_node_name().is_empty());
+    }
+
+    #[test]
+    fn cleanup_candidates_collect_deleted_and_orphaned_pods() {
+        use crate::cri_backend::SandboxView;
+        let mut wanted = BTreeMap::new();
+        let alive = serde_json::json!({
+            "metadata": {"name": "a", "namespace": "d", "uid": "u-a"},
+            "spec": {"nodeName": "n1"},
+        });
+        let mut dying = alive.clone();
+        dying["metadata"]["name"] = serde_json::json!("gone");
+        dying["metadata"]["uid"] = serde_json::json!("u-gone");
+        dying["metadata"]["deletionTimestamp"] = serde_json::json!("2026-08-23T00:00:00Z");
+        apply_event("ADDED", &alive, "n1", &mut wanted);
+        apply_event("ADDED", &dying, "n1", &mut wanted);
+        let sb = |name: &str, uid: &str| SandboxView {
+            id: format!("sb-{name}"),
+            state: "SANDBOX_READY".into(),
+            labels: Default::default(),
+            name: name.into(),
+            namespace: "d".into(),
+            uid: uid.into(),
+            ip: None,
+        };
+        let snap = Snapshot {
+            sandboxes: vec![sb("a", "u-a"), sb("orphan", "u-o"), sb("", "")],
+            ..Default::default()
+        };
+        let cands = cleanup_candidates(&wanted, &snap);
+        assert_eq!(
+            cands,
+            vec![
+                ("d/gone".to_string(), "u-gone".to_string()),
+                ("d/orphan".to_string(), "u-o".to_string()),
+            ],
+            "deleted tombstone + sandbox absent from wanted; alive and garbage skipped"
+        );
     }
 }

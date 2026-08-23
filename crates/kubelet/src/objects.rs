@@ -9,7 +9,7 @@ use crate::probes::ProbeSpec;
 
 /// One container of a pod spec (the fields the CRI config needs). Probes
 /// are Sprint 20 S1: `httpGet` only; `None` when the container declares
-/// none.
+/// none. `volume_mounts` is Sprint 20 S2 (T4.2 Scope B).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     pub name: String,
@@ -19,6 +19,36 @@ pub struct ContainerSpec {
     pub startup_probe: Option<ProbeSpec>,
     pub readiness_probe: Option<ProbeSpec>,
     pub liveness_probe: Option<ProbeSpec>,
+    pub volume_mounts: Vec<VolumeMount>,
+}
+
+/// One `spec.containers[].volumeMounts[]` entry (Sprint 20 S2). `mountPath`
+/// is required; `readOnly` defaults to false. subPath/mountPropagation are
+/// deferred (v1 mounts the whole volume dir at `mountPath`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMount {
+    pub name: String,
+    pub mount_path: String,
+    pub read_only: bool,
+}
+
+/// One `spec.volumes[]` entry (Sprint 20 S2). Only emptyDir, configMap, and
+/// secret are supported; optional/defaultMode/subPath/CSI volumes are
+/// deferred — unsupported entries parse to `None` and are skipped by the
+/// sync loop (the CRI create then fails and the cycle retries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeSpec {
+    pub name: String,
+    pub kind: VolumeKind,
+}
+
+/// Volume kind: configMap references `spec.volumes[].configMap.name`,
+/// secret references `spec.volumes[].secret.secretName`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VolumeKind {
+    EmptyDir,
+    ConfigMap { name: String },
+    Secret { name: String },
 }
 
 /// Pod identity + the fields the sync loop consumes. `marker` is the pod's
@@ -31,6 +61,7 @@ pub struct PodView {
     pub name: String,
     pub uid: String,
     pub containers: Vec<ContainerSpec>,
+    pub volumes: Vec<VolumeSpec>,
     pub deleted: bool,
     pub marker: String,
     pub restart_policy: String,
@@ -105,6 +136,72 @@ pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
                 startup_probe: probe("/startupProbe"),
                 readiness_probe: probe("/readinessProbe"),
                 liveness_probe: probe("/livenessProbe"),
+                volume_mounts: container_volume_mounts(c),
+            })
+        })
+        .collect()
+}
+
+/// `spec.containers[].volumeMounts[]` (Sprint 20 S2): rows without a name
+/// or mountPath are skipped, never fatal.
+fn container_volume_mounts(c: &Value) -> Vec<VolumeMount> {
+    c.pointer("/volumeMounts")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| {
+                    let name = m.pointer("/name").and_then(Value::as_str)?;
+                    let mount_path = m.pointer("/mountPath").and_then(Value::as_str)?;
+                    if name.is_empty() || mount_path.is_empty() {
+                        return None;
+                    }
+                    Some(VolumeMount {
+                        name: name.to_string(),
+                        mount_path: mount_path.to_string(),
+                        read_only: m
+                            .pointer("/readOnly")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `spec.volumes[]` (Sprint 20 S2): only emptyDir/configMap/secret kinds;
+/// nameless or unsupported entries are skipped, never fatal.
+pub fn pod_volumes(pod: &Value) -> Vec<VolumeSpec> {
+    let Some(items) = pod.pointer("/spec/volumes").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|v| {
+            let name = v.pointer("/name").and_then(Value::as_str)?;
+            if name.is_empty() {
+                return None;
+            }
+            let kind = if v.pointer("/emptyDir").is_some() {
+                VolumeKind::EmptyDir
+            } else if let Some(cn) = v
+                .pointer("/configMap/name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                VolumeKind::ConfigMap { name: cn.to_string() }
+            } else if let Some(sn) = v
+                .pointer("/secret/secretName")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                VolumeKind::Secret { name: sn.to_string() }
+            } else {
+                return None;
+            };
+            Some(VolumeSpec {
+                name: name.to_string(),
+                kind,
             })
         })
         .collect()
@@ -123,6 +220,7 @@ pub fn pod_view(pod: &Value) -> Option<PodView> {
         name,
         uid: pod_uid(pod),
         containers: pod_containers(pod),
+        volumes: pod_volumes(pod),
         deleted: pod_deleted(pod),
         marker: pod
             .pointer("/metadata/resourceVersion")
@@ -276,6 +374,57 @@ mod tests {
         assert_eq!(v.marker, "7");
         assert_eq!(v.restart_policy, "Always", "absent restartPolicy defaults");
         assert!(pod_view(&json!({})).is_none());
+    }
+
+    #[test]
+    fn volumes_and_mounts_are_parsed() {
+        let p = json!({
+            "metadata": {"name": "p", "namespace": "d", "uid": "u"},
+            "spec": {
+                "volumes": [
+                    {"name": "cache", "emptyDir": {}},
+                    {"name": "cfg", "configMap": {"name": "cm1"}},
+                    {"name": "sec", "secret": {"secretName": "s1"}},
+                    {"name": "nope", "hostPath": {"path": "/x"}},
+                    {"image": "no-name"},
+                ],
+                "containers": [{
+                    "name": "c", "image": "i",
+                    "volumeMounts": [
+                        {"name": "cache", "mountPath": "/data"},
+                        {"name": "cfg", "mountPath": "/etc/cm", "readOnly": true},
+                        {"name": "missing-path"},
+                    ],
+                }],
+            },
+        });
+        let v = pod_view(&p).unwrap();
+        assert_eq!(v.volumes.len(), 3, "unsupported/nameless volumes skipped");
+        assert_eq!(
+            v.volumes[0],
+            VolumeSpec { name: "cache".into(), kind: VolumeKind::EmptyDir }
+        );
+        assert_eq!(
+            v.volumes[1],
+            VolumeSpec { name: "cfg".into(), kind: VolumeKind::ConfigMap { name: "cm1".into() } }
+        );
+        assert_eq!(
+            v.volumes[2],
+            VolumeSpec { name: "sec".into(), kind: VolumeKind::Secret { name: "s1".into() } }
+        );
+        let c = &v.containers[0];
+        assert_eq!(c.volume_mounts.len(), 2);
+        assert_eq!(
+            c.volume_mounts[0],
+            VolumeMount { name: "cache".into(), mount_path: "/data".into(), read_only: false },
+            "readOnly defaults to false"
+        );
+        assert_eq!(
+            c.volume_mounts[1],
+            VolumeMount { name: "cfg".into(), mount_path: "/etc/cm".into(), read_only: true }
+        );
+        assert!(pod_volumes(&json!({})).is_empty());
+        assert!(pod_containers(&json!({})).is_empty());
     }
 
     #[test]

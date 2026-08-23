@@ -509,3 +509,104 @@ async fn liveness_probe_restarts_failing_container() {
         let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
     }
 }
+
+#[tokio::test]
+async fn volumes_are_materialized_refreshed_and_cleaned_up() {
+    let url = spawn_server().await;
+    let client = HttpJson::parse_url(&url).unwrap();
+    let dd = data_dir();
+    let mut cfg = kubelet_cfg(&url);
+    cfg.data_dir = dd.clone();
+    let cri = Arc::new(FakeCri::new());
+    let shutdown = infra::Shutdown::new();
+    let handles = spawn(
+        cfg,
+        cri.clone() as Arc<dyn CriBackend>,
+        shutdown.clone(),
+    );
+    // (a) Create a configMap with key `greeting` via the apiserver API.
+    let (code, resp) = client
+        .post_json(
+            "/api/v1/namespaces/default/configmaps",
+            &json!({
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": "cm", "namespace": "default"},
+                "data": {"greeting": "hello"},
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(code, 201, "configMap accepted: {resp}");
+    // (b) Pod mounting the configMap at /etc/cm plus an emptyDir at /data.
+    let (code, resp) = client
+        .post_json(
+            "/api/v1/namespaces/default/pods",
+            &json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "vpod", "namespace": "default"},
+                "spec": {
+                    "nodeName": NODE,
+                    "volumes": [
+                        {"name": "cm-vol", "configMap": {"name": "cm"}},
+                        {"name": "data-vol", "emptyDir": {}},
+                    ],
+                    "containers": [{
+                        "name": "c0", "image": "img:1",
+                        "volumeMounts": [
+                            {"name": "cm-vol", "mountPath": "/etc/cm", "readOnly": true},
+                            {"name": "data-vol", "mountPath": "/data"},
+                        ],
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(code, 201, "volume pod accepted: {resp}");
+    // (c) Wait for the container to be created (the kubelet synced the pod).
+    poll_until("volume pod container created", || {
+        cri.peek_containers().iter().any(|c| c.name == "c0")
+    })
+    .await;
+    // (d) Host files exist under the pod's volume root. The apiserver does
+    // not assign uids, so the kubelet synthesizes `no-uid-<ns>/<name>`.
+    let root = dd.join("pods").join("no-uid-default/vpod").join("volumes");
+    let greeting = root.join("configMap").join("cm").join("greeting");
+    let data_dir = root.join("emptyDir").join("data-vol");
+    poll_until("configMap key materialized", || {
+        std::fs::read_to_string(&greeting)
+            .map(|s| s == "hello")
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(data_dir.is_dir(), "emptyDir dir missing: {}", data_dir.display());
+    // (e) UPDATE the configMap -> the fingerprint refresh rewrites the file.
+    let (code, mut got) = client
+        .get_json("/api/v1/namespaces/default/configmaps/cm")
+        .await
+        .unwrap();
+    assert_eq!(code, 200);
+    got["data"]["greeting"] = json!("hola");
+    let (code, _) = client
+        .put_json("/api/v1/namespaces/default/configmaps/cm", &got)
+        .await
+        .unwrap();
+    assert_eq!(code, 200, "configMap update accepted");
+    poll_until("configMap key refreshed in place", || {
+        std::fs::read_to_string(&greeting)
+            .map(|s| s == "hola")
+            .unwrap_or(false)
+    })
+    .await;
+    // (f) DELETE the pod -> teardown, then the volume root is removed.
+    client
+        .delete_json("/api/v1/namespaces/default/pods/vpod")
+        .await
+        .unwrap();
+    poll_until("volume root removed", || !root.exists()).await;
+
+    shutdown.trigger();
+    for h in handles {
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+}

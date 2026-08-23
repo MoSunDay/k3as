@@ -35,11 +35,12 @@ pub enum Action {
         pod_key: String,
         cfg: PodSandboxConfig,
     },
-    /// `crictl create` + `crictl start` (fresh container).
+    /// `crictl create` + `crictl start` (fresh container). The config is
+    /// boxed to keep the variant small (ContainerConfig carries mounts).
     CreateStartContainer {
         pod_key: String,
         sandbox_id: String,
-        ccfg: ContainerConfig,
+        ccfg: Box<ContainerConfig>,
         pcfg: PodSandboxConfig,
     },
     /// `crictl start` an existing stopped container.
@@ -200,7 +201,7 @@ pub fn plan(
             actions.push(Action::CreateStartContainer {
                 pod_key: key.clone(),
                 sandbox_id: keep.id.clone(),
-                ccfg: container_cfg(view, spec, attempt),
+                ccfg: Box::new(container_cfg(view, spec, attempt, log_root)),
                 pcfg: sandbox_cfg(view, log_root),
             });
         }
@@ -237,7 +238,7 @@ fn sandbox_cfg(view: &PodView, log_root: &Path) -> PodSandboxConfig {
     }
 }
 
-fn container_cfg(view: &PodView, spec: &ContainerSpec, attempt: u32) -> ContainerConfig {
+fn container_cfg(view: &PodView, spec: &ContainerSpec, attempt: u32, log_root: &Path) -> ContainerConfig {
     ContainerConfig {
         metadata: ContainerMetadata {
             name: spec.name.clone(),
@@ -251,6 +252,11 @@ fn container_cfg(view: &PodView, spec: &ContainerSpec, attempt: u32) -> Containe
         envs: Vec::new(),
         labels: container_labels(&view.name, &view.namespace, &view.uid, &spec.name),
         log_path: format!("{}.{attempt}.log", spec.name),
+        // Sprint 20 S2 (T4.2 Scope B): pod volumes become CRI host mounts
+        // (configMap/secret read-only); unknown volume names are skipped
+        // so the CRI create fails and the cycle retries after the volume
+        // pass converges.
+        mounts: crate::volumes::resolve_mounts(spec, &view.volumes, &view.uid, log_root),
     }
 }
 

@@ -21,13 +21,30 @@ pub fn log_root(tag: &str) -> String {
 
 /// One scheduled pod with `images.len()` containers c0..cN.
 pub fn view(ns: &str, name: &str, uid: &str, images: &[&str]) -> PodView {
+    view_with_volumes(ns, name, uid, images, serde_json::json!([]), serde_json::json!([]))
+}
+
+/// [`view`] plus pod `spec.volumes` and per-container `volumeMounts`
+/// (Sprint 20 S2 volume fixtures; both default to none via [`view`]).
+pub fn view_with_volumes(
+    ns: &str,
+    name: &str,
+    uid: &str,
+    images: &[&str],
+    volumes: serde_json::Value,
+    volume_mounts: serde_json::Value,
+) -> PodView {
     pod_view(&serde_json::json!({
         "metadata": {"name": name, "namespace": ns, "uid": uid, "resourceVersion": "1"},
-        "spec": {"nodeName": "n1", "containers": images.iter()
-            .enumerate()
-            .map(|(i, img)| serde_json::json!({
-                "name": format!("c{i}"), "image": img, "command": [format!("/bin/c{i}")]}))
-            .collect::<Vec<_>>()},
+        "spec": {
+            "nodeName": "n1",
+            "volumes": volumes,
+            "containers": images.iter()
+                .enumerate()
+                .map(|(i, img)| serde_json::json!({
+                    "name": format!("c{i}"), "image": img, "command": [format!("/bin/c{i}")],
+                    "volumeMounts": volume_mounts}))
+                .collect::<Vec<_>>()},
     }))
     .unwrap()
 }
@@ -192,6 +209,7 @@ pub fn expect_ccfg(pod: &PodView, attempt: u32) -> ContainerConfig {
         command: pod.containers[0].command.clone(),
         args: Vec::new(),
         envs: Vec::new(),
+        mounts: Vec::new(),
         labels: container_labels(&pod.name, &pod.namespace, &pod.uid, "c0"),
         log_path: format!("c0.{attempt}.log"),
     }

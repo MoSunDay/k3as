@@ -74,6 +74,18 @@ pub struct KeyValue {
     pub value: String,
 }
 
+/// One `Mount` entry of `ContainerConfig.mounts` — the CRI `Mount` proto
+/// fields (`container_path`, `host_path`, `readonly`; crictl's JSON
+/// resolver accepts the proto names, same convention as `log_path`).
+/// Sprint 20 S2 (T4.2 Scope B): pod volumes reach the runtime as host
+/// mounts into the container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Mount {
+    pub container_path: String,
+    pub host_path: String,
+    pub readonly: bool,
+}
+
 /// Input config for `crictl runp` / sandbox creation. Empty optional-ish
 /// collections are omitted so the JSON stays close to the crictl examples.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -98,6 +110,8 @@ pub struct ContainerConfig {
     pub args: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub envs: Vec<KeyValue>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<Mount>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -371,6 +385,7 @@ mod tests {
                 key: "K".into(),
                 value: "V".into(),
             }],
+            mounts: vec![],
             labels: container_labels("p", "ns", "u1", "web"),
             log_path: "web.0.log".into(),
         };
@@ -380,6 +395,41 @@ mod tests {
         let labels: BTreeMap<String, String> = serde_json::from_value(v["labels"].clone()).unwrap();
         assert_eq!(labels, container_labels("p", "ns", "u1", "web"));
         assert_eq!(v["log_path"], "web.0.log");
+    }
+
+    #[test]
+    fn container_config_mounts_wire_shape() {
+        let cfg = ContainerConfig {
+            metadata: ContainerMetadata {
+                name: "web".into(),
+                attempt: 0,
+            },
+            image: ImageSpec {
+                image: "img:1".into(),
+            },
+            command: vec![],
+            args: vec![],
+            envs: vec![],
+            mounts: vec![Mount {
+                container_path: "/etc/cm".into(),
+                host_path: "/dd/pods/u1/volumes/configMap/cm".into(),
+                readonly: true,
+            }],
+            labels: BTreeMap::new(),
+            log_path: String::new(),
+        };
+        // CRI proto field names on the wire (crictl JSON resolver accepts
+        // them), matching the `log_path` convention of this module.
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["mounts"][0]["container_path"], "/etc/cm");
+        assert_eq!(v["mounts"][0]["host_path"], "/dd/pods/u1/volumes/configMap/cm");
+        assert_eq!(v["mounts"][0]["readonly"], true);
+        // Empty mounts are omitted entirely: S1 wire shapes stay stable.
+        let mut none = cfg.clone();
+        none.mounts = Vec::new();
+        let json = serde_json::to_string(&none).unwrap();
+        assert!(!json.contains("mounts"), "empty mounts omitted: {json}");
     }
 
     #[test]

@@ -59,7 +59,7 @@ fn ready_sandbox_without_containers_creates_and_starts_them() {
         vec![Action::CreateStartContainer {
             pod_key: "default/web".into(),
             sandbox_id: "sb1".into(),
-            ccfg: expect_ccfg(&pod, 0),
+            ccfg: Box::new(expect_ccfg(&pod, 0)),
             pcfg: expect_pcfg(LOG_ROOT),
         }]
     );
@@ -86,7 +86,7 @@ fn exited_container_is_recreated_with_attempt_plus_one() {
             Action::CreateStartContainer {
                 pod_key: "default/web".into(),
                 sandbox_id: "sb1".into(),
-                ccfg: expect_ccfg(&pod, 1),
+                ccfg: Box::new(expect_ccfg(&pod, 1)),
                 pcfg: expect_pcfg(LOG_ROOT),
             },
         ]
@@ -408,7 +408,7 @@ fn liveness_failure_restarts_running_container() {
             Action::CreateStartContainer {
                 pod_key: "default/web".into(),
                 sandbox_id: "sb1".into(),
-                ccfg: expect_ccfg(&pod, 1),
+                ccfg: Box::new(expect_ccfg(&pod, 1)),
                 pcfg: expect_pcfg(LOG_ROOT),
             },
         ],
@@ -473,4 +473,58 @@ fn on_failure_restarts_after_nonzero_exit_only() {
         "OnFailure keeps exited-0 containers: {:?}",
         plan_one(&pod, &completed)
     );
+}
+
+#[test]
+fn volume_mounts_are_resolved_into_ccfg() {
+    // Sprint 20 S2: plan() is pure, so the CRI mounts are fully asserted
+    // here without any IO: emptyDir mounts the volume dir with the declared
+    // readOnly; configMap mounts the volume dir read-only; unknown volume
+    // names are skipped (the CRI create would fail and the cycle retries).
+    let pod = view_with_volumes(
+        "default",
+        "web",
+        "u1",
+        &["img:1"],
+        serde_json::json!([
+            {"name": "cache", "emptyDir": {}},
+            {"name": "cfg", "configMap": {"name": "cm1"}},
+        ]),
+        serde_json::json!([
+            {"name": "cache", "mountPath": "/data"},
+            {"name": "cfg", "mountPath": "/etc/cm", "readOnly": true},
+            {"name": "unknown", "mountPath": "/x"},
+        ]),
+    );
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![],
+    };
+    let actions = plan_one(&pod, &snap);
+    let Action::CreateStartContainer { ccfg, .. } = &actions[0] else {
+        unreachable!("got {actions:?}");
+    };
+    assert_eq!(
+        ccfg.mounts,
+        vec![
+            runtime::cri_json::Mount {
+                container_path: "/data".into(),
+                host_path: format!("{LOG_ROOT}/u1/volumes/emptyDir/cache"),
+                readonly: false,
+            },
+            runtime::cri_json::Mount {
+                container_path: "/etc/cm".into(),
+                host_path: format!("{LOG_ROOT}/u1/volumes/configMap/cm1"),
+                readonly: true,
+            },
+        ]
+    );
+    // Pods without volumes still produce empty mounts (wire-stable).
+    let plain = view("default", "web", "u1", &["img:1"]);
+    let actions = plan_one(&plain, &snap);
+    let Action::CreateStartContainer { ccfg, .. } = &actions[0] else {
+        unreachable!("got {actions:?}");
+    };
+    assert!(ccfg.mounts.is_empty());
 }
