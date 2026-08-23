@@ -7,6 +7,75 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 20 — T4.2 Scope B: probes + volumes + pull policy + hostname + golden G26 (2026-08-23)
+
+**Goal:** make pods dependable — probes and volumes turn "runs" into
+"can be relied on". Sprint 20 delivers the kubelet's Scope B in five
+slices: an HTTP probe engine (S1), emptyDir/configMap/secret volume
+projection (S2), full `imagePullPolicy` semantics (S3), sandbox
+hostname passthrough (S4), and the golden G26 end-to-end gate (S5).
+T4.2 stays **in-progress** — Scope A+B are done and recorded as-built
+in `plans/init-pro/plan/04-node.md`; Scope C (exec/logs/attach, local
+deploy) is Sprint 21. The sprint also opened with Phase A drift repair
+(67b21e5, A1–A8): SSOT counts-line fix (17 → 18 done), plan WIP
+consolidation, and the T5.4/T2.x status-vs-code drift reconciled.
+
+### S1 — probe engine (`crates/kubelet/src/probes.rs`, 399 lines)
+- HTTP-only `ProbeSpec`/`Tracker` state machine: startup / readiness /
+  liveness with `initialDelaySeconds / periodSeconds / timeoutSeconds /
+  failureThreshold / successThreshold` aligned with upstream kubelet.
+- Startup probes gate the other two; liveness failure → container
+  restart gated by `restartPolicy`; the Ready condition is derived from
+  probes; `ContainerView.exitCode` is surfaced. The exec-handler
+  day-one spike did not pass → HTTP-only for now, TCP/exec probes
+  deferred to the T4.2 blockers. Workspace 717 → 731.
+
+### S2 — volumes (`crates/kubelet/src/volumes.rs`, 400 lines)
+- emptyDir (per volume name) + configMap/secret projection (per object
+  name) mounted into containers via the CRI `mounts`; an FNV-1a content
+  fingerprint detects object updates and refreshes projected files
+  in place; sandbox cleanup removes the volume tree.
+- New `Mount` struct + `ContainerConfig.mounts` (a `Box` fixes the
+  `large_enum_variant` clippy lint). Workspace 731 → 741.
+
+### S3 — imagePullPolicy
+- `ContainerSpec.image_pull_policy` is defaulted at parse time
+  (latest/no-tag → Always, digest → IfNotPresent, explicit Never);
+  `ensure_image` takes a policy argument and the sandbox image is
+  always IfNotPresent. `imagePullSecrets` (private-registry auth) is
+  **explicitly deferred** — recorded in the T4.2 blockers. Workspace
+  741 → 746.
+
+### S4 — sandbox hostname passthrough
+- `PodSandboxConfig.hostname` = pod name (skip-if-empty), closing the
+  Sprint 18 ST4 gap; upstream FQDN semantics tracked for later
+  alignment. Workspace stays 746.
+
+### S5 — golden G26 (`scripts/build-echo-image.sh` + `golden-conformance.sh`)
+- The deterministic echo image gains `/healthz` (200/500 flipped by a
+  `/healthz-fail` marker), `/fail` (sets the marker), `/bootcount`
+  (lines in `/data/boot.txt`, appended once at boot) and `CONFIG
+  <file> <first-line>` output (configMap projection, sorted by file
+  name, dotfile fingerprint files skipped).
+- **G26a** probe-gated Running+Ready; **G26b** `/fail` → liveness
+  restart with `restartCount ≥ 1` → `/healthz` recovers + Ready;
+  **G26c** `crictl stop` → emptyDir bootcount == 3 across restarts;
+  **G26d** configMap projection + `ECHO == pod name`.
+- Defect found & fixed: echo.c opened `boot.txt` O_WRONLY so the
+  read-back count was always 0 → O_RDWR. Golden 27/27 → 31/31, run
+  twice consecutively, no SKIP on the vendored box.
+
+**Gates:** workspace 717 → 746 (+29: kubelet 83 — unit 47 + sync_plan
+23 + kubelet_http_integration 7 + pod_status 6; runtime 40 — unit 37 +
+cri_integration 1 + supervisor_integration 2; storage embedded 27 /
+sqlite 31; controllers 81; scheduler 31; router 44; cli 53; vendor 52;
+multicall 15; infra 29; kubectl 29; apiserver 11; api 42). Golden
+31/31 ×2; service-traffic ST1–ST6 6/6; durability D1–D4 4/4; clippy
+zero warnings; `bash -n` clean.
+
+**Commits:** 67b21e5 (Phase A drift repair) → 39267e9 (S1) → 76ddbf1
+(S2) → 5e73896 (S3) → b924aa6 (S4) → 1fbafb0 (S5).
+
 ## Sprint 19 — T2.3: libsql/SQLite persistence; Layer 2 closed (2026-08-17)
 
 **Goal:** close Layer 2's last gap — durability. The embedded store is

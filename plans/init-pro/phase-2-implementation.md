@@ -15,8 +15,8 @@ APIServer（T1.1/T1.2）、控制面循环（T3.1/T3.2）、containerd/CRI（T4.
 Q24–Q26）、kubelet Scope A（pods 到 Running+Ready，golden G25）与 Service
 NodePort 数据面（T5.6 部分，Q28）——18/33 TODO done。本文件锁定剩余关键
 路径：**T4.2 Scope B/C（可信工作负载）→ T4.3（CNI）→ M3 端到端集群**。
-Sprint 20（T4.2 Scope B：探针 + 卷 + 真实镜像拉取）为当前冲刺；Sprint 21+
-为路线草图。
+Sprint 20 已完成（2026-08-23）；Sprint 21（T4.2 Scope C：exec/logs/attach
++ local deploy）为当前冲刺；Sprint 22+ 为路线草图。
 
 ## Scope（范围）
 **纳入（关键路径优先）：** T4.2（Scope B/C）· T4.3 · T4.4 · T4.5 ·
@@ -33,6 +33,9 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
 > 主题：让真实工作负载可信 —— 没有探针与卷的 pod 只是"能跑"，不是"能依赖"。
 > T4.2 仍为 in-progress（Scope B 记入 As-built），不提前翻状态。
 
+**Sprint 20 于 2026-08-23 全部落地（S0–S5），门禁全绿**（workspace
+717→746、golden 31/31 ×2 无 SKIP、ST1–ST6 6/6、D1–D4 4/4、clippy 0）。
+
 - **S0 — 卫生切片（repair-on-touch）**
   - `index.md` 计数行修复（17 done → 18 done；in-progress 括注去掉
     T4.1 as-built 误列）+ `phase-1-implementation.md` 归档标注 —— 随本
@@ -41,6 +44,8 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
     （基线 717）、clippy `-D warnings` 零、golden 27/27（G24/G25 无
     vendor bundle/`cc` 时走 SKIP）、cli-flag-parity 16/16、
     service-traffic-e2e ST1–ST6、durability-e2e D1–D4。
+  - ✅ S0 落地：随 67b21e5（Phase A 漂移修复）完成 —— 计数行修复 +
+    phase-1 归档 + 基线 717 确认绿。
 - **S1 — 探针引擎 `crates/kubelet/probe.rs`**
   - readiness / liveness / startup 三类探针；handler 支持 HTTP GET /
     TCP / exec 三种。
@@ -53,6 +58,12 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
     Endpoints 控制器自然消费，无需新线）；liveness 失败 → 重启容器
     （受 restartPolicy 约束，restartCount 经 status 上报）；startup
     通过前门控另两类探针。
+  - ✅ S1 落地（`crates/kubelet/src/probes.rs` 399 行，≤400 行门禁）：
+    HTTP-only `ProbeSpec`/`Tracker` 状态机 —— startup 门控 +
+    readiness/liveness + liveness 失败→重启 + restartPolicy 门控 +
+    Ready 派生 + `ContainerView.exitCode` 透出；exec handler 首日
+    spike 未过 → 降级 HTTP-only，TCP/exec 探针顺延记入 T4.2 卡点。
+    workspace 717→731。
 - **S2 — 卷挂载 `crates/kubelet/volumes.rs`**
   - emptyDir：节点侧目录 `<data-dir>/pods/<uid>/volumes/emptyDir/<name>`
     （默认 data-dir 即 `/var/lib/init-pro`，见 `infra::config`），sandbox
@@ -61,6 +72,11 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
     `mounts` 传进容器。
   - configMap/secret 对象变更 → sync 循环以内容指纹检测 → 原地刷新投影
     文件。
+  - ✅ S2 落地（`crates/kubelet/src/volumes.rs` 400 行，≤400 行门禁）：
+    emptyDir 按 volume name + configMap/secret 投影按 object name +
+    FNV-1a 内容指纹原地刷新 + sandbox 清理联动；`Mount` struct +
+    `ContainerConfig.mounts`（Box 修复 large_enum_variant）。
+    workspace 731→741。
 - **S3 — 真实镜像拉取路径**
   - kubelet 建容器前经 CRI `PullImage`（crictl pull，Q26 route B）；
     实现 `imagePullPolicy: Always / IfNotPresent / Never`（缺省规则对齐
@@ -70,10 +86,16 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
     门禁策略（Q24 出口阻断先例，见 R3）。
   - `imagePullSecrets`（私有仓库认证）**显式延后**：记入 T4.2 卡点，
     不纳入本冲刺。
+  - ✅ S3 落地：`imagePullPolicy` 解析时默认化（latest/无 tag→Always，
+    digest→IfNotPresent，显式 Never），`ensure_image` 带 policy 参数
+    （sandbox 镜像恒 IfNotPresent）；`imagePullSecrets` 延后兑现
+    （记入 T4.2 卡点）。workspace 741→746。
 - **S4 — `PodSandboxConfig.hostname` 透传（小切片）**
   - Sprint 18 已知缺口：`crictl pods` 无 IP/host 时 ST4 用 LOCAL 作
     副本判别子即因 hostname 未透传。本切片把 sandbox config 带上
     `hostname`（v1 简化为 pod name，上游 FQDN 语义后续对齐）。
+  - ✅ S4 落地：`PodSandboxConfig.hostname` = pod name 透传
+    （skip-if-empty）。workspace 746。
 - **S5 — golden G26 + 工作负载 e2e**
   - 扩展 `scripts/build-echo-image.sh`（或旁挂 builder）：确定性离线
     镜像带 HTTP 健康端点（如 `/healthz` + 可翻转失败端点供 liveness
@@ -83,8 +105,16 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
     SKIP-not-fail（G24/G25 先例）。
   - e2e 场景：liveness 失败 → 容器重启且 restartCount 递增。
   - 门禁：全量测试 + clippy + golden 28/28（27 + G26）。
+  - ✅ S5 落地：golden **G26a–d**（27 + 4 新用例 → 31/31 ×2 无 SKIP）——
+    echo 镜像确定性构建新增 `/healthz`（200/500 由 `/healthz-fail`
+    标记翻转）、`/fail`、`/bootcount`（`/data/boot.txt` 行数）、
+    `CONFIG <file> <首行>` 行；修复 echo.c boot.txt O_WRONLY→O_RDWR
+    （读回计数恒 0）。G26a 探针门控 Running+Ready；G26b /fail →
+    liveness 重启 restartCount≥1 → /healthz 恢复 + Ready；G26c
+    crictl stop → emptyDir 跨重启 bootcount==3；G26d configMap 投影 +
+    ECHO==pod name。
 
-### Sprint 21（草图）— T4.2 Scope C：exec/logs/attach + local deploy
+### Sprint 21（当前冲刺，详细规划下一冲刺展开）— T4.2 Scope C：exec/logs/attach + local deploy
 - exec / logs / attach：`kubectl logs|exec` → apiserver 透传 → kubelet →
   CRI（Q26 route B stdio；若流式订阅需求触发 route A 阈值，按 Q26 预留
   评估 feature-flag `cri-client` crate —— 100-crate 依赖代价 opt-in）。
@@ -113,28 +143,33 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
 
 ## Verify（验收 / Definition of Done — Sprint 20）
 1. `cargo test --workspace --locked` 全绿（基线 717 + probe/volume/pull
-   新增单测与集成测试）。
-2. clippy `--workspace --all-targets -- -D warnings` 零告警。
+   新增单测与集成测试）。✓ 通过：746 全绿（+29）；行数门禁
+   probes.rs 399 / volumes.rs 400 ≤ 400。
+2. clippy `--workspace --all-targets -- -D warnings` 零告警。✓ 零。
 3. golden 28/28（新 G26；无 vendor bundle/`cc` 时 G24–G26 SKIP-not-fail
-   路径可复现）。
+   路径可复现）。✓ 31/31 ×2（27 + G26a–d，vendored box 无 SKIP）。
 4. 探针语义 e2e：readiness 翻转 Ready 条件；liveness 失败 → restartCount
-   递增。
+   递增。✓ G26a/G26b 覆盖。
 5. 卷语义：configMap key → 容器内文件可读；对象更新后投影刷新。
+   ✓ G26c/G26d 覆盖（emptyDir 跨重启持久 + configMap 投影/刷新）。
 6. 镜像策略：Always / IfNotPresent / Never 三态行为有测试覆盖（在线
-   拉取断言走 SKIP-not-fail）。
+   拉取断言走 SKIP-not-fail）。✓ 三态单测覆盖。
 7. 门禁全家桶绿：cli-flag-parity、service-traffic-e2e、durability-e2e、
-   multicall-selftest。
+   multicall-selftest。✓ ST1–ST6 6/6、D1–D4 4/4、cli-flag-parity、
+   multicall-selftest、bash -n 全绿。
 8. SSOT lock-step：T4.2 As-built 增记 Scope B（状态仍 in-progress）、
    CHANGELOG Sprint 20 回顾、本文件 Sprint 20 节补落地标注。
+   ✓ 本提交（Phase C）完成。
 
 ## Risks（风险与对策）
 - **R1 — 范围超载**：S1–S5 单冲刺可能装不下 → 预约定裁剪顺序：先砍 S4
   （hostname 延后），S2 收窄为 emptyDir + configMap（secret 投影顺延
   S21）；**S1 / S3 / G26 不可裁**（探针 + 拉取路径是 Scope B 的存在
-  理由）。
+  理由）。→ **未触发**，S1–S5 全部按计划落地（2026-08-23）。
 - **R2 — "local deploy" 语义未定义**：SSOT（T4.2 卡点）仅列词未释义。
   拟定义为 k3s 式本地 manifest 自动部署目录，但与 T6.1 范围重叠 →
-  标注为 Sprint 21 待决项，本文件不拍板。
+  标注为 Sprint 21 待决项，本文件不拍板。→ 本冲刺以 hostname 透传为
+  pragma 范围兑现 S4；local deploy 正式 UX 移交 S21。
 - **R3 — 镜像拉取 e2e 依赖外网 registry**：Q24 已证本环境
   docker.io / registry.k8s.io 不可达 → airgap-first 设计，在线拉取测试
   走 SKIP-not-fail 门禁策略（ST/D/G24/G25 先例）。
@@ -158,7 +193,7 @@ T5.6 余量（LB VIP，受 Q28 约束）· T1.3/T3.3/T3.4（HA 分支）· T6.x
 
 ## 关键路径图
 ```
-S20 T4.2/B（探针+卷+拉取, G26）─> S21 T4.2/C（exec/logs/attach → T4.2 done）
+S20 T4.2/B（探针+卷+拉取, G26）done ─> S21 T4.2/C（exec/logs/attach → T4.2 done）
                                        │
                                        v
                                  S22 T4.3 CNI ──> T4.4 netpol

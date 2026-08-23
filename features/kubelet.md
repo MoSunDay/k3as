@@ -5,8 +5,10 @@ dependency-light and pure-functional. It watches its assigned pods,
 drives them to running over the T4.1 CRI seam, and reports pod + node
 status back to the apiserver. Q26 is the CRI-client strategy, Q27 the
 airgap workload image (`plans/init-pro/decisions.md`); as-built detail
-in `plans/init-pro/plan/04-node.md` (T4.2). Scope A (pod lifecycle +
-status) is done; probes/volumes/exec/pulls (Scope B/C) are not built.
+in `plans/init-pro/plan/04-node.md` (T4.2). Scope A+B done (Sprint 20:
+HTTP probe engine, emptyDir/configMap/secret volumes, imagePullPolicy,
+hostname; golden G26). Scope C (exec/logs/attach, local deploy) +
+TCP/exec probes + imagePullSecrets remain (Sprint 21).
 
 ## Shape (public API)
 

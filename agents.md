@@ -89,7 +89,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers (T3.1). |
 | `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q19). |
 | `runtime` | Agent-side containerd: config templating, idempotent vendor staging, supervisor + CRI plumbing (T4.1, Q24-Q26). |
-| `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer incl. podIP/podIPs/hostIP emission (T4.2 Scope A). |
+| `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer incl. podIP/podIPs/hostIP emission (T4.2 Scope A+B: probes/volumes/pull-policy/hostname, S20). |
 | `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
 | `router` | Built-in Lua data plane: phase pipeline, resty.*, Ingress->route compiler, balancer, reverse proxy, TLS (T5.1-T5.4). |
 | `storage` | `StorageBackend` trait + embedded etcd-semantics store incl. watch replay + compaction (T2.1/T2.2 done). |
@@ -113,10 +113,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   `EmbeddedStorage` (Q17/Q29). Leader election is Lease-object + CAS,
   not etcd leases (Q18). The real etcd-gRPC client is re-scoped to T3.4
   (HA multi-server, its only consumer).
-- Next gate on the critical path: T4.2 Scope A is done — the kubelet
-  drives real pods to Running+Ready over the T4.1 CRI seam (golden
-  G25). Remaining on the path: T4.2 Scope B/C (probes, volumes, local
-  deploy) and T4.3 (CNI).
+- Next gate on the critical path: T4.2 Scope A+B done — the kubelet
+  drives real pods to Running+Ready over the T4.1 CRI seam with probes,
+  volumes, pull policy and hostname (golden G25/G26). Remaining on the
+  path: T4.2 Scope C (exec/logs/attach, local deploy) and T4.3 (CNI).
 - The server serves real REST CRUD/watch/SSA (kubectl-compatible); with
   T2.3, zero-restart durability arrived as an explicit opt-in
   (`sqlite://` endpoint; `scripts/durability-e2e.sh` D1-D4 gates it),

@@ -149,14 +149,33 @@ and node registration.
     incl. +5 pods/status wire tests; +17 runtime CRI driver incl.
     live-containerd integration; new `tests/drain_deadline.rs`).
 
-- **状态 / Status** — in-progress (Scope A done, Sprint 17)
+  - **As-built (Sprint 20, Scope B):** probes + volumes + pull policy
+    + hostname landed (S1–S5): 探针引擎 `crates/kubelet/src/probes.rs`
+    (399 行, HTTP-only `ProbeSpec`/`Tracker` 状态机, startup 门控 +
+    readiness/liveness + liveness 失败→重启容器 + restartPolicy 门控
+    + Ready 条件派生 + `ContainerView.exitCode` 透出)；卷
+    `crates/kubelet/src/volumes.rs` (400 行, emptyDir 按 volume name +
+    configMap/secret 投影按 object name + FNV-1a 内容指纹原地刷新 +
+    sandbox 清理联动; `Mount` struct + `ContainerConfig.mounts`
+    (Box 修复 large_enum_variant))；imagePullPolicy 默认化
+    (`ContainerSpec.image_pull_policy` 解析时默认: latest/无 tag→
+    Always, digest→IfNotPresent, 显式 Never; `ensure_image` 带 policy
+    参数, sandbox 镜像恒 IfNotPresent)；`PodSandboxConfig.hostname`
+    透传 = pod name (skip-if-empty, S4)。golden **G26a–d** 端到端
+    (探针门控 Running+Ready、/fail → liveness 重启 restartCount≥1 →
+    /healthz 恢复 + Ready、crictl stop → emptyDir 跨重启 bootcount==3、
+    configMap 投影 + ECHO==pod name；echo 镜像确定性构建新增
+    /healthz+/fail+/bootcount+CONFIG 行)。门禁 31/31 ×2 无 SKIP +
+    ST1–ST6 6/6 + D1–D4 4/4 + clippy 0。
+
+- **状态 / Status** — in-progress (Scope A+B done, Sprint 20)
 - **证据 / Evidence** — kubelet 53 / apiserver 51 / runtime +17 tests;
-  golden G25 (27/27 with vendor + `cc`); Q27 ADR
-- **卡点 / Blockers** — Scope B/C remainder: probes
-  (readiness/liveness/startup), volumes (emptyDir/configMap/secret
-  first; CSI later), real image pull path, exec/logs/attach, local
-  deploy (an interactive `scripts/local-up.sh` form has existed since
-  Sprint 18 S0; the formal UX is Sprint 21 scope).
+  golden G25 (27/27 with vendor + `cc`); Q27 ADR. Sprint 20: workspace
+  746 (+29; kubelet 83 / runtime 40); golden G25+G26 31/31 ×2 (vendor
+  + `cc`); service-traffic ST1–ST6 6/6; durability D1–D4 4/4; clippy 0
+- **卡点 / Blockers** — Scope C remainder: exec/logs/attach、local
+  deploy 正式 UX（Sprint 21）; 顺延项: probes TCP/exec、
+  imagePullSecrets（私有仓库认证）、CSI 卷 (Sprint 21+)。
 - **依赖 / Depends on** — T4.1, T3.2
 
 ---
