@@ -4,10 +4,10 @@
 //! node registration + `kube-node-lease` heartbeat. All errors are logged
 //! and retried; nothing panics. Tracing target is `"init-pro"`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -18,8 +18,9 @@ use crate::exec::{execute, snapshot};
 use crate::http::HttpJson;
 use crate::node::{node_task, now_str};
 use crate::objects::{self, PodView};
+use crate::probes::{run_http_probe, PodProbeState, ProbeKind};
 use crate::status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
-use crate::sync::plan;
+use crate::sync::{plan, Snapshot};
 
 /// Configuration for [`spawn`]. All knobs are public so callers (the
 /// `agent` CLI wiring) can override; [`KubeletConfig::new`] gives k3s-like
@@ -245,12 +246,13 @@ async fn sync_task(
     let mut tick = tokio::time::interval(cfg.sync_period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_status: BTreeMap<String, Value> = BTreeMap::new();
+    let mut probes = PodProbeState::new();
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {}
         }
-        sync_once(&client, cri.as_ref(), &cfg, &desired, &mut last_status).await;
+        sync_once(&client, cri.as_ref(), &cfg, &desired, &mut probes, &mut last_status).await;
     }
 }
 
@@ -259,6 +261,7 @@ async fn sync_once(
     cri: &dyn CriBackend,
     cfg: &KubeletConfig,
     desired: &Desired,
+    probes: &mut PodProbeState,
     last_status: &mut BTreeMap<String, Value>,
 ) {
     let snap = match snapshot(cri).await {
@@ -269,7 +272,16 @@ async fn sync_once(
         }
     };
     let wanted = desired.lock().await.clone();
-    let actions = plan(&wanted, &snap, &cfg.sandbox_image, &cfg.log_root());
+    // Probe pass (Sprint 20 S1, T4.2 Scope B): drive due HTTP probes for
+    // RUNNING containers inside READY sandboxes that have an IP. The
+    // outcomes feed both the plan (liveness restarts) and the status
+    // writer (readiness gate). Sandboxes without an IP are skipped and
+    // their probe status stays Unknown.
+    let now = unix_now();
+    probe_pass(&wanted, &snap, probes, now).await;
+    let keep: BTreeSet<String> = wanted.keys().cloned().collect();
+    probes.prune(&keep);
+    let actions = plan(&wanted, &snap, &cfg.sandbox_image, &cfg.log_root(), probes);
     // Deleted pods needing no further teardown drop out of the desired map.
     {
         let mut map = desired.lock().await;
@@ -286,7 +298,7 @@ async fn sync_once(
         if view.deleted {
             continue;
         }
-        let status = build_pod_status(view, &snap, &now);
+        let status = build_pod_status(view, &snap, &now, probes);
         if matches!(last_status.get(key), Some(prev) if status_semantically_eq(prev, &status)) {
             continue;
         }
@@ -307,6 +319,100 @@ async fn sync_once(
         }
     }
     last_status.retain(|k, _| wanted.contains_key(k));
+}
+
+/// Drive due HTTP probes for RUNNING containers of READY sandboxes that
+/// have an IP (Sprint 20 S1, T4.2 Scope B). Trackers arm from the first
+/// RUNNING observation — CRI reports no container start time in S1, so
+/// that observation time is the start proxy (initialDelaySeconds counts
+/// from it). Pods without an IP are skipped entirely; their probe status
+/// stays Unknown until a probe actually runs.
+async fn probe_pass(
+    wanted: &BTreeMap<String, PodView>,
+    snap: &Snapshot,
+    probes: &mut PodProbeState,
+    now: u64,
+) {
+    for view in wanted.values() {
+        if view.deleted {
+            continue;
+        }
+        let Some(sb) = snap
+            .sandboxes
+            .iter()
+            .find(|s| s.namespace == view.namespace && s.name == view.name)
+        else {
+            continue;
+        };
+        if sb.state != "SANDBOX_READY" {
+            continue;
+        }
+        let Some(host) = sb.ip.clone() else {
+            continue;
+        };
+        for spec in &view.containers {
+            let kinds = [
+                (ProbeKind::Startup, spec.startup_probe.as_ref()),
+                (ProbeKind::Readiness, spec.readiness_probe.as_ref()),
+                (ProbeKind::Liveness, spec.liveness_probe.as_ref()),
+            ];
+            if !kinds.iter().any(|(_, p)| p.is_some()) {
+                continue;
+            }
+            // The live incarnation: highest-attempt RUNNING container.
+            let Some(cv) = snap
+                .containers
+                .iter()
+                .filter(|c| {
+                    c.sandbox_id == sb.id
+                        && c.name == spec.name
+                        && c.state == "CONTAINER_RUNNING"
+                })
+                .max_by_key(|c| c.attempt)
+            else {
+                continue;
+            };
+            probes.note_incarnation(&view.key, &spec.name, &cv.id, cv.attempt);
+            let state = probes.entry(&view.key, &spec.name);
+            for (kind, pspec) in kinds {
+                let Some(pspec) = pspec else { continue };
+                let tracker = state.tracker(kind);
+                tracker.arm(now, pspec);
+                if tracker.due(now) {
+                    let timeout = Duration::from_secs(u64::from(pspec.timeout_seconds));
+                    let res = run_http_probe(
+                        &pspec.http_get,
+                        &host,
+                        pspec.http_get.port,
+                        timeout,
+                    )
+                    .await;
+                    match res {
+                        Ok(()) => tracker.observe(true, now, pspec),
+                        Err(e) => {
+                            tracing::debug!(
+                                target: "init-pro",
+                                pod = %view.key,
+                                container = %spec.name,
+                                error = %e,
+                                "kubelet: probe failed"
+                            );
+                            tracker.observe(false, now, pspec);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Unix seconds now; 0 on clock errors (degrades to "immediately due",
+/// which is safe: probe scheduling only ever fires early).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

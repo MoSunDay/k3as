@@ -9,7 +9,7 @@
 
 mod support;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use kubelet::{spawn, CriBackend, HttpJson, KubeletConfig};
 use serde_json::{json, Value};
 use storage::{EmbeddedStorage, StorageBackend};
 use support::FakeCri;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 const NODE: &str = "test-node";
@@ -318,6 +319,190 @@ async fn kill_restart_cycle_recreates_with_attempt_plus_one() {
         calls.iter().any(|c| c == &format!("rm:{victim}")),
         "no rm of {victim} in {calls:?}"
     );
+
+    shutdown.trigger();
+    for h in handles {
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+}
+
+/// A tiny HTTP server for probe targets: returns 500 until `healthy` is
+/// set, then 200 (or always 500 when `healthy` is None).
+async fn spawn_probe_server(
+    healthy: Option<Arc<AtomicBool>>,
+) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(x) => x,
+                Err(_) => return,
+            };
+            let healthy = healthy.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await; // drain the request
+                let (status, body) = match healthy {
+                    Some(h) if h.load(Ordering::SeqCst) => ("200 OK", "ok"),
+                    _ => ("500 Internal Server Error", "not yet"),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+                    len = body.len(),
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (port, handle)
+}
+
+fn pod_with_probe(name: &str, probe_kind: &str, port: u16) -> Value {
+    json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": name, "namespace": "default"},
+        "spec": {
+            "nodeName": NODE,
+            "containers": [{
+                "name": "c0", "image": "img:1",
+                probe_kind: {
+                    "httpGet": {"path": "/readyz", "port": port},
+                    "initialDelaySeconds": 0,
+                    "periodSeconds": 1,
+                    "timeoutSeconds": 1,
+                    "failureThreshold": 1,
+                    "successThreshold": 1
+                }
+            }]
+        }
+    })
+}
+
+fn ready_condition(v: &Value, want: &str) -> bool {
+    v["status"]["conditions"]
+        .as_array()
+        .map(|cs| {
+            cs.iter()
+                .any(|c| c["type"] == "Ready" && c["status"] == want)
+        })
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn readiness_probe_gates_ready_condition() {
+    let url = spawn_server().await;
+    let client = HttpJson::parse_url(&url).unwrap();
+    let healthy = Arc::new(AtomicBool::new(false));
+    let (port, _srv) = spawn_probe_server(Some(healthy.clone())).await;
+    let cri = Arc::new(FakeCri::new().with_sandbox_ip("127.0.0.1"));
+    let shutdown = infra::Shutdown::new();
+    let handles = spawn(
+        kubelet_cfg(&url),
+        cri.clone() as Arc<dyn CriBackend>,
+        shutdown.clone(),
+    );
+    let (code, resp) = client
+        .post_json(
+            "/api/v1/namespaces/default/pods",
+            &pod_with_probe("web", "readinessProbe", port),
+        )
+        .await
+        .unwrap();
+    assert_eq!(code, 201, "probe pod accepted: {resp}");
+
+    // Phase Running but Ready=False while the probe 500s.
+    let not_ready = wait_for(
+        &client,
+        "/api/v1/namespaces/default/pods/web",
+        "Running with Ready=False",
+        |v| v["status"]["phase"] == "Running" && ready_condition(v, "False"),
+    )
+    .await;
+    assert_eq!(
+        not_ready["status"]["containerStatuses"][0]["ready"], false,
+        "probe failure keeps the container not ready"
+    );
+
+    // Flip the server healthy: Ready=True and the container turns ready.
+    healthy.store(true, Ordering::SeqCst);
+    wait_for(
+        &client,
+        "/api/v1/namespaces/default/pods/web",
+        "Ready=True",
+        ready_pred,
+    )
+    .await;
+    let v = wait_for(
+        &client,
+        "/api/v1/namespaces/default/pods/web",
+        "container ready",
+        |v| v["status"]["containerStatuses"][0]["ready"] == true,
+    )
+    .await;
+    assert!(ready_pred(&v));
+    assert_eq!(v["status"]["containerStatuses"][0]["restartCount"], 0);
+
+    shutdown.trigger();
+    for h in handles {
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+}
+
+#[tokio::test]
+async fn liveness_probe_restarts_failing_container() {
+    let url = spawn_server().await;
+    let client = HttpJson::parse_url(&url).unwrap();
+    let (port, _srv) = spawn_probe_server(None).await;
+    let cri = Arc::new(FakeCri::new().with_sandbox_ip("127.0.0.1"));
+    let shutdown = infra::Shutdown::new();
+    let handles = spawn(
+        kubelet_cfg(&url),
+        cri.clone() as Arc<dyn CriBackend>,
+        shutdown.clone(),
+    );
+    let (code, resp) = client
+        .post_json(
+            "/api/v1/namespaces/default/pods",
+            &pod_with_probe("web", "livenessProbe", port),
+        )
+        .await
+        .unwrap();
+    assert_eq!(code, 201, "probe pod accepted: {resp}");
+    wait_for(
+        &client,
+        "/api/v1/namespaces/default/pods/web",
+        "pod Running",
+        ready_pred,
+    )
+    .await;
+    // Liveness Failure (threshold 1) restarts the RUNNING container: the
+    // failed container is stopped+removed and a fresh attempt starts.
+    poll_until("liveness restart attempt=1", || {
+        cri.peek_calls().iter().any(|c| c.starts_with("rm:"))
+            && cri
+                .peek_containers()
+                .iter()
+                .any(|c| c.attempt >= 1 && c.state == "CONTAINER_RUNNING")
+    })
+    .await;
+    let calls = cri.peek_calls();
+    assert!(
+        calls.iter().filter(|c| c.starts_with("create:")).count() >= 2,
+        "container recreated after liveness failure: {calls:?}"
+    );
+    wait_for(
+        &client,
+        "/api/v1/namespaces/default/pods/web",
+        "restartCount >= 1",
+        |v| {
+            v["status"]["containerStatuses"][0]["restartCount"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        },
+    )
+    .await;
 
     shutdown.trigger();
     for h in handles {

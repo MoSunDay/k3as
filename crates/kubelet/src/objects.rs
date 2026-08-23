@@ -5,18 +5,25 @@
 
 use serde_json::{json, Value};
 
-/// One container of a pod spec (the fields the CRI config needs).
+use crate::probes::ProbeSpec;
+
+/// One container of a pod spec (the fields the CRI config needs). Probes
+/// are Sprint 20 S1: `httpGet` only; `None` when the container declares
+/// none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     pub name: String,
     pub image: String,
     pub command: Vec<String>,
     pub args: Vec<String>,
+    pub startup_probe: Option<ProbeSpec>,
+    pub readiness_probe: Option<ProbeSpec>,
+    pub liveness_probe: Option<ProbeSpec>,
 }
 
 /// Pod identity + the fields the sync loop consumes. `marker` is the pod's
 /// `resourceVersion` at observation time so status writes can skip no-op
-/// pods.
+/// pods. `restart_policy` is `spec.restartPolicy`, defaulting to "Always".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodView {
     pub key: String,
@@ -26,6 +33,7 @@ pub struct PodView {
     pub containers: Vec<ContainerSpec>,
     pub deleted: bool,
     pub marker: String,
+    pub restart_policy: String,
 }
 
 /// `"namespace/name"` key; namespace defaults to `"default"`.
@@ -88,11 +96,15 @@ pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
                     })
                     .unwrap_or_default()
             };
+            let probe = |p: &str| c.pointer(p).and_then(ProbeSpec::from_json);
             Some(ContainerSpec {
                 name,
                 image,
                 command: strings("/command"),
                 args: strings("/args"),
+                startup_probe: probe("/startupProbe"),
+                readiness_probe: probe("/readinessProbe"),
+                liveness_probe: probe("/livenessProbe"),
             })
         })
         .collect()
@@ -116,6 +128,12 @@ pub fn pod_view(pod: &Value) -> Option<PodView> {
             .pointer("/metadata/resourceVersion")
             .and_then(Value::as_str)
             .unwrap_or("")
+            .to_string(),
+        restart_policy: pod
+            .pointer("/spec/restartPolicy")
+            .and_then(Value::as_str)
+            .filter(|p| matches!(*p, "Always" | "OnFailure" | "Never"))
+            .unwrap_or("Always")
             .to_string(),
     })
 }
@@ -256,7 +274,43 @@ mod tests {
         assert_eq!(v.containers.len(), 2);
         assert!(!v.deleted);
         assert_eq!(v.marker, "7");
+        assert_eq!(v.restart_policy, "Always", "absent restartPolicy defaults");
         assert!(pod_view(&json!({})).is_none());
+    }
+
+    #[test]
+    fn probes_and_restart_policy_are_parsed() {
+        let p = json!({
+            "metadata": {"name": "p", "namespace": "d", "uid": "u"},
+            "spec": {
+                "nodeName": "n",
+                "restartPolicy": "OnFailure",
+                "containers": [{
+                    "name": "c",
+                    "image": "i",
+                    "startupProbe": {"httpGet": {"path": "/s", "port": 8080}, "failureThreshold": 5},
+                    "readinessProbe": {"httpGet": {"path": "/r"}},
+                    "livenessProbe": {"httpGet": {"path": "/l"}, "periodSeconds": 3},
+                }],
+            },
+        });
+        let v = pod_view(&p).unwrap();
+        assert_eq!(v.restart_policy, "OnFailure");
+        let c = &v.containers[0];
+        let s = c.startup_probe.as_ref().unwrap();
+        assert_eq!(s.http_get.path, "/s");
+        assert_eq!(s.http_get.port, 8080);
+        assert_eq!(s.failure_threshold, 5);
+        assert_eq!(c.readiness_probe.as_ref().unwrap().http_get.port, 80);
+        assert_eq!(c.liveness_probe.as_ref().unwrap().period_seconds, 3);
+        // Unknown restartPolicy values fall back to Always.
+        let bad = json!({"metadata": {"name": "x"}, "spec": {"restartPolicy": "Maybe"}});
+        assert_eq!(pod_view(&bad).unwrap().restart_policy, "Always");
+        // A probe without httpGet is not applicable in S1 -> None.
+        let tcp = json!({"metadata": {"name": "x"}, "spec": {"containers": [
+            {"name": "c", "image": "i", "livenessProbe": {"tcpSocket": {"port": 1}}}
+        ]}});
+        assert!(pod_view(&tcp).unwrap().containers[0].liveness_probe.is_none());
     }
 
     #[test]

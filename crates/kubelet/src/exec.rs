@@ -110,6 +110,7 @@ mod tests {
             name: "x".into(),
             attempt: 0,
             labels: Default::default(),
+            exit_code: 0,
         };
         let c2 = ContainerView {
             id: "c1".into(),

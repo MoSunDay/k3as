@@ -8,10 +8,20 @@
 use serde_json::{json, Value};
 
 use crate::objects::PodView;
+use crate::probes::PodProbeState;
 use crate::sync::Snapshot;
 
 /// Build the `.status` subtree for one pod from the observed CRI state.
-pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
+/// Sprint 20 S1: per-container `ready` is probe-aware (RUNNING plus
+/// readiness/startup Success when declared); the Ready condition is
+/// sandbox-ready && all containers ready. Phase stays RUNNING-state-only
+/// (not probe-gated — matches upstream).
+pub fn build_pod_status(
+    pod: &PodView,
+    snap: &Snapshot,
+    now: &str,
+    probes: &PodProbeState,
+) -> Value {
     let ready_sandbox = snap
         .sandboxes
         .iter()
@@ -19,6 +29,7 @@ pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
     let sandbox_ready = ready_sandbox.is_some();
     let mut statuses: Vec<Value> = Vec::new();
     let mut all_running = !pod.containers.is_empty();
+    let mut all_ready = all_running && sandbox_ready;
     for spec in &pod.containers {
         // Highest-attempt observation wins (latest incarnation of the name).
         let observed = snap
@@ -28,6 +39,7 @@ pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
             .max_by_key(|c| c.attempt);
         let Some(c) = observed else {
             all_running = false;
+            all_ready = false;
             statuses.push(json!({
                 "name": spec.name,
                 "ready": false,
@@ -38,17 +50,20 @@ pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
             continue;
         };
         let running = c.state == "CONTAINER_RUNNING";
+        let ready = running && probes.is_ready(&pod.key, &spec.name);
         all_running = all_running && running;
+        all_ready = all_ready && ready;
         let state = if running {
             json!({"running": {"startedAt": now}})
         } else if c.state == "CONTAINER_EXITED" {
-            json!({"terminated": {"exitCode": 0, "reason": "Completed", "finishedAt": now}})
+            let code = c.exit_code;
+            json!({"terminated": {"exitCode": code, "reason": if code == 0 { "Completed" } else { "Error" }, "finishedAt": now}})
         } else {
             json!({"terminated": {"exitCode": 137, "reason": "Error", "finishedAt": now}})
         };
         statuses.push(json!({
             "name": spec.name,
-            "ready": running,
+            "ready": ready,
             "restartCount": c.attempt,
             "image": spec.image,
             "containerID": format!("cri://{}", c.id),
@@ -73,9 +88,9 @@ pub fn build_pod_status(pod: &PodView, snap: &Snapshot, now: &str) -> Value {
             },
             {
                 "type": "Ready",
-                "status": if phase == "Running" { "True" } else { "False" },
-                "reason": "ContainersReady",
-                "message": if phase == "Running" { "all containers running" } else { "not all containers running" },
+                "status": if all_ready { "True" } else { "False" },
+                "reason": if all_ready { "ContainersReady" } else { "ContainersNotReady" },
+                "message": if all_ready { "all containers ready" } else { "not all containers ready" },
                 "lastTransitionTime": now,
             },
         ],
@@ -239,13 +254,18 @@ mod tests {
                 name: "c0".into(),
                 attempt: 0,
                 labels: container_labels("web", "default", "u1", "c0"),
+                exit_code: 0,
             }],
         }
     }
 
+    fn no_probes() -> PodProbeState {
+        PodProbeState::new()
+    }
+
     #[test]
     fn running_pod_status_shape() {
-        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "2026-08-16T00:00:00Z");
+        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "2026-08-16T00:00:00Z", &no_probes());
         assert_eq!(s["phase"], "Running");
         assert_eq!(s["conditions"][0]["type"], "PodScheduled");
         assert_eq!(s["conditions"][1]["type"], "Ready");
@@ -261,7 +281,7 @@ mod tests {
 
     #[test]
     fn exited_container_is_pending_and_terminated() {
-        let s = build_pod_status(&pod(), &snap("CONTAINER_EXITED"), "T");
+        let s = build_pod_status(&pod(), &snap("CONTAINER_EXITED"), "T", &no_probes());
         assert_eq!(s["phase"], "Pending");
         assert_eq!(s["conditions"][1]["status"], "False");
         assert_eq!(
@@ -273,7 +293,7 @@ mod tests {
             "Completed"
         );
         // Non-exit unknown states map to error termination.
-        let s = build_pod_status(&pod(), &snap("CONTAINER_UNKNOWN"), "T");
+        let s = build_pod_status(&pod(), &snap("CONTAINER_UNKNOWN"), "T", &no_probes());
         assert_eq!(
             s["containerStatuses"][0]["state"]["terminated"]["exitCode"],
             137
@@ -288,7 +308,7 @@ mod tests {
     fn missing_container_reports_waiting() {
         let mut s0 = snap("CONTAINER_RUNNING");
         s0.containers.clear();
-        let s = build_pod_status(&pod(), &s0, "T");
+        let s = build_pod_status(&pod(), &s0, "T", &no_probes());
         assert_eq!(s["phase"], "Pending");
         assert_eq!(
             s["containerStatuses"][0]["state"]["waiting"]["reason"],
@@ -298,10 +318,10 @@ mod tests {
 
     #[test]
     fn semantic_eq_ignores_timestamps_only() {
-        let a = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T1");
-        let b = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T2");
+        let a = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T1", &no_probes());
+        let b = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T2", &no_probes());
         assert!(status_semantically_eq(&a, &b), "timestamps must not matter");
-        let c = build_pod_status(&pod(), &snap("CONTAINER_EXITED"), "T1");
+        let c = build_pod_status(&pod(), &snap("CONTAINER_EXITED"), "T1", &no_probes());
         assert!(!status_semantically_eq(&a, &c), "state change must matter");
         let mut d = a.clone();
         d["containerStatuses"][0]["restartCount"] = json!(1);
@@ -315,7 +335,7 @@ mod tests {
     fn ready_sandbox_ip_surfaces_as_pod_ip() {
         let mut snap = snap("CONTAINER_RUNNING");
         snap.sandboxes[0].ip = Some("10.42.0.10".into());
-        let s = build_pod_status(&pod(), &snap, "T");
+        let s = build_pod_status(&pod(), &snap, "T", &no_probes());
         assert_eq!(s["phase"], "Running");
         assert_eq!(s["podIP"], "10.42.0.10");
         assert_eq!(s["podIPs"][0]["ip"], "10.42.0.10");
@@ -324,7 +344,7 @@ mod tests {
 
     #[test]
     fn ready_sandbox_without_ip_omits_pod_ip() {
-        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T");
+        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &no_probes());
         assert_eq!(s["phase"], "Running");
         assert!(s.get("podIP").is_none(), "no ip -> no podIP key: {s}");
         assert!(s.get("podIPs").is_none());
@@ -334,15 +354,15 @@ mod tests {
     #[test]
     fn semantic_eq_detects_pod_ip_change() {
         let snap = snap("CONTAINER_RUNNING");
-        let without = build_pod_status(&pod(), &snap, "T");
+        let without = build_pod_status(&pod(), &snap, "T", &no_probes());
         let mut with_ip = snap.clone();
         with_ip.sandboxes[0].ip = Some("10.42.0.10".into());
-        let with = build_pod_status(&pod(), &with_ip, "T");
+        let with = build_pod_status(&pod(), &with_ip, "T", &no_probes());
         assert!(
             !status_semantically_eq(&without, &with),
             "late-arriving podIP must trigger a status re-write"
         );
-        let same = build_pod_status(&pod(), &with_ip, "T2");
+        let same = build_pod_status(&pod(), &with_ip, "T2", &no_probes());
         assert!(status_semantically_eq(&with, &same));
     }
 
@@ -353,5 +373,65 @@ mod tests {
         assert_eq!(merged["spec"]["x"], 1);
         assert_eq!(merged["status"]["phase"], "Running");
         assert!(pod.get("status").is_none(), "input untouched");
+    }
+
+    #[test]
+    fn exited_container_reports_real_exit_code() {
+        let mut s0 = snap("CONTAINER_EXITED");
+        s0.containers[0].exit_code = 7;
+        let s = build_pod_status(&pod(), &s0, "T", &no_probes());
+        assert_eq!(s["containerStatuses"][0]["state"]["terminated"]["exitCode"], 7);
+        assert_eq!(
+            s["containerStatuses"][0]["state"]["terminated"]["reason"],
+            "Error"
+        );
+        s0.containers[0].exit_code = 0;
+        let s = build_pod_status(&pod(), &s0, "T", &no_probes());
+        assert_eq!(
+            s["containerStatuses"][0]["state"]["terminated"]["reason"],
+            "Completed"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_gates_ready_condition_only() {
+        let mut probes = no_probes();
+        {
+            let state = probes.entry(&pod().key, "c0");
+            let pspec = crate::probes::ProbeSpec {
+                http_get: crate::probes::HttpGetSpec { path: "/z".into(), port: 80 },
+                initial_delay_seconds: 0,
+                period_seconds: 1,
+                timeout_seconds: 1,
+                failure_threshold: 1,
+                success_threshold: 1,
+            };
+            let tracker = state.tracker(crate::probes::ProbeKind::Readiness);
+            tracker.arm(0, &pspec);
+            tracker.observe(false, 1, &pspec);
+            assert_eq!(tracker.status, crate::probes::ProbeStatus::Failure);
+        }
+        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &probes);
+        assert_eq!(s["phase"], "Running", "phase is NOT probe-gated");
+        assert_eq!(s["conditions"][1]["status"], "False");
+        assert_eq!(s["conditions"][1]["reason"], "ContainersNotReady");
+        assert_eq!(s["containerStatuses"][0]["ready"], false);
+        // A later success flips the condition without touching the phase.
+        {
+            let state = probes.entry(&pod().key, "c0");
+            let pspec = crate::probes::ProbeSpec {
+                http_get: crate::probes::HttpGetSpec { path: "/z".into(), port: 80 },
+                initial_delay_seconds: 0,
+                period_seconds: 1,
+                timeout_seconds: 1,
+                failure_threshold: 1,
+                success_threshold: 1,
+            };
+            state.tracker(crate::probes::ProbeKind::Readiness).observe(true, 2, &pspec);
+        }
+        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &probes);
+        assert_eq!(s["conditions"][1]["status"], "True");
+        assert_eq!(s["conditions"][1]["reason"], "ContainersReady");
+        assert_eq!(s["containerStatuses"][0]["ready"], true);
     }
 }

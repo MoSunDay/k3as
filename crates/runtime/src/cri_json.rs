@@ -114,6 +114,8 @@ pub struct ListContainers {
 }
 
 /// One container row; camelCase wire keys renamed to our snake_case fields.
+/// `exitCode` is part of the `crictl ps -o json` row shape (v1.31.1);
+/// `#[serde(default)]` keeps parses safe when a runtime omits it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct CriContainer {
@@ -125,6 +127,8 @@ pub struct CriContainer {
     pub labels: BTreeMap<String, String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    #[serde(rename = "exitCode", default)]
+    pub exit_code: i32,
 }
 
 /// `crictl pods -o json` envelope (crictl names the list `items`).
@@ -231,8 +235,9 @@ pub fn parse_images(stdout: &str) -> Result<Vec<CriImage>, String> {
 mod tests {
     use super::*;
 
-    // Real crictl v1.31.1 output shapes (camelCase keys).
-    const CONTAINERS_ONE: &str = r#"{"containers":[{"id":"abc","podSandboxId":"sb1","metadata":{"name":"c","attempt":0},"state":"CONTAINER_RUNNING","labels":{"io.kubernetes.pod.name":"p"},"createdAt":"2026-08-16T10:00:00Z"}]}"#;
+    // Real crictl v1.31.1 output shapes (camelCase keys); `exitCode` is
+    // part of the `crictl ps -o json` row (Sprint 20 S1: OnFailure restarts).
+    const CONTAINERS_ONE: &str = r#"{"containers":[{"id":"abc","podSandboxId":"sb1","metadata":{"name":"c","attempt":0},"state":"CONTAINER_EXITED","labels":{"io.kubernetes.pod.name":"p"},"createdAt":"2026-08-16T10:00:00Z","exitCode":137}]}"#;
     const CONTAINERS_EMPTY: &str = r#"{"containers":[]}"#;
     const SANDBOXES_ONE: &str = r#"{"items":[{"id":"sb1","state":"SANDBOX_READY","metadata":{"name":"p","namespace":"default","uid":"u1","attempt":0},"labels":{},"createdAt":"2026-08-16T10:00:00Z"}]}"#;
     const IMAGES_ONE: &str = r#"{"images":[{"id":"sha256:0f0","repoTags":["init-pro.local/pause:0.1"],"repoDigests":[]}]}"#;
@@ -249,9 +254,10 @@ mod tests {
         assert_eq!(c.pod_sandbox_id, "sb1");
         assert_eq!(c.metadata.name, "c");
         assert_eq!(c.metadata.attempt, 0);
-        assert_eq!(c.state, "CONTAINER_RUNNING");
+        assert_eq!(c.state, "CONTAINER_EXITED");
         assert_eq!(c.labels.get(LABEL_POD_NAME).map(String::as_str), Some("p"));
         assert_eq!(c.created_at, "2026-08-16T10:00:00Z");
+        assert_eq!(c.exit_code, 137, "exitCode parses from the wire row");
     }
 
     #[test]
@@ -267,6 +273,7 @@ mod tests {
         assert!(cs[0].pod_sandbox_id.is_empty());
         assert!(cs[0].state.is_empty());
         assert!(cs[0].labels.is_empty());
+        assert_eq!(cs[0].exit_code, 0, "missing exitCode defaults to 0");
     }
 
     #[test]

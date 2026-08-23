@@ -38,6 +38,9 @@ pub struct ContainerView {
     pub name: String,
     pub attempt: u32,
     pub labels: BTreeMap<String, String>,
+    /// Container exit code (Sprint 20 S1: restartPolicy OnFailure restarts
+    /// after non-zero exits); 0 when the runtime reported none.
+    pub exit_code: i32,
 }
 
 /// The CRI surface the kubelet equivalent drives. Implemented by
@@ -122,6 +125,7 @@ fn container_view(c: &CriContainer) -> ContainerView {
         },
         attempt: c.metadata.attempt,
         labels: c.labels.clone(),
+        exit_code: c.exit_code,
     }
 }
 
@@ -285,10 +289,12 @@ mod tests {
             state: "CONTAINER_RUNNING".into(),
             labels: BTreeMap::from([(LABEL_CONTAINER_NAME.to_string(), "x".into())]),
             created_at: String::new(),
+            exit_code: 7,
         };
         let v = container_view(&c);
         assert_eq!(v.name, "web");
         assert_eq!(v.attempt, 3);
+        assert_eq!(v.exit_code, 7);
         let c2 = runtime::cri_json::CriContainer {
             labels: BTreeMap::from([(LABEL_CONTAINER_NAME.to_string(), "lbl".into())]),
             ..Default::default()

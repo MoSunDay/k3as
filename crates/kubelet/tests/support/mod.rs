@@ -32,6 +32,51 @@ pub fn view(ns: &str, name: &str, uid: &str, images: &[&str]) -> PodView {
     .unwrap()
 }
 
+/// Pod builder with explicit `restartPolicy` and raw container JSON (the
+/// probe fixtures in `sync_plan.rs` / the integration tests use this).
+pub fn view_full(
+    ns: &str,
+    name: &str,
+    uid: &str,
+    restart_policy: &str,
+    containers: serde_json::Value,
+) -> PodView {
+    pod_view(&serde_json::json!({
+        "metadata": {"name": name, "namespace": ns, "uid": uid, "resourceVersion": "1"},
+        "spec": {
+            "nodeName": "n1",
+            "restartPolicy": restart_policy,
+            "containers": containers,
+        },
+    }))
+    .unwrap()
+}
+
+/// One `spec.containers` entry; `probe_kind` empty -> no probe, otherwise
+/// `startupProbe`/`readinessProbe`/`livenessProbe` hitting `path` on
+/// `port` with 1s period and 1-failure thresholds (fast test cycles).
+pub fn container_json(
+    name: &str,
+    image: &str,
+    probe_kind: &str,
+    path: &str,
+    port: u16,
+) -> serde_json::Value {
+    let mut c = serde_json::json!({
+        "name": name, "image": image, "command": [format!("/bin/{name}")]});
+    if !probe_kind.is_empty() {
+        c[probe_kind] = serde_json::json!({
+            "httpGet": {"path": path, "port": port},
+            "initialDelaySeconds": 0,
+            "periodSeconds": 1,
+            "timeoutSeconds": 1,
+            "failureThreshold": 1,
+            "successThreshold": 1,
+        });
+    }
+    c
+}
+
 /// An observed sandbox carrying kubelet pod labels (how `plan` recognizes it).
 pub fn sandbox(ns: &str, name: &str, uid: &str, id: &str, state: &str) -> SandboxView {
     SandboxView {
@@ -77,6 +122,7 @@ pub fn container(
         name: cname.into(),
         attempt,
         labels: container_labels(&pod.name, &pod.namespace, &pod.uid, cname),
+        exit_code: 0,
     }
 }
 
@@ -84,13 +130,15 @@ pub fn desired_of(views: &[PodView]) -> BTreeMap<String, PodView> {
     views.iter().map(|v| (v.key.clone(), v.clone())).collect()
 }
 
-/// Run `plan` for one desired pod (default sandbox image + test log root).
+/// Run `plan` for one desired pod (default sandbox image + test log root,
+/// no probe state).
 pub fn plan_one(view: &PodView, snap: &Snapshot) -> Vec<Action> {
     plan(
         &desired_of(std::slice::from_ref(view)),
         snap,
         SANDBOX_IMAGE,
         std::path::Path::new("/tmp/init-pro-kubelet-test/pods"),
+        &kubelet::PodProbeState::new(),
     )
 }
 
@@ -162,13 +210,22 @@ pub struct FakeState {
 
 pub struct FakeCri {
     st: Mutex<FakeState>,
+    /// IP assigned to every sandbox created by `run_pod_sandbox`
+    /// (None -> deterministic 10.42.0.<n>); probe tests pin 127.0.0.1 so
+    /// the kubelet can reach a local tokio listener.
+    pub sandbox_ip: Option<String>,
 }
 
 impl FakeCri {
     pub fn new() -> Self {
         Self {
             st: Mutex::new(FakeState::default()),
+            sandbox_ip: None,
         }
+    }
+    pub fn with_sandbox_ip(mut self, ip: &str) -> Self {
+        self.sandbox_ip = Some(ip.to_string());
+        self
     }
     /// Sync peeks for assertions (the mutex is never held across .await).
     pub fn peek_sandboxes(&self) -> Vec<SandboxView> {
@@ -212,7 +269,10 @@ impl CriBackend for FakeCri {
         let id = format!("sb{}", st.next);
         // Real CNI assigns the IP during runp; the fake mirrors that
         // deterministically (Sprint 18 / S1).
-        let ip = format!("10.42.0.{}", st.next);
+        let ip = self
+            .sandbox_ip
+            .clone()
+            .unwrap_or_else(|| format!("10.42.0.{}", st.next));
         st.calls.push(format!("runp:{}", cfg.metadata.uid));
         st.sandboxes.push(SandboxView {
             id: id.clone(),
@@ -242,6 +302,7 @@ impl CriBackend for FakeCri {
             name: ccfg.metadata.name.clone(),
             attempt: ccfg.metadata.attempt,
             labels: ccfg.labels.clone(),
+            exit_code: 0,
         });
         Ok(id)
     }

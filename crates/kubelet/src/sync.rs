@@ -15,6 +15,7 @@ use runtime::{ContainerConfig, PodSandboxConfig};
 
 use crate::cri_backend::{ContainerView, SandboxView};
 use crate::objects::{ContainerSpec, PodView};
+use crate::probes::PodProbeState;
 
 /// Observed CRI state at one instant.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -63,12 +64,15 @@ impl Action {
     }
 }
 
-/// Diff desired vs observed -> the action list for this cycle.
+/// Diff desired vs observed -> the action list for this cycle. `probes`
+/// carries the Sprint 20 S1 probe outcomes: a liveness failure restarts
+/// the container (restartPolicy permitting) even while it is RUNNING.
 pub fn plan(
     desired: &BTreeMap<String, PodView>,
     snap: &Snapshot,
     sandbox_image: &str,
     log_root: &Path,
+    probes: &PodProbeState,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     // Index observations: sandboxes by "ns/name" (garbage labels skipped),
@@ -151,14 +155,34 @@ pub fn plan(
         {
             teardown(&mut actions, key, sb, &pod_containers);
         }
-        // Scope A: restartPolicy Always. RUNNING -> no-op; anything else is
-        // removed and recreated with attempt = max(observed) + 1.
+        // Restart policy drives the per-container branch (Sprint 20 S1):
+        // Always (default) recreates anything not RUNNING plus liveness
+        // failures; OnFailure only after a non-zero exit or a liveness
+        // failure (exited-0 stays); Never leaves dead containers as-is,
+        // only first creation happens. Recreate emits Remove + Create in
+        // one cycle (ONE forward step per pod per cycle).
         for spec in &view.containers {
             let observed: Vec<_> = pod_containers
                 .iter()
                 .filter(|c| c.name == spec.name)
                 .collect();
-            if observed.iter().any(|c| c.state == "CONTAINER_RUNNING") {
+            let running = observed.iter().any(|c| c.state == "CONTAINER_RUNNING");
+            let liveness_failed = probes.liveness_failed(key, &spec.name);
+            let recreate = match view.restart_policy.as_str() {
+                "Never" => observed.is_empty(),
+                "OnFailure" => {
+                    if running {
+                        liveness_failed
+                    } else {
+                        let completed = observed
+                            .iter()
+                            .any(|c| c.state == "CONTAINER_EXITED" && c.exit_code == 0);
+                        !completed || liveness_failed
+                    }
+                }
+                _ => !running || liveness_failed,
+            };
+            if !recreate {
                 continue;
             }
             let attempt = observed

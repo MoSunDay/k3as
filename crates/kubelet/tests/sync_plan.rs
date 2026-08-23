@@ -163,10 +163,17 @@ fn absent_pod_observed_sandbox_is_orphan_teardown() {
             name: "c0".into(),
             attempt: 0,
             labels: container_labels("gone", "default", "u9", "c0"),
+            exit_code: 0,
         }],
         ..Default::default()
     };
-    let actions = plan(&BTreeMap::new(), &snap, SANDBOX_IMAGE, Path::new(LOG_ROOT));
+    let actions = plan(
+        &BTreeMap::new(),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        &kubelet::PodProbeState::new(),
+    );
     assert_eq!(
         actions,
         vec![
@@ -196,7 +203,13 @@ fn garbage_sandbox_without_identity_is_ignored() {
         }],
         ..Default::default()
     };
-    let actions = plan(&BTreeMap::new(), &snap, SANDBOX_IMAGE, Path::new(LOG_ROOT));
+    let actions = plan(
+        &BTreeMap::new(),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        &kubelet::PodProbeState::new(),
+    );
     assert!(
         actions.is_empty(),
         "foreign/garbage sandboxes are not ours: {actions:?}"
@@ -217,6 +230,7 @@ fn two_pods_same_name_different_namespace_are_distinct() {
         &snap,
         SANDBOX_IMAGE,
         Path::new(LOG_ROOT),
+        &kubelet::PodProbeState::new(),
     );
     assert_eq!(
         actions.len(),
@@ -338,9 +352,125 @@ fn container_inherits_pod_identity_from_its_sandbox() {
             name: "c0".into(),
             attempt: 0,
             labels: Default::default(),
+            exit_code: 0,
         }],
     };
     let actions = plan_one(&pod, &snap);
     assert!(matches!(actions[0], Action::RemoveContainer { ref id, .. } if id == "c1"));
     assert!(matches!(actions[1], Action::CreateStartContainer { .. }));
+}
+
+#[test]
+fn liveness_failure_restarts_running_container() {
+    use kubelet::probes::ProbeKind;
+    use kubelet::{HttpGetSpec, PodProbeState, ProbeSpec};
+    let pod = view_full(
+        "default",
+        "web",
+        "u1",
+        "Always",
+        serde_json::json!([{"name": "c0", "image": "img:1", "command": ["/bin/c0"]}]),
+    );
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![container(&pod, "c0", "c1", "sb1", "CONTAINER_RUNNING", 0)],
+    };
+    // Liveness tracker folded to Failure (as the runner's probe pass does).
+    let mut probes = PodProbeState::new();
+    let spec = ProbeSpec {
+        http_get: HttpGetSpec { path: "/".into(), port: 80 },
+        initial_delay_seconds: 0,
+        period_seconds: 1,
+        timeout_seconds: 1,
+        failure_threshold: 1,
+        success_threshold: 1,
+    };
+    {
+        let t = probes.entry(&pod.key, "c0").tracker(ProbeKind::Liveness);
+        t.arm(0, &spec);
+        t.observe(false, 1, &spec);
+    }
+    let actions = plan(
+        &desired_of(std::slice::from_ref(&pod)),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        &probes,
+    );
+    assert_eq!(
+        actions,
+        vec![
+            Action::RemoveContainer {
+                pod_key: "default/web".into(),
+                id: "c1".into()
+            },
+            Action::CreateStartContainer {
+                pod_key: "default/web".into(),
+                sandbox_id: "sb1".into(),
+                ccfg: expect_ccfg(&pod, 1),
+                pcfg: expect_pcfg(LOG_ROOT),
+            },
+        ],
+        "liveness Failure restarts a RUNNING container with attempt+1"
+    );
+}
+
+#[test]
+fn never_policy_leaves_exited_containers_in_place() {
+    let pod = view_full(
+        "default",
+        "web",
+        "u1",
+        "Never",
+        serde_json::json!([{"name": "c0", "image": "img:1", "command": ["/bin/c0"]}]),
+    );
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![container(&pod, "c0", "c1", "sb1", "CONTAINER_EXITED", 0)],
+    };
+    let actions = plan_one(&pod, &snap);
+    assert!(
+        actions.is_empty(),
+        "Never policy keeps dead containers as-is: {actions:?}"
+    );
+}
+
+#[test]
+fn on_failure_restarts_after_nonzero_exit_only() {
+    let pod = view_full(
+        "default",
+        "web",
+        "u1",
+        "OnFailure",
+        serde_json::json!([{"name": "c0", "image": "img:1", "command": ["/bin/c0"]}]),
+    );
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![ContainerView {
+            exit_code: 7,
+            ..container(&pod, "c0", "c1", "sb1", "CONTAINER_EXITED", 0)
+        }],
+    };
+    let actions = plan_one(&pod, &snap);
+    assert!(
+        matches!(actions[0], Action::RemoveContainer { .. }),
+        "non-zero exit restarts: {actions:?}"
+    );
+    assert!(
+        matches!(actions[1], Action::CreateStartContainer { ref ccfg, .. } if ccfg.metadata.attempt == 1)
+    );
+    // Exit code 0 -> Completed, no restart.
+    let completed = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![container(&pod, "c0", "c1", "sb1", "CONTAINER_EXITED", 0)],
+    };
+    assert!(
+        plan_one(&pod, &completed).is_empty(),
+        "OnFailure keeps exited-0 containers: {:?}",
+        plan_one(&pod, &completed)
+    );
 }
