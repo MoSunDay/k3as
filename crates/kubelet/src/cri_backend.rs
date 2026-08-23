@@ -49,7 +49,9 @@ pub struct ContainerView {
 pub trait CriBackend: Send + Sync {
     /// Repo tags of all present images (`crictl images`).
     async fn list_image_tags(&self) -> Result<Vec<String>, String>;
-    /// Pull one image by tag (`crictl pull`).
+    /// Pull one image by tag (`crictl pull`). The pull POLICY is decided in
+    /// [`crate::sync::plan`] (Always / IfNotPresent / Never — Sprint 20
+    /// S3); the backend stays a dumb pull with no policy logic of its own.
     async fn pull_image(&self, image: &str) -> Result<(), String>;
     /// All pod sandboxes, every state (`crictl pods`).
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String>;

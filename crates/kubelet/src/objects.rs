@@ -10,6 +10,9 @@ use crate::probes::ProbeSpec;
 /// One container of a pod spec (the fields the CRI config needs). Probes
 /// are Sprint 20 S1: `httpGet` only; `None` when the container declares
 /// none. `volume_mounts` is Sprint 20 S2 (T4.2 Scope B).
+/// `image_pull_policy` is Sprint 20 S3: the RESOLVED value ("Always" /
+/// "IfNotPresent" / "Never") — absent fields are defaulted at parse time
+/// following upstream defaulting (see [`resolve_image_pull_policy`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     pub name: String,
@@ -20,6 +23,7 @@ pub struct ContainerSpec {
     pub readiness_probe: Option<ProbeSpec>,
     pub liveness_probe: Option<ProbeSpec>,
     pub volume_mounts: Vec<VolumeMount>,
+    pub image_pull_policy: String,
 }
 
 /// One `spec.containers[].volumeMounts[]` entry (Sprint 20 S2). `mountPath`
@@ -100,6 +104,35 @@ pub fn pod_deleted(pod: &Value) -> bool {
     pod.pointer("/metadata/deletionTimestamp").is_some()
 }
 
+/// The upstream default image pull policy for an image reference without an
+/// explicit field (k8s `pkg/apis/core/v1` `SetDefaults_Container`): no tag
+/// or tag `latest` -> Always, any other tag -> IfNotPresent. A registry
+/// port (`localhost:5000/img`) is not a tag; digest refs
+/// (`img@sha256:...`) are immutable and default to IfNotPresent (modern
+/// upstream behavior).
+fn default_image_pull_policy(image: &str) -> String {
+    let base = image.rsplit('/').next().unwrap_or(image);
+    if base.contains('@') {
+        return "IfNotPresent".to_string();
+    }
+    match base.rsplit_once(':').map(|(_, tag)| tag).filter(|t| !t.is_empty()) {
+        Some(tag) if tag != "latest" => "IfNotPresent".to_string(),
+        _ => "Always".to_string(),
+    }
+}
+
+/// Sprint 20 S3: the resolved image pull policy for one container. Explicit
+/// `Always`/`IfNotPresent`/`Never` pass through; anything else (upstream
+/// would reject it at admission) falls back to [`default_image_pull_policy`].
+/// `imagePullSecrets` is explicitly DEFERRED (Sprint 20 / T4.2 card):
+/// pulls are unauthenticated until a later sprint.
+fn resolve_image_pull_policy(image: &str, explicit: Option<&str>) -> String {
+    match explicit {
+        Some(p) if matches!(p, "Always" | "IfNotPresent" | "Never") => p.to_string(),
+        _ => default_image_pull_policy(image),
+    }
+}
+
 /// `spec.containers[]` as [`ContainerSpec`]s; malformed rows are skipped.
 pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
     let Some(items) = pod.pointer("/spec/containers").and_then(Value::as_array) else {
@@ -128,6 +161,10 @@ pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
                     .unwrap_or_default()
             };
             let probe = |p: &str| c.pointer(p).and_then(ProbeSpec::from_json);
+            let image_pull_policy = resolve_image_pull_policy(
+                &image,
+                c.pointer("/imagePullPolicy").and_then(Value::as_str),
+            );
             Some(ContainerSpec {
                 name,
                 image,
@@ -137,6 +174,7 @@ pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
                 readiness_probe: probe("/readinessProbe"),
                 liveness_probe: probe("/livenessProbe"),
                 volume_mounts: container_volume_mounts(c),
+                image_pull_policy,
             })
         })
         .collect()
@@ -360,6 +398,44 @@ mod tests {
         assert_eq!(cs.len(), 1);
         assert_eq!(cs[0].command, vec!["a"]);
         assert!(pod_containers(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn image_pull_policy_is_resolved_at_parse_time() {
+        // Sprint 20 S3 (T4.2 Scope B): upstream defaulting applied when the
+        // field is absent — no tag or `latest` -> Always, any other tag ->
+        // IfNotPresent; explicit values pass through untouched.
+        let p = json!({"metadata": {"name": "p", "namespace": "d"}, "spec": {"containers": [
+            {"name": "no-tag", "image": "nginx"},
+            {"name": "latest", "image": "nginx:latest"},
+            {"name": "pinned", "image": "nginx:1.27"},
+            {"name": "explicit-never", "image": "nginx:1.27", "imagePullPolicy": "Never"},
+            {"name": "explicit-ifnp", "image": "nginx", "imagePullPolicy": "IfNotPresent"},
+            {"name": "explicit-always", "image": "nginx:1.27", "imagePullPolicy": "Always"},
+            {"name": "registry-port", "image": "localhost:5000/img"},
+            {"name": "digest", "image": "img@sha256:abc"},
+        ]}});
+        let cs = pod_containers(&p);
+        let pol = |n: &str| {
+            cs.iter()
+                .find(|c| c.name == n)
+                .unwrap_or_else(|| panic!("container {n}"))
+                .image_pull_policy
+                .as_str()
+        };
+        assert_eq!(pol("no-tag"), "Always", "no tag defaults to Always");
+        assert_eq!(pol("latest"), "Always", "latest tag defaults to Always");
+        assert_eq!(pol("pinned"), "IfNotPresent", "pinned tag defaults to IfNotPresent");
+        assert_eq!(pol("explicit-never"), "Never", "explicit Never respected");
+        assert_eq!(pol("explicit-ifnp"), "IfNotPresent", "explicit IfNotPresent respected");
+        assert_eq!(pol("explicit-always"), "Always", "explicit Always respected");
+        assert_eq!(pol("registry-port"), "Always", "a registry port is not a tag");
+        assert_eq!(pol("digest"), "IfNotPresent", "digest refs are immutable -> IfNotPresent");
+        // Unknown explicit values fall back to the tag derivation.
+        let odd = json!({"metadata": {"name": "x"}, "spec": {"containers": [
+            {"name": "c", "image": "img:1.2", "imagePullPolicy": "Sometimes"},
+        ]}});
+        assert_eq!(pod_containers(&odd)[0].image_pull_policy, "IfNotPresent");
     }
 
     #[test]

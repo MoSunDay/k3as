@@ -24,6 +24,22 @@ pub fn view(ns: &str, name: &str, uid: &str, images: &[&str]) -> PodView {
     view_with_volumes(ns, name, uid, images, serde_json::json!([]), serde_json::json!([]))
 }
 
+/// [`view`] where every container carries an explicit `imagePullPolicy`
+/// (Sprint 20 S3); `images` is a slice of `(image, policy)` pairs.
+pub fn view_with_policies(ns: &str, name: &str, uid: &str, images: &[(&str, &str)]) -> PodView {
+    pod_view(&serde_json::json!({
+        "metadata": {"name": name, "namespace": ns, "uid": uid, "resourceVersion": "1"},
+        "spec": {
+            "nodeName": "n1",
+            "containers": images.iter().enumerate().map(|(i, (img, pol))| {
+                serde_json::json!({
+                    "name": format!("c{i}"), "image": img, "command": [format!("/bin/c{i}")],
+                    "imagePullPolicy": pol})})
+                .collect::<Vec<_>>()},
+    }))
+    .unwrap()
+}
+
 /// [`view`] plus pod `spec.volumes` and per-container `volumeMounts`
 /// (Sprint 20 S2 volume fixtures; both default to none via [`view`]).
 pub fn view_with_volumes(

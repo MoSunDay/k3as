@@ -46,6 +46,86 @@ fn present_images_are_not_pulled() {
 }
 
 #[test]
+fn always_policy_repulls_even_when_present() {
+    // Sprint 20 S3: `imagePullPolicy: Always` re-pulls every sync cycle
+    // that (re)creates the container, even when the tag is already present.
+    let pod = view_with_policies("default", "web", "u1", &[("img:1", "Always")]);
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![],
+    };
+    let actions = plan_one(&pod, &snap);
+    assert_eq!(
+        actions,
+        vec![
+            Action::EnsureImage("img:1".into()),
+            Action::CreateStartContainer {
+                pod_key: "default/web".into(),
+                sandbox_id: "sb1".into(),
+                ccfg: Box::new(expect_ccfg(&pod, 0)),
+                pcfg: expect_pcfg(LOG_ROOT),
+            },
+        ],
+        "Always pulls even though img:1 is present"
+    );
+}
+
+#[test]
+fn never_policy_absent_image_creates_sandbox_without_pull() {
+    // Sprint 20 S3: `imagePullPolicy: Never` never pulls; the create
+    // proceeds and fails at the CRI layer if the image is absent, and the
+    // cycle retries. The sandbox image keeps its IfNotPresent semantics.
+    let pod = view_with_policies("default", "web", "u1", &[("img:1", "Never")]);
+    let actions = plan_one(&pod, &Snapshot::default());
+    assert_eq!(
+        actions,
+        vec![
+            Action::EnsureImage(SANDBOX_IMAGE.into()),
+            Action::CreateSandbox {
+                pod_key: "default/web".into(),
+                cfg: expect_pcfg(LOG_ROOT)
+            },
+        ],
+        "Never must not pull img:1 even though it is absent"
+    );
+}
+
+#[test]
+fn never_policy_present_image_creates_without_pull() {
+    // Sprint 20 S3: Never + present -> no EnsureImage, the container is
+    // still created from the pre-staged image.
+    let pod = view_with_policies("default", "web", "u1", &[("img:1", "Never")]);
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![],
+    };
+    let actions = plan_one(&pod, &snap);
+    assert_eq!(actions.len(), 1);
+    assert!(
+        matches!(&actions[0], Action::CreateStartContainer { .. }),
+        "got {actions:?}"
+    );
+}
+
+#[test]
+fn if_not_present_policy_recreate_skips_present_image() {
+    // Sprint 20 S3: the per-container recreate path also honors the
+    // policy — a present pinned-tag image is not re-pulled on restart.
+    let pod = view_with_policies("default", "web", "u1", &[("img:1", "IfNotPresent")]);
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![container(&pod, "c0", "c1", "sb1", "CONTAINER_EXITED", 0)],
+    };
+    let actions = plan_one(&pod, &snap);
+    assert_eq!(actions.len(), 2, "remove + create only: {actions:?}");
+    assert!(matches!(&actions[0], Action::RemoveContainer { .. }));
+    assert!(matches!(&actions[1], Action::CreateStartContainer { .. }));
+}
+
+#[test]
 fn ready_sandbox_without_containers_creates_and_starts_them() {
     let pod = view("default", "web", "u1", &["img:1"]);
     let snap = Snapshot {

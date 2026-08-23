@@ -28,7 +28,8 @@ pub struct Snapshot {
 /// One CRI mutation. Ordered by [`plan`], applied by [`execute`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// `crictl pull` (only planned when the tag is absent).
+    /// `crictl pull` (planned per the image pull policy — Sprint 20 S3:
+    /// Always re-pulls, IfNotPresent pulls only when absent, Never never).
     EnsureImage(String),
     /// `crictl runp` with the pod's sandbox config.
     CreateSandbox {
@@ -137,9 +138,12 @@ pub fn plan(
                     id: c.id.clone(),
                 });
             }
-            ensure_image(&mut actions, &snap.images, sandbox_image);
+            // The sandbox image (pause) is always pulled with IfNotPresent
+            // semantics: upstream pulls the sandbox image on demand and no
+            // user policy applies (Sprint 20 S3 keeps that behavior).
+            ensure_image(&mut actions, &snap.images, sandbox_image, "IfNotPresent");
             for spec in &view.containers {
-                ensure_image(&mut actions, &snap.images, &spec.image);
+                ensure_image(&mut actions, &snap.images, &spec.image, &spec.image_pull_policy);
             }
             actions.push(Action::CreateSandbox {
                 pod_key: key.clone(),
@@ -197,7 +201,7 @@ pub fn plan(
                     id: c.id.clone(),
                 });
             }
-            ensure_image(&mut actions, &snap.images, &spec.image);
+            ensure_image(&mut actions, &snap.images, &spec.image, &spec.image_pull_policy);
             actions.push(Action::CreateStartContainer {
                 pod_key: key.clone(),
                 sandbox_id: keep.id.clone(),
@@ -285,9 +289,32 @@ pub(crate) fn teardown(
     });
 }
 
-fn ensure_image(actions: &mut Vec<Action>, present: &[String], image: &str) {
-    if image.is_empty() || present.iter().any(|t| t == image) {
+/// Sprint 20 S3 (T4.2 Scope B): decide whether one image needs a pull this
+/// cycle. `policy` is the RESOLVED policy from the pod spec (see
+/// `objects::resolve_image_pull_policy`):
+/// - `Always` — re-pull every sync cycle (upstream kubelet behavior).
+/// - `Never` — never pull; create proceeds and fails at the CRI layer if
+///   the image is absent, and the cycle retries (v1 behavior).
+/// - `IfNotPresent` (default for pinned tags) — pull only when absent.
+///   This is the airgap fallback (Q27): locally imported OCI images (via
+///   `ctr -n k8s.io images import`) are found here without any network.
+///
+/// `imagePullSecrets` is EXPLICITLY DEFERRED (Sprint 20 / T4.2 card):
+/// pulls are unauthenticated until a later sprint.
+fn ensure_image(actions: &mut Vec<Action>, present: &[String], image: &str, policy: &str) {
+    if image.is_empty() {
         return;
+    }
+    match policy {
+        "Always" => {}
+        "Never" => return,
+        // IfNotPresent (and any unknown value falls back to it): pull only
+        // when absent.
+        _ => {
+            if present.iter().any(|t| t == image) {
+                return;
+            }
+        }
     }
     actions.push(Action::EnsureImage(image.to_string()));
 }
