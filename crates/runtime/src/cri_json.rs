@@ -3,8 +3,8 @@
 //! Pure serde mirror of the `crictl v1.31.1 -o json` wire shapes — no
 //! process spawning here (the subprocess driver lives in [`crate::cri`]).
 //! Input configs are Serialize-only and follow the proto field names crictl
-//! documents (`log_directory`, `log_path`; its JSON resolver accepts both
-//! forms); output listings are Deserialize-only, `#[serde(default)]`-tolerant
+//! documents (`log_directory`, `log_path`, `hostname`; its JSON resolver
+//! accepts both forms); output listings are Deserialize-only, `#[serde(default)]`-tolerant
 //! of missing fields, and read crictl's camelCase output (`podSandboxId`,
 //! `createdAt`, `repoTags`).
 
@@ -95,6 +95,11 @@ pub struct PodSandboxConfig {
     pub labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
+    /// Hostname handed to the sandbox (v1: the pod name; full upstream
+    /// FQDN/subdomain composition from `spec.hostname`/`spec.subdomain`
+    /// is deferred to a later sprint).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub hostname: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub log_directory: String,
 }
@@ -359,11 +364,13 @@ mod tests {
             },
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
+            hostname: String::new(),
             log_directory: String::new(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("labels"), "empty maps omitted: {json}");
         assert!(!json.contains("annotations"));
+        assert!(!json.contains("hostname"), "empty hostname omitted: {json}");
         assert!(!json.contains("log_directory"), "empty dir omitted");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["metadata"]["uid"], "u1");

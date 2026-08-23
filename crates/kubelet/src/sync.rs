@@ -238,6 +238,12 @@ fn sandbox_cfg(view: &PodView, log_root: &Path) -> PodSandboxConfig {
         },
         labels: pod_labels(&view.name, &view.namespace, &view.uid),
         annotations: BTreeMap::new(),
+        // Hostname passthrough (Sprint 20 S4, T4.2 Scope B): v1 uses the
+        // pod name verbatim so containers stop inheriting the sandbox
+        // host's hostname. Full upstream FQDN semantics
+        // (`spec.hostname`/`spec.subdomain` composition) are deferred to
+        // a later sprint.
+        hostname: view.name.clone(),
         log_directory: log_root.join(&view.uid).to_string_lossy().into_owned(),
     }
 }

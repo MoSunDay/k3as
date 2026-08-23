@@ -208,6 +208,7 @@ pub fn expect_pcfg(root: &str) -> PodSandboxConfig {
         },
         labels: pod_labels("web", "default", "u1"),
         annotations: BTreeMap::new(),
+        hostname: "web".into(),
         log_directory: format!("{root}/u1"),
     }
 }
