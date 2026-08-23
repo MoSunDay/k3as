@@ -45,11 +45,19 @@ size_of()   { python3 -c 'import os,sys;print(os.path.getsize(sys.argv[1]))' "$1
 # drops the connection. Port: $PORT env, else argv[1], else 8080. No threads:
 # a sequential accept loop is plenty for e2e traffic. LOCAL is the accepted
 # socket's local address (podIP) — the unique per-replica discriminator for
-# the S6 round-robin assert, since pod hostnames are not plumbed through CRI
-# yet (kubelet sends no PodSandboxConfig.hostname).
+# the S6 round-robin assert. ECHO is the container hostname: since Sprint 20
+# S4 the kubelet sets PodSandboxConfig.hostname = pod name, so ECHO returns
+# the pod name (G26d asserts it). Golden G26 adds probe/volume endpoints:
+# /healthz (200 while /healthz-fail is absent, else 500), /fail (plants that
+# marker in the ephemeral rootfs), /bootcount (lines in /data/boot.txt,
+# appended once per container start — the emptyDir survives restarts), and
+# `CONFIG <file> <first line>` lines for each regular file in /etc/config
+# (sorted by name; emitted only when that dir exists).
 cat > "$WORK/echo.c" <<'EOF'
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
@@ -57,12 +65,14 @@ cat > "$WORK/echo.c" <<'EOF'
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define HEAD_CAP (64 * 1024)   /* whole header block cap */
 #define BODY_CAP (1024 * 1024) /* Content-Length body cap (1 MiB) */
 
 static char head[HEAD_CAP]; /* single-threaded: one static buffer is fine */
+static int bootcount = 0;   /* G26c: one /data/boot.txt line per container start */
 
 /* recv() that retries EINTR; returns bytes read, 0 on EOF, -1 on error. */
 static ssize_t read_some(int fd, void *buf, size_t n) {
@@ -157,25 +167,106 @@ static void handle(int cfd) {
     body[body_len] = '\0';
   }
 
+  /* G26b: /fail plants a marker in the container's ephemeral rootfs that
+   * flips /healthz to 500 until the container restarts (which clears it). */
+  if (strcmp(target, "/fail") == 0) {
+    int mfd = open("/healthz-fail", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (mfd >= 0) close(mfd);
+  }
+  /* G26a: /healthz is 200 while the marker is absent, else 500 (the
+   * kubelet probe engine treats 2xx/3xx as success). /bootcount answers
+   * with the number of starts recorded in /data/boot.txt. */
+  if (strcmp(target, "/healthz") == 0) {
+    struct stat hs;
+    int healthy = stat("/healthz-fail", &hs) != 0;
+    const char *b = healthy ? "ok\n" : "boom\n";
+    int bl = (int)strlen(b);
+    char hdr[160];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 %s\r\nContent-Type: text/plain\r\n"
+                      "Content-Length: %d\r\nConnection: close\r\n\r\n",
+                      healthy ? "200 OK" : "500 Internal Server Error", bl);
+    if (write_all(cfd, hdr, (size_t)hl) == 0) write_all(cfd, b, (size_t)bl);
+    free(body);
+    return;
+  }
+  if (strcmp(target, "/bootcount") == 0) {
+    char bbuf[32];
+    int bn = snprintf(bbuf, sizeof(bbuf), "%d\n", bootcount);
+    char hdr[160];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                      "Content-Length: %d\r\nConnection: close\r\n\r\n", bn);
+    if (write_all(cfd, hdr, (size_t)hl) == 0) write_all(cfd, bbuf, (size_t)bn);
+    free(body);
+    return;
+  }
+
   char host[256];
   host[0] = '\0';
   gethostname(host, sizeof(host) - 1);
-  /* kubelet does not plumb PodSandboxConfig.hostname yet, so every pod
-   * inherits the node hostname; the accepted socket's local address is the
-   * unique per-replica discriminator (podIP) for the S6 round-robin assert */
+  /* Sprint 20 S4: the kubelet sets PodSandboxConfig.hostname = pod name, so
+   * ECHO is the POD NAME (G26d asserts it); LOCAL stays the per-replica
+   * discriminator (podIP) for the S6 round-robin assert */
   char local[64] = "?";
   struct sockaddr_in la;
   socklen_t lalen = sizeof(la);
   if (getsockname(cfd, (struct sockaddr *)&la, &lalen) == 0)
     inet_ntop(AF_INET, &la.sin_addr, local, sizeof(local));
 
-  size_t cap = 512 + 3 * body_off + body_len + 16;
+  size_t cap = 512 + 3 * body_off + body_len + 128 * 1024; /* + CONFIG lines */
   char *resp = malloc(cap);
   if (!resp) { free(body); return; }
   int n = snprintf(resp, cap, "ECHO %s\nLOCAL %s\nMETHOD %s\nPATH %s\n",
                    host, local, method, target);
   for (int i = 0; i < nh && n > 0 && (size_t)n < cap; i++)
     n += snprintf(resp + n, cap - (size_t)n, "HEADER %s\n", hlines[i]);
+  /* G26d: projected configMap files — one `CONFIG <name> <first line>`
+   * line per regular file in /etc/config, sorted by name. Emitted only
+   * when the dir exists, so ST workloads (which never mount it) keep
+   * byte-identical bodies. */
+  if (n > 0 && (size_t)n < cap) {
+    struct stat cst;
+    if (stat("/etc/config", &cst) == 0 && S_ISDIR(cst.st_mode)) {
+      DIR *d = opendir("/etc/config");
+      if (d) {
+        char *names[128];
+        int nnames = 0;
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL && nnames < 128) {
+          if (de->d_name[0] == '.') continue; /* skip .fingerprint marker */
+          char fpath[512];
+          snprintf(fpath, sizeof(fpath), "/etc/config/%s", de->d_name);
+          struct stat fst;
+          if (stat(fpath, &fst) == 0 && S_ISREG(fst.st_mode)) {
+            char *dup = strdup(de->d_name);
+            if (dup) names[nnames++] = dup;
+          }
+        }
+        closedir(d);
+        for (int i = 1; i < nnames; i++) { /* insertion sort (small n) */
+          char *k = names[i];
+          int j = i - 1;
+          while (j >= 0 && strcmp(names[j], k) > 0) { names[j + 1] = names[j]; j--; }
+          names[j + 1] = k;
+        }
+        for (int i = 0; i < nnames && (size_t)n < cap; i++) {
+          char fpath[512];
+          snprintf(fpath, sizeof(fpath), "/etc/config/%s", names[i]);
+          char first[256] = "";
+          FILE *f = fopen(fpath, "r");
+          if (f) {
+            if (!fgets(first, sizeof(first), f)) first[0] = '\0'; /* empty file */
+            char *nl = strchr(first, '\n');
+            if (nl) *nl = '\0';
+            fclose(f);
+          }
+          n += snprintf(resp + n, cap - (size_t)n, "CONFIG %s %s\n", names[i], first);
+          free(names[i]);
+        }
+      }
+    }
+  }
   if (body_len > 0 && n > 0 && (size_t)n < cap) {
     n += snprintf(resp + n, cap - (size_t)n, "BODY ");
     memcpy(resp + n, body, body_len); /* raw bytes, NULs preserved */
@@ -199,6 +290,26 @@ int main(int argc, char **argv) {
   if (!ps || !*ps) ps = argc > 1 ? argv[1] : "8080";
   long port = strtol(ps, NULL, 10);
   if (port <= 0 || port > 65535) port = 8080;
+
+  /* G26c: emptyDir persistence — append one `boot\n` per container start
+   * to /data/boot.txt BEFORE binding, then count lines for /bootcount.
+   * The host emptyDir dir survives container restarts, so boots #1, #2, #3
+   * accumulate across the G26 restart sequence. */
+  {
+    struct stat dst;
+    if (stat("/data", &dst) == 0 && S_ISDIR(dst.st_mode)) {
+      int bfd = open("/data/boot.txt", O_RDWR | O_CREAT | O_APPEND, 0644);
+      if (bfd >= 0) {
+        ssize_t wr = write(bfd, "boot\n", 5);
+        (void)wr;
+        lseek(bfd, 0, SEEK_SET);
+        char c;
+        while (read(bfd, &c, 1) == 1)
+          if (c == '\n') bootcount++;
+        close(bfd);
+      }
+    }
+  }
 
   int lfd = socket(AF_INET, SOCK_STREAM, 0);
   if (lfd < 0) { perror("socket"); return 1; }
