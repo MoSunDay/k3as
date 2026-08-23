@@ -1315,11 +1315,16 @@ dataplane machinery exists yet.
   implements T5.4's `UpstreamResolver` (numeric/named/identity
   targetPort; ns/name + bare-name lookup).
 - `crates/router/src/nodeport.rs`: one reverse-proxy listener per
-  allocated nodePort of every NodePort/LoadBalancer Service, managed by
+  allocated nodePort of every **NodePort-type** Service, managed by
   a reconcile loop on a dedicated worker thread (current-thread runtime
   + `LocalSet`, matching `serve_proxy`'s spawn_local model); Endpoints
   updates re-target without restart, Service delete retires the
   listener, shutdown drains the plane.
+  **As-built fact (Sprint 19 review):** `nodeport.rs` matches
+  `kind_type == "NodePort"` only — LoadBalancer-type Services get
+  nodePorts allocated from the same allocator but have **no listener**;
+  the LoadBalancer plane (external VIP + L4) is the remaining T5.6
+  scope, gated on T4.3.
 - Wired in `crates/cli/src/runtime.rs`. The plane is **on by default**
   in the server; `--disable-kube-proxy` (a pre-parsed noop until this
   sprint, kept for k3s flag parity) turns it off. The Router gained

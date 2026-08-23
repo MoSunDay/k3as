@@ -5,8 +5,9 @@
 //! bin crate drives this; `INIT_PRO_OFFLINE=1` / `INIT_PRO_VENDOR=1` select the
 //! air-gap / explicit-acquire modes (see [`acquire::Mode`]).
 //!
-//! Subprocess bundling only (containerd / runc / CNI multicall); etcd embed/FFI
-//! is T2.1's concern (Q6). License allow-list (Q7) is enforced at parse time.
+//! Subprocess bundling only (containerd / runc / CNI multicall). etcd
+//! semantics are T2.1's concern (Q17): implemented in pure Rust behind the
+//! `StorageBackend` trait — no embed/FFI/subprocess path (supersedes Q6). License allow-list (Q7) is enforced at parse time.
 
 #![forbid(unsafe_code)]
 

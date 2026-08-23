@@ -82,6 +82,9 @@ If M1 fails, Q4 is re-evaluated before Layers 1–4 are built on top.
    detail (TODO IDs strictly mirror `index.md`; maintain both in lock-step).
 5. **`plan/00-foundation-flag-matrix.md`** — the frozen k3s flag → init-pro v1
    behavior matrix (Q9 baseline for `init-pro server/agent --help`).
+6. **`phase-2-implementation.md`** (active) · **`phase-1-implementation.md`**
+   (archived at Sprint 9) — per-phase sprint-by-sprint execution plans;
+   TODO IDs strictly mirror `index.md`.
 
 ---
 

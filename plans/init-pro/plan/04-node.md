@@ -155,7 +155,8 @@ and node registration.
 - **卡点 / Blockers** — Scope B/C remainder: probes
   (readiness/liveness/startup), volumes (emptyDir/configMap/secret
   first; CSI later), real image pull path, exec/logs/attach, local
-  deploy.
+  deploy (an interactive `scripts/local-up.sh` form has existed since
+  Sprint 18 S0; the formal UX is Sprint 21 scope).
 - **依赖 / Depends on** — T4.1, T3.2
 
 ---
@@ -230,6 +231,11 @@ and node registration.
   - Golden: agent joins, `kubectl get nodes` shows `Ready`; sever tunnel,
     observe reconnect within SLA.
 
+- **备注 / Note (Sprint 17, T4.2 Scope A as-built):** node registration,
+  `kube-node-lease` heartbeat, and `kubectl get nodes` Ready are already
+  delivered by T4.2 Scope A (`crates/kubelet/src/node.rs`). T4.5's unique
+  remaining scope = the server↔agent tunnel, reconnect SLA, and
+  credentials (T3.3).
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
 - **卡点 / Blockers** — none

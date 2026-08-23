@@ -19,7 +19,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T1.1 | 1 | 资源模型与 API group schema | done | T0.3 |
 | T1.2 | 1 | APIServer 核心 (REST + kubectl 真实交互) | done | T1.1, T2.2 |
 | T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) | not-started | T1.1 |
-| T2.1 | 2 | etcd embed/FFI/子进程 bundling | done | T0.2 |
+| T2.1 | 2 | etcd 语义数据面（纯 Rust 实现，Q17） | done | T0.2 |
 | T2.2 | 2 | etcd v3 数据面 = APIServer storage backend | done | T2.1, T1.1 |
 | T2.3 | 2 | SQLite/KINE 兼容替代后端 | done | T2.2 |
 | T3.1 | 3 | kube-controller-manager 等价核心循环 | done | T1.2, T2.2 |
@@ -34,8 +34,8 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.1 | 5 | mlua + coroutine↔async 桥 | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks | done | T5.1 |
 | T5.3 | 5 | resty::* 等价标准库 | done | T5.1, T5.2 |
-| T5.4 | 5 | 内置 Router 核心 + Ingress→Lua 路由编译 | done | T5.2, T5.3, T1.1 |
-| T5.5 | 5 | 热加载 / 动态配置 (no-restart reload) | not-started | T5.4 |
+| T5.4 | 5 | 内置 Router 核心 + Ingress→RouteTable 编译（Lua 为 fallback 管线） | done | T5.2, T5.3, T1.1 |
+| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含请求间 no-restart reload；剩余：live informer / drain / shared-dict 迁移 / 动态证书) | not-started | T5.4 |
 | T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane done, Q28) | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
@@ -44,12 +44,11 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | not-started | T1.2, T3.1 |
 
-**Counts:** 33 TODOs · 17 done · 2 in-progress (T4.2 Scope A: crate
+**Counts:** 33 TODOs · 18 done · 2 in-progress (T4.2 Scope A: crate
 `kubelet` + CRI driver + pods/status + Q27 airgap pause + golden G25;
-T5.6 NodePort plane: Router service plane + service-traffic e2e, Q28;
-T4.1 as-built: crate `runtime` + vendored crictl v1.31.1 + golden G24,
-Q25/Q26) · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 · Layer4=5 ·
-Layer5=7 · Layer6=2 · Layer7=3.
+T5.6 NodePort plane: Router service plane + service-traffic e2e, Q28)
+· 13 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
+Layer4=5 · Layer5=7 · Layer6=2 · Layer7=3.
 
 ---
 

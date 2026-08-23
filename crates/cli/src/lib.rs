@@ -6,6 +6,8 @@
 //! - [`run_forced`] — used by the multicall dispatcher when a symlinked alias
 //!   (`server`, `agent`, ...) selects a known init-pro subcommand.
 
+#![forbid(unsafe_code)]
+
 mod cmd;
 mod config_scan;
 pub mod discovery;

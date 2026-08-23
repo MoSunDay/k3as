@@ -10,7 +10,8 @@
 //! * [`leaderelection`] -- coordination.k8s.io Lease + resourceVersion CAS
 //!   (decision **Q18**);
 //! * [`controllers`] -- ReplicaSet / Deployment / Endpoints / StatefulSet
-//!   / DaemonSet reconcilers (T3.1a + T3.1b; GC is the remaining T3.1b);
+//!   / DaemonSet reconcilers (T3.1a + T3.1b, done Sprint 14; incl. GC +
+//!   namespace lifecycle, decision Q20);
 //! * [`runner`] -- [`ControllerManager`] wiring the whole set together.
 //!
 //! Wire format is JSON-only (decision **Q10**): every object flowing through

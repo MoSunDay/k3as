@@ -6,7 +6,7 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
 
 ---
 
-## T2.1 — etcd embed/FFI/子进程 bundling
+## T2.1 — etcd 语义数据面（纯 Rust 实现，Q17）
 
 - **目标 / Goal**
   Run etcd from inside the single `init-pro` binary (no separate etcd process

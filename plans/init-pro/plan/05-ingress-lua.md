@@ -131,18 +131,20 @@ Reference: openresty phase model (`init_by_lua`, `init_worker_by_lua`,
 
 ---
 
-## T5.4 — 内置 Router 核心 + Ingress→Lua 路由编译
+## T5.4 — 内置 Router 核心 + Ingress→RouteTable 编译（Lua 为 fallback 管线）
 
 - **目标 / Goal**
   The Router core: route tables, upstream pools, and a compiler that turns
-  Kubernetes `Ingress` (and `HTTPRoute`/`Gateway` later) into Lua route
-  programs the data plane executes.
+  Kubernetes `Ingress` (and `HTTPRoute`/`Gateway` later) into
+  `RouteTable` programs the data plane executes (Lua remains the
+  fallback pipeline for programmable routing, T5.2/T5.3).
 
 - **核心实现 / Core implementation**
   - Router watches `Ingress`/`IngressClass`/`Secret`(TLS)/`Service`+`Endpoints`
     via informers (kube-rs).
-  - Compiler emits a Lua routing table (hosts → paths → upstream + rewrites)
-    loaded atomically via T5.5 hot reload.
+  - Compiler emits a `RouteTable` (hosts → paths → upstream + rewrites)
+    loaded atomically via no-restart hot reload (Scope B as-built; the
+    live kube-rs informer source remains T5.5).
   - Upstream selection by `balancer_by_lua` (round-robin/least-conn; pluggable).
   - TLS termination via `rustls` + `ssl_certificate_by_lua` SNI hook.
   - Default backend + path types (`Prefix`/`Exact`/`ImplementationSpecific`).

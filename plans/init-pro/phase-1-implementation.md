@@ -1,8 +1,10 @@
 # Phase 1 实施计划（M0 基座 + M1 Router spike）
 
-> Status of this file: **active**. Tracks the Phase 1 execution plan derived
-> from `index.md` / `README.md`. Sprint outcomes are recorded inline as they
-> land. TODO IDs strictly mirror `index.md`.
+> Status of this file: **done / archived**. Phase 1 (M0 + M1) closed at
+> Sprint 9; retained as the historical execution record (final inline
+> sprint states stand, including the cadence-reconciliation notes below).
+> Forward-looking planning lives in `phase-2-implementation.md` (from
+> Sprint 20 on). TODO IDs strictly mirror `index.md`.
 
 ## Goal（目标）
 交付 **Phase 1 = M0 基座 + M1 路由器 spike**：先证明两条最高风险赌注 ——
@@ -135,3 +137,7 @@ S1 T0.1+T0.3 ─┬─> S2 T0.2+T0.4 ─┐
 > + CI `golden` required check），T5.3/T5.4 标 done（剩余项 → T5.5/Phase 2）。
 > Phase 1 = M0 + M1 达成，DoD 7/7 满足。Phase 2 入口方向待评审：B 路径
 > （T2.1 etcd bundling，平台关键路径起点）vs C 路径（T5.5 Router 热加载）。
+>
+> **[已决 / resolved at Sprint 10]** Phase 2 入口 = **B 路径**（存储层
+> T2.1/T2.2 先行，见 CHANGELOG Sprint 10；后续路线见
+> `phase-2-implementation.md`）。
