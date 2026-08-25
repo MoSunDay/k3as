@@ -69,15 +69,26 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
         return ApiError::NotFoundResource.into_response();
     }
     let name = match super::state::object_name(&body) {
-        Some(n) => n,
+        Some(n) => n.to_string(),
         None => {
-            return ApiError::Invalid {
-                kind: res.kind.clone(),
-                message: "a name is required (metadata.name)".into(),
+            // Upstream apiserver parity: POST with only metadata.generateName
+            // gets a random 5-char suffix (k8s utilrand alphabet) and the
+            // generated name is persisted into the stored object (T7.3 A).
+            match super::state::object_generate_name(&body) {
+                Some(prefix) => format!("{prefix}{}", random_suffix()),
+                None => {
+                    return ApiError::Invalid {
+                        kind: res.kind.clone(),
+                        message: "a name is required (metadata.name)".into(),
+                    }
+                    .into_response();
+                }
             }
-            .into_response();
         }
     };
+    if super::state::object_name(&body).is_none() {
+        super::state::set_object_name(&mut body, &name);
+    }
     let namespace = loc
         .namespace
         .clone()
@@ -124,6 +135,18 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
         }
         Err(e) => storage_error(e, &res.kind, &name).into_response(),
     }
+}
+
+/// Random 5-char suffix over the upstream utilrand alphabet (consonants +
+/// unambiguous digits) for `metadata.generateName` creates.
+fn random_suffix() -> String {
+    const ALPHABET: &[u8] = b"bcdfghjklmnpqrstvwxz2456789";
+    let mut bytes = [0u8; 5];
+    getrandom::fill(&mut bytes).expect("system randomness unavailable");
+    bytes
+        .iter()
+        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
+        .collect()
 }
 
 pub(crate) async fn do_list(st: &AppState, loc: &Loc, params: &ListParams) -> Response {

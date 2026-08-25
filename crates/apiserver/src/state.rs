@@ -97,6 +97,25 @@ pub(crate) fn collection_prefix(group: &str, resource: &str, namespace: Option<&
     KeyPrefix::new(group, resource, namespace.map(str::to_string))
 }
 
+/// Read `metadata.generateName` (the POST-create name prefix, upstream parity).
+pub(crate) fn object_generate_name(value: &Value) -> Option<&str> {
+    value["metadata"]["generateName"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+}
+
+/// Set `metadata.name` on an object (generateName suffixing, before store).
+pub(crate) fn set_object_name(value: &mut Value, name: &str) {
+    if let Some(obj) = value.as_object_mut() {
+        let meta = obj
+            .entry("metadata")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(m) = meta.as_object_mut() {
+            m.insert("name".into(), Value::String(name.to_string()));
+        }
+    }
+}
+
 /// Set `metadata.namespace` on an object (before persistence).
 pub(crate) fn set_namespace(value: &mut Value, namespace: &str) {
     if let Some(obj) = value.as_object_mut() {

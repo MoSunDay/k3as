@@ -2,9 +2,10 @@
 //!
 //! Q21 deliberately keeps the v1 kubectl transport dependency-free: the
 //! apiserver serves plain HTTP/1.1 (axum http1), so one small
-//! request/response exchange is all `rollout status` needs. https is
-//! rejected (auth + TLS arrive with T1.3). The chunked decoder exists so a
-//! future watch-stream surface (T3.4) can reuse this module unchanged.
+//! request/response exchange is all the verbs need (`rollout status` poll,
+//! T7.3 Scope A argoproj get/apply/delete). https is rejected (auth + TLS
+//! arrive with T1.3). The chunked decoder exists so a future watch-stream
+//! surface (T3.4) can reuse this module unchanged.
 //!
 //! One connection per request (`Connection: close`): the poll loop is 4 qps
 //! at most, so connection churn is irrelevant and the code stays trivial.
@@ -69,8 +70,18 @@ impl HttpClient {
         Ok(HttpClient { host, port })
     }
 
-    /// GET `path`, return `(status_code, json_body)` (empty body -> Null).
-    pub(crate) async fn get_json(&self, path: &str) -> Result<(u16, Value), String> {
+    /// Issue one HTTP/1.1 request, return `(status_code, json_body)`
+    /// (empty body -> Null). T7.3 Scope A generalized the old GET-only
+    /// exchange: `body` implies `Content-Type`/`Content-Length` headers;
+    /// `None` sends neither (GET/DELETE). Everything else (connect/read
+    /// timeouts, chunked decoding) is byte-for-byte the Q21 behavior.
+    pub(crate) async fn request_json(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(u16, Value), String> {
         let addr = (self.host.as_str(), self.port);
         let connect = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
@@ -78,14 +89,27 @@ impl HttpClient {
             .map_err(|e| format!("connection to {}:{} failed: {e}", self.host, self.port))?;
         let mut stream = connect;
 
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: application/json\r\n\r\n",
+        let mut request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: application/json\r\n",
             self.host
         );
+        if let (Some(ct), Some(payload)) = (content_type, body) {
+            request.push_str(&format!(
+                "Content-Type: {ct}\r\nContent-Length: {}\r\n",
+                payload.len()
+            ));
+        }
+        request.push_str("\r\n");
         stream
             .write_all(request.as_bytes())
             .await
             .map_err(|e| format!("write request failed: {e}"))?;
+        if let Some(payload) = body {
+            stream
+                .write_all(payload.as_bytes())
+                .await
+                .map_err(|e| format!("write request body failed: {e}"))?;
+        }
         stream
             .flush()
             .await
@@ -114,6 +138,11 @@ impl HttpClient {
             }
         }
         parse_response(&raw)
+    }
+
+    /// GET `path`, return `(status_code, json_body)` (thin wrapper, Q21).
+    pub(crate) async fn get_json(&self, path: &str) -> Result<(u16, Value), String> {
+        self.request_json("GET", path, None, None).await
     }
 }
 

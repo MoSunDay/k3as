@@ -3,8 +3,9 @@
 //! Invoked via the multicall `argv[0]` dispatch (`ln -s init-pro kubectl`);
 //! the CLI clap path is intentionally untouched (plan T3.1b: argv[0] only).
 //!
-//! v1 surface: `kubectl rollout status (deployment/NAME | deployment NAME)`.
-//! Simplifications are locked by decision **Q21**:
+//! v1 surface: `kubectl rollout status (deployment/NAME | deployment NAME)`
+//! plus the argoproj.io verbs (T7.3 Scope A, Q30). Simplifications are
+//! locked by decision **Q21**:
 //! - transport: plain HTTP/1.1 over a raw `tokio::TcpStream`, no auth, no
 //!   https, no new dependencies (TLS + auth arrive with T1.3);
 //! - waiting: poll GET every 250ms instead of a watch stream.
@@ -15,12 +16,16 @@ mod http;
 mod rollout;
 #[cfg(test)]
 mod rollout_poll_tests;
+mod verbs;
+#[cfg(test)]
+mod verbs_tests;
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use http::HttpClient;
 use rollout::{rollout_status, Outcome};
+use verbs::{apply, delete, get, parse_output, resolve_plural, Output};
 
 /// Default apiserver address (server default bind is 127.0.0.1:6443).
 const DEFAULT_SERVER: &str = "http://127.0.0.1:6443";
@@ -46,6 +51,15 @@ pub fn run(args: &[String]) -> ExitCode {
     {
         print!("{}", usage());
         return ExitCode::SUCCESS;
+    }
+
+    // T7.3 Scope A (Q30): argoproj.io verbs dispatch first; everything
+    // else keeps flowing into the Q21 rollout parser below.
+    match args.first().map(String::as_str) {
+        Some("get") => return run_get(args),
+        Some("apply") => return run_apply(args),
+        Some("delete") => return run_delete(args),
+        _ => {}
     }
 
     let config = match parse_args(args) {
@@ -90,6 +104,224 @@ pub fn run(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Parsed flags shared by the argoproj.io verbs (T7.3 Scope A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VerbFlags {
+    server: String,
+    namespace: String,
+    output: Output,
+    /// `apply -f FILE`.
+    file: Option<String>,
+}
+
+/// Parse the flags after the verb word (`--server`, `-n|--namespace`,
+/// `-o|--output` when `allow_output`, `-f|--filename` when `allow_file`)
+/// plus the bare positionals. `--flag value` and `--flag=value` both work;
+/// anything else starting with `-` is an unknown flag (rollout-style error).
+fn parse_verb_flags(
+    args: &[String],
+    allow_output: bool,
+    allow_file: bool,
+) -> Result<(VerbFlags, Vec<String>), String> {
+    let mut flags = VerbFlags {
+        server: DEFAULT_SERVER.to_string(),
+        namespace: DEFAULT_NAMESPACE.to_string(),
+        output: Output::Table,
+        file: None,
+    };
+    let mut positional: Vec<String> = Vec::new();
+
+    let mut idx = 1usize; // args[0] is the verb word itself
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        let (name, inline): (&str, Option<&str>) = match arg.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (arg, None),
+        };
+        let is_flag = matches!(
+            name,
+            "--server" | "--namespace" | "-n" | "-o" | "--output" | "-f" | "--filename"
+        );
+        if !is_flag {
+            if name.starts_with('-') && name.len() > 1 {
+                return Err(format!("unknown flag: {name}"));
+            }
+            positional.push(arg.to_string());
+            idx += 1;
+            continue;
+        }
+        if !allow_output && matches!(name, "-o" | "--output") {
+            return Err(format!(
+                "flag {name} is only supported by \"kubectl get\" in v1"
+            ));
+        }
+        if !allow_file && matches!(name, "-f" | "--filename") {
+            return Err(format!(
+                "flag {name} is only supported by \"kubectl apply\" in v1"
+            ));
+        }
+        let mut value = inline.map(str::to_string);
+        if value.is_none() {
+            idx += 1;
+            value = args.get(idx).cloned();
+        }
+        let value = value.ok_or_else(|| format!("flag needs an argument: {name}"))?;
+        match name {
+            "--server" => flags.server = value,
+            "--namespace" | "-n" => flags.namespace = value,
+            "-o" | "--output" => flags.output = parse_output(&value)?,
+            "-f" | "--filename" => flags.file = Some(value),
+            _ => unreachable!("flag set is checked by is_flag above"),
+        }
+        idx += 1;
+    }
+    Ok((flags, positional))
+}
+
+/// Split positionals into `(plural, Option<name>)`; `TYPE/NAME` or `TYPE
+/// NAME`. `required_name` distinguishes `delete` (name mandatory) from
+/// `get` (list allowed).
+fn resolve_positionals(
+    positional: &[String],
+    required_name: bool,
+) -> Result<(&'static str, Option<String>), String> {
+    let (kind, name): (&str, Option<String>) = match positional {
+        [single] => match single.split_once('/') {
+            Some((k, n)) => (k, Some(n.to_string())),
+            None if required_name => {
+                return Err("resource must be specified as TYPE/NAME or TYPE NAME".into())
+            }
+            None => (single.as_str(), None),
+        },
+        [kind, name] => (kind.as_str(), Some(name.clone())),
+        [] => return Err("you must specify a resource type (workflow | cronworkflow)".into()),
+        _ => {
+            return Err(format!(
+                "unexpected extra arguments: {}",
+                positional[2..].join(" ")
+            ))
+        }
+    };
+    let plural = resolve_plural(kind)?;
+    match name.as_deref() {
+        Some("") => Err("resource name must not be empty".to_string()),
+        other => Ok((plural, other.map(str::to_string))),
+    }
+}
+
+/// `kubectl get (TYPE | TYPE/NAME | TYPE NAME) [-o json|yaml|name]`.
+fn run_get(args: &[String]) -> ExitCode {
+    let (flags, plural, name) =
+        match parse_verb_flags(args, true, false).and_then(|(flags, positional)| {
+            let (plural, name) = resolve_positionals(&positional, false)?;
+            Ok((flags, plural, name))
+        }) {
+            Ok(v) => v,
+            Err(msg) => return verb_error(msg),
+        };
+    let http = match HttpClient::parse(&flags.server) {
+        Ok(h) => h,
+        Err(msg) => return verb_error(msg),
+    };
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(msg) => return verb_error(msg),
+    };
+    match rt.block_on(get(
+        &http,
+        &flags.namespace,
+        plural,
+        name.as_deref(),
+        flags.output,
+    )) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(msg) => verb_error(msg),
+    }
+}
+
+/// `kubectl apply -f FILE` (Server-Side Apply, T7.3 Scope A).
+fn run_apply(args: &[String]) -> ExitCode {
+    let (flags, file) =
+        match parse_verb_flags(args, false, true) {
+            Ok((flags, positional)) => match (flags.file.clone(), positional.is_empty()) {
+                (_, false) => {
+                    return verb_error(format!(
+                        "unexpected extra arguments: {}",
+                        positional.join(" ")
+                    ))
+                }
+                (Some(file), true) => (flags, file),
+                (None, true) => return verb_error(
+                    "you must specify --filename (-f) to apply, e.g. \"kubectl apply -f wf.yaml\""
+                        .to_string(),
+                ),
+            },
+            Err(msg) => return verb_error(msg),
+        };
+    let http = match HttpClient::parse(&flags.server) {
+        Ok(h) => h,
+        Err(msg) => return verb_error(msg),
+    };
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(msg) => return verb_error(msg),
+    };
+    match rt.block_on(apply(&http, &flags.namespace, &file)) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(msg) => verb_error(msg),
+    }
+}
+
+/// `kubectl delete (TYPE/NAME | TYPE NAME)`.
+fn run_delete(args: &[String]) -> ExitCode {
+    let (flags, plural, name) =
+        match parse_verb_flags(args, false, false).and_then(|(flags, positional)| {
+            let (plural, name) = resolve_positionals(&positional, true)?;
+            Ok((flags, plural, name))
+        }) {
+            Ok(v) => v,
+            Err(msg) => return verb_error(msg),
+        };
+    let Some(name) = name else {
+        return verb_error("resource must be specified as TYPE/NAME or TYPE NAME".to_string());
+    };
+    let http = match HttpClient::parse(&flags.server) {
+        Ok(h) => h,
+        Err(msg) => return verb_error(msg),
+    };
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(msg) => return verb_error(msg),
+    };
+    match rt.block_on(delete(&http, &flags.namespace, plural, &name)) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(msg) => verb_error(msg),
+    }
+}
+
+/// Uniform failure exit for the T7.3 verbs.
+fn verb_error(msg: String) -> ExitCode {
+    eprintln!("error: {msg}");
+    ExitCode::from(1)
+}
+
+/// Q21: a tiny current-thread runtime is all the verbs need.
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to start tokio runtime: {e}"))
 }
 
 /// Parse `rollout status <target> [flags]` into a [`Config`] (pure).
@@ -215,13 +447,17 @@ fn usage() -> String {
     let lines: Vec<String> = vec![
         "kubectl controls the init-pro cluster.".into(),
         String::new(),
-        "v1 surface: rollout status for Deployments (T3.1b, Q21 plain-HTTP transport).".into(),
+        "v1 surface: rollout status for Deployments (T3.1b, Q21 plain-HTTP transport)".into(),
+        "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30).".into(),
         String::new(),
         "Usage:".into(),
         "  kubectl rollout status (TYPE/NAME | TYPE NAME) [flags]".into(),
+        "  kubectl get (TYPE | TYPE/NAME | TYPE NAME) [-o json|yaml|name] [flags]".into(),
+        "  kubectl apply -f FILE [flags]                    (Server-Side Apply, one manifest)".into(),
+        "  kubectl delete (TYPE/NAME | TYPE NAME) [flags]".into(),
         String::new(),
-        "Target forms: deployment/NAME, deployments/NAME, deploy/NAME (deployment only in v1)."
-            .into(),
+        "Target forms: deployment/NAME, deployments/NAME, deploy/NAME (deployment only in v1).".into(),
+        "argoproj types: workflow (wf), cronworkflow (cwf, cronwf) — argoproj.io/v1alpha1 only.".into(),
         String::new(),
         "Flags:".into(),
         "  -h, --help                 help for kubectl".into(),
@@ -231,6 +467,8 @@ fn usage() -> String {
         format!("  -n, --namespace string     namespace scope (default \"{DEFAULT_NAMESPACE}\")"),
         "      --timeout duration    max wait, e.g. 30s, 5m, or bare seconds; 0 = poll once".into(),
         "                            (default: wait forever)".into(),
+        "  -o, --output string        output format: json|yaml|name (get only, default table)".into(),
+        "  -f, --filename string      manifest file to apply (apply only, required)".into(),
     ];
     let mut text = lines.join("\n");
     text.push('\n');

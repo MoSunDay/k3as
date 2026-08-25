@@ -1433,3 +1433,78 @@ remains T3.4 with the real etcd-gRPC client (Q17 supersede note).
 `--kine-tls`/`datastore-*` stay noops (flag-matrix §C.6). The embedded
 store keeps its role as default and test double, so every existing test
 and golden fixture runs unchanged.
+
+---
+
+## Q30 — Argo Workflows integration: typed built-in API group + registration-driven surface, not a vendored argo server (T7.3 / Sprint 21)
+
+**Date.** 2026-08-25 (Sprint 21, T7.3 Scope A).
+
+**Context.**
+T7.3 makes argo-workflows a first-class built-in: `Workflow` and
+`CronWorkflow` created and managed natively by init-pro, no separate
+addon install. Upstream ships a Go API server (`argo server`), a Go
+workflow controller, and the `argo` CLI — three subprocess-sized
+surfaces. init-pro already has the generic machinery those need: a
+typed resource model (`crates/api`), REST CRUD/SSA/watch routes driven
+purely by schema registration (`crates/apiserver`, T1.2), control loops
+(T3.1), and a kubectl-compatible client (`crates/kubectl`). The
+question was which parts to port, which to reuse, and what to defer —
+under the standing constraints: single multicall binary (Q1), full
+protocol conformance (Q2), JSON-only wire (Q10), and no protobuf.
+
+**Options.**
+- A) **Vendored/supervised argo server + argo CLI** (subprocess bundling
+  a la containerd, Q24-Q26). Rejected: `argo server` is a full Go
+  apiserver+UI process — bundling it contradicts the Q1 single-binary
+  story's spirit, adds a second apiserver in front of ours, and the
+  upstream binary has no offline vendor slot in this environment.
+- B) **Typed built-in API group + registration-driven surface.** Port
+  the upstream v1alpha1 *types* faithfully into `crates/api`, register
+  them like any built-in group, and let the existing generic routes and
+  kubectl client serve them. No argo server, no bespoke handlers.
+- C) **CRD-only, no typed port.** Register argoproj.io as an opaque
+  schema and store blobs. Cheapest, but every downstream consumer
+  (controller, kubectl rendering, validation, fixtures) loses the type
+  information, and round-trip fidelity against upstream YAML becomes
+  unverifiable.
+
+**Decision.** B, as built (Sprint 21, Scope A):
+- (a) Full-field typed 1:1 port of upstream v4 `pkg/apis/workflow/v1alpha1`
+  into `crates/api/src/argoproj/` (16 modules, ~313 Go json tags).
+  SSOT = upstream Go json tags from `link_repos/argo-workflows`;
+  embedded k8s core types are reused from the `k8s_openapi` crate, not
+  re-declared. Wire stays JSON-only (Q10): omitempty maps to
+  `Option`/`Vec`/`BTreeMap` + skip-helpers, Go string enums become type
+  aliases, custom serde exists only where upstream is genuinely polymorphic
+  (`AnyString`/`Amount`/`Item`), steps are `Vec<Vec<WorkflowStep>>`,
+  `WorkflowStep.inline` is `Option<Box<Template>>`, `Plugin` is a
+  transparent `serde_json::Value`.
+- (b) CRUD/SSA/watch come from the existing generic apiserver routes via
+  schema registration — zero bespoke handlers. shortNames
+  (workflows→`wf`, cronworkflows→`cwf`/`cronwf`) were added to the
+  registry *contract* (`TypeInfo.short_names` +
+  `SchemaRegistry::register_with_short_names()`; the old `register()` is
+  unchanged) rather than hardcoded in discovery; discovery projects
+  shortNames only when non-empty.
+- (c) kubectl gets minimal built-in `get` / `apply -f` / `delete` verbs
+  (verb-first dispatch, Output table, multi-doc YAML manifests) — not an
+  argo CLI reimplementation. v3 manifests with the singular `schedule`
+  field are accepted via a serde alias + string-or-vec deser and
+  re-encoded as the v4 `schedules: Vec<String>`.
+- (d) Workflow controller/executor semantics (actually reconciling
+  Workflow specs into pods), artifact storage, events, and the wider
+  argo CLI surface are deferred to later T7.3 scopes.
+
+**Consequences.**
+`argoproj.io` is a zero-install built-in: a fresh cluster lists
+`Workflow`/`CronWorkflow` in `/apis` and `kubectl get wf` works out of
+the box. The discovery surface is a byte-stable golden (**G27**:
+`/apis/argoproj.io/v1alpha1`; **G28**: Workflow+CronWorkflow CRUD/SSA
+lifecycle), and upstream YAML applies as-is (11 upstream-derived
+fixtures + 8 round-trip fidelity tests pin this). No protobuf ever
+(Q10); no argo server/CLI subprocess (Q1 holds). Cost: the typed port
+must track upstream — its maintenance burden is bounded by upstream tag
+drift, and the fidelity fixtures are the drift alarm. Until Scope B+
+lands, argoproj.io objects are stored/served but nothing executes them;
+the workflow controller is the explicitly open remainder of T7.3.

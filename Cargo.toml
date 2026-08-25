@@ -54,6 +54,9 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env", "help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML manifest parsing for `kubectl apply` (T7.3 Scope A, Q30). Caret-only
+# like every external dep (precedent: libsql).
+serde_yaml_ng = "0.10"
 thiserror = "2"
 # SQLite storage backend (T2.3, Q29). Local-file mode only: no remote /
 # replication / sync / TLS features -- the server owns the single DB file.

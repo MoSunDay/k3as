@@ -7,6 +7,82 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 21 — T7.3 Scope A: argoproj.io Workflow/CronWorkflow as first-class built-ins (2026-08-25)
+
+**Goal:** open T7.3 — `Workflow` and `CronWorkflow` become typed
+**built-in** API objects with zero install, servable by the existing
+generic apiserver surface and drivable from the built-in kubectl.
+Scope A is the API group + client plane; T7.3 stays **in-progress** —
+the workflow controller (reconciling Workflow specs into pods), argo
+CLI beyond get/apply/delete, artifact storage, and events are Scope B+.
+Locked as **Q30**: typed port + registration-driven surface, not a
+vendored argo server.
+
+### S1 — typed port of upstream v1alpha1 (`crates/api/src/argoproj/`)
+- Full-field typed 1:1 Rust port of upstream Argo Workflows v4
+  `pkg/apis/workflow/v1alpha1`: 16 modules covering ~313 Go json tags.
+  SSOT = `link_repos/argo-workflows` Go json tags; embedded k8s core
+  types reused from `k8s_openapi` (not re-declared). Wire JSON-only
+  (Q10).
+- Conventions: exact omitempty mapping via `Option`/`Vec`/`BTreeMap` +
+  skip-helpers; type aliases for Go string enums; custom serde only
+  where upstream is genuinely polymorphic (`AnyString`/`Amount`/`Item`);
+  steps as `Vec<Vec<WorkflowStep>>`; `WorkflowStep.inline` as
+  `Option<Box<Template>>`; `Plugin` as transparent
+  `serde_json::Value`; v4 `schedules: Vec<String>` with a v3 `schedule`
+  alias + string-or-vec deser for v3 compat.
+
+### S2 — registration + shortNames plumbing (`crates/api/src/schema.rs`)
+- `Workflow` + `CronWorkflow` registered in group
+  `argoproj.io/v1alpha1` with shortNames workflows→`wf`,
+  cronworkflows→`cwf`,`cronwf`; wired into `crates/cli/src/discovery.rs`
+  `served_schema`.
+- shortNames became a registry **contract** feature: new
+  `TypeInfo.short_names` + `SchemaRegistry::register_with_short_names()`
+  (the old `register()` is unchanged); discovery projects shortNames
+  only when non-empty. CRUD/SSA/watch need zero bespoke handlers — they
+  come from the existing generic apiserver routes.
+
+### S3 — kubectl built-in verbs (`crates/kubectl`)
+- Verb-first dispatch with minimal `get` / `apply -f` / `delete` verbs:
+  Output table rendering with an age column, manifest parse incl.
+  multi-doc YAML. Generalized HTTP client (`request_json` with
+  content-type/body); SSA = PATCH `?fieldManager=...` with
+  `application/apply-patch+yaml`.
+- New dep `serde_yaml_ng = "0.10"` (caret-only; libsql precedent).
+
+### S4 — fidelity tests + golden gates
+- Tests: 746 → 812 workspace green (+66; incl. 8 round-trip fidelity
+  tests in `crates/api/tests/argoproj_fidelity.rs` vs 11
+  upstream-derived fixtures under `crates/api/tests/fixtures/argoproj/`,
+  7 apiserver integration tests in
+  `crates/apiserver/tests/argoproj_crud.rs` (CRUD/SSA/discovery; watch
+  covered by the storage-layer tests), and 23 kubectl verb tests).
+- Golden regenerated: G02 `/apis` now includes argoproj.io; NEW **G27**
+  (byte-stable `/apis/argoproj.io/v1alpha1` golden) and **G28**
+  (Workflow+CronWorkflow CRUD/SSA lifecycle) in NEW
+  `scripts/golden/suites/argoproj.sh`.
+- `scripts/golden-conformance.sh` had grown to 877 lines (>800 file
+  cap): split by suite into
+  `scripts/golden/suites/{storage,controllers,scheduler,nodes,argoproj}.sh`
+  sourced from the main script — a pure move (byte-identical
+  reconstruction verified) — still 33/33 green.
+- `scripts/apiserver-discovery-parity-test.sh` gained argoproj group +
+  shortNames assertions; cli-flag-parity still 16/16; clippy
+  `-D warnings` zero; fmt clean.
+
+### S5 — smoke hardening: generateName + `-o name` parity
+- Manual smoke against real upstream examples surfaced two gaps, both
+  fixed: (1) `metadata.generateName`-only manifests (the canonical
+  `hello-world.yaml` quickstart) now work — apiserver POST mints a
+  `<prefix>+5-char` suffix over the upstream utilrand alphabet
+  (`bcdfghjklmnpqrstvwxz2456789`, via `getrandom 0.4` in apiserver,
+  persisted into the stored object), and kubectl `apply -f` falls back
+  to a POST-create for them (real-kubectl semantics); (2) `get -o name`
+  prints qualified `workflow.argoproj.io/<name>` (was bare names).
+- G28 extended with the generateName leg; the upstream quickstart now
+  round-trips apply → get → delete end-to-end via the built-in kubectl.
+
 ## Sprint 20 — T4.2 Scope B: probes + volumes + pull policy + hostname + golden G26 (2026-08-23)
 
 **Goal:** make pods dependable — probes and volumes turn "runs" into

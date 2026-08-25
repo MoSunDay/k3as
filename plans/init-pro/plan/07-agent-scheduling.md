@@ -66,14 +66,35 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   API/CLI surface.
 
 - **核心实现 / Core implementation**
-  - **PLACEHOLDER — `link_repos/argo-workflows` memory still being generated;
-    refine this section once upstream analysis lands.**
-  - Expose `Workflow` / `CronWorkflow` as native API objects (CRD baked into
-    init-pro API groups, or promoted to built-in types) so `kubectl get wf`
-    works with zero install.
-  - Embed the argo workflow controller + cron controller into the single
-    `init-pro` binary (Q1 multicall; supervisor via T0.3), running
-    server-side like other Layer-3 control loops.
+  - **As-built (Sprint 21, Scope A, Q30):** `Workflow`/`CronWorkflow` are
+    **typed built-in API objects** in group `argoproj.io/v1alpha1`, ported
+    full-field 1:1 from upstream Argo Workflows v4
+    `pkg/apis/workflow/v1alpha1` into new `crates/api/src/argoproj/`
+    (16 modules, ~313 Go json tags; SSOT = `link_repos/argo-workflows` Go
+    json tags; embedded k8s core types reused from the `k8s_openapi` crate;
+    JSON-only wire per Q10). Conventions: exact omitempty mapping via
+    `Option`/`Vec`/`BTreeMap` + skip-helpers, type aliases for Go string
+    enums, custom serde only for `AnyString`/`Amount`/`Item`, steps as
+    `Vec<Vec<WorkflowStep>>`, `WorkflowStep.inline` as
+    `Option<Box<Template>>`, `Plugin` as transparent
+    `serde_json::Value`, v4 `schedules: Vec<String>` with a v3 `schedule`
+    alias + string-or-vec deser for v3 compat. Registration: shortNames
+    workflows→`wf`, cronworkflows→`cwf`/`cronwf` plumbed through new
+    `TypeInfo.short_names` + `SchemaRegistry::register_with_short_names()`
+    in `crates/api/src/schema.rs` (old `register()` unchanged; discovery
+    projects shortNames only when non-empty; wired via
+    `crates/cli/src/discovery.rs`). CRUD/SSA/watch come from the existing
+    generic apiserver routes via schema registration — zero bespoke
+    handlers. kubectl built-ins (`crates/kubectl`): verb-first dispatch
+    with minimal `get` / `apply -f` / `delete` verbs (Output table
+    rendering, age column, manifest parse incl. multi-doc YAML),
+    generalized `request_json` HTTP client (content-type/body; SSA =
+    PATCH `?fieldManager=` with `application/apply-patch+yaml`); new dep
+    `serde_yaml_ng = "0.10"` (caret-only, libsql precedent).
+  - Remaining (Scope B+): embed the argo workflow controller + cron
+    controller into the single `init-pro` binary (Q1 multicall; supervisor
+    via T0.3), running server-side like other Layer-3 control loops —
+    actually reconciling Workflow specs into pods.
   - Reuse init-pro scheduler (T3.2) and kubelet (T4.2) for pod execution —
     argo steps land as pods; no parallel executor.
   - Minimal CRD subset: steps/dag templates, artifacts (object-store backed),
@@ -87,11 +108,29 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     policy honored.
   - No external install step: a fresh `init-pro` cluster lists `Workflow`
     via `kubectl api-resources` out of the box.
+  - As-built (Scope A): fidelity = 8 round-trip tests in
+    `crates/api/tests/argoproj_fidelity.rs` vs 11 upstream-derived fixtures
+    (`crates/api/tests/fixtures/argoproj/`) — upstream YAML applies as-is;
+    7 integration tests in `crates/apiserver/tests/argoproj_crud.rs`
+    (CRUD/SSA/discovery; watch covered by storage-layer tests); 23 kubectl
+    verb tests. Golden: G02 `/apis` now lists argoproj.io; NEW **G27**
+    (byte-stable `/apis/argoproj.io/v1alpha1` golden) + **G28**
+    (Workflow+CronWorkflow CRUD/SSA lifecycle) in
+    `scripts/golden/suites/argoproj.sh` — 33/33 green.
+  - As-built (S5 smoke hardening): `metadata.generateName`-only POSTs get
+    a server-minted 5-char utilrand suffix (`crates/apiserver/src/collection.rs`,
+    `getrandom 0.4`); kubectl `apply -f` POST-creates such manifests and
+    `-o name` prints qualified `workflow.argoproj.io/<name>`; upstream
+    `examples/hello-world.yaml` round-trips apply→get→delete via the
+    built-in kubectl.
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — **`link_repos/argo-workflows` not yet analyzed
-    (memory being generated).** Upstream architecture, CRD versions, artifact
-    storage choice, and the embed-vs-rewrite decision all pending. License
-    review (Apache-2.0 expected) pending.
+- **状态 / Status** — in-progress (Scope A done, Sprint 21)
+- **证据 / Evidence** — api fidelity 8 (vs 11 fixtures) / apiserver 8 /
+  kubectl 25 tests; golden G27/G28 (33/33); Q30 ADR. Workspace 812
+  passed / 0 failed; clippy `-D warnings` zero; fmt clean.
+- **卡点 / Blockers** — upstream analysis landed (SSOT = upstream Go json
+  tags). Scope A does NOT yet run workflows: the workflow controller
+  (reconciling Workflow specs into pods), executor semantics, artifact
+  storage, and events are Scope B+; argo CLI surface beyond
+  get/apply/delete likewise open.
 - **依赖 / Depends on** — T1.2, T3.1

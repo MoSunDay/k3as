@@ -57,6 +57,19 @@ body="$(curl -fsS "$BASE/apis/init-pro.io/v1")"
 echo "$body" | grep -q '"luarouters"' || bad "/apis/init-pro.io/v1 missing luarouters: $body"
 ok "/apis/init-pro.io/v1 serves APIResourceList (luarouters)"
 
+# /apis must also include the built-in argoproj.io group (T7.3 Scope A).
+body="$(curl -fsS "$BASE/apis")"
+echo "$body" | grep -q '"argoproj.io"' || bad "/apis missing argoproj.io group: $body"
+ok "/apis serves APIGroupList with argoproj.io"
+
+# /apis/argoproj.io/v1alpha1 -> resource index: Workflow/CronWorkflow + wf/cwf.
+body="$(curl -fsS "$BASE/apis/argoproj.io/v1alpha1")"
+echo "$body" | grep -q '"workflows"' || bad "/apis/argoproj.io/v1alpha1 missing workflows: $body"
+echo "$body" | grep -q '"cronworkflows"' || bad "/apis/argoproj.io/v1alpha1 missing cronworkflows: $body"
+echo "$body" | grep -q '"shortNames":\["wf"\]' || bad "/apis/argoproj.io/v1alpha1 missing wf shortName: $body"
+echo "$body" | grep -q '"shortNames":\["cwf","cronwf"\]' || bad "/apis/argoproj.io/v1alpha1 missing cwf/cronwf shortNames: $body"
+ok "/apis/argoproj.io/v1alpha1 serves workflows + cronworkflows (wf/cwf/cronwf)"
+
 # Content-Type is application/json everywhere (decision Q10).
 ct="$(curl -fsS -o /dev/null -w '%{content_type}' "$BASE/api")"
 case "$ct" in
