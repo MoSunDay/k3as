@@ -1,5 +1,6 @@
 //! Controller set (T3.1a/T3.1b): ReplicaSet / Deployment / Endpoints /
-//! StatefulSet / DaemonSet / Namespace lifecycle / garbage collection.
+//! StatefulSet / DaemonSet / Namespace lifecycle / garbage collection /
+//! Argo Workflows (T7.3 Scope B, Q30).
 //!
 //! Each controller is a pure-ish `reconcile(client, object)` function over
 //! `serde_json::Value` (JSON-only wire, Q10); desired-state convergence
@@ -17,6 +18,16 @@ pub mod ordinal;
 pub mod replicaset;
 pub mod rollout;
 pub mod statefulset;
+pub mod workflow;
+pub mod workflow_dag;
+/// Pure naming/phase math for Workflows (T7.3 Scope B, Q30).
+pub mod workflow_phase;
+/// Pure Workflow plan compilation (T7.3 Scope B, Q30).
+pub mod workflow_plan;
+/// Workflow step-pod assembly (T7.3 Scope B, Q30).
+pub mod workflow_pod;
+/// Workflow status/node-tree composition (T7.3 Scope B, Q30).
+pub mod workflow_status;
 
 use std::sync::Arc;
 
@@ -41,6 +52,10 @@ pub struct Caches {
     /// Cluster-scoped Namespaces (T3.1b, Q20): the namespace lifecycle
     /// controller reconciles terminating namespaces through this cache.
     pub namespaces: Arc<ObjectStore>,
+    /// `argoproj.io/workflows` (T7.3 Scope B, Q30): the Workflow
+    /// controller compiles steps/DAG entrypoints into pods through this
+    /// cache; pod events fan out to their owning Workflow.
+    pub workflows: Arc<ObjectStore>,
 }
 
 impl Default for Caches {
@@ -60,6 +75,7 @@ impl Caches {
             services: Arc::new(ObjectStore::new()),
             nodes: Arc::new(ObjectStore::new()),
             namespaces: Arc::new(ObjectStore::new()),
+            workflows: Arc::new(ObjectStore::new()),
         }
     }
 }

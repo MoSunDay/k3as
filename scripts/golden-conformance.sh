@@ -21,8 +21,11 @@
 # G25 scope A lifecycle; G26 scope B: S1 probe gating/restart, S2
 # emptyDir + configMap projection, S4 pod-name hostname, on the airgap
 # echo workload; G24-G26 SKIP without the vendor bundle, G25/G26 also
-# need cc), and the argoproj.io group G27-G28 (T7.3 Scope A:
-# byte-stable Workflow/CronWorkflow discovery + CRUD/SSA lifecycle).
+# need cc), and the argoproj.io group G27-G29 (T7.3 Scope A:
+# byte-stable Workflow/CronWorkflow discovery + CRUD/SSA lifecycle; Scope B
+# G29: a two-step Workflow runs to Succeeded on the agent/containerd stack
+# with the Q27 airgap wfstep image; G29 SKIPs like G25 without the vendor
+# bundle or cc).
 #
 # Volatility: the only non-deterministic field is APIVersions.serverAddress
 # (the bind host:port); it is normalized to the token @@PORT@@ before diffing.

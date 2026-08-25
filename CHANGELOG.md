@@ -7,6 +7,104 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 22 — T7.3 Scope B: the built-in Workflow controller — Workflows actually run (2026-08-25)
+
+**Goal:** make argoproj.io Workflows **execute** — Scope B lands the
+workflow controller inside `init-pro`, reconciling Workflow specs into
+real pods on the existing scheduler/kubelet path, plus the terminal
+pod-phase ladder the node status needed to report step results, the
+`kubectl api-resources`/`api-versions` acceptance leg, and golden G29
+as the end-to-end gate. T7.3 stays **in-progress** — the CronWorkflow
+controller, executor semantics, and the wider argo CLI surface remain
+open. Q30 gains a Scope B addendum (in-process controller, no executor
+sidecar, node IDs = names).
+
+### S1 — in-process Workflow controller (`crates/controllers/src/controllers/`)
+- The controller runs inside `ControllerManager` using the T3.1/Q19
+  pattern — informer/workqueue over `StorageClient`; no HTTP client.
+  New modules: `workflow.rs` (308 lines, reconcile loop),
+  `workflow_plan.rs` (290, steps/Pod-entrypoint plan compilation),
+  `workflow_dag.rs` (157, Kahn topological layering from
+  `dependencies`/simple `depends` — `&&`-split names and
+  `.Succeeded`-style suffixes tolerated), `workflow_pod.rs` (206, pod
+  JSON assembly: template-over-workflow overlay, restartPolicy Never,
+  labels `workflows.argoproj.io/workflow` + `/template`, annotation
+  `workflows.argoproj.io/node-name`, controller ownerReference),
+  `workflow_status.rs` (171, node-tree builders), `workflow_phase.rs`
+  (112, pure naming/phase math).
+- Wiring: `runner.rs` (594 lines) gains the Kind::Workflow queue +
+  informer, pod-event `enqueue_owner` fan-out and a 5s resync;
+  `controllers/mod.rs` gains `Caches.workflows`; `gc.rs` treats
+  Workflow as a cascade-delete owner kind.
+
+### S2 — supported constructs, simplifications, node model
+- Supported template constructs: `container`, `script` (simplified:
+  `command: ["sh","-c", source]`), `steps` (sequential groups of
+  parallel steps), `dag` layering. Unsupported constructs
+  (suspend/http/resource/plugin/missing template) park the workflow at
+  `Pending` with a `status.message` naming them.
+- Node model simplification: node ID = node name (the upstream hash is
+  elided); root node typed Steps/DAG/Pod; StepGroup nodes `<wf>[g]`;
+  step nodes `<wf>[g].<step>`; DAG tasks `<wf>.<task>`. Failure →
+  workflow `Failed` + message + `Completed` condition; all-succeeded →
+  `Succeeded` + `finishedAt`.
+- 4 integration tests in `crates/controllers/tests/workflow.rs`
+  (steps-to-Succeeded, failed-pod-fails-workflow, container-entrypoint
+  root Pod node, DAG diamond layering); controllers 99 → 111.
+
+### S3 — kubelet terminal pod phases (`crates/kubelet/src/status.rs`, 453 → 573 lines)
+- Mid-sprint prerequisite found: the old phase ladder only ever
+  emitted Running/Pending, so an exited-0 `restartPolicy: Never` pod
+  stuck at Pending — diverging from upstream and hiding step results
+  from the controller. The ladder now: Running (unchanged, not
+  probe-gated) / all-terminated + Never → Failed (any nonzero) |
+  Succeeded / all-terminated + OnFailure + all-zero → Succeeded / else
+  Pending (Always is never terminal). +6 unit tests; kubelet 84 → 90.
+
+### S4 — kubectl `api-resources` + `api-versions` (`crates/kubectl/src/discovery.rs`)
+- Optional T7.3 enhancement that satisfies the card acceptance "a
+  fresh cluster lists Workflow via kubectl api-resources out of the
+  box": `api-resources` prints a NAME/SHORTNAMES/APIVERSION/NAMESPACED/
+  KIND table sorted by NAME; `api-versions` prints sorted group/versions
+  incl. `v1`. Live smoke on a fresh empty cluster lists `workflows wf
+  argoproj.io/v1alpha1 true Workflow` and `cronworkflows cwf,cronwf ...`.
+  kubectl 49 → 60 (new `discovery.rs` + `discovery_tests.rs` +
+  `discovery_wire_tests.rs`).
+
+### S5 — golden G29 (`scripts/golden/suites/argoproj.sh`, 59 → 195 lines)
+- **G29**: a 2-step Workflow applied via the built-in kubectl on the
+  suite's own SRV2 server + agent runs to `Succeeded`; status asserts
+  root Steps/Succeeded + both Pod nodes Succeeded + `finishedAt`.
+  SKIP gates preserved (vendor bundle / cc, Q25/Q27). Steps need a
+  one-shot image (the echo image never exits): NEW
+  `scripts/build-workflow-image.sh` (158 lines) builds the
+  deterministic OCI tar for `wfstep` — two runs byte-identical.
+- Teardown deletes the Workflow first (GC cascades the step pods) so
+  the data-dir `rm` never hits busy containerd mounts.
+  `golden/README.md` cases table repaired to the full G01-G29
+  inventory. Golden 33 → **34/34, 0 failed** — verified 3x this
+  session.
+
+### P1 — review follow-up: test-file size rectification
+- `crates/kubectl/src/verbs_tests.rs` 461 → 229 lines + new
+  `verbs_wire_tests.rs`; `crates/apiserver/tests/argoproj_crud.rs`
+  444 → 179 + new `argoproj_ssa.rs` + shared `argoproj_support/mod.rs`.
+  Test counts preserved exactly (kubectl 49; argoproj 4+4). All files
+  now within the 400-line engineering cap.
+
+**Defects found & fixed mid-sprint (audit trail):** kubelet phase
+ladder gap (S3); plan-compiler compile errors (volumes double-flatten;
+root children hardcoded to group 0); G29 teardown busy-mount under
+`set -e`; kubectl flag order (flags must follow the verb), caught in
+smoke.
+
+**Gates:** `cargo build --workspace --locked` ok; `cargo fmt --all
+--check` clean; `cargo clippy --workspace --all-targets --locked --
+-D warnings` zero; workspace tests **841 passed / 0 failed**
+(812 → 841); `scripts/golden-conformance.sh` 34/34;
+`scripts/cli-flag-parity-test.sh` 16/16;
+`scripts/apiserver-discovery-parity-test.sh` ALL passed.
+
 ## Sprint 21 — T7.3 Scope A: argoproj.io Workflow/CronWorkflow as first-class built-ins (2026-08-25)
 
 **Goal:** open T7.3 — `Workflow` and `CronWorkflow` become typed

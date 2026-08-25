@@ -1508,3 +1508,19 @@ must track upstream — its maintenance burden is bounded by upstream tag
 drift, and the fidelity fixtures are the drift alarm. Until Scope B+
 lands, argoproj.io objects are stored/served but nothing executes them;
 the workflow controller is the explicitly open remainder of T7.3.
+
+**Scope B addendum (Sprint 22).** Scope B landed the workflow
+controller; the Q30 shape held, with these Scope B consequences:
+- The controller runs **in-process** inside `ControllerManager`,
+  reusing the T3.1 informer/workqueue framework over `StorageClient`
+  (Q19; no HTTP client) — the same control-loop pattern as
+  ReplicaSet/Deployment, not a supervised argo-controller subprocess
+  (Q1 holds).
+- Pods-as-steps WITHOUT the upstream wait/executor sidecar: the
+  template container runs directly and kubelet terminal pod phases
+  drive node phases (upstream-aligned terminal ladder: Never →
+  Failed/Succeeded by exit code; OnFailure + all-zero → Succeeded).
+- Node IDs are the node names; the upstream node-ID hash is elided.
+- Unsupported template constructs (suspend/http/resource/plugin/missing
+  template) park the workflow at `Pending` with a `status.message`
+  naming them, rather than erroring or silently dropping steps.

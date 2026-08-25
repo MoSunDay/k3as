@@ -1,9 +1,15 @@
 //! Pod status construction for the `/status` write path (TODO **T4.2**).
 //!
-//! Scope A: phase is `Running` only when the sandbox is READY and every
-//! spec container is RUNNING; everything else is `Pending`. Timestamps are
-//! wall-clock strings passed in, and [`status_semantically_eq`] ignores
-//! them so the sync loop doesn't spam identical PUTs every cycle.
+//! Phase ladder (upstream kubelet semantics, T4.2 Scope B support for
+//! T7.3 / Argo workflows): `Running` when the sandbox is READY and every
+//! spec container is RUNNING (not probe-gated); when EVERY spec
+//! container's latest observation is EXITED, `restartPolicy: Never`
+//! reaches terminal `Succeeded`/`Failed` (by exit code) and `OnFailure`
+//! reaches `Succeeded` only when all exits were 0 (non-zero keeps
+//! restarting); `Always` never leaves `Pending` on exit (restart
+//! semantics keep it non-terminal). Timestamps are wall-clock strings
+//! passed in, and [`status_semantically_eq`] ignores them so the sync
+//! loop doesn't spam identical PUTs every cycle.
 
 use serde_json::{json, Value};
 
@@ -30,6 +36,10 @@ pub fn build_pod_status(
     let mut statuses: Vec<Value> = Vec::new();
     let mut all_running = !pod.containers.is_empty();
     let mut all_ready = all_running && sandbox_ready;
+    // Terminal tracking (T4.2 Scope B): every spec container's latest
+    // observation EXITED, and whether any exited non-zero.
+    let mut all_terminated = !pod.containers.is_empty();
+    let mut any_failed = false;
     for spec in &pod.containers {
         // Highest-attempt observation wins (latest incarnation of the name).
         let observed = snap
@@ -40,6 +50,7 @@ pub fn build_pod_status(
         let Some(c) = observed else {
             all_running = false;
             all_ready = false;
+            all_terminated = false;
             statuses.push(json!({
                 "name": spec.name,
                 "ready": false,
@@ -50,12 +61,15 @@ pub fn build_pod_status(
             continue;
         };
         let running = c.state == "CONTAINER_RUNNING";
+        let exited = c.state == "CONTAINER_EXITED";
         let ready = running && probes.is_ready(&pod.key, &spec.name);
         all_running = all_running && running;
         all_ready = all_ready && ready;
+        all_terminated = all_terminated && exited;
+        any_failed = any_failed || (exited && c.exit_code != 0);
         let state = if running {
             json!({"running": {"startedAt": now}})
-        } else if c.state == "CONTAINER_EXITED" {
+        } else if exited {
             let code = c.exit_code;
             json!({"terminated": {"exitCode": code, "reason": if code == 0 { "Completed" } else { "Error" }, "finishedAt": now}})
         } else {
@@ -72,6 +86,17 @@ pub fn build_pod_status(
     }
     let phase = if sandbox_ready && all_running {
         "Running"
+    } else if all_terminated {
+        match pod.restart_policy.as_str() {
+            // Never: the exit is the pod's verdict (Argo Workflow pods).
+            "Never" if any_failed => "Failed",
+            "Never" => "Succeeded",
+            // OnFailure: exited-0 has nothing left to restart; non-zero
+            // exits keep restarting, so the pod stays Pending.
+            "OnFailure" if !any_failed => "Succeeded",
+            // Always (the PodView default) restarts forever: never terminal.
+            _ => "Pending",
+        }
     } else {
         "Pending"
     };
@@ -263,6 +288,26 @@ mod tests {
         PodProbeState::new()
     }
 
+    /// Same fixture as [`pod`] with an explicit `spec.restartPolicy`
+    /// (`pod()` omits it, so it defaults to "Always").
+    fn pod_with_restart(policy: &str) -> PodView {
+        pod_view(&json!({
+            "metadata": {"name": "web", "namespace": "default", "uid": "u1"},
+            "spec": {
+                "restartPolicy": policy,
+                "containers": [{"name": "c0", "image": "img:1"}],
+            },
+        }))
+        .unwrap()
+    }
+
+    /// Latest observation EXITED with the given exit code.
+    fn snap_exit(code: i32) -> Snapshot {
+        let mut s = snap("CONTAINER_EXITED");
+        s.containers[0].exit_code = code;
+        s
+    }
+
     #[test]
     fn running_pod_status_shape() {
         let s = build_pod_status(
@@ -307,6 +352,81 @@ mod tests {
             s["containerStatuses"][0]["state"]["terminated"]["reason"],
             "Error"
         );
+    }
+
+    // T4.2 Scope B: terminal phases for Never/OnFailure pods (T7.3 /
+    // Argo Workflow containers exit rather than run forever).
+    #[test]
+    fn never_policy_exited_zero_is_succeeded() {
+        let s = build_pod_status(&pod_with_restart("Never"), &snap_exit(0), "T", &no_probes());
+        assert_eq!(s["phase"], "Succeeded");
+        assert_eq!(s["conditions"][1]["status"], "False");
+        assert_eq!(
+            s["containerStatuses"][0]["state"]["terminated"]["reason"],
+            "Completed"
+        );
+    }
+
+    #[test]
+    fn never_policy_exited_nonzero_is_failed() {
+        let s = build_pod_status(&pod_with_restart("Never"), &snap_exit(1), "T", &no_probes());
+        assert_eq!(s["phase"], "Failed");
+        assert_eq!(
+            s["containerStatuses"][0]["state"]["terminated"]["exitCode"],
+            1
+        );
+        assert_eq!(
+            s["containerStatuses"][0]["state"]["terminated"]["reason"],
+            "Error"
+        );
+    }
+
+    #[test]
+    fn onfailure_policy_exited_zero_is_succeeded() {
+        let s = build_pod_status(
+            &pod_with_restart("OnFailure"),
+            &snap_exit(0),
+            "T",
+            &no_probes(),
+        );
+        assert_eq!(s["phase"], "Succeeded", "nothing left to restart");
+    }
+
+    #[test]
+    fn onfailure_policy_exited_nonzero_stays_pending() {
+        let s = build_pod_status(
+            &pod_with_restart("OnFailure"),
+            &snap_exit(1),
+            "T",
+            &no_probes(),
+        );
+        assert_eq!(s["phase"], "Pending", "non-zero keeps restarting");
+    }
+
+    #[test]
+    fn always_policy_exited_zero_stays_pending() {
+        // Restart semantics keep the pod out of a terminal phase (this is
+        // also what the restartPolicy-absent default "Always" does).
+        let s = build_pod_status(
+            &pod_with_restart("Always"),
+            &snap_exit(0),
+            "T",
+            &no_probes(),
+        );
+        assert_eq!(s["phase"], "Pending");
+    }
+
+    #[test]
+    fn running_phase_wins_over_terminal_ladder() {
+        // A RUNNING container under any policy is phase Running — the
+        // ladder only engages once every container is EXITED.
+        let s = build_pod_status(
+            &pod_with_restart("Never"),
+            &snap("CONTAINER_RUNNING"),
+            "T",
+            &no_probes(),
+        );
+        assert_eq!(s["phase"], "Running");
     }
 
     #[test]

@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
 use crate::controllers::{
-    daemonset, deployment, endpoints, gc, namespace, replicaset, statefulset, Caches,
+    daemonset, deployment, endpoints, gc, namespace, replicaset, statefulset, workflow, Caches,
 };
 use crate::error::ControllerError;
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
@@ -48,6 +48,7 @@ struct Queues {
     daemonsets: Arc<WorkQueue>,
     services: Arc<WorkQueue>,
     namespaces: Arc<WorkQueue>,
+    workflows: Arc<WorkQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -58,6 +59,7 @@ enum Kind {
     DaemonSet,
     Service,
     Namespace,
+    Workflow,
 }
 
 impl ControllerManager {
@@ -92,6 +94,7 @@ impl ControllerManager {
             daemonsets: Arc::new(WorkQueue::new()),
             services: Arc::new(WorkQueue::new()),
             namespaces: Arc::new(WorkQueue::new()),
+            workflows: Arc::new(WorkQueue::new()),
         });
 
         let supervisor = tokio::spawn(async move {
@@ -196,11 +199,13 @@ fn spawn_set(
 
     // Pod events -> owner RS queue, owner StatefulSet queue (ordered rollout
     // gates: each created/deleted pod unblocks the next ordinal), owner
-    // DaemonSet queue (placement/status counts) + every
+    // DaemonSet queue (placement/status counts), owner Workflow queue
+    // (T7.3 Scope B: step phase transitions drive the node status) + every
     // same-namespace Service whose selector matches the pod.
     let q_rs = queues.replicasets.clone();
     let q_sts = queues.statefulsets.clone();
     let q_ds = queues.daemonsets.clone();
+    let q_wf = queues.workflows.clone();
     let q_svc = queues.services.clone();
     let pod_caches = caches.clone();
     let pod_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
@@ -208,6 +213,7 @@ fn spawn_set(
         enqueue_owner(&q_rs, ev, "ReplicaSet");
         enqueue_owner(&q_sts, ev, "StatefulSet");
         enqueue_owner(&q_ds, ev, "DaemonSet");
+        enqueue_owner(&q_wf, ev, "Workflow");
         let ns = object::namespace(&obj).unwrap_or("default");
         for svc in pod_caches.services.list(Some(ns)) {
             if let Some(sel) = svc.pointer("/spec/selector") {
@@ -263,6 +269,18 @@ fn spawn_set(
         if let Some(k) = event_object_key(ev) {
             q.add(k);
         }
+    });
+
+    // Workflow events (T7.3 Scope B, Q30) -> workflow queue (+ GC handoff:
+    // deleting a Workflow cascades to its step pods).
+    let q = queues.workflows.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
+    let wf_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q.add(k);
+        }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
 
     // Node events (T3.1b) -> EVERY cached DaemonSet. Nodes are the
@@ -335,6 +353,11 @@ fn spawn_set(
             caches.namespaces.clone(),
             ns_handler,
         ),
+        (
+            KeyPrefix::new("argoproj.io", "workflows", None),
+            caches.workflows.clone(),
+            wf_handler,
+        ),
     ];
     for (prefix, store, handler) in sets {
         let informer = Informer::new(prefix);
@@ -352,6 +375,7 @@ fn spawn_set(
         (queues.daemonsets.clone(), Kind::DaemonSet),
         (queues.services.clone(), Kind::Service),
         (queues.namespaces.clone(), Kind::Namespace),
+        (queues.workflows.clone(), Kind::Workflow),
     ] {
         for _ in 0..2 {
             spawn_worker(
@@ -486,6 +510,9 @@ fn spawn_worker(
 /// reconciles. A no-op reconcile writes nothing, so the anti-oscillation
 /// gate holds.
 const DEPLOYMENT_RESYNC: Duration = Duration::from_secs(1);
+/// Workflow resync backstop (T7.3 Scope B): pod events drive the normal
+/// loop; this keeps Pending/edge cases from stalling indefinitely.
+const WORKFLOW_RESYNC: Duration = Duration::from_secs(5);
 
 async fn reconcile_key(
     client: &Arc<dyn Client>,
@@ -553,5 +580,15 @@ async fn reconcile_key(
         // Handled by the cluster-scoped early return above; the namespaced
         // split is meaningless for a bare-name key.
         Kind::Namespace => Ok(()),
+        Kind::Workflow => {
+            let Some(wf) = caches.workflows.get(ns, name) else {
+                return Ok(()); // deleted from cache: nothing to do
+            };
+            workflow::reconcile(client, &wf).await?;
+            // Resync backstop (see WORKFLOW_RESYNC); the loop self-
+            // terminates once the object leaves the cache.
+            queue.add_after(key.to_string(), WORKFLOW_RESYNC);
+            Ok(())
+        }
     }
 }

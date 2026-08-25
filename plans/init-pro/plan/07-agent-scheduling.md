@@ -91,10 +91,39 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     generalized `request_json` HTTP client (content-type/body; SSA =
     PATCH `?fieldManager=` with `application/apply-patch+yaml`); new dep
     `serde_yaml_ng = "0.10"` (caret-only, libsql precedent).
-  - Remaining (Scope B+): embed the argo workflow controller + cron
-    controller into the single `init-pro` binary (Q1 multicall; supervisor
-    via T0.3), running server-side like other Layer-3 control loops —
-    actually reconciling Workflow specs into pods.
+  - **As-built (Sprint 22, Scope B, Q30):** the **Workflow controller**
+    runs in-process inside `ControllerManager` (Q19 pattern:
+    informer/workqueue over `StorageClient`; no HTTP client) — new
+    `crates/controllers/src/controllers/` modules `workflow.rs`
+    (308 lines, reconcile loop), `workflow_plan.rs` (290,
+    steps/Pod-entrypoint plan compilation), `workflow_dag.rs` (157,
+    Kahn topological layering from `dependencies`/simple `depends` —
+    `&&`-split names, `.Succeeded`-style suffixes tolerated),
+    `workflow_pod.rs` (206, pod JSON assembly: template-over-workflow
+    overlay, restartPolicy Never, labels
+    `workflows.argoproj.io/workflow` + `/template`, annotation
+    `workflows.argoproj.io/node-name`, controller ownerReference),
+    `workflow_status.rs` (171, node-tree builders), `workflow_phase.rs`
+    (112, pure naming/phase math). Wiring: `runner.rs` (594 lines —
+    Kind::Workflow queue + informer + pod-event `enqueue_owner`
+    fan-out + 5s resync), `controllers/mod.rs` (`Caches.workflows`),
+    `gc.rs` (Workflow as cascade-delete owner kind). Supported template
+    constructs: `container`, `script` (simplified: `command:
+    ["sh","-c", source]`), `steps` (sequential groups of parallel
+    steps), `dag` layering; unsupported constructs
+    (suspend/http/resource/plugin/missing template) park the workflow
+    at `Pending` with a `status.message` naming them. Node model
+    simplification: node ID = node name (upstream hash elided); root
+    node typed Steps/DAG/Pod; StepGroup nodes `<wf>[g]`; step nodes
+    `<wf>[g].<step>`; DAG tasks `<wf>.<task>`; failure → workflow
+    `Failed` + message + `Completed` condition; all-succeeded →
+    `Succeeded` + `finishedAt`. Pods run WITHOUT the upstream
+    wait/executor sidecar — the template container runs directly and
+    kubelet terminal pod phases drive node phases.
+  - Remaining (Scope C+): the CronWorkflow controller — fire
+    CronWorkflow schedules into Workflows (concurrency policy honored)
+    — embedded server-side like other Layer-3 control loops; the
+    workflow controller itself landed in Scope B (above).
   - Reuse init-pro scheduler (T3.2) and kubelet (T4.2) for pod execution —
     argo steps land as pods; no parallel executor.
   - Minimal CRD subset: steps/dag templates, artifacts (object-store backed),
@@ -123,14 +152,31 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     `-o name` prints qualified `workflow.argoproj.io/<name>`; upstream
     `examples/hello-world.yaml` round-trips apply→get→delete via the
     built-in kubectl.
+  - As-built (Scope B): NEW **G29** — a 2-step Workflow applied via the
+    built-in kubectl on a fresh SRV2 server + agent runs to `Succeeded`
+    and status reports node phases (root Steps/Succeeded + both Pod
+    nodes Succeeded + finishedAt), over the Q27 airgap one-shot `wfstep`
+    image (`scripts/build-workflow-image.sh`, deterministic OCI tar —
+    two runs byte-identical); `scripts/golden/suites/argoproj.sh` 59 →
+    195 lines — 34/34 green. 4 controller integration tests in
+    `crates/controllers/tests/workflow.rs` (steps-to-Succeeded,
+    failed-pod-fails-workflow, container-entrypoint root Pod node, DAG
+    diamond layering). kubectl `api-resources` + `api-versions` (new
+    `crates/kubectl/src/discovery.rs`) close the fresh-cluster
+    acceptance: live smoke on a fresh empty cluster lists `workflows wf
+    argoproj.io/v1alpha1 true Workflow` and `cronworkflows cwf,cronwf
+    ...` out of the box.
 
-- **状态 / Status** — in-progress (Scope A done, Sprint 21)
-- **证据 / Evidence** — api fidelity 8 (vs 11 fixtures) / apiserver 8 /
-  kubectl 25 tests; golden G27/G28 (33/33); Q30 ADR. Workspace 812
-  passed / 0 failed; clippy `-D warnings` zero; fmt clean.
-- **卡点 / Blockers** — upstream analysis landed (SSOT = upstream Go json
-  tags). Scope A does NOT yet run workflows: the workflow controller
-  (reconciling Workflow specs into pods), executor semantics, artifact
-  storage, and events are Scope B+; argo CLI surface beyond
-  get/apply/delete likewise open.
+- **状态 / Status** — in-progress (Scope A+B done, Sprint 22)
+- **证据 / Evidence** — Scope A: api fidelity 8 (vs 11 fixtures) /
+  apiserver 8. Scope B: controllers 111 (+4 workflow integration) /
+  kubelet 90 (+6 terminal-phase unit) / kubectl 60 (+11 discovery);
+  golden G27/G28/G29 (34/34); Q30 ADR (+ Scope B addendum). Workspace
+  841 passed / 0 failed; clippy `-D warnings` zero; fmt clean.
+- **卡点 / Blockers** — now open: the CronWorkflow controller (schedule
+  firing, concurrency policy); executor semantics (upstream wait
+  container, artifacts, `{{...}}` parameter substitution,
+  loops/withItems); suspend/http/resource templates (currently park the
+  workflow at `Pending` with a message); the argo CLI surface beyond
+  get/apply/delete; artifact storage and events likewise open.
 - **依赖 / Depends on** — T1.2, T3.1

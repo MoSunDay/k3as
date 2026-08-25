@@ -48,12 +48,13 @@ pub(crate) const DEPENDENT_KINDS: [(&str, &str); 5] = [
 
 /// Owner kinds the GC is authoritative over (each has an informer cache);
 /// any other owner kind on a dependent is left alone.
-pub(crate) const MANAGED_OWNER_KINDS: [&str; 5] = [
+pub(crate) const MANAGED_OWNER_KINDS: [&str; 6] = [
     "Deployment",
     "ReplicaSet",
     "Service",
     "StatefulSet",
     "DaemonSet",
+    "Workflow",
 ];
 
 /// One sweep pass: delete dependents whose managed controller owner is gone.
@@ -181,6 +182,7 @@ fn owner_in_cache(caches: &Caches, kind: &str, ns: &str, owner_name: &str) -> bo
         "Service" => caches.services.get(ns, owner_name).is_some(),
         "StatefulSet" => caches.statefulsets.get(ns, owner_name).is_some(),
         "DaemonSet" => caches.daemonsets.get(ns, owner_name).is_some(),
+        "Workflow" => caches.workflows.get(ns, owner_name).is_some(),
         _ => false,
     }
 }
@@ -195,7 +197,7 @@ mod tests {
         for kind in MANAGED_OWNER_KINDS {
             assert!(matches!(
                 kind,
-                "Deployment" | "ReplicaSet" | "Service" | "StatefulSet" | "DaemonSet"
+                "Deployment" | "ReplicaSet" | "Service" | "StatefulSet" | "DaemonSet" | "Workflow"
             ));
         }
         assert!(!MANAGED_OWNER_KINDS.contains(&"Node"));
