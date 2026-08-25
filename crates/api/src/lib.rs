@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod apply;
+pub mod argoproj;
 pub mod discovery;
 pub mod gvk;
 pub mod initpro;

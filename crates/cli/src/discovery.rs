@@ -6,11 +6,12 @@
 //! controller), the `apps/v1` group (T3.1a Deployment/ReplicaSet
 //! controllers, T3.1b StatefulSet + its `controllerrevisions` history;
 //! DaemonSet stays schema-only until its T3.1b slice),
-//! `coordination.k8s.io/v1` (Lease — leader election, decision **Q18**), and
-//! the `init-pro.io/v1` group. The actual HTTP serving is **T1.2**; this
+//! `coordination.k8s.io/v1` (Lease — leader election, decision **Q18**), the
+//! `init-pro.io/v1` group, and `argoproj.io/v1alpha1` (T7.3 Scope A:
+//! Workflow + CronWorkflow, schema-only CRUD — no workflow controller yet). The actual HTTP serving is **T1.2**; this
 //! module hands T1.2 a byte-correct registry today and is exercised at startup.
 
-use api::{api_group_list, core_api_versions, initpro, SchemaRegistry};
+use api::{api_group_list, argoproj, core_api_versions, initpro, SchemaRegistry};
 
 /// The served schema registry: core/v1 + apps/v1 + coordination.k8s.io/v1
 /// native types + init-pro.io/v1 CRDs.
@@ -36,6 +37,10 @@ pub fn served_schema() -> SchemaRegistry {
     // coordination.k8s.io/v1: Lease backs controller-manager leader election
     // (decision Q18: Lease object + CAS, not etcd leases).
     reg.register_native::<k8s_openapi::api::coordination::v1::Lease>();
+    // argoproj.io/v1alpha1 (T7.3 Scope A): Workflow + CronWorkflow are
+    // served as first-class built-ins — full CRUD/watch/SSA via the generic
+    // routes, schema-only (the workflow controller is a later scope, Q30).
+    argoproj::register(&mut reg);
     initpro::register(&mut reg);
     reg
 }
@@ -87,6 +92,24 @@ mod tests {
         let coordination =
             api_resource_list(&reg, "coordination.k8s.io", "v1").expect("coordination served");
         assert!(coordination.resources.iter().any(|r| r.name == "leases"));
+        // T7.3 Scope A: argoproj.io/v1alpha1 serves Workflow + CronWorkflow
+        // with their kubectl short names (wf / cwf, cronwf).
+        let argo = api_resource_list(&reg, "argoproj.io", "v1alpha1").expect("argoproj served");
+        let wf = argo
+            .resources
+            .iter()
+            .find(|r| r.name == "workflows")
+            .expect("workflows served");
+        assert_eq!(wf.short_names, Some(vec!["wf".to_string()]));
+        let cwf = argo
+            .resources
+            .iter()
+            .find(|r| r.name == "cronworkflows")
+            .expect("cronworkflows served");
+        assert_eq!(
+            cwf.short_names,
+            Some(vec!["cwf".to_string(), "cronwf".to_string()])
+        );
         // core/v1 now includes endpoints (T3.1a) and persistentvolumeclaims
         // (T3.1b StatefulSet claims, lazy storage Q22).
         let core = api_resource_list(&reg, "", "v1").expect("core/v1 served");

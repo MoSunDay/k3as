@@ -117,7 +117,11 @@ fn to_api_resource(group: &str, info: &TypeInfo) -> APIResource {
         version: None,
         storage_version_hash: None,
         categories: None,
-        short_names: None,
+        short_names: if info.short_names.is_empty() {
+            None
+        } else {
+            Some(info.short_names.clone())
+        },
     }
 }
 

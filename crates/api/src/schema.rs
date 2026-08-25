@@ -40,6 +40,9 @@ pub struct TypeInfo {
     /// List kind, e.g. `"PodList"`.
     pub list_kind: String,
     pub scope: Scope,
+    /// CLI short names (kubectl `shortNames`), e.g. `["wf"]`. Empty for
+    /// native types (discovery omits the field, upstream parity).
+    pub short_names: Vec<String>,
 }
 
 impl TypeInfo {
@@ -54,6 +57,7 @@ impl TypeInfo {
             resource: resource.into(),
             list_kind: list_kind.into(),
             scope,
+            short_names: Vec::new(),
         }
     }
 }
@@ -157,6 +161,37 @@ impl SchemaRegistry {
                 kind: kind.to_string(),
             },
             TypeInfo::new(kind, resource, list_kind, scope),
+        );
+    }
+
+    /// Register a CRD/custom type with kubectl short names (T7.3 Scope A).
+    #[allow(clippy::too_many_arguments)] // mirrors `register` + shortNames
+    ///
+    /// Same as [`SchemaRegistry::register`] but records the CLI shortNames
+    /// projected by discovery (e.g. workflows -> wf, cronworkflows -> cwf).
+    pub fn register_with_short_names(
+        &mut self,
+        group: &str,
+        version: &str,
+        kind: &str,
+        resource: &str,
+        list_kind: &str,
+        scope: Scope,
+        short_names: &[&str],
+    ) {
+        self.by_gvk.insert(
+            Key {
+                group: group.to_ascii_lowercase(),
+                version: version.to_string(),
+                kind: kind.to_string(),
+            },
+            TypeInfo {
+                kind: kind.to_string(),
+                resource: resource.to_string(),
+                list_kind: list_kind.to_string(),
+                scope,
+                short_names: short_names.iter().map(|s| s.to_string()).collect(),
+            },
         );
     }
 
