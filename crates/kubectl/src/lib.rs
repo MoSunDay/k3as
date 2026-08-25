@@ -12,6 +12,11 @@
 
 #![forbid(unsafe_code)]
 
+mod discovery;
+#[cfg(test)]
+mod discovery_tests;
+#[cfg(test)] // canned-TCP-server cases (file size limit, mirrors verbs_wire_tests)
+mod discovery_wire_tests;
 mod http;
 mod rollout;
 #[cfg(test)]
@@ -19,10 +24,13 @@ mod rollout_poll_tests;
 mod verbs;
 #[cfg(test)]
 mod verbs_tests;
+#[cfg(test)] // wire-level cases split out of verbs_tests (file size limit)
+mod verbs_wire_tests;
 
 use std::process::ExitCode;
 use std::time::Duration;
 
+use discovery::{api_resources, api_versions};
 use http::HttpClient;
 use rollout::{rollout_status, Outcome};
 use verbs::{apply, delete, get, parse_output, resolve_plural, Output};
@@ -59,6 +67,9 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("get") => return run_get(args),
         Some("apply") => return run_apply(args),
         Some("delete") => return run_delete(args),
+        // T7.3 optional enhancement (Q30): discovery listing verbs.
+        Some("api-versions") => return run_discovery(args, "api-versions"),
+        Some("api-resources") => return run_discovery(args, "api-resources"),
         _ => {}
     }
 
@@ -310,6 +321,41 @@ fn run_delete(args: &[String]) -> ExitCode {
     }
 }
 
+/// `kubectl api-versions` / `kubectl api-resources` (T7.3 optional
+/// enhancement, Q30). Neither takes positional args; only the shared
+/// flags (`--server`, `-n`) apply, so both share one thin runner.
+fn run_discovery(args: &[String], verb: &str) -> ExitCode {
+    let flags = match parse_verb_flags(args, false, false) {
+        Ok((flags, positional)) if positional.is_empty() => flags,
+        Ok((_, positional)) => {
+            return verb_error(format!(
+                "unexpected arguments: {} (\"kubectl {verb}\" takes no positional arguments)",
+                positional.join(" ")
+            ))
+        }
+        Err(msg) => return verb_error(msg),
+    };
+    let http = match HttpClient::parse(&flags.server) {
+        Ok(h) => h,
+        Err(msg) => return verb_error(msg),
+    };
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(msg) => return verb_error(msg),
+    };
+    let outcome = match verb {
+        "api-resources" => rt.block_on(api_resources(&http)),
+        _ => rt.block_on(api_versions(&http)),
+    };
+    match outcome {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(msg) => verb_error(msg),
+    }
+}
+
 /// Uniform failure exit for the T7.3 verbs.
 fn verb_error(msg: String) -> ExitCode {
     eprintln!("error: {msg}");
@@ -448,13 +494,16 @@ fn usage() -> String {
         "kubectl controls the init-pro cluster.".into(),
         String::new(),
         "v1 surface: rollout status for Deployments (T3.1b, Q21 plain-HTTP transport)".into(),
-        "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30).".into(),
+        "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30)".into(),
+        "and the discovery listing verbs api-versions / api-resources (T7.3, Q30).".into(),
         String::new(),
         "Usage:".into(),
         "  kubectl rollout status (TYPE/NAME | TYPE NAME) [flags]".into(),
         "  kubectl get (TYPE | TYPE/NAME | TYPE NAME) [-o json|yaml|name] [flags]".into(),
         "  kubectl apply -f FILE [flags]                    (Server-Side Apply, one manifest)".into(),
         "  kubectl delete (TYPE/NAME | TYPE NAME) [flags]".into(),
+        "  kubectl api-versions [flags]                     (all served group/version, sorted)".into(),
+        "  kubectl api-resources [flags]                    (NAME SHORTNAMES APIVERSION NAMESPACED KIND)".into(),
         String::new(),
         "Target forms: deployment/NAME, deployments/NAME, deploy/NAME (deployment only in v1).".into(),
         "argoproj types: workflow (wf), cronworkflow (cwf, cronwf) — argoproj.io/v1alpha1 only.".into(),
