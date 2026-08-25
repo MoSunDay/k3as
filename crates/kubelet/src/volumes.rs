@@ -83,13 +83,11 @@ async fn ensure_one_volume(
     log_root: &Path,
 ) -> Result<(), String> {
     match &vol.kind {
-        VolumeKind::EmptyDir => tokio::fs::create_dir_all(empty_dir_path(
-            log_root,
-            &view.uid,
-            &vol.name,
-        ))
-        .await
-        .map_err(|e| format!("create emptyDir {}: {e}", vol.name)),
+        VolumeKind::EmptyDir => {
+            tokio::fs::create_dir_all(empty_dir_path(log_root, &view.uid, &vol.name))
+                .await
+                .map_err(|e| format!("create emptyDir {}: {e}", vol.name))
+        }
         VolumeKind::ConfigMap { name } => {
             let path = format!("/api/v1/namespaces/{}/configmaps/{name}", view.namespace);
             refresh_files(client, &path, view, log_root, "configMap", name).await
@@ -129,10 +127,7 @@ async fn refresh_files(
 /// files were written; `Ok(false)` is the steady-state no-op. The
 /// fingerprint covers only safe keys — unsafe entries never land on disk,
 /// so they must not drive rewrites either.
-async fn apply_if_changed(
-    dir: &Path,
-    data: &BTreeMap<String, String>,
-) -> Result<bool, String> {
+async fn apply_if_changed(dir: &Path, data: &BTreeMap<String, String>) -> Result<bool, String> {
     let safe: BTreeMap<String, String> = data
         .iter()
         .filter(|(k, _)| is_safe_key(k))
@@ -215,7 +210,8 @@ pub fn resolve_mounts(
                     (volume_dir(log_root, uid, "configMap", name), true)
                 }
                 VolumeKind::Secret { name } => (volume_dir(log_root, uid, "secret", name), true),
-            };            Some(Mount {
+            };
+            Some(Mount {
                 container_path: m.mount_path.clone(),
                 host_path: host_path.to_string_lossy().into_owned(),
                 readonly,
@@ -296,7 +292,12 @@ mod tests {
             {"name": "cache", "emptyDir": {}},
             {"name": "cfg", "configMap": {"name": "cm1"}},
         ]));
-        let mounts = resolve_mounts(&pod.containers[0], &pod.volumes, &pod.uid, Path::new("/dd/pods"));
+        let mounts = resolve_mounts(
+            &pod.containers[0],
+            &pod.volumes,
+            &pod.uid,
+            Path::new("/dd/pods"),
+        );
         assert_eq!(
             mounts,
             vec![
@@ -317,7 +318,12 @@ mod tests {
         let pod = pod_with_volumes(serde_json::json!([
             {"name": "cfg", "secret": {"secretName": "s1"}},
         ]));
-        let mounts = resolve_mounts(&pod.containers[0], &pod.volumes, &pod.uid, Path::new("/dd/pods"));
+        let mounts = resolve_mounts(
+            &pod.containers[0],
+            &pod.volumes,
+            &pod.uid,
+            Path::new("/dd/pods"),
+        );
         assert_eq!(mounts[0].host_path, "/dd/pods/u1/volumes/secret/s1");
         assert!(mounts[0].readonly);
     }
@@ -356,7 +362,10 @@ mod tests {
         let greeting = config_map_path(&root, "u1", "cm", "greeting");
         tokio::fs::write(&greeting, "tampered").await.unwrap();
         assert!(!apply_if_changed(&dir, &data).await.unwrap(), "unchanged");
-        assert_eq!(tokio::fs::read_to_string(&greeting).await.unwrap(), "tampered");
+        assert_eq!(
+            tokio::fs::read_to_string(&greeting).await.unwrap(),
+            "tampered"
+        );
         // Changed content -> files + marker rewritten.
         let changed = BTreeMap::from([
             ("greeting".to_string(), "bye".to_string()),
@@ -385,8 +394,16 @@ mod tests {
         }
         names.sort();
         assert_eq!(names, vec![".fingerprint".to_string(), "ok".to_string()]);
-        let marker = tokio::fs::read_to_string(dir.join(FINGERPRINT_FILE)).await.unwrap();
-        assert_eq!(marker, format!("{:016x}", fingerprint(&BTreeMap::from([("ok".to_string(), "1".to_string())]))));
+        let marker = tokio::fs::read_to_string(dir.join(FINGERPRINT_FILE))
+            .await
+            .unwrap();
+        assert_eq!(
+            marker,
+            format!(
+                "{:016x}",
+                fingerprint(&BTreeMap::from([("ok".to_string(), "1".to_string())]))
+            )
+        );
         // Empty data -> marker present, no key files.
         let empty = volume_dir(&root, "u1", "configMap", "empty");
         apply_if_changed(&empty, &BTreeMap::new()).await.unwrap();

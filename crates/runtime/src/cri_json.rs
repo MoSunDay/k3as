@@ -430,7 +430,10 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(v["mounts"][0]["container_path"], "/etc/cm");
-        assert_eq!(v["mounts"][0]["host_path"], "/dd/pods/u1/volumes/configMap/cm");
+        assert_eq!(
+            v["mounts"][0]["host_path"],
+            "/dd/pods/u1/volumes/configMap/cm"
+        );
         assert_eq!(v["mounts"][0]["readonly"], true);
         // Empty mounts are omitted entirely: S1 wire shapes stay stable.
         let mut none = cfg.clone();

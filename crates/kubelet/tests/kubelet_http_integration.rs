@@ -519,11 +519,7 @@ async fn volumes_are_materialized_refreshed_and_cleaned_up() {
     cfg.data_dir = dd.clone();
     let cri = Arc::new(FakeCri::new());
     let shutdown = infra::Shutdown::new();
-    let handles = spawn(
-        cfg,
-        cri.clone() as Arc<dyn CriBackend>,
-        shutdown.clone(),
-    );
+    let handles = spawn(cfg, cri.clone() as Arc<dyn CriBackend>, shutdown.clone());
     // (a) Create a configMap with key `greeting` via the apiserver API.
     let (code, resp) = client
         .post_json(
@@ -579,7 +575,11 @@ async fn volumes_are_materialized_refreshed_and_cleaned_up() {
             .unwrap_or(false)
     })
     .await;
-    assert!(data_dir.is_dir(), "emptyDir dir missing: {}", data_dir.display());
+    assert!(
+        data_dir.is_dir(),
+        "emptyDir dir missing: {}",
+        data_dir.display()
+    );
     // (e) UPDATE the configMap -> the fingerprint refresh rewrites the file.
     let (code, mut got) = client
         .get_json("/api/v1/namespaces/default/configmaps/cm")

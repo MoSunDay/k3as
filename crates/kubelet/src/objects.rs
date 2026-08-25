@@ -115,7 +115,11 @@ fn default_image_pull_policy(image: &str) -> String {
     if base.contains('@') {
         return "IfNotPresent".to_string();
     }
-    match base.rsplit_once(':').map(|(_, tag)| tag).filter(|t| !t.is_empty()) {
+    match base
+        .rsplit_once(':')
+        .map(|(_, tag)| tag)
+        .filter(|t| !t.is_empty())
+    {
         Some(tag) if tag != "latest" => "IfNotPresent".to_string(),
         _ => "Always".to_string(),
     }
@@ -227,13 +231,17 @@ pub fn pod_volumes(pod: &Value) -> Vec<VolumeSpec> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
-                VolumeKind::ConfigMap { name: cn.to_string() }
+                VolumeKind::ConfigMap {
+                    name: cn.to_string(),
+                }
             } else if let Some(sn) = v
                 .pointer("/secret/secretName")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
-                VolumeKind::Secret { name: sn.to_string() }
+                VolumeKind::Secret {
+                    name: sn.to_string(),
+                }
             } else {
                 return None;
             };
@@ -425,12 +433,32 @@ mod tests {
         };
         assert_eq!(pol("no-tag"), "Always", "no tag defaults to Always");
         assert_eq!(pol("latest"), "Always", "latest tag defaults to Always");
-        assert_eq!(pol("pinned"), "IfNotPresent", "pinned tag defaults to IfNotPresent");
+        assert_eq!(
+            pol("pinned"),
+            "IfNotPresent",
+            "pinned tag defaults to IfNotPresent"
+        );
         assert_eq!(pol("explicit-never"), "Never", "explicit Never respected");
-        assert_eq!(pol("explicit-ifnp"), "IfNotPresent", "explicit IfNotPresent respected");
-        assert_eq!(pol("explicit-always"), "Always", "explicit Always respected");
-        assert_eq!(pol("registry-port"), "Always", "a registry port is not a tag");
-        assert_eq!(pol("digest"), "IfNotPresent", "digest refs are immutable -> IfNotPresent");
+        assert_eq!(
+            pol("explicit-ifnp"),
+            "IfNotPresent",
+            "explicit IfNotPresent respected"
+        );
+        assert_eq!(
+            pol("explicit-always"),
+            "Always",
+            "explicit Always respected"
+        );
+        assert_eq!(
+            pol("registry-port"),
+            "Always",
+            "a registry port is not a tag"
+        );
+        assert_eq!(
+            pol("digest"),
+            "IfNotPresent",
+            "digest refs are immutable -> IfNotPresent"
+        );
         // Unknown explicit values fall back to the tag derivation.
         let odd = json!({"metadata": {"name": "x"}, "spec": {"containers": [
             {"name": "c", "image": "img:1.2", "imagePullPolicy": "Sometimes"},
@@ -478,26 +506,43 @@ mod tests {
         assert_eq!(v.volumes.len(), 3, "unsupported/nameless volumes skipped");
         assert_eq!(
             v.volumes[0],
-            VolumeSpec { name: "cache".into(), kind: VolumeKind::EmptyDir }
+            VolumeSpec {
+                name: "cache".into(),
+                kind: VolumeKind::EmptyDir
+            }
         );
         assert_eq!(
             v.volumes[1],
-            VolumeSpec { name: "cfg".into(), kind: VolumeKind::ConfigMap { name: "cm1".into() } }
+            VolumeSpec {
+                name: "cfg".into(),
+                kind: VolumeKind::ConfigMap { name: "cm1".into() }
+            }
         );
         assert_eq!(
             v.volumes[2],
-            VolumeSpec { name: "sec".into(), kind: VolumeKind::Secret { name: "s1".into() } }
+            VolumeSpec {
+                name: "sec".into(),
+                kind: VolumeKind::Secret { name: "s1".into() }
+            }
         );
         let c = &v.containers[0];
         assert_eq!(c.volume_mounts.len(), 2);
         assert_eq!(
             c.volume_mounts[0],
-            VolumeMount { name: "cache".into(), mount_path: "/data".into(), read_only: false },
+            VolumeMount {
+                name: "cache".into(),
+                mount_path: "/data".into(),
+                read_only: false
+            },
             "readOnly defaults to false"
         );
         assert_eq!(
             c.volume_mounts[1],
-            VolumeMount { name: "cfg".into(), mount_path: "/etc/cm".into(), read_only: true }
+            VolumeMount {
+                name: "cfg".into(),
+                mount_path: "/etc/cm".into(),
+                read_only: true
+            }
         );
         assert!(pod_volumes(&json!({})).is_empty());
         assert!(pod_containers(&json!({})).is_empty());
@@ -535,7 +580,9 @@ mod tests {
         let tcp = json!({"metadata": {"name": "x"}, "spec": {"containers": [
             {"name": "c", "image": "i", "livenessProbe": {"tcpSocket": {"port": 1}}}
         ]}});
-        assert!(pod_view(&tcp).unwrap().containers[0].liveness_probe.is_none());
+        assert!(pod_view(&tcp).unwrap().containers[0]
+            .liveness_probe
+            .is_none());
     }
 
     #[test]

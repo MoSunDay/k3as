@@ -143,7 +143,12 @@ pub fn plan(
             // user policy applies (Sprint 20 S3 keeps that behavior).
             ensure_image(&mut actions, &snap.images, sandbox_image, "IfNotPresent");
             for spec in &view.containers {
-                ensure_image(&mut actions, &snap.images, &spec.image, &spec.image_pull_policy);
+                ensure_image(
+                    &mut actions,
+                    &snap.images,
+                    &spec.image,
+                    &spec.image_pull_policy,
+                );
             }
             actions.push(Action::CreateSandbox {
                 pod_key: key.clone(),
@@ -201,7 +206,12 @@ pub fn plan(
                     id: c.id.clone(),
                 });
             }
-            ensure_image(&mut actions, &snap.images, &spec.image, &spec.image_pull_policy);
+            ensure_image(
+                &mut actions,
+                &snap.images,
+                &spec.image,
+                &spec.image_pull_policy,
+            );
             actions.push(Action::CreateStartContainer {
                 pod_key: key.clone(),
                 sandbox_id: keep.id.clone(),
@@ -248,7 +258,12 @@ fn sandbox_cfg(view: &PodView, log_root: &Path) -> PodSandboxConfig {
     }
 }
 
-fn container_cfg(view: &PodView, spec: &ContainerSpec, attempt: u32, log_root: &Path) -> ContainerConfig {
+fn container_cfg(
+    view: &PodView,
+    spec: &ContainerSpec,
+    attempt: u32,
+    log_root: &Path,
+) -> ContainerConfig {
     ContainerConfig {
         metadata: ContainerMetadata {
             name: spec.name.clone(),

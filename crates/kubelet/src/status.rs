@@ -265,7 +265,12 @@ mod tests {
 
     #[test]
     fn running_pod_status_shape() {
-        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "2026-08-16T00:00:00Z", &no_probes());
+        let s = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_RUNNING"),
+            "2026-08-16T00:00:00Z",
+            &no_probes(),
+        );
         assert_eq!(s["phase"], "Running");
         assert_eq!(s["conditions"][0]["type"], "PodScheduled");
         assert_eq!(s["conditions"][1]["type"], "Ready");
@@ -380,7 +385,10 @@ mod tests {
         let mut s0 = snap("CONTAINER_EXITED");
         s0.containers[0].exit_code = 7;
         let s = build_pod_status(&pod(), &s0, "T", &no_probes());
-        assert_eq!(s["containerStatuses"][0]["state"]["terminated"]["exitCode"], 7);
+        assert_eq!(
+            s["containerStatuses"][0]["state"]["terminated"]["exitCode"],
+            7
+        );
         assert_eq!(
             s["containerStatuses"][0]["state"]["terminated"]["reason"],
             "Error"
@@ -399,7 +407,10 @@ mod tests {
         {
             let state = probes.entry(&pod().key, "c0");
             let pspec = crate::probes::ProbeSpec {
-                http_get: crate::probes::HttpGetSpec { path: "/z".into(), port: 80 },
+                http_get: crate::probes::HttpGetSpec {
+                    path: "/z".into(),
+                    port: 80,
+                },
                 initial_delay_seconds: 0,
                 period_seconds: 1,
                 timeout_seconds: 1,
@@ -420,14 +431,19 @@ mod tests {
         {
             let state = probes.entry(&pod().key, "c0");
             let pspec = crate::probes::ProbeSpec {
-                http_get: crate::probes::HttpGetSpec { path: "/z".into(), port: 80 },
+                http_get: crate::probes::HttpGetSpec {
+                    path: "/z".into(),
+                    port: 80,
+                },
                 initial_delay_seconds: 0,
                 period_seconds: 1,
                 timeout_seconds: 1,
                 failure_threshold: 1,
                 success_threshold: 1,
             };
-            state.tracker(crate::probes::ProbeKind::Readiness).observe(true, 2, &pspec);
+            state
+                .tracker(crate::probes::ProbeKind::Readiness)
+                .observe(true, 2, &pspec);
         }
         let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &probes);
         assert_eq!(s["conditions"][1]["status"], "True");

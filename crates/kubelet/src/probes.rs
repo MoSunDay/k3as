@@ -71,7 +71,7 @@ impl ProbeSpec {
             failure_threshold: num("failureThreshold", 3),
             success_threshold: num("successThreshold", 1),
         })
-        }
+    }
 }
 
 /// Outcome of one probe: unknown until thresholds are crossed.
@@ -102,7 +102,7 @@ impl Tracker {
             consecutive_failures: 0,
             next_probe_at: None,
         }
-}
+    }
 
     /// Arm the first probe (idempotent): initialDelay after first RUNNING.
     pub fn arm(&mut self, now: u64, spec: &ProbeSpec) {
@@ -229,7 +229,8 @@ impl PodProbeState {
             return;
         }
         self.seen.insert(key.clone(), (id.to_string(), attempt));
-        self.per_container.insert(key, ContainerProbeState::default());
+        self.per_container
+            .insert(key, ContainerProbeState::default());
     }
 
     /// Startup passed for the container (true when no startup probe).
@@ -254,10 +255,14 @@ impl PodProbeState {
     /// True when any probe tracker of the container is due at `now`.
     pub fn next_probe_due(&self, pod_key: &str, container: &str, now: u64) -> bool {
         self.get(pod_key, container).is_some_and(|s| {
-            [s.startup.as_ref(), s.readiness.as_ref(), s.liveness.as_ref()]
-                .into_iter()
-                .flatten()
-                .any(|t| t.due(now))
+            [
+                s.startup.as_ref(),
+                s.readiness.as_ref(),
+                s.liveness.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|t| t.due(now))
         })
     }
 
@@ -299,7 +304,10 @@ mod tests {
 
     fn spec() -> ProbeSpec {
         ProbeSpec {
-            http_get: HttpGetSpec { path: "/readyz".into(), port: 8080 },
+            http_get: HttpGetSpec {
+                path: "/readyz".into(),
+                port: 8080,
+            },
             initial_delay_seconds: 0,
             period_seconds: 1,
             timeout_seconds: 1,
@@ -312,7 +320,10 @@ mod tests {
     fn parse_applies_upstream_defaults() {
         let p = ProbeSpec::from_json(&json!({"httpGet": {"path": "/z"}})).unwrap();
         assert_eq!((p.http_get.path.as_str(), p.http_get.port), ("/z", 80));
-        assert_eq!((p.initial_delay_seconds, p.period_seconds, p.timeout_seconds), (0, 10, 1));
+        assert_eq!(
+            (p.initial_delay_seconds, p.period_seconds, p.timeout_seconds),
+            (0, 10, 1)
+        );
         assert_eq!((p.failure_threshold, p.success_threshold), (3, 1));
         let p = ProbeSpec::from_json(&json!({"httpGet": {"port": 9}})).unwrap();
         assert_eq!((p.http_get.path.as_str(), p.http_get.port), ("/", 9));
@@ -320,8 +331,16 @@ mod tests {
 
     #[test]
     fn parse_requires_http_get_object() {
-        for v in [json!({}), json!({"httpGet": null}), json!({"tcpSocket": {"port": 1}}), json!(42)] {
-            assert!(ProbeSpec::from_json(&v).is_none(), "no httpGet -> none: {v}");
+        for v in [
+            json!({}),
+            json!({"httpGet": null}),
+            json!({"tcpSocket": {"port": 1}}),
+            json!(42),
+        ] {
+            assert!(
+                ProbeSpec::from_json(&v).is_none(),
+                "no httpGet -> none: {v}"
+            );
         }
     }
 
@@ -330,10 +349,20 @@ mod tests {
         let mut t = Tracker::new();
         for i in 1..=3 {
             t.observe(false, i, &spec());
-            assert_eq!(t.status, if i < 3 { ProbeStatus::Unknown } else { ProbeStatus::Failure });
+            assert_eq!(
+                t.status,
+                if i < 3 {
+                    ProbeStatus::Unknown
+                } else {
+                    ProbeStatus::Failure
+                }
+            );
         }
         t.observe(true, 4, &spec());
-        assert_eq!((t.status, t.consecutive_failures), (ProbeStatus::Success, 0));
+        assert_eq!(
+            (t.status, t.consecutive_failures),
+            (ProbeStatus::Success, 0)
+        );
         let mut s = spec();
         s.success_threshold = 2;
         let mut t = Tracker::new();
@@ -352,17 +381,27 @@ mod tests {
         assert!(state.is_startup_ok() && state.is_ready() && !state.liveness_failed());
         // failureThreshold 3: one failure -> Unknown (not ok / no restart).
         state.tracker(ProbeKind::Startup).observe(false, 1, &spec());
-        state.tracker(ProbeKind::Liveness).observe(false, 2, &spec());
+        state
+            .tracker(ProbeKind::Liveness)
+            .observe(false, 2, &spec());
         assert!(!state.is_startup_ok() && !state.liveness_failed());
         state.tracker(ProbeKind::Startup).observe(true, 3, &spec());
         assert!(state.is_startup_ok());
         // Fold liveness to Failure (3 consecutive) while startup is ok.
-        (4..=6).for_each(|i| state.tracker(ProbeKind::Liveness).observe(false, i, &spec()));
+        (4..=6).for_each(|i| {
+            state
+                .tracker(ProbeKind::Liveness)
+                .observe(false, i, &spec())
+        });
         assert!(state.liveness_failed(), "startup passed + liveness failed");
         // One readiness failure (below failureThreshold) drops ready already.
-        state.tracker(ProbeKind::Readiness).observe(false, 7, &spec());
+        state
+            .tracker(ProbeKind::Readiness)
+            .observe(false, 7, &spec());
         assert!(!state.is_ready(), "readiness failure gates ready");
-        state.tracker(ProbeKind::Readiness).observe(true, 8, &spec());
+        state
+            .tracker(ProbeKind::Readiness)
+            .observe(true, 8, &spec());
         assert!(state.is_ready());
     }
 
@@ -387,13 +426,22 @@ mod tests {
         (1..=3).for_each(|i| t.observe(false, i, &spec()));
         assert!(probes.liveness_failed("ns/p", "c0"));
         probes.note_incarnation("ns/p", "c0", "id1", 0);
-        assert!(probes.liveness_failed("ns/p", "c0"), "same incarnation keeps failure");
+        assert!(
+            probes.liveness_failed("ns/p", "c0"),
+            "same incarnation keeps failure"
+        );
         probes.note_incarnation("ns/p", "c0", "id2", 1);
-        assert!(!probes.liveness_failed("ns/p", "c0") && !probes.next_probe_due("ns/p", "c0", 1_000_000),
-            "new incarnation resets failure + re-arms");
+        assert!(
+            !probes.liveness_failed("ns/p", "c0")
+                && !probes.next_probe_due("ns/p", "c0", 1_000_000),
+            "new incarnation resets failure + re-arms"
+        );
         probes.prune(&["ns/p"].iter().map(|s| s.to_string()).collect());
         assert!(probes.is_ready("ns/p", "c0"), "kept pod's trackers survive");
         probes.prune(&BTreeSet::new());
-        assert!(!probes.next_probe_due("ns/p", "c0", 0), "pruned pod drops trackers");
+        assert!(
+            !probes.next_probe_due("ns/p", "c0", 0),
+            "pruned pod drops trackers"
+        );
     }
 }

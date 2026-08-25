@@ -253,7 +253,15 @@ async fn sync_task(
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {}
         }
-        sync_once(&client, cri.as_ref(), &cfg, &desired, &mut probes, &mut last_status).await;
+        sync_once(
+            &client,
+            cri.as_ref(),
+            &cfg,
+            &desired,
+            &mut probes,
+            &mut last_status,
+        )
+        .await;
     }
 }
 
@@ -382,9 +390,7 @@ async fn probe_pass(
                 .containers
                 .iter()
                 .filter(|c| {
-                    c.sandbox_id == sb.id
-                        && c.name == spec.name
-                        && c.state == "CONTAINER_RUNNING"
+                    c.sandbox_id == sb.id && c.name == spec.name && c.state == "CONTAINER_RUNNING"
                 })
                 .max_by_key(|c| c.attempt)
             else {
@@ -398,13 +404,8 @@ async fn probe_pass(
                 tracker.arm(now, pspec);
                 if tracker.due(now) {
                     let timeout = Duration::from_secs(u64::from(pspec.timeout_seconds));
-                    let res = run_http_probe(
-                        &pspec.http_get,
-                        &host,
-                        pspec.http_get.port,
-                        timeout,
-                    )
-                    .await;
+                    let res =
+                        run_http_probe(&pspec.http_get, &host, pspec.http_get.port, timeout).await;
                     match res {
                         Ok(()) => tracker.observe(true, now, pspec),
                         Err(e) => {

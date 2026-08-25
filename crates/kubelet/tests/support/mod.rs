@@ -21,7 +21,14 @@ pub fn log_root(tag: &str) -> String {
 
 /// One scheduled pod with `images.len()` containers c0..cN.
 pub fn view(ns: &str, name: &str, uid: &str, images: &[&str]) -> PodView {
-    view_with_volumes(ns, name, uid, images, serde_json::json!([]), serde_json::json!([]))
+    view_with_volumes(
+        ns,
+        name,
+        uid,
+        images,
+        serde_json::json!([]),
+        serde_json::json!([]),
+    )
 }
 
 /// [`view`] where every container carries an explicit `imagePullPolicy`

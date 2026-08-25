@@ -459,7 +459,10 @@ fn liveness_failure_restarts_running_container() {
     // Liveness tracker folded to Failure (as the runner's probe pass does).
     let mut probes = PodProbeState::new();
     let spec = ProbeSpec {
-        http_get: HttpGetSpec { path: "/".into(), port: 80 },
+        http_get: HttpGetSpec {
+            path: "/".into(),
+            port: 80,
+        },
         initial_delay_seconds: 0,
         period_seconds: 1,
         timeout_seconds: 1,
