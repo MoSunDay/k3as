@@ -71,10 +71,10 @@ impl HttpClient {
     }
 
     /// Issue one HTTP/1.1 request, return `(status_code, json_body)`
-    /// (empty body -> Null). T7.3 Scope A generalized the old GET-only
-    /// exchange: `body` implies `Content-Type`/`Content-Length` headers;
-    /// `None` sends neither (GET/DELETE). Everything else (connect/read
-    /// timeouts, chunked decoding) is byte-for-byte the Q21 behavior.
+    /// (empty body -> Null). Thin wrapper over [`Self::exchange`] +
+    /// [`parse_response`](crate::http::parse_response); the T4.2 Scope C
+    /// verbs (`logs`, `exec`) share the same machinery via
+    /// [`Self::request_bytes`].
     pub(crate) async fn request_json(
         &self,
         method: &str,
@@ -82,6 +82,39 @@ impl HttpClient {
         content_type: Option<&str>,
         body: Option<&str>,
     ) -> Result<(u16, Value), String> {
+        let raw = self.exchange(method, path, content_type, body).await?;
+        parse_response(&raw)
+    }
+
+    /// Issue one HTTP/1.1 request, return `(status, lowercase content-type,
+    /// utf8-lossy body)`. T4.2 Scope C addition so `kubectl logs` can receive
+    /// the kubelet's deliberate non-JSON `text/plain` stream (Q31) while
+    /// keeping every Q21 transport property unchanged: connect/read timeouts,
+    /// 32 MiB cap, chunked decoding. A missing Content-Type surfaces as `""`.
+    pub(crate) async fn request_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(u16, String, String), String> {
+        let raw = self.exchange(method, path, content_type, body).await?;
+        let parts = parse_raw(&raw)?;
+        Ok((
+            parts.code,
+            parts.content_type,
+            String::from_utf8_lossy(&parts.body).to_string(),
+        ))
+    }
+
+    /// The one-and-only request engine (one `Connection: close` TCP session).
+    async fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
         let addr = (self.host.as_str(), self.port);
         let connect = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
@@ -137,7 +170,7 @@ impl HttpClient {
                 return Err("response exceeds 32 MiB limit".to_string());
             }
         }
-        parse_response(&raw)
+        Ok(raw)
     }
 
     /// GET `path`, return `(status_code, json_body)` (thin wrapper, Q21).
@@ -172,8 +205,18 @@ fn complete_response_len(raw: &[u8]) -> Option<usize> {
     content_length.map(|n| hdr_end + n)
 }
 
-/// Parse a raw HTTP/1.1 response into `(status, json)` (pure, unit-tested).
-fn parse_response(raw: &[u8]) -> Result<(u16, Value), String> {
+/// One parsed HTTP response with framing applied (headers only in this
+/// struct; the body is raw bytes so non-JSON payloads survive — Q31).
+struct RawParts {
+    code: u16,
+    /// Lowercased Content-Type; empty string when the header is absent.
+    content_type: String,
+    body: Vec<u8>,
+}
+
+/// Parse a raw HTTP/1.1 response into status + content-type + framed body
+/// (pure, unit-tested).
+fn parse_raw(raw: &[u8]) -> Result<RawParts, String> {
     let hdr_end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -194,16 +237,18 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Value), String> {
 
     let mut chunked = false;
     let mut content_length: Option<usize> = None;
+    let mut content_type = String::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim();
-        if name == "content-length" {
-            content_length = value.parse::<usize>().ok();
-        } else if name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked") {
-            chunked = true;
+        match name.as_str() {
+            "content-length" => content_length = value.parse::<usize>().ok(),
+            "transfer-encoding" => chunked = value.to_ascii_lowercase().contains("chunked"),
+            "content-type" => content_type = value.to_ascii_lowercase(),
+            _ => {}
         }
     }
 
@@ -221,13 +266,22 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Value), String> {
     } else {
         body_raw.to_vec()
     };
+    Ok(RawParts {
+        code,
+        content_type,
+        body,
+    })
+}
 
-    if body.is_empty() {
-        return Ok((code, Value::Null));
+/// Parse a raw HTTP/1.1 response into `(status, json)` (pure, unit-tested).
+fn parse_response(raw: &[u8]) -> Result<(u16, Value), String> {
+    let parsed = parse_raw(raw)?;
+    if parsed.body.is_empty() {
+        return Ok((parsed.code, Value::Null));
     }
-    let value =
-        serde_json::from_slice(&body).map_err(|e| format!("invalid JSON response body: {e}"))?;
-    Ok((code, value))
+    let value = serde_json::from_slice(&parsed.body)
+        .map_err(|e| format!("invalid JSON response body: {e}"))?;
+    Ok((parsed.code, value))
 }
 
 /// Decode simple chunked framing: `<hex-size>[;ext]\r\n<data>\r\n` repeated,

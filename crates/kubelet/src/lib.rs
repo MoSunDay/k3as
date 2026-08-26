@@ -15,7 +15,10 @@
 //! - [`sync`] + [`exec`] — the reconcile core: pure `plan()` (desired vs
 //!   snapshot -> actions) and `execute()` (sequential CRI application).
 //! - [`status`] — Pod status construction + semantic equality.
-//! - [`runner`] — the three loops (watch, sync, node/lease) + [`spawn`].
+//! - [`server`] — the local log/exec listener (T4.2 Scope C, Q31) the
+//!   apiserver relay dials on `node_ip:kubelet_port`.
+//! - [`runner`] — the four loops (watch, sync, node/lease, local API) +
+//!   [`spawn`].
 #![forbid(unsafe_code)]
 
 pub mod cri_backend;
@@ -26,6 +29,9 @@ pub mod node;
 pub mod objects;
 pub mod probes;
 pub mod runner;
+pub mod server;
+#[cfg(test)] // pure-helper cases split out of server.rs (file size limit)
+mod server_tests;
 pub mod status;
 pub mod sync;
 pub mod volumes;
@@ -39,6 +45,7 @@ pub use objects::{
 };
 pub use probes::{HttpGetSpec, PodProbeState, ProbeSpec};
 pub use runner::{default_node_name, spawn, KubeletConfig};
+pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 pub use sync::{plan, Action, Snapshot};
 pub use volumes::{cleanup_volumes, empty_dir_path, ensure_volumes, resolve_mounts, volume_root};

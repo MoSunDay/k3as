@@ -152,6 +152,26 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Handcrafted canonical `Status` failure with caller-chosen fields.
+///
+/// The T4.2 Scope C relay (`pods/log`, `pods/exec`) needs bespoke codes and
+/// messages (unscheduled pod, missing node InternalIP, kubelet relay
+/// failure) that do not fit an [`ApiError`] variant; this keeps the envelope
+/// byte-identical to [`ApiError`]'s shape (`kind`/`apiVersion`/`metadata`/
+/// `status`/`message`/`reason`/`code`).
+pub(crate) fn status_failure(code: StatusCode, reason: &str, message: String) -> Response {
+    let body = json!({
+        "kind": "Status",
+        "apiVersion": "v1",
+        "metadata": {},
+        "status": "Failure",
+        "message": message,
+        "reason": reason,
+        "code": code.as_u16(),
+    });
+    (code, Json(body)).into_response()
+}
+
 /// Map a [`StorageError`] to an [`ApiError`] for a given kind/name.
 pub(crate) fn storage_error(err: StorageError, kind: &str, name: &str) -> ApiError {
     match err {

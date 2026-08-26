@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Deterministic, fully-offline OCI image builder for Sprint 18 / S5: packages
 # a static C HTTP echo server as the load-balancing test workload for the S4
-# NodePort plane (Q28) and the S6 two-replica round-robin assertion.
+# NodePort plane (Q28) and the S6 two-replica round-robin assertion. Since
+# T4.2 Scope C the same image also carries `/bin/wfstep` — the Q27 airgap
+# one-shot step binary from build-workflow-image.sh, source identical — so
+# `kubectl exec` assertions (golden G30) exercise exit-code passthrough in
+# the very image the kubelet already runs for logs/probes/volumes coverage.
 #
 # Registry egress is blocked in this environment (registry.k8s.io redirects to
 # a blocked CDN, docker.io is blocked, ghcr.io has no usable echo repo), so
@@ -349,10 +353,35 @@ if command -v file >/dev/null && file "$WORK/echo" | grep -qi 'statically linked
   echo "echo: static ELF confirmed by file(1)"
 fi
 
+# --- (a2) static wfstep binary (T4.2 Scope C) ---------------------------------
+# Byte-for-byte the wfstep.c contract of scripts/build-workflow-image.sh:
+#   wfstep <message>          -> prints "wfstep: <message>" to stdout, exit 0
+#   wfstep --fail <message>   -> prints "wfstep: <message>" to stderr, exit 1
+cat > "$WORK/wfstep.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    int fail = argc > 1 && strcmp(argv[1], "--fail") == 0;
+    const char *msg = fail ? (argc > 2 ? argv[2] : "") : (argc > 1 ? argv[1] : "");
+    if (fail) { fprintf(stderr, "wfstep: %s\n", msg); return 1; }
+    printf("wfstep: %s\n", msg);
+    return 0;
+}
+EOF
+(cd "$WORK" && "$CC" -static -Os -o wfstep wfstep.c)
+[[ -x "$WORK/wfstep" && -s "$WORK/wfstep" ]] || { echo "error: wfstep binary not built" >&2; exit 1; }
+GOT="$("$WORK/wfstep" hello)"
+[[ "$GOT" == "wfstep: hello" ]] || { echo "error: wfstep stdout mismatch: '$GOT'" >&2; exit 1; }
+if "$WORK/wfstep" --fail boom >/dev/null 2>"$WORK/fail.err"; then
+  echo "error: wfstep --fail exited 0" >&2; exit 1
+fi
+[[ "$(cat "$WORK/fail.err")" == "wfstep: boom" ]] || { echo "error: wfstep --fail stderr mismatch" >&2; exit 1; }
+
 # --- (b) deterministic layer tar (/bin/echo, mode 0755, owner 0:0, mtime @0) -
 ROOTDIR="$WORK/rootdir"
 mkdir -p "$ROOTDIR/bin"
 install -m 0755 "$WORK/echo" "$ROOTDIR/bin/echo"
+install -m 0755 "$WORK/wfstep" "$ROOTDIR/bin/wfstep"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
     -cf "$WORK/layer.tar" -C "$ROOTDIR" .
 

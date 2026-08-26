@@ -6,13 +6,17 @@
 # recipe (scripts/golden-conformance.sh).
 #
 # Usage: scripts/local-up.sh
-#   INIT_PRO_BIN=...       reuse a pre-built binary (default: build if missing)
-#   INIT_PRO_API_PORT=...  fixed apiserver port (default: pick a free one)
+#   INIT_PRO_BIN=...        reuse a pre-built binary (default: build if missing)
+#   INIT_PRO_API_PORT=...   fixed apiserver port (default: pick a free one)
+#   LOCAL_UP_DATA_DIR=DIR   persistent data dir (T4.2 Scope C): keeps
+#                           pods/logs across runs; default remains an
+#                           ephemeral mktemp dir removed on exit.
 #
 # The datastore is SQLite on disk since T2.3 (Q29): the server is started
 # with `--datastore-endpoint sqlite://$DD/server/state.db`, so the local
 # cluster is RESTARTABLE within a run — data persists across server
-# restarts. The data dir is still a mktemp dir removed on exit.
+# restarts. The data dir is still a mktemp dir removed on exit unless
+# LOCAL_UP_DATA_DIR opts into persistence (caller owns the tree then).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +41,13 @@ pick_port() {
 
 API_PORT="${INIT_PRO_API_PORT:-$(pick_port)}"
 BASE="http://127.0.0.1:$API_PORT"
-DD="$(mktemp -d /tmp/init-pro-local.XXXXXX)"
+if [[ -n "${LOCAL_UP_DATA_DIR:-}" ]]; then
+  # Persistent mode (T4.2 Scope C): caller owns the tree.
+  DD="$LOCAL_UP_DATA_DIR"
+  mkdir -p "$DD"
+else
+  DD="$(mktemp -d /tmp/init-pro-local.XXXXXX)"
+fi
 PAUSE_REF="init-pro.local/pause:0.1"
 PAUSE_TAR="$DD/pause.tar"
 SERVER_PID="" AGENT_PID=""
@@ -55,7 +65,13 @@ cleanup() {
     umount -l "$m" 2>/dev/null || true
   done
   sleep 0.5
-  rm -rf "$DD"
+  # Ephemeral runs own the dir and remove it; LOCAL_UP_DATA_DIR runs leave
+  # the tree for the caller (pods/logs survive, Q31).
+  if [[ -z "${LOCAL_UP_DATA_DIR:-}" ]]; then
+    rm -rf "$DD"
+  else
+    echo "local-up: data kept at $DD (LOCAL_UP_DATA_DIR)"
+  fi
   echo "local-up: bye."
 }
 trap cleanup EXIT
@@ -78,8 +94,11 @@ for _ in $(seq 1 120); do grep -q "discovery listening" "$DD/server.log" 2>/dev/
 grep -q "discovery listening" "$DD/server.log" || { echo "error: server never came up (see $DD/server.log)" >&2; exit 1; }
 
 echo "local-up: starting agent ..."
-INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$DD/agent" --token dev \
-  --server "$BASE" --node-name local-node >"$DD/agent.log" 2>&1 &
+KUBELET_PORT="$(pick_port)"
+INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" \
+"$BIN" agent --data-dir "$DD/agent" --token dev \
+  --server "$BASE" --node-name local-node \
+  --node-ip 127.0.0.1 --kubelet-port "$KUBELET_PORT" >"$DD/agent.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 240); do grep -q "containerd healthy" "$DD/agent.log" 2>/dev/null && break; sleep 0.25; done
 grep -q "containerd healthy" "$DD/agent.log" || { echo "error: containerd never healthy (see $DD/agent.log)" >&2; exit 1; }
@@ -103,22 +122,80 @@ done
 echo "local-up: node Ready. Single-node cluster is UP."
 
 ln -sf "$BIN" "$DD/kubectl"
+
+# The suggested workload is a REAL echo pod (airgap image): it serves HTTP
+# on the podIP AND leaves stderr lines in its CRI log file, so the logs/exec
+# data plane (T4.2 Scope C) is demonstrable immediately. Applied via plain
+# REST curl + $DD/demo.sh (kubectl apply/get still speak argoproj.io only -
+# T7.3 Scope A).
+ECHO_TAR="$DD/demo-echo.tar"
+if "$SCRIPT_DIR/build-echo-image.sh" "$ECHO_TAR" "init-pro.local/echo:0.1" >/dev/null 2>&1; then
+  for _ in $(seq 1 20); do
+    if INIT_PRO_DATA_DIR="$DD/agent" "$BIN" ctr -n k8s.io images import "$ECHO_TAR" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+  done
+fi
+cat > "$DD/demo.json" <<JSON
+{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo","namespace":"default"},
+ "spec":{"replicas":1,"selector":{"matchLabels":{"app":"demo"}},
+   "template":{"metadata":{"labels":{"app":"demo"}},
+     "spec":{"containers":[{"name":"echo","image":"init-pro.local/echo:0.1",
+       "ports":[{"containerPort":8080}]}]}}}}
+JSON
+
+cat > "$DD/demo.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+# Create the demo Deployment and wait for its pod to go Running+Ready,
+# then print the T4.2 Scope C one-liners. Uses REST for create/wait --
+# the bundled kubectl apply/get speak argoproj.io only (T7.3 Scope A).
+set -euo pipefail
+DD="$(cd "$(dirname "$0")" && pwd)"
+BASE="${INIT_PRO_SERVER:?export INIT_PRO_SERVER first (see local-up banner)}"
+K="$DD/kubectl"
+curl -s -X POST "$BASE/apis/apps/v1/namespaces/default/deployments" \
+  -H 'Content-Type: application/json' --data-binary @"$DD/demo.json" >/dev/null
+POD=""
+for _ in $(seq 1 240); do
+  POD="$(curl -s "$BASE/api/v1/namespaces/default/pods" | python3 -c 'import json,sys
+try: items=json.load(sys.stdin).get("items",[])
+except Exception: items=[]
+for p in items:
+  st=p.get("status",{})
+  conds={c.get("type"):c.get("status") for c in st.get("conditions",[])}
+  if st.get("phase")=="Running" and conds.get("Ready")=="True":
+    print(p["metadata"]["name"]); break' 2>/dev/null || true)"
+  [[ -n "$POD" ]] && break
+  sleep 0.5
+done
+[[ -n "$POD" ]] || { echo "demo pod never became Running+Ready"; exit 1; }
+echo "demo pod ready: $POD"
+echo "  $K logs $POD                                # relayed CRI log bytes"
+echo "  $K logs -f $POD                             # client-side poll follow"
+echo "  $K exec $POD -- /bin/wfstep hello           # rc 0 through crictl exec"
+echo "  $K exec $POD -- /bin/wfstep --fail oops     # remote exit 1 propagates"
+SCRIPT
+chmod +x "$DD/demo.sh"
+
 cat <<FOLLOWUP
 
   API server  : $BASE
+  Kubelet     : $KUBELET_PORT (node-ip 127.0.0.1; logs/exec relay target)
   Logs        : $DD/server.log   $DD/agent.log
   crictl      : INIT_PRO_DATA_DIR=$DD/agent $BIN crictl ps
-  kubectl     : $DD/kubectl rollout status deployment/NAME --server $BASE
+  kubectl     : export INIT_PRO_SERVER=$BASE   # then just run $DD/kubectl <verb> ...
 
-  Try a Deployment (pause pods, airgap image $PAUSE_REF):
+  Try the echo-pod demo (create + wait handled for you):
 
-    curl -s -X POST -H 'Content-Type: application/json' \\
-      -d '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"demo","namespace":"default"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"demo"}},"template":{"metadata":{"labels":{"app":"demo"}},"spec":{"containers":[{"name":"pause","image":"$PAUSE_REF"}]}}}}' \\
-      $BASE/apis/apps/v1/namespaces/default/deployments
+    export INIT_PRO_SERVER=$BASE   # kubectl's --server env fallback
+    $DD/demo.sh                    # creates the demo Deployment via REST, waits Ready
 
-    curl -s $BASE/api/v1/namespaces/default/pods | python3 -m json.tool
+    then run the verbs it prints, e.g.:
+    $DD/kubectl logs \$POD              # streamed CRI log bytes via the relay
+    $DD/kubectl exec \$POD -- /bin/wfstep --fail oops   # remote exit 1 propagates
 
-  Ctrl-C to tear everything down.
+  Ctrl-C to tear everything down${LOCAL_UP_DATA_DIR:+ (data stays at $DD)}.
 
 FOLLOWUP
 wait "$SERVER_PID"

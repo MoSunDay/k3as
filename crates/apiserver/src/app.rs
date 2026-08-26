@@ -67,6 +67,16 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/namespaces/{namespace}/pods/{name}/status",
             put(crate::pod_status::put_pod_status),
         )
+        // T4.2 Scope C: pods/log + pods/exec relay subresources — resolved
+        // to the owning node's kubelet, then passed through verbatim (Q31).
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}/log",
+            get(crate::pod_io::pod_log),
+        )
+        .route(
+            "/api/v1/namespaces/{namespace}/pods/{name}/exec",
+            post(crate::pod_io::pod_exec),
+        )
         .route(
             "/api/v1/namespaces/{namespace}/{resource}/{name}",
             get(item::core_get_ns)

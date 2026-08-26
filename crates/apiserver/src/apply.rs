@@ -105,6 +105,7 @@ pub(crate) async fn do_apply(
     set_managed_fields(&mut value, result.managed_fields);
 
     if result.created {
+        super::state::ensure_object_uid(&mut value);
         match st.store.create(&key, value).await {
             Ok(entry) => {
                 let mut v = entry.value;

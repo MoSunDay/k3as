@@ -1,8 +1,10 @@
-//! The kubelet loops (TODO **T4.2**): three tasks spawned by [`spawn`] —
+//! The kubelet loops (TODO **T4.2**): four tasks spawned by [`spawn`] —
 //! a pod watch (LIST + watch stream -> desired map), the sync cycle
-//! (snapshot -> [`crate::sync::plan`] -> execute -> `/status` writes), and
-//! node registration + `kube-node-lease` heartbeat. All errors are logged
-//! and retried; nothing panics. Tracing target is `"init-pro"`.
+//! (snapshot -> [`crate::sync::plan`] -> execute -> `/status` writes), node
+//! registration + `kube-node-lease` heartbeat, and since Scope C (Q31) the
+//! local container log/exec HTTP listener ([`crate::server::serve`]). All
+//! errors are logged and retried; nothing panics. Tracing target is
+//! `"init-pro"`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -34,6 +36,13 @@ pub struct KubeletConfig {
     pub sandbox_image: String,
     pub sync_period: Duration,
     pub heartbeat_period: Duration,
+    /// IP the kubelet's local log/exec listener binds AND that it advertises
+    /// on the Node object (`status.addresses[InternalIP]`) so the apiserver
+    /// relay can reach it (T4.2 Scope C, Q31). Default `127.0.0.1`.
+    pub node_ip: String,
+    /// Port of the same listener (upstream kubelet convention: 10250);
+    /// published via the Node annotation `init-pro.io/kubelet-port`.
+    pub kubelet_port: u16,
 }
 
 impl KubeletConfig {
@@ -51,7 +60,21 @@ impl KubeletConfig {
             sandbox_image: runtime::config::sandbox_image(),
             sync_period: Duration::from_secs(2),
             heartbeat_period: Duration::from_secs(10),
+            node_ip: "127.0.0.1".to_string(),
+            kubelet_port: 10250,
         }
+    }
+
+    /// Override the advertised/bind node IP for the local log+exec listener.
+    pub fn with_node_ip(mut self, ip: impl Into<String>) -> Self {
+        self.node_ip = ip.into();
+        self
+    }
+
+    /// Override the local log+exec listener port (default 10250).
+    pub fn with_kubelet_port(mut self, port: u16) -> Self {
+        self.kubelet_port = port;
+        self
     }
 
     /// Per-pod log root handed to the CRI sandbox configs.
@@ -79,7 +102,11 @@ pub fn default_node_name() -> String {
     "init-pro-node".to_string()
 }
 
-/// Spawn the three kubelet tasks; join handles drain on shutdown.
+/// Spawn the kubelet tasks; join handles drain on shutdown.
+///
+/// Four loops since T4.2 Scope C: pod watch, sync cycle, node/lease
+/// heartbeat, and the local log/exec HTTP listener ([`crate::server::serve`],
+/// Q31) — the apiserver relay dials it on `cfg.node_ip:cfg.kubelet_port`.
 pub fn spawn(
     cfg: KubeletConfig,
     cri: Arc<dyn CriBackend>,
@@ -96,6 +123,7 @@ pub fn spawn(
     tracing::info!(
         target: "init-pro",
         node = %cfg.node_name, server = %cfg.server_url,
+        local = %format!("{}:{}", cfg.node_ip, cfg.kubelet_port),
         "kubelet loops starting (T4.2)"
     );
     vec![
@@ -107,13 +135,27 @@ pub fn spawn(
         )),
         tokio::spawn(sync_task(
             client.clone(),
-            cri,
+            cri.clone(),
             cfg.clone(),
             desired,
             shutdown.clone(),
         )),
-        tokio::spawn(node_task(client, cfg, shutdown)),
+        tokio::spawn(node_task(client, cfg.clone(), shutdown.clone())),
+        // Task 4 (T4.2 Scope C / Q31): plain-HTTP container logs + exec for
+        // the apiserver relay. Same `CriCtl`-backed seam as the sync loop;
+        // a bind failure must not take the whole kubelet down, so the error
+        // is logged inside [`server_task`] instead of failing `spawn`.
+        tokio::spawn(server_task(cfg, cri, shutdown)),
     ]
+}
+
+/// Adapter around [`crate::server::serve`] so the join set stays
+/// `JoinHandle<()>`: bind failures (bad node_ip / port already taken) are
+/// logged and end this one task only.
+async fn server_task(cfg: KubeletConfig, backend: Arc<dyn CriBackend>, shutdown: infra::Shutdown) {
+    if let Err(e) = crate::server::serve(cfg, backend, shutdown).await {
+        tracing::warn!(target: "init-pro", error = %e, "kubelet: local log/exec API exited");
+    }
 }
 
 type Desired = Arc<Mutex<BTreeMap<String, PodView>>>;

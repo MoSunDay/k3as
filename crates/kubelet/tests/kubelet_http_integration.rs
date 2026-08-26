@@ -178,7 +178,8 @@ async fn kubelet_runs_pod_via_fake_cri_and_tears_down_on_delete() {
         cri.clone() as Arc<dyn CriBackend>,
         shutdown.clone(),
     );
-    assert_eq!(handles.len(), 3);
+    // Four loops since Scope C: watch + sync + node/lease + local log/exec.
+    assert_eq!(handles.len(), 4);
 
     // Node registration + lease heartbeat happen before any pod exists.
     wait_for(
@@ -559,14 +560,19 @@ async fn volumes_are_materialized_refreshed_and_cleaned_up() {
         .await
         .unwrap();
     assert_eq!(code, 201, "volume pod accepted: {resp}");
+    // Scope C upline fix: the apiserver now STAMPS metadata.uid on create,
+    // so the kubelet's volume root is keyed by the real uid (not the
+    // synthesized `no-uid-<ns>/<name>` fallback).
+    let uid = resp["metadata"]["uid"]
+        .as_str()
+        .expect("pod uid stamped")
+        .to_string();
+    let root = dd.join("pods").join(&uid).join("volumes");
     // (c) Wait for the container to be created (the kubelet synced the pod).
     poll_until("volume pod container created", || {
         cri.peek_containers().iter().any(|c| c.name == "c0")
     })
     .await;
-    // (d) Host files exist under the pod's volume root. The apiserver does
-    // not assign uids, so the kubelet synthesizes `no-uid-<ns>/<name>`.
-    let root = dd.join("pods").join("no-uid-default/vpod").join("volumes");
     let greeting = root.join("configMap").join("cm").join("greeting");
     let data_dir = root.join("emptyDir").join("data-vol");
     poll_until("configMap key materialized", || {

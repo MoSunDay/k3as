@@ -191,3 +191,88 @@ pub(crate) fn item_key(loc: &Loc, res: &Resolved, name: &str) -> Key {
 /// The error returned when a REST path names a resource that is not served
 /// (upstream: `404 the server could not find the requested resource`).
 pub(crate) const NOT_FOUND_RESOURCE_MSG: &str = "the server could not find the requested resource";
+
+/// Upstream parity (T4.2 Scope C): every object creation is assigned a
+/// `metadata.uid` (k8s generates a UUID on POST / SSA-create). Fills only
+/// when absent-or-empty; callers pass the freshly built object before it
+/// hits the store. The v1 relay (pod log/exec) and the kubelet log
+/// directory layout both key off this uid, so a missing one used to strand
+/// the whole data plane.
+pub(crate) fn ensure_object_uid(v: &mut Value) {
+    let blank = match v.get("metadata").and_then(|m| m.get("uid")) {
+        None | Some(Value::Null) => true,
+        Some(x) => x.as_str().map(str::is_empty).unwrap_or(false),
+    };
+    if blank
+        && v.get("metadata")
+            .map(serde_json::Value::is_object)
+            .unwrap_or(false)
+    {
+        if let Some(m) = v.get_mut("metadata") {
+            m["uid"] = Value::String(new_uid());
+        }
+    }
+}
+
+/// Fresh Kubernetes-shaped v4 UUID via the already-pinned `getrandom`
+/// (same entropy source as collection.rs `random_suffix`).
+fn new_uid() -> String {
+    use std::fmt::Write as _;
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system randomness unavailable");
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let mut out = String::with_capacity(36);
+    for (i, x) in b.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        let _ = write!(out, "{x:02x}");
+    }
+    out
+}
+
+#[cfg(test)]
+mod uid_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_object_uid_fills_missing_and_keeps_explicit() {
+        let mut v: Value = serde_json::from_str(r#"{"metadata":{"name":"p"},"spec":{}}"#).unwrap();
+        ensure_object_uid(&mut v);
+        let uid = v.pointer("/metadata/uid").and_then(Value::as_str).unwrap();
+        assert_eq!(uid.len(), 36);
+        assert_eq!(
+            uid.matches('-').count(),
+            4,
+            "Kubernetes v4 UUID shape expected"
+        );
+
+        // Explicit non-empty uid survives untouched.
+        let mut kept: Value =
+            serde_json::from_str(r#"{"metadata":{"name":"p","uid":"explicit-uid"}}"#).unwrap();
+        ensure_object_uid(&mut kept);
+        assert_eq!(
+            kept.pointer("/metadata/uid").cloned(),
+            Some(Value::String("explicit-uid".into()))
+        );
+
+        // Null and empty-string uids count as blank (regenerated).
+        for raw in [r#"{"metadata":{"uid":null}}"#, r#"{"metadata":{"uid":""}}"#] {
+            let mut b: Value = serde_json::from_str(raw).unwrap();
+            ensure_object_uid(&mut b);
+            assert_eq!(
+                b.pointer("/metadata/uid")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .len(),
+                36
+            );
+        }
+
+        // No metadata object: leave the body alone (creation validates it).
+        let mut none: Value = serde_json::json!({"spec": {}});
+        ensure_object_uid(&mut none);
+        assert!(none.get("metadata").is_none());
+    }
+}

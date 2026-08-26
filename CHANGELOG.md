@@ -7,6 +7,95 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 24 — T4.2 Scope C: `kubectl logs/exec` over the kubelet relay — T4.2 closes (2026-08-26)
+
+**Goal:** make `kubectl logs` and `kubectl exec` work end-to-end on the
+upstream-shaped data plane (apiserver relay -> new kubelet local
+listener -> crictl subprocess), promote `scripts/local-up.sh` to the
+official single-node UX, and close T4.2 as done (Scope A+B+C).
+**Q31** records the plain-HTTP single-shot relay decision.
+
+### S1-S2 - kubelet listener (`crates/kubelet/src/server.rs`, 364 lines, NEW)
+- Plain-HTTP server on `<node-ip>:<kubelet-port>` (default
+  127.0.0.1:10250): `GET|POST /pods/{pod_uid}/containers/{container}/log|exec`;
+  `{container}` = `-` auto-selects the lexicographically smallest
+  container name; errors are exact k8s `Status` JSON.
+- axum promoted dev-dep -> dep (same workspace-locked version);
+  `tailLines=N` parsed manually instead of axum Query (deviation noted).
+  Graceful drain wired into the agent shutdown order.
+- Tests: `server_tests.rs` (349 lines) covers routing, container
+  auto-select, tail, and status-error shapes.
+
+### S3 - CRI exec + CLI flags
+- `runtime::CriCtl::exec_container(id, cmd, timeout) -> (i32, String)`
+  is non-zero-exit-safe; fixed upstream quirk: crictl `--timeout`
+  takes a bare integer of SECONDS, not `30s`.
+- cli: `--node-ip` / `--kubelet-port` on `agent` (flag-parity strip
+  exemptions included).
+
+### S4 - apiserver relay (`pod_io.rs` 280 + `kubelet_hop.rs` 253 lines, NEW)
+- Routes `GET|POST /api/v1/namespaces/{ns}/pods/{name}/log|exec`.
+- Node addressing chain Pod->nodeName->Node->hop:
+  `Node.status.addresses[InternalIP]` + annotation
+  `init-pro.io/kubelet-port` (fallback 10250 if absent); resolution
+  failures map 404 (unknown pod/node), hop failures map 502.
+
+### S5 - kubectl verbs + env fallback
+- `logs (POD|pod/POD|pods/POD) [-f|--follow] [--tail=N] [-c C]` and
+  `exec POD [-n NS] [-c C] -- CMD...` (literal `--` required).
+- Every verb now falls back to `INIT_PRO_SERVER` (pure helper
+  `default_server_from(env)`), exercised by G30.
+- Documented deviations (Q31): `-f` is client-side 250 ms polling,
+  tail applies only to the first poll; stdout+stderr are merged in v1;
+  log-shrink rotation behavior under follow is deliberate.
+
+### S6 - defect fix: nobody stamped `metadata.uid`
+- The relay/kubelet log directory contract keys on pod uid, but no
+  write path assigned one (previously only kubelet synthesized a
+  fallback). Upstream-parity fix at all three write seams:
+  apiserver `do_create`, SSA apply create branch, and controllers'
+  `StorageClient::create`; helpers in `controllers::id`
+  (`format_uid/new_uid/uid_is_blank`) + `apiserver::state::
+  ensure_object_uid`. The kubelet volumes integration test updated to
+  the real-uid root path (it asserted the old synthesized name).
+
+### S7 - golden G30 (4 assertions; vendor + `cc` gated)
+- logs relay hits the streamed CRI bytes; exec rc0 passes output
+  (`wfstep: hello`); follow-mode sees appended lines grow; exec rc1
+  propagates remote exit code. Random API+kubelet ports prove the
+  annotation addressing path; `INIT_PRO_SERVER` exercises the env
+  fallback. **golden 38/38 green** against the linked binary.
+- `scripts/build-echo-image.sh` now also builds `/bin/wfstep`
+  (identical C source to build-workflow-image.sh); deterministic double
+  run verified byte-identical via `cmp`.
+
+### S8 - local-up.sh promoted to the official UX
+- Waits for `containerd healthy` BEFORE image imports (retry loop for
+  the echo tar); an env-prefix bug that silently dropped
+  `INIT_PRO_SANDBOX_IMAGE`/KUBELET_PORT wiring was found and fixed by
+  smoke-testing the script itself.
+- REST one-shot demo: `$DD/demo.sh` POSTs the demo Deployment JSON and
+  waits Running+Ready, then prints the logs/exec one-liners (the
+  bundled `kubectl apply/get` speak argoproj.io/v1alpha1 only -
+  T7.3 Scope A - so create/wait ride plain curl on purpose).
+- `LOCAL_UP_DATA_DIR=DIR` opts into a persistent tree (caller owns it;
+  default remains an ephemeral mktemp dir removed on exit). Both modes
+  smoke-tested live; demo pod reached Running+Ready with logs/exec
+  relay verified through the new verbs.
+
+### Gates
+- `cargo test --workspace --locked`: **903 passed / 0 failed**
+  (was 854 pre-sprint; deltas: kubelet server tests, apiserver
+  pod_io/kubelet_hop/wire tests, kubectl logs/exec tests, uid-stamp
+  unit tests).
+- golden conformance **38 passed / 0 failed** (was 34; +G30 x4),
+  run twice with vendor+cc.
+- clippy `-D warnings`: 0 errors; `cargo fmt --all --check` clean.
+- flag parity **16/16**; discovery parity ALL PASS; multicall selftest OK.
+- File caps audit: largest new files pod_io 280 / kubelet_hop 253 /
+  logs 327 / exec_cmd 264; iterated http.rs 400 / nodes.sh 478 (within
+  limits).
+
 ## Sprint 23 — T7.3 Scope C: the CronWorkflow controller — schedules fire; T7.3 closes (2026-08-26)
 
 **Goal:** make argoproj.io CronWorkflows **fire** — Scope C lands the

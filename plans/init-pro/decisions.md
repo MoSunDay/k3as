@@ -1556,3 +1556,39 @@ consequences:
   in `status.lastScheduledTime` thereafter, which is written only when
   a child is actually created.
 
+---
+
+## Q31 — logs/exec data plane: plain-HTTP single-shot relay (T4.2 Scope C)
+
+- **Context.** Upstream `kubectl logs|exec` rides SPDY/WebSocket
+  bidirectional streams between apiserver and kubelet :10250, with
+  token authn + SubjectAccessReview authz on every hop. Reproducing the
+  streaming subprotocol for a single-host distribution would buy
+  complexity long before it buys capability.
+- **Options.** (a) Full SPDY/WebSocket channel parity; (b) no exec/logs
+  at all until Phase 3; (c) plain HTTP single-shot relay shaped like the
+  upstream URL hierarchy.
+- **Decision.** (c). The kubelet serves plain HTTP on
+  `<node-ip>:<kubelet-port>` (default 127.0.0.1:10250; `--node-ip` /
+  `--kubelet-port` flags): `GET|POST /pods/{pod_uid}/containers/
+  {container}/log|exec`. `{container}` = `-` auto-selects the
+  lexicographically smallest container name. `tailLines=N` is parsed as
+  a raw integer. Errors are exact k8s `Status` JSON objects. Exec takes
+  `{"command":[...]}` and answers 200 `{"exitCode":N,"output":"..."}` —
+  a non-zero remote exit code is a NORMAL 200; only infrastructure
+  failure (pod missing, node unreachable, crictl broken) yields 502.
+  The apiserver relays `/api/v1/namespaces/{ns}/pods/{name}/log|exec`,
+  resolving Pod→nodeName→Node→hop (404 for unknown pod/node, 502 for
+  hop failure). stdout+stderr are MERGED in v1 (single CRI stream);
+  `-f/--follow` is implemented CLIENT-side as a 250 ms poll of
+  `tailLines`, with tail applied only to the first poll.
+- **Consequences.** Two documented deviations from upstream: (1) no
+  byte-split streams / attach / port-forward subprotocol in v1;
+  (2) follow is poll-based, so log rotation under follow can repeat or
+  skip lines across rotations. Trust model: single-host first — bind
+  defaults to loopback; TLS + authN on the kubelet listener are
+  explicitly deferred to the T1.3 security workstream and the Deferred
+  list of T4.2, not silently assumed. Pod addressing keys on real
+  `metadata.uid`, which is why Sprint 24 also fixed uid stamping at all
+  three write seams (apiserver create, SSA create branch,
+  StorageClient.create).

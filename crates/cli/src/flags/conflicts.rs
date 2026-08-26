@@ -211,6 +211,8 @@ mod tests {
         let a = AgentCmd {
             shared: shared(),
             node_name: None,
+            node_ip: "127.0.0.1".to_string(),
+            kubelet_port: 10250,
         };
         let err = validate_agent(&a).unwrap_err();
         assert_eq!(err.0, "--token is required");
@@ -223,6 +225,8 @@ mod tests {
         let a = AgentCmd {
             shared: sh,
             node_name: None,
+            node_ip: "127.0.0.1".to_string(),
+            kubelet_port: 10250,
         };
         let err = validate_agent(&a).unwrap_err();
         assert_eq!(err.0, "--server is required");
@@ -236,6 +240,8 @@ mod tests {
         let a = AgentCmd {
             shared: sh,
             node_name: None,
+            node_ip: "127.0.0.1".to_string(),
+            kubelet_port: 10250,
         };
         assert!(validate_agent(&a).is_ok());
     }

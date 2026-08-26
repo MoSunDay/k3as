@@ -43,22 +43,38 @@ pub struct ServerBind {
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
-    run_supervised("server", cfg, Some(bind), None, None)
+    run_supervised("server", cfg, Some(bind), None, None, None)
 }
 
-pub fn run_agent(cfg: Config, server_url: Option<String>, node_name: Option<String>) -> ExitCode {
-    run_supervised("agent", cfg, None, server_url, node_name)
+pub fn run_agent(
+    cfg: Config,
+    server_url: Option<String>,
+    node_name: Option<String>,
+    node_ip: String,
+    kubelet_port: u16,
+) -> ExitCode {
+    run_supervised(
+        "agent",
+        cfg,
+        None,
+        server_url,
+        node_name,
+        Some((node_ip, kubelet_port)),
+    )
 }
 
 /// `server` serves discovery when given a [`ServerBind`]; `agent` supervises
 /// the bundled containerd runtime (T4.1) and, with `server_url` + a staged
-/// crictl, the kubelet loops (T4.2 Scope A) under `node_name`.
+/// crictl, the kubelet loops (T4.2 Scope A) under `node_name`. The kubelet's
+/// local log/exec listener (Scope C, Q31) binds/advertises
+/// `(node_ip, kubelet_port)` when present.
 fn run_supervised(
     role: &'static str,
     cfg: Config,
     bind: Option<ServerBind>,
     server_url: Option<String>,
     node_name: Option<String>,
+    kubelet_addr: Option<(String, u16)>,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -141,11 +157,24 @@ fn run_supervised(
                                  kubelet disabled"
                             );
                         } else {
-                            let kc = kubelet::KubeletConfig::new(
-                                url.clone(),
-                                node.clone(),
-                                cfg.data_dir.clone(),
-                            );
+                            let kc = match &kubelet_addr {
+                                Some((ip, port)) => kubelet::KubeletConfig::new(
+                                    url.clone(),
+                                    node.clone(),
+                                    cfg.data_dir.clone(),
+                                )
+                                .with_node_ip(ip.clone())
+                                .with_kubelet_port(*port),
+                                None => {
+                                    // Defaults (127.0.0.1:10250) — used by
+                                    // non-CLI callers / tests only.
+                                    kubelet::KubeletConfig::new(
+                                        url.clone(),
+                                        node.clone(),
+                                        cfg.data_dir.clone(),
+                                    )
+                                }
+                            };
                             let handles = kubelet::spawn(
                                 kc,
                                 Arc::new(kubelet::CriCtlBackend::new(cri)),

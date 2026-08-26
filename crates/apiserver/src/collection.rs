@@ -103,6 +103,8 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
     if res.scope.is_namespaced() {
         set_namespace(&mut body, &namespace);
     }
+    // T4.2 Scope C: upstream assigns metadata.uid on every create.
+    super::state::ensure_object_uid(&mut body);
     // Upstream apiserver parity (T3.1b, Q20): every Namespace is created with
     // the `kubernetes` finalizer so deletion is gated on the namespace
     // controller draining all namespaced content first.

@@ -247,6 +247,76 @@ impl CriCtl {
             .await?;
         parse_inspect_pod_sandbox(&out).map_err(CriError::Parse)
     }
+
+    /// One-shot `crictl exec --timeout <SECONDS> <id> <cmd...>` (TODO **T4.2
+    /// Scope C**, decision **Q31** — the primitive behind the kubelet's
+    /// `POST /pods/{uid}/containers/{c}/exec` route).
+    ///
+    /// Unlike [`CriCtl::run`] a NONZERO container exit code is a normal
+    /// outcome: it is returned as `(rc, merged_output)`. Only spawn/io/
+    /// timeout/serialize failures are [`Err`].
+    ///
+    /// Merge choice (v1 simplification): stdout and stderr are captured in
+    /// two separate pipes and concatenated stdout-then-stderr into one
+    /// lossy-UTF-8 buffer. This keeps the merge a pure byte concat the unit
+    /// tests can reason about, at the cost of no real-time interleaving.
+    ///
+    /// The crictl-side `--timeout` flag and the tokio-level deadline are set
+    /// to the same duration (the explicit-flag lesson from the T4.2 flake:
+    /// never rely on only one layer).
+    pub async fn exec_container(
+        &self,
+        container_id: &str,
+        cmd: &[String],
+        timeout: Duration,
+    ) -> Result<(i32, String), CriError> {
+        if cmd.is_empty() {
+            return Err(CriError::Parse(
+                "exec command must be non-empty (no shell, array of argv words)".to_string(),
+            ));
+        }
+        let argv = self.exec_argv(container_id, cmd, timeout);
+        let mut command = Command::new(&self.bin);
+        command
+            .args(&argv)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| {
+                CriError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("crictl exec timed out after {timeout:?}"),
+                ))
+            })?
+            .map_err(CriError::Spawn)?;
+        // Merged output: stdout first, then stderr (documented above).
+        let mut merged = output.stdout;
+        merged.extend_from_slice(&output.stderr);
+        Ok((
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&merged).into_owned(),
+        ))
+    }
+
+    /// Pure argv for [`CriCtl::exec_container`] (crictl's `--timeout` takes
+    /// RAW SECONDS — no unit suffix, unlike stop: `crictl exec --timeout N
+    /// <id> <words...>`), following the same pattern as [`CriCtl::argv`] so
+    /// it stays unit-tested without spawning. Owned `String`s because the
+    /// exec words cross from caller-owned vectors.
+    fn exec_argv(&self, container_id: &str, cmd: &[String], timeout: Duration) -> Vec<String> {
+        let mut argv = vec![
+            "--runtime-endpoint".to_string(),
+            self.endpoint.clone(),
+            "exec".to_string(),
+            "--timeout".to_string(),
+            timeout.as_secs().max(1).to_string(),
+            container_id.to_string(),
+        ];
+        argv.extend(cmd.iter().cloned());
+        argv
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +377,46 @@ mod tests {
         assert_eq!(cmd_args("rm", &["cid"]), vec!["rm", "cid"]);
         assert_eq!(cmd_args("stopp", &["sb1"]), vec!["stopp", "sb1"]);
         assert_eq!(cmd_args("rmp", &["sb1"]), vec!["rmp", "sb1"]);
+    }
+
+    #[test]
+    fn argv_exec_orders_timeout_flag_before_id_and_words() {
+        // T4.2 Scope C: `crictl exec --timeout 30 <id> <words...>`; the
+        // explicit crictl-side --timeout is part of the contract (Q31).
+        let c = cri();
+        let argv = c.exec_argv(
+            "cid0",
+            &["/bin/wfstep".to_string(), "hello".to_string()],
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "--runtime-endpoint",
+                "unix:///dd/run/containerd/containerd.sock",
+                "exec",
+                "--timeout",
+                "30",
+                "cid0",
+                "/bin/wfstep",
+                "hello"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn argv_exec_clamps_subsecond_timeouts_to_one_second() {
+        // A zero/sub-second caller timeout must still yield a well-formed
+        // (>= 1s) crictl flag: the tokio deadline races it anyway.
+        let c = cri();
+        assert_eq!(
+            c.exec_argv("cid", &[], Duration::from_millis(40))
+                .as_slice()[3..5],
+            ["--timeout", "1"]
+        );
     }
 
     #[test]

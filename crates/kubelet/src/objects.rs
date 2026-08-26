@@ -294,12 +294,20 @@ pub fn pod_stub(view: &PodView) -> Value {
 
 /// The Node object this kubelet registers (deterministic: `now` is passed
 /// in, so tests can pin the timestamps).
-pub fn node_object(name: &str, now: &str) -> Value {
+///
+/// T4.2 Scope C (Q31): `status.addresses[InternalIP]` carries
+/// [`crate::runner::KubeletConfig::node_ip`] and the metadata annotation
+/// `init-pro.io/kubelet-port` carries the local log/exec listener port, so
+/// the apiserver relay can dial `ip:port` without extra discovery.
+pub fn node_object(name: &str, node_ip: &str, kubelet_port: u16, now: &str) -> Value {
     json!({
         "apiVersion": "v1",
         "kind": "Node",
         "metadata": {
             "name": name,
+            "annotations": {
+                "init-pro.io/kubelet-port": kubelet_port.to_string(),
+            },
             "labels": {
                 "kubernetes.io/hostname": name,
                 "kubernetes.io/os": "linux",
@@ -318,7 +326,7 @@ pub fn node_object(name: &str, now: &str) -> Value {
                 "lastHeartbeatTime": now,
                 "lastTransitionTime": now,
             }],
-            "addresses": [{"type": "InternalIP", "address": "127.0.0.1"}],
+            "addresses": [{"type": "InternalIP", "address": node_ip}],
             "nodeInfo": {
                 "kubeletVersion": "init-pro-0.2.0",
                 "containerRuntimeVersion": "containerd://1.7.20",
@@ -587,11 +595,16 @@ mod tests {
 
     #[test]
     fn node_object_shape() {
-        let n = node_object("n1", "2026-08-16T00:00:00Z");
+        let n = node_object("n1", "10.0.0.7", 10250, "2026-08-16T00:00:00Z");
         assert_eq!(n["apiVersion"], "v1");
         assert_eq!(n["kind"], "Node");
         assert_eq!(n["metadata"]["name"], "n1");
         assert_eq!(n["metadata"]["labels"]["kubernetes.io/hostname"], "n1");
+        // T4.2 Scope C (Q31): the relay discovery keys.
+        assert_eq!(
+            n["metadata"]["annotations"]["init-pro.io/kubelet-port"],
+            "10250"
+        );
         assert_eq!(n["status"]["capacity"]["pods"], "110");
         assert_eq!(n["status"]["conditions"][0]["type"], "Ready");
         assert_eq!(n["status"]["conditions"][0]["status"], "True");
@@ -601,7 +614,7 @@ mod tests {
         );
         assert_eq!(
             n["status"]["addresses"][0],
-            json!({"type": "InternalIP", "address": "127.0.0.1"})
+            json!({"type": "InternalIP", "address": "10.0.0.7"})
         );
         assert_eq!(n["status"]["nodeInfo"]["kubeletVersion"], "init-pro-0.2.0");
     }

@@ -130,6 +130,10 @@ impl Client for StorageClient {
     }
 
     async fn create(&self, key: &Key, value: Value) -> Result<Value, ControllerError> {
+        // Upstream parity (T4.2 Scope C): the apiserver stamps
+        // `metadata.uid` on REST creates; controller-side direct storage
+        // writes must too, or ownerReferences/log dirs see empty uids.
+        let value = ensure_uid(value);
         let entry = self.store.create(key, value).await?;
         let ns = (!key.namespace.is_empty()).then(|| key.namespace.clone());
         Ok(StorageClient::project(entry, ns))
@@ -158,4 +162,70 @@ impl Client for StorageClient {
     ) -> Result<Watch, ControllerError> {
         Ok(self.store.watch(prefix, start_revision).await?)
     }
+}
+
+/// Stamp `metadata.uid` when absent/empty (upstream assigns UUIDs on every
+/// object creation). Leaves an explicitly provided non-empty uid untouched.
+pub(crate) fn ensure_uid(mut v: Value) -> Value {
+    if crate::id::uid_is_blank(v.pointer("/metadata/uid"))
+        && v.get("metadata")
+            .map(serde_json::Value::is_object)
+            .unwrap_or(false)
+    {
+        if let Some(m) = v.get_mut("metadata") {
+            m["uid"] = Value::String(crate::id::new_uid());
+        }
+    }
+    v
+}
+
+#[tokio::test]
+async fn create_stamps_metadata_uid_when_absent() {
+    // T4.2 Scope C: controller-side direct storage creates must carry the
+    // upstream-assigned metadata.uid too (pod log dirs + ownerReferences
+    // key off it). Explicit non-empty uids are left untouched.
+    use crate::client::{Client, StorageClient};
+    let client = StorageClient::new(std::sync::Arc::new(storage::EmbeddedStorage::new()));
+    let key = storage::Key::new("", "pods", "default", "p1");
+    client
+        .create(
+            &key,
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "p1", "namespace": "default"},
+                "spec": {}
+            }),
+        )
+        .await
+        .unwrap();
+    let got = client.get(&key).await.unwrap().unwrap();
+    assert_eq!(
+        got.pointer("/metadata/uid")
+            .and_then(|u| u.as_str())
+            .map(str::len),
+        Some(36)
+    );
+
+    let key2 = storage::Key::new("", "pods", "default", "p2");
+    client
+        .create(
+            &key2,
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "p2", "namespace": "default", "uid": "mine"},
+                "spec": {}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .get(&key2)
+            .await
+            .unwrap()
+            .unwrap()
+            .pointer("/metadata/uid")
+            .cloned(),
+        Some(serde_json::Value::String("mine".into()))
+    );
 }

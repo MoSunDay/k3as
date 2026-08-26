@@ -154,7 +154,13 @@ where
         }
         Some(Command::Agent(ag)) => {
             tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);
-            runtime::run_agent(cfg, ag.shared.server.clone(), ag.node_name.clone())
+            runtime::run_agent(
+                cfg,
+                ag.shared.server.clone(),
+                ag.node_name.clone(),
+                ag.node_ip.clone(),
+                ag.kubelet_port,
+            )
         }
         Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, manifest),
         None => {
@@ -226,11 +232,57 @@ mod tests {
             "--server",
             "--prefer-bundled-bin",
             "--node-name",
+            "--node-ip",
+            "--kubelet-port",
         ] {
             assert!(
                 agent_help.contains(flag),
                 "agent --help missing wired flag {flag}"
             );
+        }
+        // T4.2 Scope C (Q31): the new listener flags are advertised too.
+        for flag in ["--node-ip", "--kubelet-port"] {
+            assert!(
+                agent_help.contains(flag),
+                "agent --help missing wired flag {flag}"
+            );
+        }
+    }
+
+    /// T4.2 Scope C (Q31): `--node-ip`/`--kubelet-port` parse on `agent`
+    /// with defaults, and an explicit override wins (proves the strip filter
+    /// no longer eats them pre-clap).
+    #[test]
+    fn agent_accepts_node_ip_and_kubelet_port() {
+        let parsed = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("init-pro").chain(args.iter().copied()))
+                .expect("agent flags accepted")
+        };
+        match parsed(&["agent", "--server", "http://s", "--token", "t"]).command {
+            Some(Command::Agent(ag)) => {
+                assert_eq!(ag.node_ip, "127.0.0.1");
+                assert_eq!(ag.kubelet_port, 10250);
+            }
+            _ => panic!("expected Agent"),
+        }
+        match parsed(&[
+            "agent",
+            "--server",
+            "http://s",
+            "--token",
+            "t",
+            "--node-ip",
+            "10.0.0.7",
+            "--kubelet-port",
+            "10251",
+        ])
+        .command
+        {
+            Some(Command::Agent(ag)) => {
+                assert_eq!(ag.node_ip, "10.0.0.7");
+                assert_eq!(ag.kubelet_port, 10251);
+            }
+            _ => panic!("expected Agent"),
         }
     }
 

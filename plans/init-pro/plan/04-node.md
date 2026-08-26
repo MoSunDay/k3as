@@ -168,14 +168,36 @@ and node registration.
     /healthz+/fail+/bootcount+CONFIG 行)。门禁 31/31 ×2 无 SKIP +
     ST1–ST6 6/6 + D1–D4 4/4 + clippy 0。
 
-- **状态 / Status** — in-progress (Scope A+B done, Sprint 20)
-- **证据 / Evidence** — kubelet 53 / apiserver 51 / runtime +17 tests;
-  golden G25 (27/27 with vendor + `cc`); Q27 ADR. Sprint 20: workspace
-  746 (+29; kubelet 83 / runtime 40); golden G25+G26 31/31 ×2 (vendor
-  + `cc`); service-traffic ST1–ST6 6/6; durability D1–D4 4/4; clippy 0
-- **卡点 / Blockers** — Scope C remainder: exec/logs/attach、local
-  deploy 正式 UX（Sprint 21）; 顺延项: probes TCP/exec、
-  imagePullSecrets（私有仓库认证）、CSI 卷 (Sprint 21+)。
+  - **As-built (Sprint 24, Scope C):** logs/exec 数据面走上游形状的三段
+    链路 (**Q31**): (1) apiserver 中继 `crates/apiserver/src/pod_io.rs`
+    (280 行) + `kubelet_hop.rs` (253 行)，路由
+    `/api/v1/namespaces/{ns}/pods/{name}/log|exec`，寻址链
+    Pod→nodeName→Node InternalIP + 注解 `init-pro.io/kubelet-port`
+    (回退 10250)，hop 失败 → 404/502；(2) kubelet 局部监听器
+    `crates/kubelet/src/server.rs` (364 行, axum 升正依赖) +
+    graceful drain；(3) crictl 子进程 `runtime::CriCtl::exec_container`
+    (`--timeout` 裸秒数修复, 非 0 rc 不当错误)。CLI 新增
+    `--node-ip/--kubelet-port`（含 nop-strip 豁免）；kubectl 新动词
+    `logs [-f|--tail] [-c]` / `exec POD -- CMD…`，`INIT_PRO_SERVER`
+    env 回退全动词生效；`-f` 为客户端 250ms 轮询（记录在案的偏差）。
+    缺陷修复：metadata.uid 此前无人分配 —— apiserver create、SSA 创建
+    分支、controllers StorageClient.create 三处写入接缝统一注入。
+    golden **G30** 四断言 → **38/38 全绿** (vendor+cc 门控; 随机端口
+    证明注解寻址)。local-up.sh 单机 UX：健康后导镜像、REST 一键 demo.sh
+    (kubectl apply/get 现仅 argoproj.io v1alpha1)、LOCAL_UP_DATA_DIR
+    持久化模式。测试 workspace 903/0；clippy 0; parity 16/16;
+    discovery ALL。
+
+- **状态 / Status** — done (Scope A+B+C, Sprint 24; **Q31**)
+- **证据 / Evidence** — Sprint 24: workspace 903 通过 / 0 失败;
+  golden **38/38** ×(G25/G26/G30 vendor+cc); flag parity 16/16;
+  discovery parity ALL; clippy -D warnings 0. 前序: golden G25 27/27,
+  G26 31/31 ×2, ST1–ST6 6/6, D1–D4 4/4 (Sprint 17/20 evidence 保留)。
+- **卡点 / Blockers** — 无 (A+B+C 全部交付)。
+- **顺延 / Deferred (future enhancements, 非 TODO 阻塞)** — probes
+  TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
+  exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN
+  （随 T1.3 安全工作面）。
 - **依赖 / Depends on** — T4.1, T3.2
 
 ---

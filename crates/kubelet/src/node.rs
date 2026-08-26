@@ -21,7 +21,7 @@ pub(crate) async fn node_task(
     shutdown: infra::Shutdown,
 ) {
     loop {
-        match ensure_node(&client, &cfg.node_name).await {
+        match ensure_node(&client, &cfg).await {
             Ok(()) => break,
             Err(e) => {
                 tracing::warn!(target: "init-pro", error = %e, "kubelet: node registration failed; retrying");
@@ -38,16 +38,17 @@ pub(crate) async fn node_task(
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {}
         }
-        heartbeat(&client, &cfg.node_name).await;
+        heartbeat(&client, &cfg).await;
     }
 }
 
-async fn ensure_node(client: &HttpJson, name: &str) -> Result<(), String> {
+async fn ensure_node(client: &HttpJson, cfg: &KubeletConfig) -> Result<(), String> {
+    let name = cfg.node_name.as_str();
     let path = format!("/api/v1/nodes/{name}");
     match client.get_json(&path).await {
         Ok((200, _)) => Ok(()),
         Ok((404, _)) => {
-            let body = objects::node_object(name, &now_str());
+            let body = objects::node_object(name, &cfg.node_ip, cfg.kubelet_port, &now_str());
             match client.post_json("/api/v1/nodes", &body).await {
                 Ok((code, _)) if code == 200 || code == 201 => Ok(()),
                 Ok((409, _)) => Ok(()), // created concurrently elsewhere
@@ -61,7 +62,8 @@ async fn ensure_node(client: &HttpJson, name: &str) -> Result<(), String> {
 }
 
 /// One heartbeat: renew (or create) the node lease, refresh node status.
-async fn heartbeat(client: &HttpJson, name: &str) {
+async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig) {
+    let name = cfg.node_name.as_str();
     let now = now_str();
     let lease_path =
         format!("/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/{name}");
@@ -100,17 +102,21 @@ async fn heartbeat(client: &HttpJson, name: &str) {
         }
         Err(e) => tracing::warn!(target: "init-pro", error = %e, "kubelet: lease write failed"),
     }
-    refresh_node_status(client, name, &now).await;
+    refresh_node_status(client, cfg, &now).await;
 }
 
 /// GET the node, replace `.status` with fresh Ready/capacity, full PUT back
 /// (resourceVersion preserved -> CAS; a 409 just retries next tick).
-async fn refresh_node_status(client: &HttpJson, name: &str, now: &str) {
+async fn refresh_node_status(client: &HttpJson, cfg: &KubeletConfig, now: &str) {
+    let name = cfg.node_name.as_str();
     let path = format!("/api/v1/nodes/{name}");
     let Ok((200, mut node)) = client.get_json(&path).await else {
         return;
     };
-    let Some(status) = objects::node_object(name, now).pointer("/status").cloned() else {
+    let Some(status) = objects::node_object(name, &cfg.node_ip, cfg.kubelet_port, now)
+        .pointer("/status")
+        .cloned()
+    else {
         return;
     };
     node["status"] = status;

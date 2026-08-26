@@ -152,8 +152,105 @@ pub fn placeholder_pod_ip(uid: &str) -> String {
     format!("10.42.{x}.{y}")
 }
 
+/// A Kubernetes-shaped UUID (`v4` layout): `8-4-4-4-12` lowercase hex with
+/// the version nibble fixed to `4`. Pure over its input bytes so tests can
+/// pin the exact output; entropy comes from [`new_uid`] which follows the
+/// house no-`rand` convention ([`rand_suffix`]).
+/// True when a `metadata.uid` JSON value is absent-or-empty (the only case
+/// where creation seams must synthesize one).
+pub fn uid_is_blank(v: Option<&serde_json::Value>) -> bool {
+    match v {
+        None | Some(serde_json::Value::Null) => true,
+        Some(x) => x.as_str().map(str::is_empty).unwrap_or(false),
+    }
+}
+
+pub fn format_uid(bytes: [u8; 16]) -> String {
+    let mut b = bytes;
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Fresh upstream-parity object UID (`metadata.uid`, k8s assigns a UUID on
+/// every create). Drawn through the same hasher-seed trick as
+/// [`rand_suffix`]; uniqueness across processes is wall-clock widened.
+/// Exposed for the storage write seams that bypass REST POSTs
+/// (T4.2 Scope C relay depends on non-empty pod uids).
+pub fn new_uid() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let draw = |salt: u64| {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+        h.write_u64(salt);
+        h.write_u64(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        );
+        h.finish()
+    };
+    let lo = draw(0xA0761D6478BD642F);
+    let hi = draw(0xE7037ED1A0B428DB);
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&lo.to_le_bytes());
+    bytes[8..].copy_from_slice(&hi.to_le_bytes());
+    format_uid(bytes)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn format_uid_yields_kubernetes_v4_shape() {
+        let u = crate::id::format_uid([0u8; 16]);
+        let parts: Vec<&str> = u.split('-').collect();
+        assert_eq!(parts.len(), 5, "{u}");
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12],
+            "{u}"
+        );
+        assert!(u.chars().all(|c| c == '-' || c.is_ascii_hexdigit()), "{u}");
+        assert_eq!(u, "00000000-0000-4000-8000-000000000000");
+        // Version/variant nibbles pinned regardless of input entropy.
+        for seed in 1u8..=8 {
+            let mut b = [seed; 16];
+            b[6] = 0xff;
+            b[8] = 0x00;
+            let x = crate::id::format_uid(b);
+            assert!(x.contains("-4"), "version nibble not v4: {x}");
+        }
+    }
+
+    #[test]
+    fn new_uid_shape_and_uniqueness() {
+        let a = crate::id::new_uid();
+        let b = crate::id::new_uid();
+        let shape = |s: &str| s.len() == 36 && s.chars().all(|c| c == '-' || c.is_ascii_hexdigit());
+        assert!(shape(&a), "{a}");
+        assert!(shape(&b), "{b}");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn uid_is_blank_only_for_missing_or_empty() {
+        use serde_json::{json, Value};
+        assert!(crate::id::uid_is_blank(None));
+        assert!(crate::id::uid_is_blank(Some(&json!(""))));
+        assert!(crate::id::uid_is_blank(Some(&Value::Null)));
+        assert!(!crate::id::uid_is_blank(Some(&json!("abc-123"))));
+        assert!(!crate::id::uid_is_blank(Some(&json!(42))));
+    }
+
     use super::*;
     use serde_json::json;
 

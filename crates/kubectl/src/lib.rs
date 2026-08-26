@@ -17,7 +17,13 @@ mod discovery;
 mod discovery_tests;
 #[cfg(test)] // canned-TCP-server cases (file size limit, mirrors verbs_wire_tests)
 mod discovery_wire_tests;
+mod exec_cmd;
+#[cfg(test)] // canned-apiserver cases for the exec verb (file size limit)
+mod exec_wire_tests;
 mod http;
+mod logs;
+#[cfg(test)] // pure follow/parser cases split out of logs.rs (file size limit)
+mod logs_tests;
 mod rollout;
 #[cfg(test)]
 mod rollout_poll_tests;
@@ -36,9 +42,25 @@ use rollout::{rollout_status, Outcome};
 use verbs::{apply, delete, get, parse_output, resolve_plural, Output};
 
 /// Default apiserver address (server default bind is 127.0.0.1:6443).
-const DEFAULT_SERVER: &str = "http://127.0.0.1:6443";
+pub(crate) const DEFAULT_SERVER: &str = "http://127.0.0.1:6443";
 /// Default namespace, kubectl parity.
-const DEFAULT_NAMESPACE: &str = "default";
+pub(crate) const DEFAULT_NAMESPACE: &str = "default";
+
+/// Pure env-fallback resolution (T4.2 Scope C): a non-empty `env` value
+/// beats [`DEFAULT_SERVER`], and an explicit `--server` flag in turn beats
+/// the env (flags overwrite the initialized default). Kept pure so tests
+/// cover precedence without process-global state.
+fn default_server_from(env: Option<String>) -> String {
+    match env {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => DEFAULT_SERVER.to_string(),
+    }
+}
+
+/// [`DEFAULT_SERVER`] unless `INIT_PRO_SERVER` overrides it.
+fn default_server() -> String {
+    default_server_from(std::env::var("INIT_PRO_SERVER").ok())
+}
 
 /// Parsed `kubectl rollout status` invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +89,9 @@ pub fn run(args: &[String]) -> ExitCode {
         Some("get") => return run_get(args),
         Some("apply") => return run_apply(args),
         Some("delete") => return run_delete(args),
+        // T4.2 Scope C (Q31): pod log + exec over the apiserver relay.
+        Some("logs") => return crate::logs::run(args),
+        Some("exec") => return crate::exec_cmd::run(args),
         // T7.3 optional enhancement (Q30): discovery listing verbs.
         Some("api-versions") => return run_discovery(args, "api-versions"),
         Some("api-resources") => return run_discovery(args, "api-resources"),
@@ -137,7 +162,7 @@ fn parse_verb_flags(
     allow_file: bool,
 ) -> Result<(VerbFlags, Vec<String>), String> {
     let mut flags = VerbFlags {
-        server: DEFAULT_SERVER.to_string(),
+        server: default_server(),
         namespace: DEFAULT_NAMESPACE.to_string(),
         output: Output::Table,
         file: None,
@@ -356,14 +381,14 @@ fn run_discovery(args: &[String], verb: &str) -> ExitCode {
     }
 }
 
-/// Uniform failure exit for the T7.3 verbs.
-fn verb_error(msg: String) -> ExitCode {
+/// Uniform failure exit for the T7.3 verbs and the T4.2 logs/exec verbs.
+pub(crate) fn verb_error(msg: String) -> ExitCode {
     eprintln!("error: {msg}");
     ExitCode::from(1)
 }
 
 /// Q21: a tiny current-thread runtime is all the verbs need.
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -388,7 +413,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
         ));
     }
 
-    let mut server = DEFAULT_SERVER.to_string();
+    let mut server = default_server();
     let mut namespace = DEFAULT_NAMESPACE.to_string();
     let mut timeout: Option<Duration> = None;
     let mut positional: Vec<&str> = Vec::new();
@@ -495,7 +520,8 @@ fn usage() -> String {
         String::new(),
         "v1 surface: rollout status for Deployments (T3.1b, Q21 plain-HTTP transport)".into(),
         "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30)".into(),
-        "and the discovery listing verbs api-versions / api-resources (T7.3, Q30).".into(),
+        "the discovery listing verbs api-versions / api-resources (T7.3, Q30),".into(),
+        "and pod logs / exec over the apiserver relay (T4.2 Scope C, Q31).".into(),
         String::new(),
         "Usage:".into(),
         "  kubectl rollout status (TYPE/NAME | TYPE NAME) [flags]".into(),
@@ -504,6 +530,8 @@ fn usage() -> String {
         "  kubectl delete (TYPE/NAME | TYPE NAME) [flags]".into(),
         "  kubectl api-versions [flags]                     (all served group/version, sorted)".into(),
         "  kubectl api-resources [flags]                    (NAME SHORTNAMES APIVERSION NAMESPACED KIND)".into(),
+        "  kubectl logs (POD | pod/POD | pods/POD) [-f] [--tail=N] [-c C] [flags]".into(),
+        "  kubectl exec POD [-c CONTAINER] -- CMD [ARGS...] [flags]".into(),
         String::new(),
         "Target forms: deployment/NAME, deployments/NAME, deploy/NAME (deployment only in v1).".into(),
         "argoproj types: workflow (wf), cronworkflow (cwf, cronwf) — argoproj.io/v1alpha1 only.".into(),
@@ -625,5 +653,24 @@ mod tests {
         assert!(text.contains("rollout status"));
         assert!(text.contains("--server"));
         assert!(text.contains("--timeout"));
+        // T4.2 Scope C verbs are documented too.
+        assert!(text.contains("kubectl logs"), "usage must mention logs");
+        assert!(text.contains("kubectl exec"), "usage must mention exec");
+    }
+
+    #[test]
+    fn env_fallback_precedence_is_pure() {
+        use crate::default_server_from as from;
+        // No env -> canonical default; empty/blank env counts as unset.
+        assert_eq!(from(None), DEFAULT_SERVER);
+        assert_eq!(from(Some(String::new())), DEFAULT_SERVER);
+        assert_eq!(from(Some("   ".to_string())), DEFAULT_SERVER);
+        // Non-empty env wins over the default...
+        assert_eq!(
+            from(Some("http://10.0.0.9:6443".to_string())),
+            "http://10.0.0.9:6443"
+        );
+        // ...and an explicit --server flag in turn beats any env value
+        // (flags overwrite the initialized default), asserted parser-side.
     }
 }

@@ -331,3 +331,148 @@ for p in items:
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
   rm -rf "$G26TMP" "$G26SRV" "$G26AG"
 fi
+
+# --- T4.2 Scope C: kubectl logs/exec data plane over the apiserver relay ---
+# G30 closes T4.2 Scope C: the logs/exec verbs ride the upstream-shaped
+# chain kubectl -> apiserver relay (pod->nodeName->node InternalIP +
+# init-pro.io/kubelet-port annotation) -> kubelet local listener ->
+# crictl subprocess (Q26/Q31). Plain HTTP single-shot relay; stdout+stderr
+# are MERGED by design in v1 (Q31 documents the deviation from upstream's
+# SPDY/WebSocket byte-splitting). Same vendor+cc gates as G25/G26 since the
+# workload is the Q27 airgap echo image — which now also ships /bin/wfstep
+# (build-echo-image.sh, same source as build-workflow-image.sh).
+if [[ -z "$G24_VENDOR_BIN" ]]; then
+  echo "SKIP G30 kubelet logs/exec relay (no vendored containerd)"
+elif ! command -v cc >/dev/null 2>&1; then
+  echo "SKIP G30 kubelet logs/exec relay (no cc for the airgap echo image)"
+else
+  G30TMP="$(mktemp -d)"; G30SRV="$(mktemp)"; G30AG="$(mktemp)"
+  G30_PORT="$(pick_port)"; G30_KPORT="$(pick_port)"
+  "$BIN" server --data-dir "$G30TMP/srv" --bind-address 127.0.0.1 --https-listen-port "$G30_PORT" >"$G30SRV" 2>&1 &
+  SRV2=$!
+  for _ in $(seq 1 60); do grep -q "discovery listening" "$G30SRV" && break; sleep 0.1; done
+  BASE30="http://127.0.0.1:${G30_PORT}"
+  PAUSE_REF="init-pro.local/pause:0.1"
+  G30_ECHO_TAR="$G30TMP/echo.tar"
+  ECHO_REF="init-pro.local/echo:0.1"
+  "$SCRIPT_DIR/build-echo-image.sh" "$G30_ECHO_TAR" "$ECHO_REF" >/dev/null 2>&1 || true
+  # Explicit --node-ip/--kubelet-port prove the flag wiring AND force the
+  # node-annotation addressing path (the relay must NOT rely on a lucky
+  # well-known 10250 here — the port is random).
+  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G30TMP/ag" --token dev \
+      --server "$BASE30" --node-name g30-node \
+      --node-ip 127.0.0.1 --kubelet-port "$G30_KPORT" >"$G30AG" 2>&1 &
+  AGENT_PID=$!
+  for _ in $(seq 1 300); do grep -q "containerd healthy" "$G30AG" && break; sleep 0.1; done
+  G30_PAUSE_TAR="$G30TMP/pause.tar"
+  "$SCRIPT_DIR/build-pause-image.sh" "$G30_PAUSE_TAR" "$PAUSE_REF" >/dev/null 2>&1 || true
+  INIT_PRO_DATA_DIR="$G30TMP/ag" "$BIN" ctr -n k8s.io images import "$G30_PAUSE_TAR" >/dev/null 2>&1 || true
+  INIT_PRO_DATA_DIR="$G30TMP/ag" "$BIN" ctr -n k8s.io images import "$G30_ECHO_TAR" >/dev/null 2>&1 || true
+
+  curl -s -o /dev/null -X POST -H "Content-Type: application/json" \
+    -d '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"g30-dep","namespace":"default"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"g30"}},"template":{"metadata":{"labels":{"app":"g30"}},"spec":{"containers":[{"name":"echo","image":"'"$ECHO_REF"'"}]}}}}' \
+    "$BASE30/apis/apps/v1/namespaces/default/deployments"
+  G30A=0; G30POD=""
+  for _ in $(seq 1 240); do
+    S="$(curl -s "$BASE30/api/v1/namespaces/default/pods" | python3 -c 'import json,sys
+try: items=json.load(sys.stdin).get("items",[])
+except Exception: sys.exit(0)
+for p in items:
+  if p.get("metadata",{}).get("labels",{}).get("app")!="g30": continue
+  st=p.get("status",{})
+  conds={c.get("type"):c.get("status") for c in st.get("conditions",[])}
+  if st.get("phase")=="Running" and conds.get("Ready")=="True": print(p["metadata"]["name"]); break' 2>/dev/null || true)"
+    [[ -n "$S" ]] && { G30A=1; G30POD="$S"; break; }
+    sleep 0.5
+  done
+  if [[ "$G30A" -eq 1 ]]; then
+    # Generate deterministic log noise: the echo server emits ONE stderr
+    # line per accepted connection (no request-path logging), captured
+    # into the CRI log file.
+    G30IP="$(curl -s "$BASE30/api/v1/namespaces/default/pods/$G30POD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"].get("podIP",""))' 2>/dev/null || true)"
+    if [[ -z "${G30IP:-}" ]]; then
+      for _ in $(seq 1 60); do
+        G30IP="$(curl -s "$BASE30/api/v1/namespaces/default/pods/$G30POD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"].get("podIP",""))' 2>/dev/null || true)"
+        [[ -n "$G30IP" ]] && break
+        sleep 0.5
+      done
+    fi
+    curl -s --max-time 5 -o /dev/null "http://$G30IP:8080/noise1" 2>/dev/null || true
+    curl -s --max-time 5 -o /dev/null "http://$G30IP:8080/noise2" 2>/dev/null || true
+    sleep 1
+  else
+    echo "FAIL G30 pod never Running+Ready (server: $G30SRV agent: $G30AG)"
+    FAIL=$((FAIL+1))
+  fi
+
+  ln -sf "$BIN" "$G30TMP/kubectl"
+  export INIT_PRO_SERVER="$BASE30"   # exercises the env-var --server fallback
+
+  # G30a: kubectl logs (one-shot) relays the streamed CRI log bytes.
+  G30B_LOG=""
+  if [[ "$G30A" -eq 1 ]]; then
+    G30B_LOG="$("$G30TMP/kubectl" logs "$G30POD" -n default 2>/dev/null || true)"
+    if printf '%s' "$G30B_LOG" | grep -q "echo: connection from"; then
+      ok "G30  kubectl logs relays container log lines via kubelet  (T4.2 Scope C, Q31)"
+      PASS=$((PASS+1))
+    else
+      echo "FAIL G30a kubectl logs missing generated line (got: $(printf '%s' "$G30B_LOG" | head -3))"
+      FAIL=$((FAIL+1))
+    fi
+  fi
+
+  # G30b: kubectl exec exit-0 + output passthrough (/bin/wfstep hello).
+  G30C_OK=0
+  if [[ "$G30A" -eq 1 ]]; then
+    G30X_OUT="$("$G30TMP/kubectl" exec "$G30POD" -n default -- /bin/wfstep hello 2>/dev/null)" && G30C_RC=0 || G30C_RC=$?
+    if [[ "$G30C_RC" -eq 0 && "$G30X_OUT" == "wfstep: hello" ]]; then
+      ok "G30  kubectl exec runs /bin/wfstep: rc0 + merged output  (T4.2 Scope C, Q31)"
+      PASS=$((PASS+1))
+    else
+      echo "FAIL G30b exec success (rc=$G30C_RC out='$G30X_OUT')"
+      FAIL=$((FAIL+1))
+    fi
+  fi
+
+  # G30b2: -f streams NEW lines as they appear (client-side polling
+  # follow, Q21 cadence): snapshot after the first poll, generate fresh
+  # traffic, then require the follow output to have grown past it.
+  if [[ "$G30A" -eq 1 ]]; then
+    "$G30TMP/kubectl" logs "$G30POD" -n default -f >"$G30TMP/follow.out" 2>/dev/null &
+    G30F_PID=$!
+    sleep 2   # >= two follow ticks so the baseline snapshot is taken
+    G30F_BASE="$(wc -l <"$G30TMP/follow.out")"
+    G30IP2="$(curl -s "$BASE30/api/v1/namespaces/default/pods/$G30POD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"].get("podIP",""))' 2>/dev/null || true)"
+    curl -s --max-time 5 -o /dev/null "http://$G30IP2:8080/followme" 2>/dev/null || true
+    sleep 3   # >= several follow ticks to observe the appended line
+    G30F_NOW="$(wc -l <"$G30TMP/follow.out")"
+    kill "$G30F_PID" 2>/dev/null || true; wait "$G30F_PID" 2>/dev/null || true
+    if [[ "${G30F_NOW:-0}" -gt "${G30F_BASE:-0}" ]]; then
+      ok "G30  kubectl logs -f streams appended lines (client poll follow)  (T4.2 Scope C, Q31)"
+      PASS=$((PASS+1))
+    else
+      echo "FAIL G30b2 logs -f did not grow ($G30F_BASE -> $G30F_NOW)"
+      FAIL=$((FAIL+1))
+    fi
+  fi
+
+  # G30c: kubectl exec propagates the remote nonzero exit (rc 1) —
+  # /bin/wfstep --fail prints to the merged stream and exits 1.
+  G30D_OK=0
+  if [[ "$G30A" -eq 1 ]]; then
+    G30F_OUT="$("$G30TMP/kubectl" exec "$G30POD" -n default -- /bin/wfstep --fail oops 2>/dev/null)" && G30F_RC=0 || G30F_RC=$?
+    if [[ "$G30F_RC" -eq 1 ]] && printf '%s' "$G30F_OUT" | grep -q "wfstep: oops"; then
+      ok "G30  kubectl exec propagates remote exit 1 (+output)  (T4.2 Scope C, Q31)"
+      PASS=$((PASS+1))
+    else
+      echo "FAIL G30c exec failure propagation (rc=$G30F_RC out='$G30F_OUT')"
+      FAIL=$((FAIL+1))
+    fi
+  fi
+
+  unset INIT_PRO_SERVER
+  curl -s -o /dev/null -X DELETE "$BASE30/apis/apps/v1/namespaces/default/deployments/g30-dep" || true
+  kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
+  kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
+  rm -rf "$G30TMP" "$G30SRV" "$G30AG"
+fi

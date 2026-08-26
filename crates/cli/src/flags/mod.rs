@@ -21,6 +21,13 @@ pub struct StripResult {
     pub seen: Vec<String>,
 }
 
+/// Agent-wired noop-table flags: kept for clap when the subcommand is
+/// `agent`, still stripped (and warned) everywhere else. `node-name` since
+/// T4.2; `node-ip` since Scope C (Q31).
+fn wired_for_agent(long: &str) -> bool {
+    matches!(long, "node-name" | "node-ip")
+}
+
 /// Strip accept-no-op-warn flags from `argv` (argv[0] is preserved as-is).
 ///
 /// Stops stripping at `--` (end of options); everything after is passed
@@ -56,9 +63,10 @@ pub fn strip_noop(argv: &[String]) -> StripResult {
                 None => (rest, false),
             };
             if let Some(f) = find_long(name) {
-                // T4.2: `--node-name` is wired for `agent` — keep it so clap
-                // sees it; it stays accept-no-op-warn for `server`/`stage`.
-                if !(f.long == "node-name" && sub == Some("agent")) {
+                // T4.2: `--node-name`, and since Scope C `--node-ip`, are
+                // wired for `agent` — keep them so clap sees them; both stay
+                // accept-no-op-warn for `server`/`stage`.
+                if !(sub == Some("agent") && wired_for_agent(f.long)) {
                     record_seen(&mut seen, f.long);
                     if f.takes_value && !tok.contains('=') {
                         // Consume the separate value token (if present).
@@ -74,19 +82,26 @@ pub fn strip_noop(argv: &[String]) -> StripResult {
         } else if tok.len() > 1 && tok.starts_with('-') {
             let c = tok.chars().nth(1).unwrap();
             if let Some(f) = find_short(c) {
-                record_seen(&mut seen, f.long);
-                let after = &tok[2..];
-                if f.takes_value {
-                    // -x=val / -xval: value is attached → skip one token.
-                    // -x with nothing after: value is the next token.
-                    if after.is_empty() || after == "=" {
-                        i += 2;
+                // Same agent wiring for the short form: k3s spells
+                // `--node-ip` as `-i` (only node-ip has an agent-wired short).
+                if !(sub == Some("agent") && wired_for_agent(f.long)) {
+                    record_seen(&mut seen, f.long);
+                    let after = &tok[2..];
+                    if f.takes_value {
+                        // -x=val / -xval: value is attached → skip one token.
+                        // -x with nothing after: value is the next token.
+                        if after.is_empty() || after == "=" {
+                            i += 2;
+                        } else {
+                            i += 1;
+                        }
                     } else {
                         i += 1;
                     }
-                } else {
-                    i += 1;
+                    continue;
                 }
+                out.push(tokens[i].clone());
+                i += 1;
                 continue;
             }
             out.push(tokens[i].clone());
@@ -290,6 +305,33 @@ mod tests {
             ])
         );
         assert!(r.seen.is_empty());
+    }
+
+    #[test]
+    fn node_ip_wired_for_agent_stripped_elsewhere() {
+        // T4.2 Scope C (Q31): `--node-ip` reaches clap on `agent` (both
+        // separate-value and inline `=` forms), stays no-op on server/stage,
+        // and its k3s short form `-i` is kept for agent too.
+        let r = strip_noop(&argv(&["init-pro", "agent", "--node-ip", "10.0.0.7"]));
+        assert_eq!(
+            r.argv,
+            argv(&["init-pro", "agent", "--node-ip", "10.0.0.7"])
+        );
+        assert!(r.seen.is_empty());
+
+        let r = strip_noop(&argv(&["init-pro", "agent", "--node-ip=10.0.0.8"]));
+        assert_eq!(r.argv, argv(&["init-pro", "agent", "--node-ip=10.0.0.8"]));
+        assert!(r.seen.is_empty());
+
+        let r = strip_noop(&argv(&["init-pro", "agent", "-i", "10.0.0.9"]));
+        assert_eq!(r.argv, argv(&["init-pro", "agent", "-i", "10.0.0.9"]));
+        assert!(r.seen.is_empty());
+
+        for sub in ["server", "stage"] {
+            let r = strip_noop(&argv(&["init-pro", sub, "--node-ip", "10.0.0.7"]));
+            assert_eq!(r.argv, argv(&["init-pro", sub]));
+            assert_eq!(r.seen, vec!["node-ip".to_string()]);
+        }
     }
 
     #[test]

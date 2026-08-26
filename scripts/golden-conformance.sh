@@ -25,7 +25,9 @@
 # byte-stable Workflow/CronWorkflow discovery + CRUD/SSA lifecycle; Scope B
 # G29: a two-step Workflow runs to Succeeded on the agent/containerd stack
 # with the Q27 airgap wfstep image; G29 SKIPs like G25 without the vendor
-# bundle or cc).
+# bundle or cc). Scope C (T4.2): G30 walks kubectl logs/exec through the
+# apiserver relay -> kubelet local listener -> crictl subprocess chain
+# (Q31 plain-HTTP single-shot; SKIPs like G25 without vendor bundle or cc).
 #
 # Volatility: the only non-deterministic field is APIVersions.serverAddress
 # (the bind host:port); it is normalized to the token @@PORT@@ before diffing.

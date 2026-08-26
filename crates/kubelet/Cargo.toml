@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+axum = { workspace = true }
 common = { workspace = true }
 infra = { workspace = true }
 runtime = { workspace = true }
@@ -20,7 +21,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 api = { workspace = true }
 apiserver = { workspace = true }
-axum = { workspace = true }
 k8s-openapi = { workspace = true }
 storage = { workspace = true }
 tokio = { workspace = true }
