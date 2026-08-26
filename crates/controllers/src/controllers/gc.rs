@@ -38,23 +38,25 @@ pub(crate) const ORPHAN_ANNOTATION: &str = "init-pro.io/deletion-propagation";
 
 /// `(group, resource)` of every kind the GC sweeps for dangling controller
 /// ownerReferences (cluster-wide list).
-pub(crate) const DEPENDENT_KINDS: [(&str, &str); 5] = [
+pub(crate) const DEPENDENT_KINDS: [(&str, &str); 6] = [
     ("", "pods"),
     ("apps", "replicasets"),
     ("", "endpoints"),
     ("", "persistentvolumeclaims"),
     ("apps", "controllerrevisions"),
+    ("argoproj.io", "workflows"),
 ];
 
 /// Owner kinds the GC is authoritative over (each has an informer cache);
 /// any other owner kind on a dependent is left alone.
-pub(crate) const MANAGED_OWNER_KINDS: [&str; 6] = [
+pub(crate) const MANAGED_OWNER_KINDS: [&str; 7] = [
     "Deployment",
     "ReplicaSet",
     "Service",
     "StatefulSet",
     "DaemonSet",
     "Workflow",
+    "CronWorkflow",
 ];
 
 /// One sweep pass: delete dependents whose managed controller owner is gone.
@@ -183,6 +185,7 @@ fn owner_in_cache(caches: &Caches, kind: &str, ns: &str, owner_name: &str) -> bo
         "StatefulSet" => caches.statefulsets.get(ns, owner_name).is_some(),
         "DaemonSet" => caches.daemonsets.get(ns, owner_name).is_some(),
         "Workflow" => caches.workflows.get(ns, owner_name).is_some(),
+        "CronWorkflow" => caches.cronworkflows.get(ns, owner_name).is_some(),
         _ => false,
     }
 }
@@ -197,7 +200,13 @@ mod tests {
         for kind in MANAGED_OWNER_KINDS {
             assert!(matches!(
                 kind,
-                "Deployment" | "ReplicaSet" | "Service" | "StatefulSet" | "DaemonSet" | "Workflow"
+                "Deployment"
+                    | "ReplicaSet"
+                    | "Service"
+                    | "StatefulSet"
+                    | "DaemonSet"
+                    | "Workflow"
+                    | "CronWorkflow"
             ));
         }
         assert!(!MANAGED_OWNER_KINDS.contains(&"Node"));
@@ -206,12 +215,13 @@ mod tests {
 
     #[test]
     fn dependent_kinds_are_the_sweep_universe() {
-        assert_eq!(DEPENDENT_KINDS.len(), 5);
+        assert_eq!(DEPENDENT_KINDS.len(), 6);
         assert!(DEPENDENT_KINDS.contains(&("", "pods")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "replicasets")));
         assert!(DEPENDENT_KINDS.contains(&("", "endpoints")));
         assert!(DEPENDENT_KINDS.contains(&("", "persistentvolumeclaims")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "controllerrevisions")));
+        assert!(DEPENDENT_KINDS.contains(&("argoproj.io", "workflows")));
         // The drain kinds (namespace.rs) are a superset for teardown; the
         // sweep universe only needs owner-carrying kinds.
         for kind in DEPENDENT_KINDS {

@@ -7,6 +7,79 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 23 — T7.3 Scope C: the CronWorkflow controller — schedules fire; T7.3 closes (2026-08-26)
+
+**Goal:** make argoproj.io CronWorkflows **fire** — Scope C lands the
+CronWorkflow controller inside `init-pro`, evaluating Vixie-cron
+schedules in-process and submitting child Workflows on the Scope B
+execution path. With it, T7.3's minimal-integration scope (types +
+routes + kubectl verbs + Workflow controller + CronWorkflow
+controller + golden G27-G29) is complete and the TODO closes as
+**done**. Q30 gains a Scope C addendum (in-repo cron engine, UTC-naive,
+ownerReference + GC cascade).
+
+### S1 — pure Vixie-cron engine (`crates/controllers/src/controllers/cron_expr.rs`, 393 lines, NEW)
+- 5-field expressions: `*`, lists, ranges, steps; dom/dow take EITHER
+  semantics when both are restricted; dow 7 == Sunday; aliases
+  `@hourly/@daily/@midnight/@weekly/@monthly/@yearly/@annually`;
+  `@every <duration>` accepts compound `s`/`m`/`h`/`d` pairs
+  (e.g. `1m30s`).
+- `next_after()` is strictly-after, minute-granularity, and capped at a
+  366-day horizon. 9 unit tests.
+
+### S2 — controller + wiring
+- `cronworkflow.rs` (353 lines, NEW) reconciles over raw `Value`:
+  schedule source `spec.schedules` (v4 array) else `spec.schedule`
+  (v3); `suspend` short-circuits; an invalid schedule upserts a
+  `SubmissionError` condition; due = any expr's
+  `next_after(lastScheduledTime` else `creationTimestamp)` <= now.
+- concurrencyPolicy: `Allow` (default) / `Forbid` (skip the tick
+  WITHOUT advancing `lastScheduledTime` — upstream parity) / `Replace`
+  (delete active children, then fire).
+- Fires child Workflow `<cwf-name>-<unix_ts>` with `spec.workflowSpec`
+  cloned verbatim + the `workflowMetadata.labels` overlay, label
+  `workflows.argoproj.io/cron-workflow`, and ownerReference
+  `CronWorkflow/argoproj.io/v1alpha1`. Status: `active`
+  (ObjectReference list) + `lastScheduledTime` — the latter written
+  only when a child is actually created — via semantic_eq + CAS
+  write-if-changed.
+- Wiring: `runner.rs` (639 lines) gains the Kind::CronWorkflow queue +
+  informer, 2 workers, a 5s resync, and Workflow-event owner-enqueue
+  into the cron queue; `controllers/mod.rs` gains
+  `Caches.cronworkflows`; `gc.rs` adds CronWorkflow to
+  MANAGED_OWNER_KINDS (7) and workflows to DEPENDENT_KINDS (6), so
+  children cascade-delete.
+
+### S3 — tests
+- 4 integration tests in `crates/controllers/tests/cronworkflow.rs`
+  (262 lines): fires a child; Forbid blocks + releases on terminal
+  CAS; Replace deletes active; suspend never fires. Plus the 9
+  `cron_expr.rs` unit tests. controllers 111 → 124.
+
+### Simplifications / deviations (documented, not blockers)
+- No on-disk anchor → eager first fire; the anchor persists in
+  `lastScheduledTime` thereafter.
+- One child per due tick regardless of schedule count.
+- `spec.timezone` ignored (UTC naive).
+- NOT enforced: successful/failedJobsHistoryLimit, stopStrategy,
+  succeeded/failed/phase status counters.
+
+### T7.3 closes
+- plan/07's "Remaining (Scope C+)" listed only the CronWorkflow
+  controller; with it landed the TODO is complete. Future work
+  (executor semantics, `{{...}}` params, suspend/http/resource
+  templates, argo CLI breadth, timezone/history limits) moves to a
+  "future enhancements" note, not open blockers.
+
+**Gates:** `cargo build --workspace --locked` ok; `cargo fmt --all
+--check` clean; `cargo clippy --workspace --all-targets --locked --
+-D warnings` zero; workspace tests **854 passed / 0 failed**
+(841 → 854, +13 controllers); `scripts/golden-conformance.sh` 34/34
+(G28 CWF lifecycle unaffected — verified live; G29 green);
+`scripts/cli-flag-parity-test.sh` 16/16;
+`scripts/apiserver-discovery-parity-test.sh` ALL passed. All new
+files ≤400 lines; iterated files (runner/mod/gc) ≤800.
+
 ## Sprint 22 — T7.3 Scope B: the built-in Workflow controller — Workflows actually run (2026-08-25)
 
 **Goal:** make argoproj.io Workflows **execute** — Scope B lands the

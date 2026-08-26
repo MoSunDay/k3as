@@ -120,10 +120,46 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     `Succeeded` + `finishedAt`. Pods run WITHOUT the upstream
     wait/executor sidecar — the template container runs directly and
     kubelet terminal pod phases drive node phases.
-  - Remaining (Scope C+): the CronWorkflow controller — fire
-    CronWorkflow schedules into Workflows (concurrency policy honored)
-    — embedded server-side like other Layer-3 control loops; the
-    workflow controller itself landed in Scope B (above).
+  - **As-built (Sprint 23, Scope C, Q30):** the **CronWorkflow
+    controller** — new `crates/controllers/src/controllers/cron_expr.rs`
+    (393 lines, pure Vixie-cron engine: 5-field expressions `*`/lists/
+    ranges/steps, dom/dow EITHER semantics when both restricted,
+    dow 7==Sunday, aliases `@hourly/@daily/@midnight/@weekly/@monthly/
+    @yearly/@annually`, `@every <duration>` with compound `s`/`m`/`h`/`d`
+    pairs e.g. `1m30s`; `next_after()` strictly-after, minute
+    granularity, 366-day horizon cap; 9 unit tests) and
+    `cronworkflow.rs` (353 lines, reconcile over raw `Value`):
+    schedule source `spec.schedules` (v4 array) else `spec.schedule`
+    (v3); `suspend` short-circuit; invalid schedule → `SubmissionError`
+    condition upsert; due = any expr `next_after(lastScheduledTime`
+    else `creationTimestamp)` <= now; concurrencyPolicy
+    Allow(default)/Forbid(skip the tick WITHOUT advancing
+    lastScheduledTime — upstream parity)/Replace(delete active children
+    then fire); fires child Workflow `<cwf-name>-<unix_ts>` with
+    `spec.workflowSpec` cloned verbatim + `workflowMetadata.labels`
+    overlay, label `workflows.argoproj.io/cron-workflow`, ownerReference
+    `CronWorkflow/argoproj.io/v1alpha1`; status `active`
+    (ObjectReference list) + `lastScheduledTime` (only when a child is
+    actually created), write-if-changed via semantic_eq + CAS. Wiring:
+    `runner.rs` (639 lines — Kind::CronWorkflow queue + informer +
+    2 workers + 5s resync + Workflow-event owner-enqueue into the cron
+    queue), `controllers/mod.rs` (`Caches.cronworkflows`), `gc.rs`
+    (CronWorkflow in MANAGED_OWNER_KINDS (7) + workflows in
+    DEPENDENT_KINDS (6) — children cascade-delete). 4 integration tests
+    in `crates/controllers/tests/cronworkflow.rs` (fires child; Forbid
+    blocks + releases on terminal CAS; Replace deletes active; suspend
+    never fires).
+  - Documented simplifications/deviations (Scope C): no on-disk anchor →
+    eager first fire (the anchor persists in `lastScheduledTime`
+    thereafter); one child per due tick regardless of schedule count;
+    `spec.timezone` ignored (UTC naive); NOT enforced:
+    successful/failedJobsHistoryLimit, stopStrategy, succeeded/failed/
+    phase status counters.
+  - Future enhancements (out of TODO scope, not blockers): executor
+    semantics (upstream wait container, artifacts, `{{...}}` parameter
+    substitution, loops/withItems), suspend/http/resource templates,
+    the argo CLI surface beyond get/apply/delete, timezone and
+    history-limit handling, artifact storage and events.
   - Reuse init-pro scheduler (T3.2) and kubelet (T4.2) for pod execution —
     argo steps land as pods; no parallel executor.
   - Minimal CRD subset: steps/dag templates, artifacts (object-store backed),
@@ -166,17 +202,26 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     acceptance: live smoke on a fresh empty cluster lists `workflows wf
     argoproj.io/v1alpha1 true Workflow` and `cronworkflows cwf,cronwf
     ...` out of the box.
+  - As-built (Scope C): the CronWorkflow acceptance leg is covered by
+    the controller integration tests (`crates/controllers/tests/`
+    `cronworkflow.rs`) — schedule firing, Forbid/Replace concurrency
+    policies and suspend are exercised against the real in-process
+    control loop; G28 keeps the CronWorkflow CRUD/SSA lifecycle green
+    (verified live this session).
 
-- **状态 / Status** — in-progress (Scope A+B done, Sprint 22)
+- **状态 / Status** — done (Scope A+B+C, Sprint 21-23)
 - **证据 / Evidence** — Scope A: api fidelity 8 (vs 11 fixtures) /
   apiserver 8. Scope B: controllers 111 (+4 workflow integration) /
   kubelet 90 (+6 terminal-phase unit) / kubectl 60 (+11 discovery);
-  golden G27/G28/G29 (34/34); Q30 ADR (+ Scope B addendum). Workspace
-  841 passed / 0 failed; clippy `-D warnings` zero; fmt clean.
-- **卡点 / Blockers** — now open: the CronWorkflow controller (schedule
-  firing, concurrency policy); executor semantics (upstream wait
-  container, artifacts, `{{...}}` parameter substitution,
-  loops/withItems); suspend/http/resource templates (currently park the
-  workflow at `Pending` with a message); the argo CLI surface beyond
-  get/apply/delete; artifact storage and events likewise open.
+  golden G27/G28/G29 (34/34); Q30 ADR (+ Scope B addendum). Scope C:
+  `cron_expr.rs` 9 unit + `tests/cronworkflow.rs` 4 integration;
+  controllers 111 → 124; workspace **854 passed / 0 failed**;
+  golden 34/34 (G28/G29); Q30 ADR (+ Scope C addendum). Clippy
+  `-D warnings` zero; fmt clean.
+- **卡点 / Blockers** — none; T7.3 closed at its minimal-integration
+  scope (types + routes + kubectl verbs + Workflow controller +
+  CronWorkflow controller + golden G27-G29). Remaining items are
+  future enhancements (executor semantics, `{{...}}` params,
+  suspend/http/resource templates, argo CLI breadth, timezone /
+  history limits) — see the list above, not open blockers.
 - **依赖 / Depends on** — T1.2, T3.1

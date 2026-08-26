@@ -1524,3 +1524,35 @@ controller; the Q30 shape held, with these Scope B consequences:
 - Unsupported template constructs (suspend/http/resource/plugin/missing
   template) park the workflow at `Pending` with a `status.message`
   naming them, rather than erroring or silently dropping steps.
+
+**Scope C addendum (Sprint 23).** Scope C landed the CronWorkflow
+controller and closed T7.3; the Q30 shape held, with these Scope C
+consequences:
+- Schedule source is the v4 `spec.schedules` array first, with the v3
+  singular `spec.schedule` as fallback (mirroring the Scope A serde
+  alias); `suspend` short-circuits reconcile, and an unparsable
+  schedule surfaces as a `SubmissionError` condition rather than a
+  crash-loop.
+- The cron engine is a pure in-repo Vixie-cron subset (no external
+  `cron` crate dependency): 5-field expressions with `*`/lists/ranges/
+  steps, dom-vs-dow EITHER semantics when both are restricted,
+  dow 7 == Sunday, the `@hourly/@daily/@midnight/@weekly/@monthly/
+  @yearly/@annually` aliases, and `@every <duration>` with compound
+  `s`/`m`/`h`/`d` pairs. Evaluation is minute-granularity and
+  strictly-after (`next_after`), capped at a 366-day horizon. Timezone
+  handling is explicitly out of scope: schedules are UTC-naive.
+- concurrencyPolicy semantics: `Allow` (default) always fires;
+  `Forbid` skips the due tick WITHOUT advancing `lastScheduledTime`
+  (upstream parity — the missed fire is not silently consumed);
+  `Replace` deletes the active children first, then fires.
+- Each fired child is a generated-name Workflow
+  (`<cwf-name>-<unix_ts>`) carrying `spec.workflowSpec` verbatim plus
+  the `workflowMetadata.labels` overlay, the label
+  `workflows.argoproj.io/cron-workflow`, and an ownerReference to the
+  `CronWorkflow/argoproj.io/v1alpha1` parent — so child cleanup rides
+  the Q20 garbage-collection cascade machinery, with no bespoke reaper.
+- With no upstream on-disk scheduling anchor available, the first
+  evaluation is eager (fires immediately if due); the anchor persists
+  in `status.lastScheduledTime` thereafter, which is written only when
+  a child is actually created.
+

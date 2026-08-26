@@ -18,7 +18,10 @@
 //! the owner RS, the owner StatefulSet (ordered rollout gates), the owner
 //! DaemonSet, and every Service in the same namespace whose selector
 //! matches the pod (this is the convergence path for Services created after
-//! Pods); Service events enqueue the Service. Reconcilers read through the
+//! Pods); Service events enqueue the Service. Workflow events (T7.3)
+//! enqueue the Workflow and its owning CronWorkflow (child terminal
+//! transitions promptly re-evaluate Forbid/Replace); CronWorkflow events
+//! (T7.3 Scope C) enqueue the CronWorkflow. Reconcilers read through the
 //! [`Client`] (storage consistency) while caches drive the fan-out.
 
 use std::sync::Arc;
@@ -29,7 +32,8 @@ use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
 use crate::controllers::{
-    daemonset, deployment, endpoints, gc, namespace, replicaset, statefulset, workflow, Caches,
+    cronworkflow, daemonset, deployment, endpoints, gc, namespace, replicaset, statefulset,
+    workflow, Caches,
 };
 use crate::error::ControllerError;
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
@@ -42,6 +46,7 @@ use crate::workqueue::WorkQueue;
 pub struct ControllerManager;
 
 struct Queues {
+    cronworkflows: Arc<WorkQueue>,
     deployments: Arc<WorkQueue>,
     replicasets: Arc<WorkQueue>,
     statefulsets: Arc<WorkQueue>,
@@ -53,6 +58,7 @@ struct Queues {
 
 #[derive(Clone, Copy)]
 enum Kind {
+    CronWorkflow,
     Deployment,
     ReplicaSet,
     StatefulSet,
@@ -88,6 +94,7 @@ impl ControllerManager {
 
         let caches = Arc::new(Caches::new());
         let queues = Arc::new(Queues {
+            cronworkflows: Arc::new(WorkQueue::new()),
             deployments: Arc::new(WorkQueue::new()),
             replicasets: Arc::new(WorkQueue::new()),
             statefulsets: Arc::new(WorkQueue::new()),
@@ -272,11 +279,28 @@ fn spawn_set(
     });
 
     // Workflow events (T7.3 Scope B, Q30) -> workflow queue (+ GC handoff:
-    // deleting a Workflow cascades to its step pods).
-    let q = queues.workflows.clone();
+    // deleting a Workflow cascades to its step pods). Child events also
+    // re-enqueue the owning CronWorkflow (T7.3 Scope C): a terminal child
+    // promptly releases a Forbid policy on the parent's next tick.
+    let q_wf = queues.workflows.clone();
+    let q_cwf = queues.cronworkflows.clone();
     let gc_client = client.clone();
     let gc_caches = caches.clone();
     let wf_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q_wf.add(k);
+        }
+        enqueue_owner(&q_cwf, ev, "CronWorkflow");
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
+    });
+
+    // CronWorkflow events (T7.3 Scope C, Q30) -> cronworkflow queue (+
+    // GC handoff: deleting a CronWorkflow cascades to its child
+    // Workflows).
+    let q = queues.cronworkflows.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
+    let cwf_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if let Some(k) = event_object_key(ev) {
             q.add(k);
         }
@@ -358,6 +382,11 @@ fn spawn_set(
             caches.workflows.clone(),
             wf_handler,
         ),
+        (
+            KeyPrefix::new("argoproj.io", "cronworkflows", None),
+            caches.cronworkflows.clone(),
+            cwf_handler,
+        ),
     ];
     for (prefix, store, handler) in sets {
         let informer = Informer::new(prefix);
@@ -369,6 +398,7 @@ fn spawn_set(
     }
 
     for (queue, kind) in [
+        (queues.cronworkflows.clone(), Kind::CronWorkflow),
         (queues.deployments.clone(), Kind::Deployment),
         (queues.replicasets.clone(), Kind::ReplicaSet),
         (queues.statefulsets.clone(), Kind::StatefulSet),
@@ -513,6 +543,10 @@ const DEPLOYMENT_RESYNC: Duration = Duration::from_secs(1);
 /// Workflow resync backstop (T7.3 Scope B): pod events drive the normal
 /// loop; this keeps Pending/edge cases from stalling indefinitely.
 const WORKFLOW_RESYNC: Duration = Duration::from_secs(5);
+/// CronWorkflow resync (T7.3 Scope C): schedules fire on wall-clock time
+/// with no event to observe, so the queue re-enqueues periodically (the
+/// same shape as WORKFLOW_RESYNC).
+const CRONWORKFLOW_RESYNC: Duration = Duration::from_secs(5);
 
 async fn reconcile_key(
     client: &Arc<dyn Client>,
@@ -588,6 +622,17 @@ async fn reconcile_key(
             // Resync backstop (see WORKFLOW_RESYNC); the loop self-
             // terminates once the object leaves the cache.
             queue.add_after(key.to_string(), WORKFLOW_RESYNC);
+            Ok(())
+        }
+        Kind::CronWorkflow => {
+            let Some(cwf) = caches.cronworkflows.get(ns, name) else {
+                return Ok(()); // deleted from cache: nothing to do
+            };
+            cronworkflow::reconcile(client, &cwf).await?;
+            // Resync (see CRONWORKFLOW_RESYNC): the next due tick arrives
+            // by wall clock alone; the loop self-terminates once the
+            // object leaves the cache.
+            queue.add_after(key.to_string(), CRONWORKFLOW_RESYNC);
             Ok(())
         }
     }
