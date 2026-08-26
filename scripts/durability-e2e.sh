@@ -58,6 +58,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Route fatal signals through the EXIT trap (bash skips it on untrapped signals).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 PORT=16499
 BASE="http://127.0.0.1:$PORT"
 DSN="sqlite://$DD/server/state.db"

@@ -66,6 +66,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Route fatal signals through the EXIT trap (bash skips it on untrapped signals).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 for _ in $(seq 1 60); do grep -q "discovery listening" "$LOG" && break; sleep 0.1; done
 grep -q "discovery listening" "$LOG" || { echo "error: server never reported listening"; cat "$LOG" >&2; exit 1; }
 

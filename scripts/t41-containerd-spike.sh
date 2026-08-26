@@ -42,6 +42,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Route fatal signals through the EXIT trap (bash skips it on untrapped signals).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # --- 1. stage (k3s layout: agent/containerd holds the runtime bundle,
 #     agent/etc/cni holds CNI conf, the cni-plugins bundle lands beside) ---
 mkdir -p "$RUNTIME_DIR" "$ETC_DIR" "$ETC_DIR/cni/net.d" "$RUN_DIR"

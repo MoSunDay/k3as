@@ -96,6 +96,23 @@ official single-node UX, and close T4.2 as done (Scope A+B+C).
   logs 327 / exec_cmd 264; iterated http.rs 400 / nodes.sh 478 (within
   limits).
 
+### Post-review hygiene closure (same-day follow-up to this sprint)
+- `crates/apiserver/src/pod_io_wire_tests.rs` had landed at exactly the
+  400-line cap; split by responsibility BEFORE further iteration per repo
+  rule: `pod_io_wire_common.rs` (175, shared in-process harness) +
+  `pod_io_wire_tests.rs` (127, happy paths) +
+  `pod_io_wire_resolution_tests.rs` (137, pre-hop branches). Test bodies
+  unchanged: same 11 wire tests, workspace total stays **903 passed /
+  0 failed**.
+- Unified fatal-signal shutdown protocol (`trap 'exit 129' HUP` /
+  `130 INT` / `143 TERM` routed through the existing EXIT cleanup) across
+  long-lived scripts: local-up.sh (replacing its wrong TERM->130),
+  golden-conformance.sh, durability-e2e.sh, t41-containerd-spike.sh,
+  graceful-shutdown-test.sh. No short-lived scripts touched.
+- Re-run gates after both changes: fmt clean; clippy `-D warnings` 0;
+  golden **38/38** incl. G30 x4; flag parity 16/16; durability D1-D4 ALL;
+  graceful SIGTERM drain OK.
+
 ## Sprint 23 — T7.3 Scope C: the CronWorkflow controller — schedules fire; T7.3 closes (2026-08-26)
 
 **Goal:** make argoproj.io CronWorkflows **fire** — Scope C lands the

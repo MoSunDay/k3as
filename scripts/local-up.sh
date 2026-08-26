@@ -75,7 +75,10 @@ cleanup() {
   echo "local-up: bye."
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+# Route fatal signals through the EXIT trap (bash skips it on untrapped signals).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "local-up: building the Q27 airgap pause image ..."
 "$SCRIPT_DIR/build-pause-image.sh" "$PAUSE_TAR" "$PAUSE_REF" >/dev/null

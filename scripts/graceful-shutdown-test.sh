@@ -12,6 +12,11 @@ BIN="${INIT_PRO_BIN:-$TARGET_DIR/debug/init-pro}"
 DD="$(mktemp -d)"
 trap 'rm -rf "$DD"' EXIT
 
+# Route fatal signals through the EXIT trap (bash skips it on untrapped signals).
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Start server, send SIGTERM after it's up, assert it exits 0 promptly.
 "$BIN" server --data-dir "$DD" >/tmp/init-pro-server.log 2>&1 &
 SRV=$!

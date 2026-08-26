@@ -25,6 +25,10 @@ pub(crate) mod pod_io;
 #[cfg(test)]
 mod pod_io_tests;
 #[cfg(test)]
+mod pod_io_wire_common;
+#[cfg(test)]
+mod pod_io_wire_resolution_tests;
+#[cfg(test)]
 mod pod_io_wire_tests;
 pub(crate) mod pod_status;
 mod serve;
