@@ -1,9 +1,11 @@
-//! LIST->WATCH reflectors for the service plane (Sprint 18 / **S4**, Q28 —
-//! recorded S7): two storage watch loops fold the cluster's Services +
-//! Endpoints into one watch channel shared by
-//! [`crate::endpoints::EndpointsResolver`] (peer resolution) and
-//! [`crate::nodeport`] (listener reconciliation). Mirrors the controllers'
-//! informer LIST -> WATCH -> re-LIST-on-close pattern (T3.1a).
+//! LIST->WATCH reflectors for the gateway plane (Sprint 18 / **S4**, Q28 —
+//! recorded S7; extended by workstream A / decision **Q32**): storage watch
+//! loops fold the cluster's Services + Endpoints — and, since Q32, the
+//! `networking.k8s.io/v1` Ingress set ([`crate::ingress_watch`]) — into the
+//! watch channels of [`crate::endpoints::EndpointsResolver`], shared by
+//! [`crate::nodeport`] (listener reconciliation) and [`crate::gateway`]
+//! (Ingress recompilation). Mirrors the controllers' informer LIST -> WATCH
+//! -> re-LIST-on-close pattern (T3.1a).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,6 +16,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::endpoints::{fold_event, replace_all, EndpointsResolver, ResolverState, Resource};
+use crate::ingress_watch::{watch_ingresses, IngressMap};
 
 /// Backoff before re-LISTing once a watch stream closes.
 const RECONNECT_DELAY: Duration = Duration::from_millis(100);
@@ -45,14 +48,28 @@ pub fn supervise(
         shutdown.clone(),
     ));
     let endpoints = tokio::spawn(watch_prefix(
-        store,
+        store.clone(),
         Resource::Endpoints,
         endpoints_prefix(),
         state,
         tx,
+        shutdown.clone(),
+    ));
+    // Q32: a third reflector folds Ingress objects for the gateway.
+    let (ing_tx, ing_rx) = watch::channel(Arc::new(IngressMap::default()));
+    let ingresses = tokio::spawn(watch_ingresses(
+        store,
+        Arc::new(Mutex::new(IngressMap::default())),
+        ing_tx,
         shutdown,
     ));
-    (EndpointsResolver { rx }, vec![services, endpoints])
+    (
+        EndpointsResolver {
+            rx,
+            ingresses: ing_rx,
+        },
+        vec![services, endpoints, ingresses],
+    )
 }
 
 /// Fold `entries` (or one event) into the shared state and publish a new

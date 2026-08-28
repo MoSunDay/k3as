@@ -23,6 +23,14 @@
 //! transitions promptly re-evaluate Forbid/Replace); CronWorkflow events
 //! (T7.3 Scope C) enqueue the CronWorkflow. Reconcilers read through the
 //! [`Client`] (storage consistency) while caches drive the fan-out.
+//!
+//! T4.3 Scope A (decision **Q34**): a second Nodes informer feeds a
+//! single-worker `NodeCidr` queue. Enabled via `--cluster-cidr`
+//! ([`ManagerConfig::cluster_cidr`]), it allocates `spec.podCIDR` /
+//! `spec.podCIDRs` to Nodes that lack one (first free /24, CAS-written) --
+//! the kube-controller-manager `--allocate-node-cidrs` loop. One worker
+//! by design: the LIST -> first-free -> CAS decision is serial so a
+//! subnet is never double-assigned to two Nodes.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,8 +40,8 @@ use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
 use crate::controllers::{
-    cronworkflow, daemonset, deployment, endpoints, gc, namespace, replicaset, statefulset,
-    workflow, Caches,
+    cronworkflow, daemonset, deployment, endpoints, gc, namespace, node_cidr, replicaset,
+    statefulset, workflow, Caches,
 };
 use crate::error::ControllerError;
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
@@ -45,6 +53,16 @@ use crate::workqueue::WorkQueue;
 /// Wiring entry point; owns no long-lived mutable state itself.
 pub struct ControllerManager;
 
+/// Optional manager configuration (T4.3 Scope A). `cluster_cidr` enables
+/// the node podCIDR allocator; `None` (the `spawn` default) keeps the
+/// manager byte-identical to the pre-T4.3 controller set.
+#[derive(Debug, Clone, Default)]
+pub struct ManagerConfig {
+    /// `--cluster-cidr`: when set, Nodes without `spec.podCIDR` are
+    /// allocated the first free `/24` inside it (decision **Q34**).
+    pub cluster_cidr: Option<String>,
+}
+
 struct Queues {
     cronworkflows: Arc<WorkQueue>,
     deployments: Arc<WorkQueue>,
@@ -54,6 +72,8 @@ struct Queues {
     services: Arc<WorkQueue>,
     namespaces: Arc<WorkQueue>,
     workflows: Arc<WorkQueue>,
+    /// Node podCIDR allocator (T4.3 Scope A); single worker by design.
+    node_cidrs: Arc<WorkQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -66,6 +86,7 @@ enum Kind {
     Service,
     Namespace,
     Workflow,
+    NodeCidr,
 }
 
 impl ControllerManager {
@@ -74,6 +95,24 @@ impl ControllerManager {
     /// supervisor). The actual controller set is re-spawned/aborted by the
     /// supervisor on leadership transitions.
     pub fn spawn(store: Arc<dyn StorageBackend>, stop: Stop) -> Vec<JoinHandle<()>> {
+        ControllerManager::spawn_with(store, stop, ManagerConfig::default())
+    }
+
+    /// [`ControllerManager::spawn`] with explicit configuration
+    /// (T4.3 Scope A: `cluster_cidr` turns on the podCIDR allocator).
+    pub fn spawn_with(
+        store: Arc<dyn StorageBackend>,
+        stop: Stop,
+        cfg: ManagerConfig,
+    ) -> Vec<JoinHandle<()>> {
+        let cluster_cidr: Arc<Option<node_cidr::ClusterCidr>> = Arc::new(
+            cfg.cluster_cidr
+                .as_deref()
+                .and_then(node_cidr::parse_cidr),
+        );
+        if let (Some(flag), None) = (cfg.cluster_cidr.as_deref(), cluster_cidr.as_ref()) {
+            tracing::warn!(cluster_cidr = flag, "invalid --cluster-cidr; podCIDR allocation disabled");
+        }
         let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
         let now: NowFn = Arc::new(|| {
             SystemTime::now()
@@ -102,6 +141,7 @@ impl ControllerManager {
             services: Arc::new(WorkQueue::new()),
             namespaces: Arc::new(WorkQueue::new()),
             workflows: Arc::new(WorkQueue::new()),
+            node_cidrs: Arc::new(WorkQueue::new()),
         });
 
         let supervisor = tokio::spawn(async move {
@@ -119,7 +159,14 @@ impl ControllerManager {
                 }
                 tracing::info!("acquired leadership; starting controller set");
                 bootstrap_namespaces(&client).await;
-                let set = spawn_set(&client, &caches, &queues, stop.clone(), now.clone());
+                let set = spawn_set(
+                    &client,
+                    &caches,
+                    &queues,
+                    stop.clone(),
+                    now.clone(),
+                    cluster_cidr.clone(),
+                );
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => {
@@ -176,6 +223,7 @@ fn spawn_set(
     queues: &Arc<Queues>,
     stop: Stop,
     now: NowFn,
+    cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -322,6 +370,19 @@ fn spawn_set(
         }
     });
 
+    // Node events (T4.3 Scope A, Q34) -> podCIDR allocator queue. Bare
+    // node name (cluster-scoped); a SECOND informer on the same Nodes
+    // prefix drives this queue with its own handler, so DS fan-out and
+    // CIDR allocation stay independent. Disabled when `cluster_cidr` is
+    // None: the handler still enqueues (a WorkQueue add is ~free) and the
+    // worker short-circuits, keeping the wiring unconditional.
+    let q_nc = queues.node_cidrs.clone();
+    let node_cidr_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q_nc.add(k);
+        }
+    });
+
     // ControllerRevision events -> owner StatefulSet queue. No cache is
     // needed (the STS reconciler lists revisions through the client), but
     // `Informer::run` requires an ObjectStore: a dummy one, never read.
@@ -355,6 +416,15 @@ fn spawn_set(
             KeyPrefix::new("", "nodes", None),
             caches.nodes.clone(),
             node_handler,
+        ),
+        (
+            // Second Nodes informer (T4.3 Scope A): podCIDR allocator
+            // events. Dummy store, never read -- `allocate` reads the
+            // Node fresh through the client so its CAS base is the
+            // current revision, not a cached one.
+            KeyPrefix::new("", "nodes", None),
+            Arc::new(crate::informer::ObjectStore::new()),
+            node_cidr_handler,
         ),
         (
             KeyPrefix::new("apps", "controllerrevisions", None),
@@ -408,16 +478,34 @@ fn spawn_set(
         (queues.workflows.clone(), Kind::Workflow),
     ] {
         for _ in 0..2 {
-            spawn_worker(
+            handles.push(spawn_worker(
                 client,
                 caches,
                 &queue,
                 kind,
                 &stop,
                 now.clone(),
-                &mut handles,
-            );
+            ));
         }
+    }
+
+    // Node podCIDR allocator (T4.3 Scope A, Q34): ONE worker on purpose.
+    // Serial processing is the concurrency-correctness mechanism: LIST ->
+    // pick first free -> CAS across two workers could double-assign the
+    // same free /24 to two Nodes (the CAS only guards per-object writes,
+    // not the inter-node allocation decision).
+    {
+        let queue = queues.node_cidrs.clone();
+        let cluster_cidr = cluster_cidr.clone();
+        handles.push(spawn_worker_with_cluster_cidr(
+            client,
+            caches,
+            &queue,
+            Kind::NodeCidr,
+            cluster_cidr,
+            &stop,
+            now.clone(),
+        ));
     }
 
     // GC backstop (T3.1b, Q20): owner-DELETE hooks drive the common path;
@@ -491,13 +579,27 @@ fn spawn_worker(
     kind: Kind,
     stop: &Stop,
     now: NowFn,
-    out: &mut Vec<JoinHandle<()>>,
-) {
+) -> JoinHandle<()> {
+    spawn_worker_with_cluster_cidr(client, caches, queue, kind, Arc::new(None), stop, now)
+}
+
+/// [`spawn_worker`] variant carrying the podCIDR allocator config
+/// (T4.3 Scope A): `Kind::NodeCidr` needs the parsed `--cluster-cidr`.
+#[allow(clippy::too_many_arguments)] // 7 = the lint's own ceiling; all live config
+fn spawn_worker_with_cluster_cidr(
+    client: &Arc<dyn Client>,
+    caches: &Arc<Caches>,
+    queue: &Arc<WorkQueue>,
+    kind: Kind,
+    cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
+    stop: &Stop,
+    now: NowFn,
+) -> JoinHandle<()> {
     let client = client.clone();
     let caches = caches.clone();
     let queue = queue.clone();
     let stop = stop.clone();
-    out.push(tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
             // Workers must race `next()` against `stop`: the queue's senders
             // are never dropped, `next` alone would never return None.
@@ -508,7 +610,17 @@ fn spawn_worker(
                     None => break,
                 },
             };
-            match reconcile_key(&client, &caches, &queue, kind, &key, &now).await {
+            match reconcile_key(
+                &client,
+                &caches,
+                &queue,
+                kind,
+                &cluster_cidr,
+                &key,
+                &now,
+            )
+            .await
+            {
                 Ok(()) => {
                     queue.forget(&key);
                     queue.done(&key);
@@ -532,7 +644,7 @@ fn spawn_worker(
                 }
             }
         }
-    }));
+    })
 }
 
 /// Deployment resync period (T3.1b): progress-deadline evaluation is
@@ -553,9 +665,23 @@ async fn reconcile_key(
     caches: &Caches,
     queue: &Arc<WorkQueue>,
     kind: Kind,
+    cluster_cidr: &Option<node_cidr::ClusterCidr>,
     key: &str,
     now: &NowFn,
 ) -> Result<(), ControllerError> {
+    // Node podCIDR allocation (T4.3 Scope A, Q34) is cluster-scoped: its
+    // queue key is the BARE node name. The Node is read fresh through the
+    // client (this kind has no cache) so the CAS base is the current
+    // revision; a concurrent node patch surfaces as Conflict -> requeue.
+    if let Kind::NodeCidr = kind {
+        let Some(cluster) = cluster_cidr else {
+            return Ok(()); // allocator disabled: no --cluster-cidr
+        };
+        return match client.get(&Key::new("", "nodes", "", key)).await? {
+            Some(node) => node_cidr::allocate(client, cluster, &node).await.map(|_| ()),
+            None => Ok(()), // node deleted: nothing to allocate
+        };
+    }
     // Namespaces are cluster-scoped: their queue key is the BARE object
     // name (no `ns/` prefix), so they must not go through the namespaced
     // split below.
@@ -613,7 +739,7 @@ async fn reconcile_key(
         }
         // Handled by the cluster-scoped early return above; the namespaced
         // split is meaningless for a bare-name key.
-        Kind::Namespace => Ok(()),
+        Kind::Namespace | Kind::NodeCidr => Ok(()),
         Kind::Workflow => {
             let Some(wf) = caches.workflows.get(ns, name) else {
                 return Ok(()); // deleted from cache: nothing to do

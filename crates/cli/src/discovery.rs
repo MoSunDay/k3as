@@ -11,7 +11,7 @@
 //! Workflow + CronWorkflow, schema-only CRUD — no workflow controller yet). The actual HTTP serving is **T1.2**; this
 //! module hands T1.2 a byte-correct registry today and is exercised at startup.
 
-use api::{api_group_list, argoproj, core_api_versions, initpro, SchemaRegistry};
+use api::{api_group_list, argoproj, core_api_versions, initpro, networking, SchemaRegistry};
 
 /// The served schema registry: core/v1 + apps/v1 + coordination.k8s.io/v1
 /// native types + init-pro.io/v1 CRDs.
@@ -42,6 +42,10 @@ pub fn served_schema() -> SchemaRegistry {
     // routes, schema-only (the workflow controller is a later scope, Q30).
     argoproj::register(&mut reg);
     initpro::register(&mut reg);
+    // networking.k8s.io/v1 (Q32): Ingress + IngressClass feed the built-in
+    // openrusty gateway (generic CRUD/watch routes; the gateway reflects
+    // the same objects through its storage watchers).
+    networking::register(&mut reg);
     reg
 }
 
@@ -67,7 +71,7 @@ mod tests {
     #[test]
     fn served_schema_has_core_and_initpro() {
         let reg = served_schema();
-        assert!(reg.len() >= 8); // 8 core/v1 + apps/v1 + coordination + LuaRouter
+        assert!(reg.len() >= 8); // 8 core/v1 + apps/v1 + coordination + networking.k8s.io + init-pro.io
         let summary = served_groups_summary(&reg, "127.0.0.1:6443");
         assert!(summary.contains("(core)"));
         assert!(summary.contains("init-pro.io"));
@@ -112,6 +116,26 @@ mod tests {
         );
         // core/v1 now includes endpoints (T3.1a) and persistentvolumeclaims
         // (T3.1b StatefulSet claims, lazy storage Q22).
+        // Q32: networking.k8s.io/v1 serves ingresses (short name `ing`,
+        // namespaced) + ingressclasses (cluster-scoped).
+        assert!(summary.contains("networking.k8s.io"));
+        let net = api_resource_list(&reg, "networking.k8s.io", "v1")
+            .expect("networking.k8s.io/v1 served");
+        let ing = net
+            .resources
+            .iter()
+            .find(|r| r.name == "ingresses")
+            .expect("ingresses served");
+        assert_eq!(ing.kind, "Ingress");
+        assert_eq!(ing.short_names, Some(vec!["ing".to_string()]));
+        assert!(ing.namespaced);
+        let classes = net
+            .resources
+            .iter()
+            .find(|r| r.name == "ingressclasses")
+            .expect("ingressclasses served");
+        assert_eq!(classes.kind, "IngressClass");
+        assert!(!classes.namespaced);
         let core = api_resource_list(&reg, "", "v1").expect("core/v1 served");
         assert!(core.resources.iter().any(|r| r.name == "endpoints"));
         assert!(core

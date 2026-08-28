@@ -6,8 +6,8 @@
 //!
 //! - `tests/embedded_storage.rs` instantiates them for `EmbeddedStorage`
 //!   (module `embedded`, reported as `embedded::<case>`);
-//! - `tests/sqlite_storage.rs` instantiates them for `SqliteStorage` on a
-//!   fresh `:memory:` database per case (module `sqlite_memory`).
+//! - `tests/rdb_storage.rs` instantiates them for `RdbStorage` on a fresh
+//!   temp-dir RocksDB per case (module `rdb`; **Q33**).
 //!
 //! The single embedded-only case (`history_eviction_...` pins
 //! `with_history_capacity`, which the trait does not expose) stays in

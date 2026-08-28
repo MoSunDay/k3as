@@ -12,6 +12,8 @@
 //! - [`patch`] — Strategic Merge Patch (core/v1 strategies) + JSON Patch fallback.
 //! - [`apply`] — Server-Side Apply field-manager (T1.2c).
 //! - [`initpro`] — the `init-pro.io/v1` CRD types (e.g. `LuaRouter`).
+//! - [`networking`] — the `networking.k8s.io/v1` group (Ingress/IngressClass;
+//!   consumed by the openrusty Ingress gateway, decision Q32).
 #![forbid(unsafe_code)]
 
 pub mod apply;
@@ -19,6 +21,7 @@ pub mod argoproj;
 pub mod discovery;
 pub mod gvk;
 pub mod initpro;
+pub mod networking;
 pub mod patch;
 pub mod schema;
 pub mod serde_ext;
@@ -28,6 +31,13 @@ pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldE
 pub use discovery::{api_group_list, api_resource_list, core_api_versions};
 pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use initpro::{LuaRouter, LuaRouterSpec};
+pub use networking::{
+    API_VERSION as NETWORKING_API_VERSION, GROUP as NETWORKING_GROUP, VERSION as NETWORKING_VERSION,
+    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressClass, IngressClassList,
+    IngressClassSpec, IngressList, IngressLoadBalancerIngress, IngressLoadBalancerStatus, IngressRule,
+    IngressServiceBackend, IngressSpec, IngressStatus, IngressTLS, ServiceBackendPort,
+    TypedLocalObjectReference,
+};
 pub use patch::{strategic_merge, PatchStrategy};
 pub use schema::{SchemaRegistry, Scope, TypeInfo};
 pub use serde_ext::{from_json, to_json, to_json_pretty};

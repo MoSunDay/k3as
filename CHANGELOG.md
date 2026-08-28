@@ -7,6 +7,134 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 25 — link_repos wave: openrusty router + rdb/RocksDB datastore + flannel CNI (Q32/Q33/Q34) (2026-08-28)
+
+**Goal:** swap three load-bearing substrates to upstream Rust code
+adopted as path dependencies, keeping every gate green: (wave A) the
+Router rides the openrusty h2c gateway as an embedded library (Q32),
+(wave B) the durable datastore moves from libsql/SQLite to
+rdb/RocksDB (Q33), and (wave C) the CNI is flannel-rust embedded in the
+agent process (Q34, T4.3 Scope A).
+
+### link_repos adoption + wave 0 upstream changes
+- Three upstream repos consumed as path dependencies, symlinked at
+  `link_repos/{openrusty,rdb,flannel-rust}` (git-ignored); root
+  `Cargo.toml` sets `exclude = ["link_repos"]` so the upstream
+  workspaces stay outside this one.
+- openrusty (h2c HTTP gateway): lib targets added
+  (`openrusty-core` / `openrusty-server` usable as libraries), plus
+  `state::from_config`, `reload::apply_config`, `RouteConfig.host`
+  (203 upstream tests).
+- rdb (RocksDB-backed versioned KV, etcd-ish semantics): a `store`
+  feature gate added (981 upstream tests).
+- flannel-rust (flanneld daemon + flannel-cni plugin):
+  `install_signal_handlers` option added on flanneld `Options` —
+  init-pro sets false so SIGTERM bridges through init-pro's own
+  `infra::Shutdown` `CancellationToken` (350 upstream tests).
+
+### Wave A - Router rewritten on openrusty (Q32)
+- `crates/router`: the mlua/Lua data plane is DELETED — no more
+  `resty.*` shim, `ngx.*`, cosocket, or coroutine phase pipeline. The
+  router now embeds openrusty-core/openrusty-server as an in-process
+  h2c gateway (`AppState` from `state::from_config`), keeping the
+  product-shaped parts: services/endpoints + Ingress reflectors, the
+  `RouteTable` route model, and the nodeport + Ingress gateways behind
+  the shared 503-on-empty-Endpoints gate. One dedicated thread,
+  current-thread runtime, plain-`Send` connection tasks.
+- `crates/api`: `networking.k8s.io/v1` Ingress + IngressClass models,
+  schema-registry + discovery registration — Ingress is now the
+  first-class ingress resource (the LuaRouter CRD is no longer the
+  primary path).
+- `crates/apiserver`: NEW `node_status.rs` —
+  `PUT/PATCH /api/v1/nodes/{name}/status` subresource (flannel F2
+  dependency).
+- 503-on-empty-Endpoints gate preserved (ST5); the NodePort ServiceLB
+  plane (Q28) ported to the openrusty plane.
+- `scripts/router-coroutine-selftest.sh` DELETED (Lua-specific).
+- `crates/router/src/nodeport.rs`: `NodePortConfig` gained
+  `ingress_listen: Option<SocketAddr>` (default `None`) — the CLI flag
+  is still unwired (debt, below).
+- Golden: `discovery-apis.json` regenerated (networking.k8s.io group
+  added); NEW `golden/discovery-networking-v1.json`; NEW
+  `scripts/golden/suites/networking.sh` check **G31**, wired into
+  `scripts/golden-conformance.sh` + `golden/README.md` (inventory now
+  G01–G31, 39 PASS sites).
+
+### Wave B - datastore swapped to rdb/RocksDB (Q33)
+- NEW `crates/storage/src/rdb_backend/{mod.rs,keys.rs,watch.rs}`:
+  `RdbStorage` on the rdb crate (RocksDB) via its `store` feature. Key
+  layout `meta/revision`, `meta/compact`, `obj/<key>`,
+  `log/<rev big-endian>`; WriteBatch + fsync write path; etcd
+  revision/CAS/watch-historical-replay/compaction semantics replicated
+  from the former sqlite write path. `RdbStorage::open(&Path)` is async.
+- DSN is now `rdb://<path>`; **`sqlite://` returns `Unsupported` with a
+  pointer to `rdb://`** (breaking DSN change).
+- DELETED: `crates/storage/src/sqlite/`,
+  `crates/storage/tests/sqlite_storage.rs`; libsql and mlua removed from
+  the root + storage `Cargo.toml`s.
+- NEW `crates/storage/tests/rdb_storage.rs`: 26 contract + 4 durability
+  + double-open tests.
+- `crates/cli/src/runtime.rs`: `Dsn::Rdb(PathBuf)` classification/open;
+  the startup log line contains "rdb datastore (rocksdb) — T2.3/Q33"
+  (durability-e2e greps "rdb datastore").
+- `scripts/local-up.sh`: `--datastore-endpoint rdb://$DD/server/state.rdb`
+  + `--cluster-cidr 10.42.0.0/16`.
+
+### Wave C - CNI swapped to flannel-rust (Q34, T4.3 Scope A)
+- NEW `crates/cli/src/flannel.rs`: embedded flanneld daemon (vxlan
+  default backend) run inside the agent process; multicall alias
+  `flannel` -> `flannel_cni::skel::run()` (CNI meta-plugin, invoked by
+  containerd via the `<runtime>/aux/flannel` symlink).
+- NEW `crates/cli/src/flannel_keeper.rs`: 5s loop keeping Node
+  `NetworkUnavailable=False` — DEBT: the apiserver status patch lacks a
+  status/conditions merge key, so a one-shot condition write is not yet
+  possible (upstream-style status subresource merge pending).
+- `crates/controllers`: node-cidr reconciler allocates node podCIDRs
+  (`Kind::NodeCidr`, `ManagerConfig.cluster_cidr`, default
+  10.42.0.0/16).
+- `crates/runtime/src/stage.rs`: stages `10-flannel.conflist` + aux
+  staging of flannel binaries (vendor tgz aux) + the aux/flannel
+  symlink. C-side fixes: `isDefaultGateway` dropped from the delegate
+  conf (double default route); `iptables_forward_rules: true` pinned
+  (FORWARD-DROP killed pod<->pod).
+- New CLI flags: `--flannel-backend`, `--cluster-cidr`.
+- NEW `scripts/flannel-e2e.sh`: F1 (node podCIDR allocated from
+  cluster-cidr), F2 (flannel annotations + NetworkUnavailable=False),
+  F3 (podIP inside node podCIDR), F4 (pod-to-pod over the flannel
+  fabric), F5 (informational NOTE: upstream flannel conformance
+  host-gw/multi-node/netpol out of Scope A).
+
+### CI
+- `.github/workflows/ci.yml`: the `router-coroutine` step is replaced by
+  `service-traffic-e2e`.
+
+### Gates
+- `cargo build --workspace --locked` OK; `cargo clippy --workspace
+  --all-targets -- -D warnings`: **0 warnings**; `cargo test --workspace
+  --locked`: **852 passed / 0 failed** (64 targets).
+- `scripts/golden-conformance.sh`: **39 passed / 0 failed** (new G31
+  networking discovery).
+- `scripts/durability-e2e.sh` D1–D4 **4/4** on `rdb://` (D3 identical
+  resourceVersions across restart; D4 revision counter resumed 15->16 +
+  watch replay). Flake fix during the review round: D3 used to snapshot the
+  Deployment rv before the deployment controller's first (converging) status
+  write, so the gate raced that write; the pre-restart snapshot now waits
+  until rv is stable for 5 consecutive reads (storage semantics unchanged).
+- `scripts/service-traffic-e2e.sh` ST1–ST6 **6/6**;
+  `scripts/flannel-e2e.sh` F1–F5 **5/5** (F5 informational).
+- `scripts/multicall-selftest.sh`: alias list now includes `flannel`
+  (9 aliases + unknown->help); `scripts/cli-flag-parity-test.sh`
+  **18/18**; graceful-shutdown-test OK; apiserver-discovery-parity-test
+  ALL (incl. networking.k8s.io); `local-up.sh` boots server+agent and
+  tears down cleanly.
+
+### Debts (recorded, not fixed this sprint)
+- `NodePortConfig.ingress_listen` exists but the CLI flag is unwired
+  (default `None`; T5.5/T5.7-adjacent).
+- `flannel_keeper` polls every 5s because the apiserver status patch has
+  no merge key for `status/conditions` (one-shot condition writes
+  impossible; upstream-style status subresource merge pending).
+
 ## Sprint 24 — T4.2 Scope C: `kubectl logs/exec` over the kubelet relay — T4.2 closes (2026-08-26)
 
 **Goal:** make `kubectl logs` and `kubectl exec` work end-to-end on the

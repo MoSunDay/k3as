@@ -87,4 +87,16 @@ pub struct ServerCmd {
     /// env `INIT_PRO_CLUSTER_INIT`.
     #[arg(long = "cluster-init", env = "INIT_PRO_CLUSTER_INIT")]
     pub cluster_init: bool,
+
+    /// IPv4 CIDR range for pod IPs. The node-cidr controller carves each
+    /// Node a `/24` out of it (`spec.podCIDR`, flanneld's lease source) —
+    /// the k3s `--cluster-cidr` parity, T4.3 Scope A (Q34).
+    /// env `INIT_PRO_CLUSTER_CIDR`.
+    #[arg(
+        long = "cluster-cidr",
+        env = "INIT_PRO_CLUSTER_CIDR",
+        default_value = "10.42.0.0/16",
+        value_name = "CIDR"
+    )]
+    pub cluster_cidr: String,
 }

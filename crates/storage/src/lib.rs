@@ -8,11 +8,10 @@
 //!
 //! - [`EmbeddedStorage`] -- in-process, zero external dependencies; the
 //!   default backend and the test double.
-//! - [`SqliteStorage`] -- a libsql/SQLite (kine-style) backend selected by
-//!   `--datastore-endpoint sqlite://...` (T2.3, Q29): one append-only `kv`
-//!   table whose row id IS the cluster revision, persisted to a local
-//!   database file for zero-restart durability. Local-file mode only -- no
-//!   remote/replication/sync features are compiled in.
+//! - [`RdbStorage`] -- a RocksDB backend over the rdb `store` engine
+//!   selected by `--datastore-endpoint rdb://<path>` (T2.3, Q33): the same
+//!   append-only record model spread over single-CF key prefixes
+//!   (`meta/` + `obj/` + `log/`), one atomic fsync-ed batch per write.
 //!
 //! # Why an embedded backend first (T2.1 spike decision)
 //!
@@ -41,11 +40,11 @@ pub mod entry;
 pub mod error;
 mod history;
 pub mod key;
-pub mod sqlite;
+pub mod rdb_backend;
 
 pub use backend::{StorageBackend, Watch};
 pub use embedded::EmbeddedStorage;
 pub use entry::{Revision, StoredEntry, WatchEvent};
 pub use error::StorageError;
 pub use key::{Key, KeyPrefix};
-pub use sqlite::SqliteStorage;
+pub use rdb_backend::RdbStorage;

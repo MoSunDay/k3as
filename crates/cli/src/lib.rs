@@ -12,6 +12,8 @@ mod cmd;
 mod config_scan;
 pub mod discovery;
 mod flags;
+mod flannel;
+mod flannel_keeper;
 mod runtime;
 mod stage;
 
@@ -141,6 +143,7 @@ where
                         disable_kube_proxy: svc.disable_kube_proxy,
                         scheduler_args: svc.kube_scheduler_arg.clone(),
                         datastore_endpoint: svc.datastore_endpoint.clone(),
+                        cluster_cidr: svc.cluster_cidr.clone(),
                     },
                 ),
                 Err(e) => {
@@ -160,6 +163,12 @@ where
                 ag.node_name.clone(),
                 ag.node_ip.clone(),
                 ag.kubelet_port,
+                crate::flannel::FlannelNet {
+                    cluster_cidr: Some(ag.cluster_cidr.clone()),
+                    backend: Some(ag.flannel_backend.clone()),
+                    iface: ag.flannel_iface.clone(),
+                    conf: ag.flannel_conf.clone(),
+                },
             )
         }
         Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, manifest),

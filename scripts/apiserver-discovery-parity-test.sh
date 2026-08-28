@@ -70,6 +70,18 @@ echo "$body" | grep -q '"shortNames":\["wf"\]' || bad "/apis/argoproj.io/v1alpha
 echo "$body" | grep -q '"shortNames":\["cwf","cronwf"\]' || bad "/apis/argoproj.io/v1alpha1 missing cwf/cronwf shortNames: $body"
 ok "/apis/argoproj.io/v1alpha1 serves workflows + cronworkflows (wf/cwf/cronwf)"
 
+# /apis must also include the built-in networking.k8s.io group (workstream A).
+body="$(curl -fsS "$BASE/apis")"
+echo "$body" | grep -q '"networking.k8s.io"' || bad "/apis missing networking.k8s.io group: $body"
+ok "/apis serves APIGroupList with networking.k8s.io"
+
+# /apis/networking.k8s.io/v1 -> ingresses (shortName ing) + ingressclasses.
+body="$(curl -fsS "$BASE/apis/networking.k8s.io/v1")"
+echo "$body" | grep -q '"ingresses"' || bad "/apis/networking.k8s.io/v1 missing ingresses: $body"
+echo "$body" | grep -q '"shortNames":\["ing"\]' || bad "/apis/networking.k8s.io/v1 missing ing shortName: $body"
+echo "$body" | grep -q '"ingressclasses"' || bad "/apis/networking.k8s.io/v1 missing ingressclasses: $body"
+ok "/apis/networking.k8s.io/v1 serves ingresses (ing) + ingressclasses"
+
 # Content-Type is application/json everywhere (decision Q10).
 ct="$(curl -fsS -o /dev/null -w '%{content_type}' "$BASE/api")"
 case "$ct" in

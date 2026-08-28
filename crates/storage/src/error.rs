@@ -30,7 +30,7 @@ pub enum StorageError {
     },
     #[error("invalid storage key: {key}")]
     InvalidKey { key: String },
-    /// A backend-specific failure (SQLite/libsql IO or SQL error, T2.3).
+    /// A backend-specific failure (engine IO error, T2.3).
     #[error("storage backend error: {0}")]
     Backend(String),
     /// The backend (or its watch channel) has been closed.

@@ -19,6 +19,9 @@ pub mod endpoints;
 pub mod gc;
 /// Pure StatefulSet ordinal/naming/revision math (T3.1b).
 pub mod namespace;
+/// Node podCIDR allocator (T4.3 Scope A, Q34): first-free /24 per Node,
+/// CAS-written onto `spec.podCIDR`/`spec.podCIDRs`.
+pub mod node_cidr;
 pub mod ordinal;
 pub mod replicaset;
 pub mod rollout;

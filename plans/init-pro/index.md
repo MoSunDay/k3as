@@ -21,22 +21,22 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) | not-started | T1.1 |
 | T2.1 | 2 | etcd 语义数据面（纯 Rust 实现，Q17） | done | T0.2 |
 | T2.2 | 2 | etcd v3 数据面 = APIServer storage backend | done | T2.1, T1.1 |
-| T2.3 | 2 | SQLite/KINE 兼容替代后端 | done | T2.2 |
+| T2.3 | 2 | rdb/RocksDB 持久化后端 (kine 语义, Q33) | done | T2.2 |
 | T3.1 | 3 | kube-controller-manager 等价核心循环 | done | T1.2, T2.2 |
 | T3.2 | 3 | 调度器 (kube-scheduler 等价 + extender seam) | done | T1.2, T4.1 (由 Q24 spike 满足) |
 | T3.3 | 3 | bootstrap / 证书 / token 轮转 | not-started | T1.3, T2.2 |
 | T3.4 | 3 | HA 多 server (etcd 集群 + 选举) | not-started | T2.2, T3.3 |
 | T4.1 | 4 | containerd bundling 与 CRI 实现 | done | T0.2 |
 | T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24) | T4.1, T3.2 |
-| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | not-started | T4.2 |
+| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | in-progress (Scope A flannel CNI done, Q34) | T4.2 |
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
-| T5.1 | 5 | mlua + coroutine↔async 桥 | done | T0.3 |
-| T5.2 | 5 | HTTP 管线 + phase hooks | done | T5.1 |
-| T5.3 | 5 | resty::* 等价标准库 | done | T5.1, T5.2 |
-| T5.4 | 5 | 内置 Router 核心 + Ingress→RouteTable 编译（Lua 为 fallback 管线） | done | T5.2, T5.3, T1.1 |
-| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含请求间 no-restart reload；剩余：live informer / drain / shared-dict 迁移 / 动态证书) | not-started | T5.4 |
-| T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane done, Q28) | T5.4, T4.3 |
+| T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
+| T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
+| T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
+| T5.4 | 5 | 内置 Router 核心 + Ingress (networking.k8s.io/v1) → 路由编译 (openrusty h2c 网关嵌入, Q32) | done | T5.2, T5.3, T1.1 |
+| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含 openrusty `apply_config` 请求间 no-restart reload；剩余：live informer / drain / shared-dict 等价 / 动态证书 等价) | not-started | T5.4 |
+| T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane done, openrusty 承载, Q28/Q32) | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
 | T6.2 | 6 | 标准 addon (CoreDNS/local-storage/metrics-server) | not-started | T6.1 |
@@ -44,9 +44,10 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | done (Scope A+B+C, Sprint 23) | T1.2, T3.1 |
 
-**Counts:** 33 TODOs · 20 done · 1 in-progress (T5.6 NodePort plane:
-Router service plane + service-traffic e2e, Q28)
-· 12 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
+**Counts:** 33 TODOs · 20 done · 2 in-progress (T5.6 NodePort plane:
+Router service plane + service-traffic e2e, Q28; T4.3 Scope A flannel
+CNI done, Q34 — Scope B/ServiceLB L4 剩余)
+· 11 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=5 · Layer5=7 · Layer6=2 · Layer7=3.
 
 ---
@@ -73,6 +74,56 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 25 — link_repos wave: Router 换底 openrusty + datastore 换底 rdb/RocksDB + CNI 换底 flannel-rust (T2.3 重写 done, T4.3 Scope A → in-progress, T5.1–T5.4 重写 done, Q32/Q33/Q34).**
+  三个上游 Rust 仓库以 path dependency 收编（`link_repos/{openrusty,rdb,flannel-rust}`
+  symlink, git-ignore; 根 `Cargo.toml` `exclude = ["link_repos"]`）。wave 0 上游改造:
+  openrusty 增加 lib target（openrusty-core/openrusty-server 可作为库）+
+  `state::from_config` + `reload::apply_config` + `RouteConfig.host`（上游 203 tests）;
+  rdb 增加 `store` feature gate（981 tests）; flanneld `Options` 增加
+  `install_signal_handlers`（init-pro 置 false, SIGTERM 经自身 infra::Shutdown
+  的 CancellationToken 桥接, 350 tests）。
+  **Wave A (Q32) Router 重写:** mlua/Lua 数据面整体删除（resty.* shim、ngx.*、
+  cosocket、coroutine phase pipeline、`scripts/router-coroutine-selftest.sh`）,
+  `crates/router` 内嵌 openrusty h2c gateway; `networking.k8s.io/v1` Ingress
+  成为一级 ingress 资源（`crates/api`: Ingress/IngressClass 模型 + schema-registry
+  + discovery 注册）; `crates/apiserver/src/node_status.rs` 新增
+  `PUT/PATCH /api/v1/nodes/{name}/status` 子资源（flannel F2 依赖）; 空Endpoints
+  503 门（ST5）与 NodePort ServiceLB 面（Q28）平移到 openrusty 面;
+  `nodeport.rs` `NodePortConfig.ingress_listen: Option<SocketAddr>`（默认 None,
+  CLI flag 未接线 = 记账债务）。
+  **Wave B (Q33) datastore 换底:** 新 `crates/storage/src/rdb_backend/`
+  （mod/keys/watch）— `RdbStorage` 跑在 rdb crate（RocksDB）`store` feature 上,
+  key 布局 `meta/revision`、`meta/compact`、`obj/<key>`、`log/<rev 大端>`,
+  WriteBatch + fsync 写路径, etcd revision/CAS/watch 历史回放/compaction 语义
+  复刻自原 sqlite 写路径; `RdbStorage::open(&Path)` 为 async。DSN 变为
+  `rdb://<path>`, `sqlite://` 返回 Unsupported（破坏性 DSN 变更）;
+  删除 `crates/storage/src/sqlite/` + `tests/sqlite_storage.rs`, libsql 与 mlua
+  从根/storage Cargo.toml 移除; 新 `tests/rdb_storage.rs`（26 contract + 4
+  durability + 双开）; `cli::runtime` 按 `Dsn::Rdb` 分类, 日志行含
+  "rdb datastore (rocksdb) — T2.3/Q33"; `local-up.sh` 用
+  `--datastore-endpoint rdb://$DD/server/state.rdb` + `--cluster-cidr 10.42.0.0/16`。
+  **Wave C (Q34, T4.3 Scope A) CNI 换底:** 新 `crates/cli/src/flannel.rs` —
+  内嵌 flanneld（默认 vxlan backend）随 agent 进程运行; multicall 别名
+  `flannel` → `flannel_cni::skel::run()`（CNI meta-plugin, 由 containerd 经
+  `<runtime>/aux/flannel` symlink 调用）; 新 `crates/cli/src/flannel_keeper.rs` —
+  5s 循环维持 Node `NetworkUnavailable=False`（债务: apiserver status patch 缺
+  status/conditions merge key, 一次性条件写入尚不可行, 记为 debt）;
+  `crates/controllers` 新 node-cidr reconciler 按 `--cluster-cidr`（默认
+  10.42.0.0/16）分配 node podCIDR; `runtime::stage` 新增 `10-flannel.conflist` +
+  flannel 二进制 aux staging + aux/flannel symlink; C 侧修复: delegate 去掉
+  isDefaultGateway（双默认路由）、钉住 `iptables_forward_rules: true`
+  （FORWARD-DROP 杀 pod↔pod）; 新 CLI flag `--flannel-backend`、`--cluster-cidr`;
+  新 `scripts/flannel-e2e.sh`（F1 podCIDR 分配 / F2 flannel 注解 +
+  NetworkUnavailable=False / F3 podIP 落在 node podCIDR / F4 flannel 织物上
+  pod↔pod / F5 上游 conformance 范围说明）。
+  CI: `router-coroutine` step 换为 `service-traffic-e2e`。
+  门禁全绿: workspace **852 通过 / 0 失败**（64 targets）; clippy -D warnings 0;
+  golden **39/39**（新 G31 networking discovery, 盘点 G01-G31 / 39 PASS sites）;
+  durability D1-D4 4/4（rdb:// 上: D3 重启后 resourceVersion 全同, D4 revision
+  计数 15→16 续走 + watch 回放）; service-traffic ST1-ST6 6/6; flannel-e2e
+  F1-F5 5/5（F5 信息性）; multicall selftest 9 别名（含 flannel）+ 未知→help;
+  flag parity 18/18; graceful-shutdown OK; discovery parity ALL（含
+  networking.k8s.io）; local-up 起 server+agent 并干净收尾。
 - **Sprint 24 — T4.2 Scope C: `kubectl logs/exec` 走通数据面上游形状，kubelet 局部监听器 + apiserver 中继 (→ done Scope A+B+C, **Q31**).**
   三段链路 kubectl → apiserver 中继 (`crates/apiserver/src/pod_io.rs` 280 行 +
   `kubelet_hop.rs` 253 行；路由 `/api/v1/namespaces/{ns}/pods/{name}/log|exec`；

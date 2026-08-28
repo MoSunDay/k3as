@@ -32,9 +32,10 @@ pub mod workqueue;
 
 pub use client::{Client, StorageClient};
 pub use controllers::Caches;
+pub use controllers::node_cidr;
 pub use error::ControllerError;
 pub use informer::{EventHandler, Informer, ObjectStore};
 pub use leaderelection::{LeaderElector, LeaseConfig};
-pub use runner::ControllerManager;
+pub use runner::{ControllerManager, ManagerConfig};
 pub use stop::Stop;
 pub use workqueue::WorkQueue;

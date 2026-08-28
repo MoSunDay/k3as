@@ -1,7 +1,10 @@
-//! Compiled HTTP route table: host × path → upstream (TODO **T5.4**).
+//! Compiled HTTP route table: host × path → upstream (TODO **T5.4**; the
+//! semantic reference retained by the openrusty rewrite, decision **Q32**).
 //!
 //! Built by the Ingress compiler ([`crate::ingress`]) and consulted by the
-//! reverse-proxy data plane ([`crate::proxy`]). Matching follows Kubernetes
+//! gateway 503 gate ([`crate::gate`]) for host/path-aware short-circuits;
+//! the openrusty emitter ([`crate::gateway_config`]) projects it onto the
+//! serving runtime. Matching follows Kubernetes
 //! `Ingress` semantics: a request matches the **first** rule (in specificity
 //! order) whose host and path both match. Hosts may be exact (`foo.bar`) or
 //! wildcard (`*.bar`); paths are `Prefix` (element-wise), `Exact`, or
@@ -31,7 +34,8 @@ impl UpstreamRef {
 pub enum PortRef {
     /// A numeric port (e.g. `80`).
     Number(u16),
-    /// A named port (resolved by [`crate::balancer::UpstreamResolver`]).
+    /// A named port (resolved against the Service's port list by
+    /// [`crate::endpoints::resolve_with_state`]).
     Named(String),
 }
 
@@ -122,7 +126,7 @@ impl PathMatcher {
     }
 
     /// Longer = more specific (used for ordering).
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             PathMatcher::Prefix(p) | PathMatcher::Exact(p) => p.len(),
         }

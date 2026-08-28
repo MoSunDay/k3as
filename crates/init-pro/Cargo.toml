@@ -14,6 +14,7 @@ name = "init-pro"
 path = "src/main.rs"
 
 [dependencies]
+flannel-cni = { workspace = true }
 multicall = { workspace = true }
 cli = { workspace = true }
 common = { workspace = true }

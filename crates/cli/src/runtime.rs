@@ -35,15 +35,18 @@ pub struct ServerBind {
     /// `--kube-scheduler-arg KEY=VALUE` passthrough (`config=<path>` wires
     /// HTTP extenders, T3.2/Q3).
     pub scheduler_args: Vec<String>,
-    /// DSN selecting the storage backend (**T2.3**, decision **Q29**):
-    /// `None`/empty = the embedded default (**Q17**); `sqlite://<path>` =
-    /// the libsql/SQLite `SqliteStorage` backend; other schemes are fatal
-    /// (etcd-gRPC is deferred to T3.4).
+    /// DSN selecting the storage backend (**T2.3**, decisions **Q29/Q33**):
+    /// `None`/empty = the embedded default (**Q17**); `rdb://<path>` = the
+    /// RocksDB `RdbStorage` backend; other schemes are fatal (etcd-gRPC is
+    /// deferred to T3.4).
     pub datastore_endpoint: Option<String>,
+    /// `--cluster-cidr`: the node-cidr controller carves Node `/24`
+    /// podCIDRs from it (T4.3 Scope A, Q34).
+    pub cluster_cidr: String,
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
-    run_supervised("server", cfg, Some(bind), None, None, None)
+    run_supervised("server", cfg, Some(bind), None, None, None, None)
 }
 
 pub fn run_agent(
@@ -52,6 +55,7 @@ pub fn run_agent(
     node_name: Option<String>,
     node_ip: String,
     kubelet_port: u16,
+    flannel: crate::flannel::FlannelNet,
 ) -> ExitCode {
     run_supervised(
         "agent",
@@ -60,6 +64,7 @@ pub fn run_agent(
         server_url,
         node_name,
         Some((node_ip, kubelet_port)),
+        Some(flannel),
     )
 }
 
@@ -75,6 +80,7 @@ fn run_supervised(
     server_url: Option<String>,
     node_name: Option<String>,
     kubelet_addr: Option<(String, u16)>,
+    flannel: Option<crate::flannel::FlannelNet>,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -119,6 +125,9 @@ fn run_supervised(
         // render config -> supervise with backoff). The server keeps the
         // runtime off by default (single-node UX arrives with T4.5/e2e).
         let mut runtime_drain: Option<tokio::task::JoinHandle<()>> = None;
+        // T4.3 Scope A (Q34): embedded flanneld (kube subnet-mgr). Drained
+        // after the kubelet, before the containerd runtime.
+        let mut flannel_drain: Option<tokio::task::JoinHandle<()>> = None;
         if bind.is_none() {
             match node_runtime::start_agent_runtime(&cfg.data_dir, shutdown.clone()) {
                 Ok(task) => {
@@ -196,6 +205,34 @@ fn run_supervised(
                         "no staged crictl; kubelet off (T4.1 tree missing)"
                     ),
                 }
+                // T4.3 Scope A (Q34): embedded flanneld as the kube subnet
+                // manager — same apiserver URL as the kubelet (plain HTTP,
+                // no auth in v1). Independent of the kubelet's staged
+                // crictl: flanneld only needs the API surface + netlink.
+                // `--flannel-backend=none` keeps the agent flannel-free.
+                let net = flannel.clone().unwrap_or_default();
+                if crate::flannel::is_enabled(&net) {
+                    match crate::flannel::spawn_flannel(
+                        &cfg.data_dir,
+                        &url,
+                        &node,
+                        &net,
+                        shutdown.clone(),
+                    ) {
+                        Ok(handle) => flannel_drain = Some(handle),
+                        Err(e) => tracing::warn!(
+                            target: "init-pro",
+                            role,
+                            "flannel disabled (net-conf unreadable): {e}"
+                        ),
+                    }
+                } else {
+                    tracing::info!(
+                        target: "init-pro",
+                        role,
+                        "flannel disabled by --flannel-backend=none"
+                    );
+                }
             }
         }
         let server_join = match &bind {
@@ -205,7 +242,7 @@ fn run_supervised(
                 let summary = crate::discovery::served_groups_summary(&reg, &advertised);
                 tracing::info!(target: "init-pro", role, "T1.1 {summary}");
                 // T1.2b: default backend = the zero-dependency embedded store
-                // (Q17); `sqlite://` opts into SqliteStorage (T2.3, Q29) —
+                // (Q17); `rdb://` opts into RdbStorage (T2.3, Q33) —
                 // etcd-gRPC remains deferred to T3.4.
                 let store = match open_store(b.datastore_endpoint.as_deref()).await {
                     Ok(store) => store,
@@ -220,8 +257,15 @@ fn run_supervised(
                 // `--disable-apiserver` keeps single-process server semantics.
                 if !b.disable_controllers {
                     let cm_stop = controllers::Stop::new();
-                    let cm_handles =
-                        controllers::ControllerManager::spawn(store.clone(), cm_stop.clone());
+                    let cm_handles = controllers::ControllerManager::spawn_with(
+                        store.clone(),
+                        cm_stop.clone(),
+                        controllers::ManagerConfig {
+                            // T4.3 Scope A (Q34): allocate Node podCIDRs
+                            // from --cluster-cidr.
+                            cluster_cidr: Some(b.cluster_cidr.clone()),
+                        },
+                    );
                     tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
                     controllers_drain = Some((cm_handles, cm_stop));
                 }
@@ -321,6 +365,12 @@ fn run_supervised(
             }
             tracing::info!(target: "init-pro", role, "kubelet drained");
         }
+        // T4.3 (Q34): then drain flanneld — no new pods after the kubelet
+        // stopped, so the CNI data plane can come down before containerd.
+        if let Some(h) = flannel_drain {
+            let _ = h.await;
+            tracing::info!(target: "init-pro", role, "flannel drained");
+        }
         // T4.1: then drain the containerd supervisor (kill + bounded wait),
         // mirroring k3s stopping the runtime before the control plane.
         if let Some(h) = runtime_drain {
@@ -378,8 +428,9 @@ fn run_supervised(
 enum Dsn {
     /// Unset or empty: the zero-dependency embedded default (**Q17**).
     Embedded,
-    /// `sqlite://<path>`: the libsql/SQLite backend (`SqliteStorage`).
-    Sqlite(PathBuf),
+    /// `rdb://<path>`: the RocksDB (rdb `store` engine) backend
+    /// (`RdbStorage`, **Q33**).
+    Rdb(PathBuf),
     /// Anything else (including bare `sqlite://`): fatal, unsupported.
     Unsupported(String),
 }
@@ -389,9 +440,9 @@ enum Dsn {
 fn classify_dsn(dsn: Option<&str>) -> Dsn {
     match dsn {
         None | Some("") => Dsn::Embedded,
-        Some(s) if s.starts_with("sqlite://") => match &s["sqlite://".len()..] {
+        Some(s) if s.starts_with("rdb://") => match &s["rdb://".len()..] {
             "" => Dsn::Unsupported(s.to_string()),
-            path => Dsn::Sqlite(PathBuf::from(path)),
+            path => Dsn::Rdb(PathBuf::from(path)),
         },
         Some(s) => Dsn::Unsupported(s.to_string()),
     }
@@ -399,27 +450,27 @@ fn classify_dsn(dsn: Option<&str>) -> Dsn {
 
 /// Open the storage backend selected by `--datastore-endpoint` (**T2.3**,
 /// decision **Q29**). Unset/empty keeps the embedded default (**Q17**) —
-/// sqlite is an explicit opt-in, never a silent behavior change;
-/// `sqlite://<path>` opens the libsql/SQLite backend; other schemes are
+/// rdb is an explicit opt-in, never a silent behavior change;
+/// `rdb://<path>` opens the RocksDB backend (**Q33**); other schemes are
 /// fatal (etcd-gRPC is deferred to T3.4).
 async fn open_store(dsn: Option<&str>) -> std::io::Result<Arc<dyn storage::StorageBackend>> {
     match classify_dsn(dsn) {
         Dsn::Embedded => Ok(Arc::new(storage::EmbeddedStorage::new())),
-        Dsn::Sqlite(path) => {
-            let store = storage::SqliteStorage::open(&path)
+        Dsn::Rdb(path) => {
+            let store = storage::RdbStorage::open(&path)
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             tracing::info!(target: "init-pro", path = %path.display(),
-                "SQLite datastore (libsql, WAL) — T2.3/Q29");
+                "rdb datastore (rocksdb) — T2.3/Q33");
             Ok(Arc::new(store))
         }
         Dsn::Unsupported(s) => {
-            let msg = if s == "sqlite://" {
-                "--datastore-endpoint sqlite:// requires a file path".to_string()
+            let msg = if s == "rdb://" {
+                "--datastore-endpoint rdb:// requires a file path".to_string()
             } else {
                 format!(
                     "unsupported --datastore-endpoint scheme (got {s:?}); \
-                     supported: sqlite://<path> (T2.3); empty = embedded default"
+                     supported: rdb://<path> (T2.3); empty = embedded default"
                 )
             };
             Err(std::io::Error::other(msg))
@@ -491,8 +542,8 @@ fn print_dry_run(cfg: &Config, manifest: &EmbeddedManifest) {
 mod tests {
     use super::*;
 
-    /// T2.3/Q29: unset or empty DSN must keep the embedded default (Q17) -
-    /// sqlite is explicit opt-in only.
+    /// T2.3/Q33: unset or empty DSN must keep the embedded default (Q17) -
+    /// rdb is explicit opt-in only.
     #[test]
     fn classify_dsn_empty_is_embedded() {
         assert_eq!(classify_dsn(None), Dsn::Embedded);
@@ -500,22 +551,26 @@ mod tests {
     }
 
     #[test]
-    fn classify_dsn_sqlite_paths() {
+    fn classify_dsn_rdb_paths() {
         assert_eq!(
-            classify_dsn(Some("sqlite:///tmp/a.db")),
-            Dsn::Sqlite(PathBuf::from("/tmp/a.db"))
+            classify_dsn(Some("rdb:///tmp/a.rdb")),
+            Dsn::Rdb(PathBuf::from("/tmp/a.rdb"))
         );
         assert_eq!(
-            classify_dsn(Some("sqlite://rel.db")),
-            Dsn::Sqlite(PathBuf::from("rel.db"))
+            classify_dsn(Some("rdb://rel.rdb")),
+            Dsn::Rdb(PathBuf::from("rel.rdb"))
         );
     }
 
     #[test]
-    fn classify_dsn_rejects_bare_sqlite_and_foreign_schemes() {
+    fn classify_dsn_rejects_bare_rdb_and_foreign_schemes() {
         assert_eq!(
-            classify_dsn(Some("sqlite://")),
-            Dsn::Unsupported("sqlite://".to_string())
+            classify_dsn(Some("rdb://")),
+            Dsn::Unsupported("rdb://".to_string())
+        );
+        assert_eq!(
+            classify_dsn(Some("sqlite:///tmp/a.db")),
+            Dsn::Unsupported("sqlite:///tmp/a.db".to_string())
         );
         assert_eq!(
             classify_dsn(Some("mysql://x")),

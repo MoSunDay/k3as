@@ -32,4 +32,38 @@ pub struct AgentCmd {
         value_name = "PORT"
     )]
     pub kubelet_port: u16,
+
+    /// IPv4 pod network: flanneld leases this node's `/24` from the Node
+    /// `spec.podCIDR` allocated under it and synthesizes net-conf.json
+    /// `Network` from it (T4.3 Scope A, Q34). env `INIT_PRO_CLUSTER_CIDR`.
+    #[arg(
+        long = "cluster-cidr",
+        env = "INIT_PRO_CLUSTER_CIDR",
+        default_value = "10.42.0.0/16",
+        value_name = "CIDR"
+    )]
+    pub cluster_cidr: String,
+
+    /// flannel data-plane backend: `vxlan` (default) | `host-gw` |
+    /// `none` (disables the embedded flanneld; k3s parity).
+    /// env `INIT_PRO_FLANNEL_BACKEND`.
+    #[arg(
+        long = "flannel-backend",
+        env = "INIT_PRO_FLANNEL_BACKEND",
+        default_value = "vxlan",
+        value_name = "BACKEND"
+    )]
+    pub flannel_backend: String,
+
+    /// Interface (name or IP) flanneld binds the data plane on; defaults
+    /// to autodetection (k3s `--flannel-iface` parity).
+    /// env `INIT_PRO_FLANNEL_IFACE`.
+    #[arg(long = "flannel-iface", env = "INIT_PRO_FLANNEL_IFACE", value_name = "IFACE")]
+    pub flannel_iface: Option<String>,
+
+    /// Verbatim net-conf.json passthrough — skips the synthesized
+    /// `agent/etc/flannel/net-conf.json` (k3s `--flannel-conf` parity).
+    /// env `INIT_PRO_FLANNEL_CONF`.
+    #[arg(long = "flannel-conf", env = "INIT_PRO_FLANNEL_CONF", value_name = "FILE")]
+    pub flannel_conf: Option<std::path::PathBuf>,
 }

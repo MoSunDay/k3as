@@ -1,18 +1,21 @@
-//! Ingress → [`RouteTable`] compiler (TODO **T5.4**).
+//! Ingress -> [`RouteTable`] compiler (workstream A, decision **Q32**).
 //!
-//! Turns Kubernetes `networking/v1` [`Ingress`] objects into a flat,
-//! specificity-ordered route table the reverse-proxy data plane consults.
-//! `host` rules, `pathType` (`Prefix`/`Exact`/`ImplementationSpecific`),
-//! per-path backends (`Service` name + numeric/named port) and the optional
-//! `spec.defaultBackend` are all honoured. `HTTPRoute`/`Gateway` compile to the
-//! same table later.
+//! Turns `networking.k8s.io/v1` [`Ingress`] objects (the in-tree `api`
+//! model; the Lua era used k8s-openapi) into a flat, specificity-ordered
+//! route table the gateway consumes. `host` rules, `pathType`
+//! (`Prefix`/`Exact`/`ImplementationSpecific`), per-path backends
+//! (Service name + numeric/named port) and the optional
+//! `spec.defaultBackend` are all honoured.
 //!
-//! Only `Service` backends are routed (a `resource` backend is skipped — there
-//! is nothing to proxy to). A warning is logged, not fatal.
+//! Only `Service` backends are routed (a `resource` backend is skipped —
+//! there is nothing to proxy to): a warning is logged, not fatal. The
+//! table's wildcard-host support is retained here; the openrusty emitter
+//! ([`crate::gateway_config::expressible`]) drops wildcards (documented
+//! deviation: openrusty matches hosts exactly).
 
-use k8s_openapi::api::networking::v1::{Ingress, IngressBackend, IngressRule};
+use api::networking::{Ingress, IngressBackend, IngressRule};
 
-use crate::route::{HostMatcher, PathMatcher, RouteRule, RouteTable, UpstreamRef};
+use crate::route::{HostMatcher, PathMatcher, PortRef, RouteRule, RouteTable, UpstreamRef};
 
 /// Compile a set of Ingress objects into a single [`RouteTable`].
 ///
@@ -46,16 +49,14 @@ pub fn compile_ingress(ingresses: &[Ingress]) -> RouteTable {
 
 /// Compile one [`IngressRule`] into route rules appended to `table`.
 fn compile_rule(rule: &IngressRule, origin: &str, table: &mut RouteTable) {
-    let host = rule.host.as_deref().unwrap_or("");
-    let host_matcher = HostMatcher::new(host);
+    let host_matcher = HostMatcher::new(&rule.host);
     let paths = match rule.http.as_ref() {
         Some(h) => &h.paths,
         None => return,
     };
     for path in paths {
-        let path_type = path.path_type.as_str();
-        let raw_path = path.path.as_deref().unwrap_or("/");
-        let path_matcher = PathMatcher::new(path_type, raw_path);
+        let raw_path = if path.path.is_empty() { "/" } else { &path.path };
+        let path_matcher = PathMatcher::new(&path.path_type, raw_path);
         let Some(upstream) = backend_upstream(&path.backend) else {
             tracing::warn!(
                 target: "init-pro",
@@ -78,13 +79,13 @@ fn compile_rule(rule: &IngressRule, origin: &str, table: &mut RouteTable) {
 fn backend_upstream(backend: &IngressBackend) -> Option<UpstreamRef> {
     let svc = backend.service.as_ref()?;
     let port = svc.port.as_ref()?;
-    let port_ref = match (port.number, port.name.as_deref()) {
+    let port_ref = match (port.number, port.name.as_str()) {
         (Some(n), _) => {
             // Clamp the i32 port into u16 (K8s max is 65535).
-            crate::route::PortRef::Number(n.clamp(0, 65535) as u16)
+            PortRef::Number(n.clamp(0, 65535) as u16)
         }
-        (None, Some(name)) => crate::route::PortRef::Named(name.to_owned()),
-        (None, None) => return None,
+        (None, name) if !name.is_empty() => PortRef::Named(name.to_owned()),
+        (None, _) => return None,
     };
     Some(UpstreamRef {
         service: svc.name.clone(),
@@ -102,19 +103,32 @@ fn ingress_origin(ing: &Ingress) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::networking::v1::{
-        HTTPIngressPath, HTTPIngressRuleValue, IngressBackend, IngressRule, IngressServiceBackend,
-        IngressSpec, IngressTLS, ServiceBackendPort,
+    use api::networking::{
+        HTTPIngressPath, HTTPIngressRuleValue, IngressServiceBackend, IngressSpec,
+        ServiceBackendPort,
     };
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube_core::metadata::ObjectMeta;
 
     fn svc_backend(name: &str, port: i32) -> IngressBackend {
         IngressBackend {
             service: Some(IngressServiceBackend {
                 name: name.to_owned(),
                 port: Some(ServiceBackendPort {
-                    name: None,
+                    name: String::new(),
                     number: Some(port),
+                }),
+            }),
+            resource: None,
+        }
+    }
+
+    fn named_backend(name: &str, port: &str) -> IngressBackend {
+        IngressBackend {
+            service: Some(IngressServiceBackend {
+                name: name.to_owned(),
+                port: Some(ServiceBackendPort {
+                    name: port.to_owned(),
+                    number: None,
                 }),
             }),
             resource: None,
@@ -124,20 +138,21 @@ mod tests {
     fn path(backend: IngressBackend, p: &str, ty: &str) -> HTTPIngressPath {
         HTTPIngressPath {
             backend,
-            path: Some(p.to_owned()),
+            path: p.to_owned(),
             path_type: ty.to_owned(),
         }
     }
 
     fn rule(host: Option<&str>, paths: Vec<HTTPIngressPath>) -> IngressRule {
         IngressRule {
-            host: host.map(str::to_owned),
+            host: host.unwrap_or_default().to_owned(),
             http: Some(HTTPIngressRuleValue { paths }),
         }
     }
 
     fn ingress(name: &str, spec: IngressSpec) -> Ingress {
         Ingress {
+            types: Default::default(),
             metadata: ObjectMeta {
                 name: Some(name.to_owned()),
                 ..Default::default()
@@ -161,7 +176,7 @@ mod tests {
                         path(svc_backend("health", 8081), "/health", "Exact"),
                     ],
                 )]),
-                tls: Some(Vec::<IngressTLS>::new()),
+                tls: None,
             },
         );
         let table = compile_ingress(&[ing]);
@@ -236,5 +251,45 @@ mod tests {
         // The exact host + exact path wins despite being declared second.
         let r = table.lookup("exact.io", "/x").unwrap();
         assert_eq!(r.upstream.service, "precise");
+    }
+
+    #[test]
+    fn named_service_ports_and_implementation_specific_paths() {
+        let ing = ingress(
+            "n",
+            IngressSpec {
+                default_backend: None,
+                ingress_class_name: None,
+                rules: Some(vec![rule(
+                    Some("n.io"),
+                    vec![
+                        path(named_backend("api", "http"), "/a", "ImplementationSpecific"),
+                        path(named_backend("metrics", "metrics"), "/b", "Prefix"),
+                    ],
+                )]),
+                tls: None,
+            },
+        );
+        let table = compile_ingress(&[ing]);
+        let a = table.lookup("n.io", "/a").unwrap();
+        assert_eq!(a.upstream.port, PortRef::Named("http".into()));
+        let b = table.lookup("n.io", "/b").unwrap();
+        assert_eq!(b.upstream.port, PortRef::Named("metrics".into()));
+    }
+
+    /// Empty/missing spec compiles to an empty table (no panic).
+    #[test]
+    fn specless_ingresses_are_ignored() {
+        let ing = Ingress {
+            types: Default::default(),
+            metadata: ObjectMeta {
+                name: Some("bare".into()),
+                ..Default::default()
+            },
+            spec: None,
+            status: None,
+        };
+        let table = compile_ingress(&[ing]);
+        assert!(table.is_empty());
     }
 }

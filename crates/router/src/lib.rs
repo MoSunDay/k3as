@@ -1,59 +1,49 @@
-//! Built-in Router VM: a Lua-driven HTTP data plane.
+//! Built-in Router data plane — openrusty-powered h2c gateway (workstream A,
+//! decision **Q32**; externally observable behavior parity under **Q28**).
 //!
-//! - **T5.1** (done): the mlua coroutine<->async bridge — a Lua coroutine
-//!   yields at a Rust `await` point on a Tokio `LocalSet`, letting other
-//!   coroutines run concurrently on the same worker VM (openresty's model,
-//!   reproduced in Rust). ADR **Q12**.
-//! - **T5.2** (done): the full openresty phase pipeline — `rewrite` ->
-//!   `access` -> `content` -> `header_filter` -> `body_filter` -> `log`
-//!   (+ `init_worker` at boot), with `ngx.req`/`ngx.header`/`ngx.status`/
-//!   `ngx.var`/`ngx.exec`/`ngx.redirect`/`ngx.arg`, request-body reading and a
-//!   real-TCP HTTP/1.1 data plane. A `header_filter_by_lua` mutates headers
-//!   observed by a real client (the T5.2 acceptance gate). ADRs **Q13/Q14**.
-//! - **T5.3** (done): `resty::*` + `ngx.shared.DICT`.
-//! - **T5.4** (done): the Ingress→route-table compiler, a Rust round-robin
-//!   [`balancer::Balancer`] + upstream resolver, a Rust HTTP reverse proxy
-//!   ([`proxy::serve_proxy`]), TLS termination with SNI ([`tls`]), and a
-//!   no-restart hot-reload seam ([`config`]). `Phase::Balancer` is wired.
-//! - **Sprint 18 / S4** (Q28): the NodePort service plane — Services +
-//!   Endpoints reflectors over the storage backend ([`endpoints_watch`]),
-//!   live peer resolution ([`endpoints`]) and per-nodePort reverse-proxy
-//!   listeners ([`nodeport`]), wired into the `server` runtime by default
-//!   (`--disable-kube-proxy` turns it off).
+//! The mlua Lua plane (T5.1 bridge, T5.2 phase pipeline, T5.3 resty.*,
+//! T5.4 Ingress->Lua routing + TLS + Lua hot reload) is replaced by the
+//! openrusty gateway engine: this crate now owns
 //!
-//! Cosocket (`ngx.socket.tcp`), TLS/SNI, and hot reload are all in. Live
-//! `kube-rs` informer config sourcing + dynamic Lua cert issuance are deferred
-//! to T5.5 / Phase 2.
+//! - the **reflectors**: Services + Endpoints ([`endpoints_watch`], S4) and
+//!   the `networking.k8s.io/v1` Ingress set ([`ingress_watch`]), folded into
+//!   one [`EndpointsResolver`];
+//! - the **route model**: [`route::RouteTable`] — the Ingress compiler
+//!   ([`ingress`]) target, still the semantic reference for host × path →
+//!   upstream matching;
+//! - the **gateways**: per-`nodePort` listeners ([`nodeport`]) and the
+//!   Ingress gateway ([`gateway`]), both openrusty `AppState`s served
+//!   through the 503 gate ([`gate`]) over real HTTP/1.1 + h2c connections
+//!   ([`serve`]), with openrusty's in-memory reload for live endpoint and
+//!   Ingress changes (the Lua-era "hot reload" seam, now config-driven).
+//!
+//! Deviations from the Lua era are documented per-module (wildcard hosts,
+//! TLS termination, active health probes); the wire behavior gated by
+//! `scripts/service-traffic-e2e.sh` (ST1-ST6) is preserved.
+//!
+//! Threading: the whole plane runs on ONE dedicated thread with a
+//! current-thread runtime (`router::supervise` + `router::spawn_nodeport_plane`
+//! from the CLI `server` runtime); every connection task is plain `Send`.
+
 #![forbid(unsafe_code)]
 
-mod balancer;
-mod config;
-mod conn;
-mod context;
-mod cosocket;
-pub mod endpoints;
-pub mod endpoints_watch;
+mod endpoints;
+mod endpoints_watch;
+mod gate;
+mod gateway;
+mod gateway_config;
 mod ingress;
-mod ngx;
+mod ingress_watch;
 pub mod nodeport;
-mod pipeline;
-mod proxy;
-mod resty;
 mod route;
 mod serve;
-mod tls;
-mod vm;
 
-pub use balancer::{pick_peer, Balancer, StaticResolver, UpstreamResolver};
-pub use config::{reload_channel, ConfigSource, RouteStore, StaticConfigSource};
-pub use context::RequestContext;
-pub use endpoints::{EndpointsResolver, EndpointsView, ResolverState, ServiceView};
+pub use endpoints::{
+    resolve_with_state, EndpointsResolver, EndpointsView, ResolverState, ServiceView, SvcPort,
+    TargetPort,
+};
 pub use endpoints_watch::{endpoints_prefix, services_prefix, supervise};
 pub use ingress::compile_ingress;
+pub use ingress_watch::{ingresses_prefix, IngressMap};
 pub use nodeport::{spawn as spawn_nodeport_plane, NodePortConfig, NodePortPlane};
-pub use pipeline::{build_response, Phase, PhaseOutcome, Pipeline, PipelineBuilder};
-pub use proxy::{serve_proxy, ProxyOptions};
 pub use route::{HostMatcher, PathMatcher, PortRef, RouteRule, RouteTable, UpstreamRef};
-pub use serve::{ephemeral_listener, serve};
-pub use tls::{build_server_config, CertKey, SniCertResolver};
-pub use vm::worker_vm;

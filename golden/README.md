@@ -4,7 +4,7 @@ An immutable set of k3s/k8s wire-level behaviors that every later TODO must
 keep green (Q2 merge gate). The harness `scripts/golden-conformance.sh` boots a
 real `init-pro server` and diffs its responses against these fixtures; per-layer
 suites live in `scripts/golden/suites/` (`storage.sh`, `controllers.sh`,
-`scheduler.sh`, `nodes.sh`, `argoproj.sh`).
+`scheduler.sh`, `nodes.sh`, `networking.sh`, `argoproj.sh`).
 
 ## Volatility
 
@@ -15,7 +15,7 @@ timestamps/uids/resourceVersions in discovery payloads).
 
 ## Cases
 
-Current inventory: G01-G29 (34 PASS sites; multi-leg cases G25/G26/G29 emit one
+Current inventory: G01-G31 (39 PASS sites; multi-leg cases G25/G26/G30 emit one
 verdict per leg). SKIP policy (Q25): a missing build prerequisite (vendored
 containerd bundle, `cc`) SKIPs the whole case rather than failing it — a
 build-configuration state is not a conformance break.
@@ -48,6 +48,8 @@ build-configuration state is not a conformance break.
 | G24 | nodes | agent supervises containerd; `crictl version/ps` over CRI. SKIP: no vendor bundle; the registry pull smoke SKIPs best-effort | T4.1 |
 | G25 | nodes | Deployment pod Running+Ready on the agent node over real containerd; container kill → kubelet restart; delete → zero sandboxes (legs a/b/c). SKIP: no vendor bundle or no cc (Q27 pause image) | T4.2 |
 | G26 | nodes | readiness gates Ready, liveness restarts after /fail, emptyDir bootcount, configMap projection + hostname==pod (legs a-d). SKIP: no vendor bundle or no cc | T4.2 |
+| G30 | nodes | kubectl logs relays container lines, `logs -f` follows appended lines, exec runs `/bin/wfstep` (rc0 + merged output) and propagates remote exit 1 (legs a-d). SKIP: no vendor bundle or no cc | T4.2 Scope C, Q31 |
+| G31 | networking | `GET /apis/networking.k8s.io/v1` byte-stable (ingresses `ing`, ingressclasses) | Q32 router swap |
 | G27 | argoproj | `GET /apis/argoproj.io/v1alpha1` byte-stable (wf/cwf/cronwf shortNames) | T7.3 Scope A |
 | G28 | argoproj | Workflow + CronWorkflow CRUD/SSA lifecycle + generateName minting | T7.3 Scope A |
 | G29 | argoproj | two-step Workflow runs to Succeeded over the agent/containerd stack; status reports Steps root + Succeeded Pod nodes (wfstep one-shot image, Q27). SKIP: no vendor bundle or no cc | T7.3 Scope B |
@@ -58,7 +60,8 @@ This baseline started as the empty-cluster discovery-only contract (G01-G06)
 and now spans CRUD/watch/SSA over the embedded store (T1.2b/T1.2c), watch
 history replay (T2.2), the in-process controller manager (T3.1a/T3.1b), the
 scheduler (T3.2), the node layer (T4.1 containerd supervision, T4.2 kubelet
-end-to-end incl. probes/volumes/hostname), and the argoproj.io group (T7.3
+end-to-end incl. probes/volumes/hostname/exec/logs), the networking.k8s.io
+group (Q32 Ingress discovery), and the argoproj.io group (T7.3
 Scope A discovery/CRUD, Scope B a two-step Workflow reaching Succeeded on real
 step pods). When a layer adds a wire-visible behavior, append its golden case
 here and to the matching suite file, then commit the new fixture. Flaky cases

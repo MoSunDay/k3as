@@ -4,6 +4,34 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- router-data-plane / storage-layer / multicall-cli / controllers /
+  apiserver: Sprint 25 (2026-08-28) — link_repos wave, three substrates
+  swapped to upstream Rust adopted as path deps (Q32/Q33/Q34). Router
+  re-platformed onto the openrusty h2c gateway embedded in-process — the
+  mlua/Lua plane (phase pipeline, `resty.*`, cosocket) and
+  `scripts/router-coroutine-selftest.sh` are deleted; `networking.k8s.io/v1`
+  Ingress + IngressClass are the first-class ingress resource (api models +
+  discovery, golden **G31**, inventory G01-G31); the NodePort ServiceLB
+  plane (Q28) and its 503-on-empty-Endpoints gate carry over to the
+  openrusty plane (ST1-ST6 6/6). Datastore durable option is now
+  `RdbStorage` on rdb/RocksDB via `--datastore-endpoint rdb://<path>`
+  (kine-style append-only `log/` keys, fsync-ed WriteBatch;
+  `crates/storage/src/sqlite/` + `tests/sqlite_storage.rs` deleted, libsql
+  and mlua dropped from the manifests; **`sqlite://` answers `Unsupported`**
+  — breaking DSN change; `tests/rdb_storage.rs` 26 contract + 4 durability +
+  double-open; durability D1-D4 4/4). CNI is flannel-rust embedded in the
+  agent (vxlan default): `flannel` multicall alias as CNI meta-plugin via
+  the `<runtime>/aux/flannel` symlink, `10-flannel.conflist` + aux staging,
+  node-cidr podCIDR reconciler from `--cluster-cidr` (default
+  10.42.0.0/16), apiserver node `/status` subresource, 5s
+  `NetworkUnavailable=False` keeper (debt: no status/conditions merge key),
+  flags `--flannel-backend`/`--cluster-cidr`, `scripts/flannel-e2e.sh`
+  F1-F5 5/5. Upstream wave 0: openrusty lib targets + `state::from_config`
+  + `reload::apply_config` + `RouteConfig.host`; rdb `store` feature;
+  flanneld `install_signal_handlers` (init-pro sets false, SIGTERM via
+  infra::Shutdown). Workspace 852 passed / 0 failed; golden 39/39; clippy
+  -D warnings 0. Debts: `NodePortConfig.ingress_listen` CLI flag unwired;
+  flannel_keeper polling (status/conditions merge key).
 - kubelet: T4.2 Scope B landed (Sprint 20, 2026-08-23) — HTTP probe
   engine (startup/readiness/liveness, liveness→restart), volumes
   (emptyDir + configMap/secret projection with FNV-1a fingerprint

@@ -113,6 +113,20 @@ mod tests {
             disable_helm_controller: false,
             datastore_endpoint: None,
             cluster_init: false,
+            cluster_cidr: "10.42.0.0/16".to_string(),
+        }
+    }
+
+    fn agent(shared: WiredShared) -> AgentCmd {
+        AgentCmd {
+            shared,
+            node_name: None,
+            node_ip: "127.0.0.1".to_string(),
+            kubelet_port: 10250,
+            cluster_cidr: "10.42.0.0/16".to_string(),
+            flannel_backend: "vxlan".to_string(),
+            flannel_iface: None,
+            flannel_conf: None,
         }
     }
 
@@ -208,12 +222,7 @@ mod tests {
 
     #[test]
     fn agent_requires_token() {
-        let a = AgentCmd {
-            shared: shared(),
-            node_name: None,
-            node_ip: "127.0.0.1".to_string(),
-            kubelet_port: 10250,
-        };
+        let a = agent(shared());
         let err = validate_agent(&a).unwrap_err();
         assert_eq!(err.0, "--token is required");
     }
@@ -222,12 +231,7 @@ mod tests {
     fn agent_requires_server() {
         let mut sh = shared();
         sh.token = Some("t".to_string());
-        let a = AgentCmd {
-            shared: sh,
-            node_name: None,
-            node_ip: "127.0.0.1".to_string(),
-            kubelet_port: 10250,
-        };
+        let a = agent(sh);
         let err = validate_agent(&a).unwrap_err();
         assert_eq!(err.0, "--server is required");
     }
@@ -237,12 +241,7 @@ mod tests {
         let mut sh = shared();
         sh.token = Some("t".to_string());
         sh.server = Some("https://x".to_string());
-        let a = AgentCmd {
-            shared: sh,
-            node_name: None,
-            node_ip: "127.0.0.1".to_string(),
-            kubelet_port: 10250,
-        };
+        let a = agent(sh);
         assert!(validate_agent(&a).is_ok());
     }
 

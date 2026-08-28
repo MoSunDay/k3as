@@ -35,7 +35,8 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("tls-san", None, true),
     nf("tls-san-security", None, false),
     // C.3 Cluster networking
-    nf("cluster-cidr", None, true),
+    // (`cluster-cidr` is wired in T4.3 Scope A — server allocates Node
+    // podCIDRs from it; the agent synthesizes net-conf.json from it.)
     nf("service-cidr", None, true),
     nf("service-node-port-range", None, true),
     nf("cluster-dns", None, true),
@@ -173,8 +174,9 @@ mod tests {
     #[test]
     fn no_long_name_collides_with_wired() {
         // Wired flag long names (Table A) must NOT appear in the no-op set.
-        // (`node-name` is the one exception: wired for `agent` only since
-        // T4.2 — the strip filter special-cases it by subcommand.)
+        // (`node-name`/`node-ip` are the exceptions: wired for `agent` only —
+        // the strip filter special-cases them by subcommand; same for the
+        // flannel-* flags since T4.3 Scope A.)
         let wired = [
             "data-dir",
             "debug",
@@ -196,6 +198,7 @@ mod tests {
             "cluster-init",
             "bind-address",
             "https-listen-port",
+            "cluster-cidr",
         ];
         for w in wired {
             assert!(find_long(w).is_none(), "{w} must not be no-op");
@@ -204,7 +207,7 @@ mod tests {
 
     #[test]
     fn value_flags_take_value() {
-        assert!(find_long("cluster-cidr").unwrap().takes_value);
+        assert!(find_long("service-cidr").unwrap().takes_value);
         assert!(find_long("v").unwrap().takes_value);
         assert!(!find_long("rootless").unwrap().takes_value);
         assert!(!find_long("cluster-reset").unwrap().takes_value);

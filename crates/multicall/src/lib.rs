@@ -20,6 +20,10 @@ pub enum Action {
     Crictl,
     Containerd,
     Etcd,
+    /// Embedded `flannel` CNI meta-plugin (T4.3 Scope A, Q34): invoked by
+    /// containerd through the `<runtime>/aux/flannel` symlink; NOT a
+    /// bundled-peer stub, it has a real in-repo implementation.
+    Flannel,
 }
 
 impl Action {
@@ -34,12 +38,15 @@ impl Action {
             Action::Crictl => "crictl",
             Action::Containerd => "containerd",
             Action::Etcd => "etcd",
+            Action::Flannel => "flannel",
         }
     }
 
     /// True for bundled-peer CLI aliases (external CLIs). kubectl has had a
     /// real in-repo implementation since T3.1b but is still resolved — and
-    /// classified — as a peer alias; the rest remain stubs.
+    /// classified — as a peer alias; the rest remain stubs. `flannel` is
+    /// deliberately NOT external: containerd execs it through the staged
+    /// symlink and it must reach the embedded CNI plugin, never the stub.
     pub const fn is_external(self) -> bool {
         matches!(
             self,
@@ -63,6 +70,9 @@ pub const ALIASES: &[(&str, Action)] = &[
     ("crictl", Action::Crictl),
     ("containerd", Action::Containerd),
     ("etcd", Action::Etcd),
+    // T4.3 Scope A (Q34): the flannel CNI meta-plugin ships as an alias of
+    // this same binary (Q1); runtime::stage symlinks <runtime>/aux/flannel.
+    ("flannel", Action::Flannel),
 ];
 
 /// Lowercased, extension-less basename of an `argv[0]`.
@@ -264,6 +274,7 @@ mod tests {
             "crictl",
             "containerd",
             "etcd",
+            "flannel",
         ] {
             assert!(
                 resolve(name).is_some(),
@@ -309,6 +320,7 @@ mod tests {
             Action::Crictl,
             Action::Containerd,
             Action::Etcd,
+            Action::Flannel,
         ];
         for a in all {
             assert!(covered.contains(&a), "{a:?} missing from ALIASES");
@@ -329,6 +341,10 @@ mod tests {
         assert!(Action::Etcd.is_external());
         assert!(!Action::Server.is_external());
         assert!(!Action::InitPro.is_external());
+        // flannel is an embedded plugin, not a bundled peer: dispatching it
+        // to external_stub would print a "not yet vendored" banner instead
+        // of running the CNI ADD/DEL machinery.
+        assert!(!Action::Flannel.is_external());
     }
 
     #[test]
@@ -343,6 +359,7 @@ mod tests {
         assert_eq!(Action::Crictl.as_str(), "crictl");
         assert_eq!(Action::Containerd.as_str(), "containerd");
         assert_eq!(Action::Etcd.as_str(), "etcd");
+        assert_eq!(Action::Flannel.as_str(), "flannel");
     }
 
     #[test]
@@ -361,6 +378,7 @@ mod tests {
         assert_eq!(resolve("crictl"), Some(Action::Crictl));
         assert_eq!(resolve("containerd"), Some(Action::Containerd));
         assert_eq!(resolve("etcd"), Some(Action::Etcd));
+        assert_eq!(resolve("flannel"), Some(Action::Flannel));
     }
 }
 

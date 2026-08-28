@@ -6,8 +6,10 @@
 # plane (S3 nodePort auto-allocation, S2 Endpoints targetPort resolution,
 # S4 kube-proxy-equivalent listeners — decision D: NodePort-only service
 # plane via the built-in Router, no ClusterIP dataplane; Q28 in the S7
-# writeup). Modeled on k3s/Argo/OpenResty e2e conventions: manifest-driven
-# (JSON-only wire, Q10), assertions numbered ST1..ST6.
+# writeup; since Q32 the plane is the openrusty-powered h2c gateway — the
+# externally observable contract below is unchanged). Modeled on k3s/Argo
+# e2e conventions: manifest-driven (JSON-only wire, Q10), assertions
+# numbered ST1..ST6.
 #
 # SKIP semantics (G24/G25 parity): without a vendored containerd bundle, or
 # without `cc` for the offline image builders, the suite prints a SKIP line

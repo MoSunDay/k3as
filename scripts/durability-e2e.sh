@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Sprint 19 / T2.3 (Q29): durability across restart for the libsql/SQLite
-# datastore backend. Boots a real init-pro server on
-# `server --datastore-endpoint sqlite://<path>`, seeds objects, drains it
-# cleanly, restarts it on the SAME DSN, and asserts:
+# T2.3 (Q29 -> Q33): durability across restart for the durable datastore
+# backend. Boots a real init-pro server on
+# `server --datastore-endpoint rdb://<path>` (RocksDB/rdb store engine),
+# seeds objects, drains it cleanly, restarts it on the SAME DSN, and asserts:
 #
-#   D1  boot + seed      — SQLite backend actually in use, objects created
-#   D2  clean drain      — SIGTERM exits 0 within the deadline, WAL state sane
+#   D1  boot + seed      — rdb datastore actually in use, objects created
+#   D2  clean drain      — SIGTERM exits 0 within the deadline, engine state sane
 #   D3  persistence      — every object survives with its resourceVersion
 #                          IDENTICAL (no rewrite, no reset of revision
 #                          bookkeeping)
 #   D4  continuity       — the revision counter resumed (strictly greater
 #                          RVs, never reused/regressed) + watch historical
-#                          replay across the restart (persisted event table)
+#                          replay across the restart (persisted event log)
 #                          + controllers/informer resync smoke (stable GET,
 #                          no panic)
 #
@@ -65,8 +65,8 @@ trap 'exit 143' TERM
 
 PORT=16499
 BASE="http://127.0.0.1:$PORT"
-DSN="sqlite://$DD/server/state.db"
-DB="$DD/server/state.db"
+DSN="rdb://$DD/server/state.rdb"
+DB="$DD/server/state.rdb"
 
 # Wait until the server logs readiness (then answers HTTP), ~10s budget —
 # the graceful-shutdown-test.sh pattern.
@@ -125,15 +125,15 @@ get_code() { # $1 path
 }
 
 # --- D1: boot + seed ----------------------------------------------------
-echo "## durability e2e — SQLite datastore across restart (port $PORT)"
+echo "## durability e2e — rdb datastore across restart (port $PORT)"
 "$BIN" server --data-dir "$DD" --datastore-endpoint "$DSN" \
   --https-listen-port "$PORT" --bind-address 127.0.0.1 >"$LOG1" 2>&1 &
 SRV=$!
 wait_ready "$LOG1"
 
-grep -q "SQLite datastore" "$LOG1" || fail "D1 log does not mention the SQLite datastore backend"
-[[ -f "$DB" ]] || fail "D1 $DB was not created"
-ok "D1  booted on sqlite://<data-dir>/server/state.db (SQLite datastore, T2.3/Q29)"
+grep -q "rdb datastore" "$LOG1" || fail "D1 log does not mention the rdb datastore backend"
+[[ -d "$DB" ]] || fail "D1 $DB was not created"
+ok "D1  booted on rdb://<data-dir>/server/state.rdb (rdb datastore, T2.3/Q33)"
 
 C="$(post_code "$TMP_NS"  /api/v1/namespaces)"
 [[ "$C" == "201" ]] || fail "D1 POST namespace -> $C (expected 201)"
@@ -146,6 +146,27 @@ RV_NS="$(rv_of /api/v1/namespaces/dur)"
 RV_CM="$(rv_of /api/v1/namespaces/dur/configmaps/dur-cm)"
 RV_DEP="$(rv_of /apis/apps/v1/namespaces/dur/deployments/dur-dep)"
 [[ -n "$RV_NS" && -n "$RV_CM" && -n "$RV_DEP" ]] || fail "D1 could not read seeded resourceVersions (ns=$RV_NS cm=$RV_CM dep=$RV_DEP)"
+
+# The deployment controller (T3.1b) writes aggregate status + conditions on
+# its FIRST reconcile after boot — a legitimate k8s-conformant write that
+# bumps the Deployment rv once and then converges (write-if-changed, no
+# further rewrites). D3 asserts persistence (rv IDENTICAL across restart),
+# so the pre-restart snapshot must be taken AFTER the controller settled,
+# otherwise the gate races the first status write and flakes. Poll until rv
+# is stable for 5 consecutive reads (~1s), bounded at 10s.
+SETTLE=0
+for _ in $(seq 1 50); do
+  R="$(rv_of /apis/apps/v1/namespaces/dur/deployments/dur-dep)"
+  if [[ "$R" == "$RV_DEP" ]]; then
+    SETTLE=$((SETTLE + 1))
+    (( SETTLE >= 5 )) && break
+  else
+    RV_DEP="$R"
+    SETTLE=0
+  fi
+  sleep 0.2
+done
+(( SETTLE >= 5 )) || fail "D1 deployment rv never settled before drain (controller churn?) rv=$RV_DEP"
 MAX_PRE="$RV_NS"
 if (( RV_CM > MAX_PRE ));  then MAX_PRE="$RV_CM"; fi
 if (( RV_DEP > MAX_PRE )); then MAX_PRE="$RV_DEP"; fi
@@ -155,10 +176,13 @@ ok "D1  seeded namespace+configmap+deployment (rv ns=$RV_NS cm=$RV_CM dep=$RV_DE
 drain "$SRV"
 SRV=""
 [[ "$DRAIN_CODE" == "0" ]] || fail "D2 server exited with $DRAIN_CODE (expected 0) or did not stop in 10s"
-if [[ -f "$DB-wal" ]]; then
-  echo "     note: $DB-wal still present after drain (not checkpointed; informational only)"
+# RocksDB keeps its write-ahead log INSIDE the data directory (no `-wal`
+# sidecar like SQLite); its state after drain is informational only -- the
+# gate is the exit code above.
+if compgen -G "$DB/*.log" >/dev/null; then
+  echo "     note: RocksDB write-ahead log segments present in $DB after drain (recovery-ready; informational only)"
 else
-  echo "     note: WAL checkpointed on drain ($DB-wal absent)"
+  echo "     note: no RocksDB write-ahead log segments present in $DB after drain (informational only)"
 fi
 ok "D2  server drained cleanly on SIGTERM (exit 0 within deadline)"
 
@@ -168,7 +192,7 @@ ok "D2  server drained cleanly on SIGTERM (exit 0 within deadline)"
 SRV=$!
 wait_ready "$LOG2"
 
-grep -q "SQLite datastore" "$LOG2" || fail "D3 second boot does not mention the SQLite datastore backend"
+grep -q "rdb datastore" "$LOG2" || fail "D3 second boot does not mention the rdb datastore backend"
 
 C="$(get_code /api/v1/namespaces/dur)"
 [[ "$C" == "200" ]] || fail "D3 GET namespace after restart -> $C (expected 200)"
@@ -196,14 +220,14 @@ else
   fail "D4 post-restart create got rv=$RV_CM2 <= pre-restart max=$MAX_PRE (revision counter reset/regressed)"
 fi
 
-# Watch replay from the persisted event table: the ADDED for dur-cm-2 must
+# Watch replay from the persisted event log: the ADDED for dur-cm-2 must
 # be replayed when starting at the pre-restart RV_CM. curl is bounded by
 # --max-time (exit 28 is expected once the replay drains and the stream
 # idles) — same suppression as golden G15.
 WATCH_BODY="$(curl -sN --max-time 5 \
   "$BASE/api/v1/namespaces/dur/configmaps?watch=1&resourceVersion=$RV_CM" 2>/dev/null || true)"
 if printf '%s' "$WATCH_BODY" | grep -q '"dur-cm-2"'; then
-  ok "D4  watch from pre-restart rv=$RV_CM replayed the dur-cm-2 ADDED (event table persisted)"
+  ok "D4  watch from pre-restart rv=$RV_CM replayed the dur-cm-2 ADDED (event log persisted)"
 else
   fail "D4 watch from rv=$RV_CM did not replay dur-cm-2; body: $WATCH_BODY"
 fi

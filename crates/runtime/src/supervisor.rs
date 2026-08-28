@@ -38,6 +38,11 @@ pub struct SupervisorSpec {
     /// Directory prepended to the child's `PATH` (shims + runc live beside
     /// the binary; containerd resolves shims from its own dir, runc via PATH).
     pub path_prefix: Option<PathBuf>,
+    /// Extra `KEY=VALUE` env applied to the child on top of the inherited
+    /// environment (T4.3 Scope A, Q34: `FLANNEL_SUBNET_FILE` points the
+    /// flannel CNI meta-plugin at flanneld's subnet.env — CNI plugins
+    /// inherit containerd's env, the Rust NetConf has no `subnetFile` key).
+    pub extra_env: Vec<(String, String)>,
     /// containerd log level.
     pub log_level: String,
     pub socket_timeout: Duration,
@@ -55,11 +60,27 @@ impl SupervisorSpec {
             config_path: config_path.into(),
             socket: socket.into(),
             path_prefix: None,
+            extra_env: Vec::new(),
             log_level: "warn".to_string(),
             socket_timeout: SOCKET_TIMEOUT,
             stable_after: STABLE_AFTER,
         }
     }
+}
+
+/// The child environment, purely computed (unit-testable): inherited PATH
+/// (optionally prefixed), then `extra_env` on top (later wins).
+pub fn resolved_env(spec: &SupervisorSpec) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    let path = std::env::var("PATH").unwrap_or_default();
+    match &spec.path_prefix {
+        Some(prefix) => env.push(("PATH".to_string(), format!("{}:{}", prefix.display(), path))),
+        None => env.push(("PATH".to_string(), path)),
+    }
+    for (k, v) in &spec.extra_env {
+        env.push((k.clone(), v.clone()));
+    }
+    env
 }
 
 /// Exponential backoff: `base << restarts`, clamped to `cap`.
@@ -84,9 +105,8 @@ fn spawn_child(spec: &SupervisorSpec) -> std::io::Result<Child> {
     // The child's logs flow into the agent's stderr (visible in golden logs).
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     cmd.kill_on_drop(true);
-    if let Some(prefix) = &spec.path_prefix {
-        let path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{}:{}", prefix.display(), path));
+    for (key, value) in resolved_env(spec) {
+        cmd.env(key, value);
     }
     cmd.spawn()
 }
@@ -256,6 +276,29 @@ pub async fn supervise(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_env_applies_prefix_and_extra() {
+        let mut spec = SupervisorSpec::new("/bin/containerd", "/etc/c.toml", "/run/c.sock");
+        spec.path_prefix = Some(PathBuf::from("/dd/agent/containerd"));
+        spec.extra_env = vec![(
+            "FLANNEL_SUBNET_FILE".to_string(),
+            "/dd/agent/flannel/subnet.env".to_string(),
+        )];
+        let env = resolved_env(&spec);
+        let path = env.iter().find(|(k, _)| k == "PATH").unwrap();
+        assert!(
+            path.1.starts_with("/dd/agent/containerd:"),
+            "prefix ahead of inherited PATH: {path:?}"
+        );
+        assert!(
+            env.contains(&(
+                "FLANNEL_SUBNET_FILE".to_string(),
+                "/dd/agent/flannel/subnet.env".to_string()
+            )),
+            "extra env carried to the child: {env:?}"
+        );
+    }
 
     #[test]
     fn backoff_doubles_then_caps() {

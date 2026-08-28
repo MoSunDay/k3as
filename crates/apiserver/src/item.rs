@@ -306,13 +306,14 @@ pub(crate) async fn do_patch(
     }
 }
 
-/// Apply a patch per its Content-Type:
+/// Apply a patch per its Content-Type (pub(crate): the node status
+/// subresource reuses the exact same wire semantics):
 ///  - `application/strategic-merge-patch+json` -> core/v1 strategies
 ///  - `application/merge-patch+json`           -> RFC 7386 (deep merge)
 ///  - `application/json-patch+json`            -> RFC 6902
 ///
 /// Unknown content-type falls back to strategic merge (kubectl default).
-fn apply_patch(target: &mut Value, content_type: &str, patch: &[u8]) -> Result<(), ApiError> {
+pub(crate) fn apply_patch(target: &mut Value, content_type: &str, patch: &[u8]) -> Result<(), ApiError> {
     if content_type.contains("json-patch") {
         let p: api::patch::JsonPatch =
             serde_json::from_slice(patch).map_err(|e| ApiError::BadRequest(e.to_string()))?;

@@ -1,7 +1,8 @@
 //! Live Endpoints-backed upstream resolution (Sprint 18 / **S4**, Q28 —
 //! recorded S7): views + lenient parsing + state fold + peer resolution for
-//! the NodePort service plane, fed by the [`crate::endpoints_watch`]
-//! reflector. Empty/missing Endpoints -> zero peers -> proxy answers 503.
+//! the NodePort service plane and the Ingress gateway (Q32), fed by the
+//! [`crate::endpoints_watch`] reflectors. Empty/missing Endpoints -> zero
+//! peers -> the gateway gate answers 503 ([`crate::gate`]).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -11,7 +12,6 @@ use serde_json::Value;
 use storage::{StoredEntry, WatchEvent};
 use tokio::sync::watch;
 
-use crate::balancer::UpstreamResolver;
 use crate::route::{PortRef, UpstreamRef};
 
 /// A Service port view (`spec.ports[]`).
@@ -284,10 +284,14 @@ pub fn resolve_with_state(state: &ResolverState, upstream: &UpstreamRef) -> Vec<
     peers
 }
 
-/// Cheaply-clonable live resolver: a watch receiver over folded state.
+/// Cheaply-clonable live resolver: watch receivers over the folded state —
+/// Services + Endpoints (S4, Q28) and, since the openrusty rewrite (Q32),
+/// the folded `networking.k8s.io/v1` Ingress set
+/// ([`crate::ingress_watch::IngressMap`]) the Ingress gateway compiles.
 #[derive(Clone, Debug)]
 pub struct EndpointsResolver {
     pub(crate) rx: watch::Receiver<Arc<ResolverState>>,
+    pub(crate) ingresses: watch::Receiver<Arc<crate::ingress_watch::IngressMap>>,
 }
 
 impl EndpointsResolver {
@@ -296,14 +300,19 @@ impl EndpointsResolver {
         self.rx.borrow().clone()
     }
 
+    /// Subscribe to Services + Endpoints folds (NodePort reconcile).
     pub fn subscribe(&self) -> watch::Receiver<Arc<ResolverState>> {
         self.rx.clone()
     }
-}
 
-impl UpstreamResolver for EndpointsResolver {
-    fn resolve(&self, upstream: &UpstreamRef) -> Vec<SocketAddr> {
-        resolve_with_state(&self.rx.borrow(), upstream)
+    /// The current folded Ingress set.
+    pub fn ingress_table(&self) -> Arc<crate::ingress_watch::IngressMap> {
+        self.ingresses.borrow().clone()
+    }
+
+    /// Subscribe to Ingress folds (gateway recompiles on change).
+    pub fn subscribe_ingresses(&self) -> watch::Receiver<Arc<crate::ingress_watch::IngressMap>> {
+        self.ingresses.clone()
     }
 }
 

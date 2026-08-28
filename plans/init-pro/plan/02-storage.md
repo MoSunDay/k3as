@@ -71,67 +71,68 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
 
 - **状态 / Status** — done
 - **证据 / Evidence** — Sprint 10: trait + `EmbeddedStorage` (etcd `KeyValue` parity, `/registry/...` layout) + 15 integration tests. Sprint 10.5: wired into REST CRUD/watch (T1.2b). Sprint 12: watch historical replay + compaction closeout — `crates/storage/src/history.rs` (event log + watermark, 4 unit tests), replay-then-live seam under one lock, `compact` on the trait, `Compacted` → 410 Gone mapping in the apiserver, k8s↔etcd `resourceVersion` translation fixed (`ListParams` was silently dropping the wire param). 26 storage integration tests (11 new: replay order/ seam losslessness under concurrent writes / prefix filtering / future start / compacted errors / eviction / prev-object-on-delete / multi-watcher) + 4 unit; 4 new apiserver watch-replay tests over real TCP; 360 total, golden 15/15 (G15).
-- **卡点 / Blockers** — none for v1 scope. Durability (restart persistence) is delivered by T2.3 (`SqliteStorage`, opt-in via `--datastore-endpoint sqlite://<path>`); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede note, Q29). Policy-grade retention/compaction scheduling remains open. Policy note: the 10k-revision default retention is deliberately generous; aggressive compaction would starve slow informers.
+- **卡点 / Blockers** — none for v1 scope. Durability (restart persistence) is delivered by T2.3 (`RdbStorage`, opt-in via `--datastore-endpoint rdb://<path>`, Q33); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede note). Policy-grade retention/compaction scheduling remains open. Policy note: the 10k-revision default retention is deliberately generous; aggressive compaction would starve slow informers.
 - **依赖 / Depends on** — T2.1, T1.1
 
 ---
 
-## T2.3 — SQLite/KINE 兼容替代后端
+## T2.3 — rdb/RocksDB 持久化后端 (kine 语义, Q33)
+
+> **Sprint 25 (Q33) 重写：** 实现从 libsql/SQLite（Sprint 19, Q29）换底为
+> rdb/RocksDB（`RdbStorage`）。原 `crates/storage/src/sqlite/`（mod/schema/
+> watch/tests）与 `crates/storage/tests/sqlite_storage.rs` 已整体删除，libsql
+> 依赖从根 + storage `Cargo.toml` 移除；`sqlite://` DSN 现返回
+> `StorageError::Unsupported`（指向 `rdb://`）。历史证据保留在本卡末尾。
 
 - **目标 / Goal**
-  A non-etcd backend (SQLite via KINE-equivalent) for the single-node /
-  embedded flavor — k3s `--datastore-endpoint` parity — that is **durable
-  across restarts** (entries, revisions, watch history, compaction
-  watermark).
+  A non-etcd backend for the single-node / embedded flavor — k3s
+  `--datastore-endpoint` parity — that is **durable across restarts**
+  (entries, revisions, watch history, compaction watermark). As of
+  Sprint 25 the durable option is **rdb/RocksDB（kine 语义）**.
 
 - **核心实现 / Core implementation**
-  - `crates/storage/src/sqlite/` (`mod.rs` 373 lines, `schema.rs`,
-    `watch.rs`, `tests.rs`): `SqliteStorage` on **libsql 0.9**
-    (`default-features = false, features = ["core"]` = local-file only;
-    NO remote/replication/sync/tls features compiled in). libsql is a
-    hard requirement per maintainer decision (Q29) — a
-    rusqlite+spawn_blocking fallback was explicitly rejected.
-  - Kine-style schema: one append-only `kv` event table (row `id` = global
-    revision AUTOINCREMENT, key, value JSON TEXT, `create_revision`,
-    `prev_revision`, `deleted`, `version`) + a `meta` table
-    (schema_version / revision / compact_revision). PRAGMAs:
-    `journal_mode=WAL`, `synchronous=FULL`, `busy_timeout=5000ms`.
-    Revision counter restored at open from max(meta.revision, MAX(kv.id)).
-  - Full `StorageBackend` impl: CRUD+CAS inside explicit
-    `BEGIN IMMEDIATE` transactions; broadcast fan-out (cap 1024,
-    `WATCH_CAP` parity) sent strictly post-COMMIT under a single
-    connection mutex (broadcast order == commit order == revision order);
-    watch replay = `SELECT id >= start ORDER BY id` (cross-restart);
-    compact keeps the latest row per key (get/list unaffected) and
-    persists the watermark to `meta`; watch at/below watermark →
-    `StorageError::Compacted` (410 Gone).
-  - Explicit `version` column (etcd `KeyValue.version` parity:
-    create=1, update=prev+1, tombstone carries the final version) — a
-    mid-sprint defect fix: the original COUNT-derived `version` shrank
-    after compaction.
-  - Selection: `--datastore-endpoint` (crates/cli/src/runtime.rs) —
-    empty/None → `EmbeddedStorage` default unchanged (Q17; explicit
-    opt-in only); `sqlite://<path>` → `SqliteStorage`; fatal on
-    unsupported schemes (e.g. `mysql://`), classified by the pure
-    `classify_dsn`. `--kine-tls`/`datastore-*` remain noops
-    (flag-matrix §C.6).
+  - `crates/storage/src/rdb_backend/`（`mod.rs` + `keys.rs` + `watch.rs`）：
+    `RdbStorage` 跑在 **rdb crate（RocksDB）** 的 `store` engine 上（根
+    `Cargo.toml` path dep `link_repos/rdb`, `default-features = false,
+    features = ["store"]`, Q33）。
+  - 单 CF 内按前缀分区的 kine 式 append-only 记录模型：`meta/revision`
+    （cluster revision, 8 字节大端 u64）、`meta/compact`（compaction
+    watermark, 最低保留 log rev）、`obj/<key>`（live `StoredEntry` JSON,
+    删除即缺席）、`log/<rev 大端>`（每次成功写入一条 `LogRecord` JSON）。
+    `log/` 定宽大端 → 字典序 == revision 序，range scan 即 revision 序回放；
+    `obj/` 与 `log/` 分离（SQLite 时代 row 表即 log 表）。
+  - 写路径：一次写入 = 一个原子 WriteBatch（`obj/` upsert/delete +
+    `log/<rev>` append + `meta/revision` bump），批量落盘并 fsync；
+    回放/compaction 语义复刻自原 sqlite 写路径（etcd revision/CAS/watch
+    历史回放/compaction watermark 全量保留）。`RdbStorage::open(&Path)`
+    为 async。
+  - 选择：`--datastore-endpoint`（crates/cli/src/runtime.rs）— 空/None →
+    `EmbeddedStorage` 默认不变（Q17；仅显式 opt-in）；`rdb://<path>` →
+    `RdbStorage`（`Dsn::Rdb(PathBuf)` 分类, 启动日志行含
+    "rdb datastore (rocksdb) — T2.3/Q33", durability-e2e grep 该行）；
+    `sqlite://` → `Unsupported`（Sprint 25 破坏性 DSN 变更）；其他 scheme
+    fatal。`--kine-tls`/`datastore-*` 保持 noop（flag-matrix §C.6）。
 
 - **验收手段 / Acceptance**
-  - Contract parity: the 26 embedded tests extracted into a shared suite
-    (`crates/storage/tests/contract/`) — 26 portable cases run against
-    BOTH backends via the `storage_contract!` macro; 1 embedded-only
-    history-eviction case stays.
-  - 5 file-backed durability tests: reopen preserves entries+revisions;
-    revision strictly monotonic across restart; watch replays across
-    restart; compaction watermark survives restart; WAL mode verified
-    via a second handle. Plus 8 in-module unit tests (incl. post-review
-    tx self-heal + failed-COMMIT pins).
-  - `scripts/durability-e2e.sh` D1–D4: boot+seed / SIGTERM drain /
-    restart persistence with identical resourceVersions / revision
-    continuity + watch replay across restart + controller resync smoke
-    (CI gate).
+  - Contract parity: `crates/storage/tests/contract/` 的 26 个可移植用例
+    继续通过 `storage_contract!` 对两个后端各跑一遍；新
+    `crates/storage/tests/rdb_storage.rs` = 26 contract + 4 durability
+    （reopen 保 entries+revisions / revision 严格单调 / watch 跨重启回放 /
+    compaction watermark 存活）+ double-open 排他测试。
+  - `scripts/durability-e2e.sh` D1–D4（`rdb://` 上）：boot+seed / SIGTERM
+    drain / 重启持久化（resourceVersion 逐一相同）/ revision 计数续走
+    （D4 实测 15→16）+ 跨重启 watch 回放 + controller resync smoke
+    （CI gate）。
 
 - **状态 / Status** — done
-- **证据 / Evidence** — Sprint 19: `SqliteStorage` + contract suite landed; storage crate reports lib 12 (4 history + 8 sqlite unit), embedded_storage 27, sqlite_storage 31 (26 contract + 5 durability); workspace 674 → 717 tests green (post-review hardening: tx self-heal + unrepresentable-revision clamp, each pinned by a test proven to fail unfixed). Gates: clippy `-D warnings` zero, fmt clean, golden 27/27, cli-flag-parity 16/16, graceful-shutdown green, service-traffic-e2e 6/6, durability-e2e D1–D4 in ci.yml. Cargo.lock +31 packages via libsql core, caret-only unchanged. `scripts/local-up.sh` boots `sqlite://$DD/server/state.db`. Layer 2 = 3/3 complete.
-- **卡点 / Blockers** — none. Default backend stays `EmbeddedStorage` (flipping to sqlite-by-default is a possible future decision, NOT taken); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede note).
+- **证据 / Evidence** — Sprint 25 (Q33): `RdbStorage` + `rdb_storage.rs`
+  (26 contract + 4 durability + double-open) 交付; durability D1–D4 4/4 在
+  `rdb://` 上全绿; `scripts/local-up.sh` boots
+  `rdb://$DD/server/state.rdb`; workspace 852 tests green, clippy
+  `-D warnings` 0. 历史: Sprint 19 的 libsql/SQLite 实现（`SqliteStorage`,
+  `sqlite_storage` 31 tests, Q29）已被本卡顶部的删除说明取代。
+- **卡点 / Blockers** — none. Default backend stays `EmbeddedStorage`
+  (flipping to durable-by-default is a possible future decision, NOT
+  taken); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede
+  note).
 - **依赖 / Depends on** — T2.2

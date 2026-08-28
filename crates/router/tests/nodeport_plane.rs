@@ -1,6 +1,9 @@
-//! Sprint 18 / **S4** (Q28) acceptance: the NodePort service plane. Real
-//! storage-backed Services + Endpoints drive per-nodePort reverse-proxy
-//! listeners over live Endpoints — observed by a real TCP client.
+//! Sprint 18 / **S4** (Q28) acceptance, re-platformed onto the openrusty
+//! gateway (workstream A, decision **Q32**): real storage-backed Services +
+//! Endpoints drive per-nodePort gateway listeners over live Endpoints —
+//! observed by a real TCP client. The externally observable plane behavior
+//! (200 through live backends, 503 while Endpoints are empty, live backend
+//! switch, listener retirement) is unchanged.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -153,6 +156,7 @@ async fn boot(node_port_bind: std::net::IpAddr) -> Plane {
     let (resolver, reflectors) = router::supervise(store.clone(), shutdown.clone());
     let cfg = router::NodePortConfig {
         addr: node_port_bind,
+        ingress_listen: None,
     };
     let plane = router::spawn_nodeport_plane(resolver, cfg, shutdown.clone());
     Plane {
@@ -209,8 +213,10 @@ async fn missing_endpoints_answer_503() {
 
     let addr = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 31002);
     wait_listen(addr).await;
-    let (status, _) = wait_http(addr, |(s, _)| s.contains("503")).await;
+    let (status, body) = wait_http(addr, |(s, _)| s.contains("503")).await;
     assert!(status.contains("503"), "status line: {status}");
+    // Q28 body parity with the Lua-era proxy (gate short-circuit).
+    assert_eq!(body, "no upstream peers available");
 
     teardown(p).await;
 }

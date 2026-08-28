@@ -67,6 +67,13 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/namespaces/{namespace}/pods/{name}/status",
             put(crate::pod_status::put_pod_status),
         )
+        // Node status subresource (upstream `nodes/status`): the status
+        // write path for heartbeats/capacity (cluster-scoped, `.status`
+        // writable only). PUT = full-object write, PATCH = standard CTs.
+        .route(
+            "/api/v1/nodes/{name}/status",
+            put(crate::node_status::put_node_status).patch(crate::node_status::patch_node_status),
+        )
         // T4.2 Scope C: pods/log + pods/exec relay subresources — resolved
         // to the owning node's kubelet, then passed through verbatim (Q31).
         .route(

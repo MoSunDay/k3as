@@ -23,9 +23,13 @@ pub struct StripResult {
 
 /// Agent-wired noop-table flags: kept for clap when the subcommand is
 /// `agent`, still stripped (and warned) everywhere else. `node-name` since
-/// T4.2; `node-ip` since Scope C (Q31).
+/// T4.2; `node-ip` since Scope C (Q31); the flannel-* trio since T4.3
+/// Scope A (Q34).
 fn wired_for_agent(long: &str) -> bool {
-    matches!(long, "node-name" | "node-ip")
+    matches!(
+        long,
+        "node-name" | "node-ip" | "flannel-backend" | "flannel-iface" | "flannel-conf"
+    )
 }
 
 /// Strip accept-no-op-warn flags from `argv` (argv[0] is preserved as-is).
@@ -148,8 +152,9 @@ fn detect_subcommand(tokens: &[&String]) -> Option<&'static str> {
         if let Some(rest) = tok.strip_prefix("--") {
             if !rest.contains('=') {
                 // `--flag VALUE`: skip the separate value token.
-                let takes_value =
-                    rest == "data-dir" || find_long(rest).is_some_and(|f| f.takes_value);
+                let takes_value = rest == "data-dir"
+                    || rest == "cluster-cidr"
+                    || find_long(rest).is_some_and(|f| f.takes_value);
                 if takes_value {
                     i += 1;
                 }
@@ -194,16 +199,16 @@ mod tests {
         let r = strip_noop(&argv(&[
             "init-pro",
             "server",
-            "--cluster-cidr",
+            "--service-cidr",
             "10.0.0.0/16",
         ]));
         assert_eq!(r.argv, argv(&["init-pro", "server"]));
-        assert_eq!(r.seen, vec!["cluster-cidr".to_string()]);
+        assert_eq!(r.seen, vec!["service-cidr".to_string()]);
     }
 
     #[test]
     fn equals_form_keeps_no_value_token() {
-        let r = strip_noop(&argv(&["init-pro", "server", "--cluster-cidr=10.0.0.0/16"]));
+        let r = strip_noop(&argv(&["init-pro", "server", "--service-cidr=10.0.0.0/16"]));
         assert_eq!(r.argv, argv(&["init-pro", "server"]));
     }
 
@@ -331,6 +336,73 @@ mod tests {
             let r = strip_noop(&argv(&["init-pro", sub, "--node-ip", "10.0.0.7"]));
             assert_eq!(r.argv, argv(&["init-pro", sub]));
             assert_eq!(r.seen, vec!["node-ip".to_string()]);
+        }
+    }
+
+    #[test]
+    fn flannel_flags_wired_for_agent_stripped_elsewhere() {
+        // T4.3 Scope A (Q34): the flannel-* trio reaches clap on `agent`
+        // (drives net-conf.json + flanneld Options), stays accept-no-op-warn
+        // on server/stage.
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "agent",
+            "--flannel-backend",
+            "host-gw",
+            "--flannel-iface=eth1",
+            "--flannel-conf",
+            "/etc/flannel/net-conf.json",
+        ]));
+        assert_eq!(
+            r.argv,
+            argv(&[
+                "init-pro",
+                "agent",
+                "--flannel-backend",
+                "host-gw",
+                "--flannel-iface=eth1",
+                "--flannel-conf",
+                "/etc/flannel/net-conf.json"
+            ])
+        );
+        assert!(r.seen.is_empty());
+
+        let r = strip_noop(&argv(&["init-pro", "server", "--flannel-backend", "vxlan"]));
+        assert_eq!(r.argv, argv(&["init-pro", "server"]));
+        assert_eq!(r.seen, vec!["flannel-backend".to_string()]);
+    }
+
+    #[test]
+    fn cluster_cidr_never_stripped_and_value_not_mistaken_for_subcommand() {
+        // T4.3 Scope A: `--cluster-cidr` is wired (Table A) on both
+        // subcommands — clap sees it untouched, and its VALUE token must
+        // not blind detect_subcommand (a wired flag before the subcommand).
+        // `--flannel-backend` after the subcommand follows the usual
+        // subcommand-aware rule: kept for `agent` (wired there), nooped for
+        // `server` (the embedded flanneld runs agent-side, Q34).
+        for (sub, kept) in [("server", false), ("agent", true)] {
+            let r = strip_noop(&argv(&[
+                "init-pro",
+                "--cluster-cidr",
+                "10.42.0.0/16",
+                sub,
+                "--flannel-backend",
+                "vxlan",
+            ]));
+            let mut expected = vec![
+                "init-pro".to_string(),
+                "--cluster-cidr".to_string(),
+                "10.42.0.0/16".to_string(),
+                sub.to_string(),
+            ];
+            if kept {
+                expected.push("--flannel-backend".to_string());
+                expected.push("vxlan".to_string());
+                assert!(r.seen.is_empty());
+            } else {
+                assert_eq!(r.seen, vec!["flannel-backend".to_string()]);
+            }
+            assert_eq!(r.argv, expected);
         }
     }
 

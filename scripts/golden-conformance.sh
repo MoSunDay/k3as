@@ -150,6 +150,7 @@ source "$SCRIPT_DIR/golden/suites/storage.sh"
 source "$SCRIPT_DIR/golden/suites/controllers.sh"
 source "$SCRIPT_DIR/golden/suites/scheduler.sh"
 source "$SCRIPT_DIR/golden/suites/nodes.sh"
+source "$SCRIPT_DIR/golden/suites/networking.sh"
 source "$SCRIPT_DIR/golden/suites/argoproj.sh"
 
 echo

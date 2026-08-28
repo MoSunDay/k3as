@@ -12,10 +12,13 @@
 #                           pods/logs across runs; default remains an
 #                           ephemeral mktemp dir removed on exit.
 #
-# The datastore is SQLite on disk since T2.3 (Q29): the server is started
-# with `--datastore-endpoint sqlite://$DD/server/state.db`, so the local
+# The datastore is rdb/RocksDB on disk since T2.3 (Q33): the server is started
+# with `--datastore-endpoint rdb://$DD/server/state.rdb`, so the local
 # cluster is RESTARTABLE within a run — data persists across server
-# restarts. The data dir is still a mktemp dir removed on exit unless
+# restarts. Since T4.3 Scope A (Q34) the server also allocates node
+# podCIDRs from `--cluster-cidr 10.42.0.0/16` and the agent runs the
+# embedded flanneld (`--flannel-backend vxlan`), so pods get real
+# cluster-network IPs. The data dir is still a mktemp dir removed on exit unless
 # LOCAL_UP_DATA_DIR opts into persistence (caller owns the tree then).
 set -euo pipefail
 
@@ -87,10 +90,11 @@ echo "local-up: starting server on $BASE (data dir: $DD) ..."
 # Sprint 18 / S4 (Q28): the NodePort service plane is on by default — the
 # Router binds one listener per allocated nodePort, backed by live Endpoints.
 # Sprint 19 / T2.3 (Q29): durable SQLite datastore under the data dir, so a
-# server restart inside this run keeps the cluster state.
+# server restart inside this run keeps the cluster state (Q33: rdb/RocksDB).
 mkdir -p "$DD/server"
 "$BIN" server --data-dir "$DD/server" --bind-address 127.0.0.1 \
-  --datastore-endpoint "sqlite://$DD/server/state.db" \
+  --datastore-endpoint "rdb://$DD/server/state.rdb" \
+  --cluster-cidr 10.42.0.0/16 \
   --https-listen-port "$API_PORT" >"$DD/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 120); do grep -q "discovery listening" "$DD/server.log" 2>/dev/null && break; sleep 0.25; done
@@ -101,7 +105,8 @@ KUBELET_PORT="$(pick_port)"
 INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" \
 "$BIN" agent --data-dir "$DD/agent" --token dev \
   --server "$BASE" --node-name local-node \
-  --node-ip 127.0.0.1 --kubelet-port "$KUBELET_PORT" >"$DD/agent.log" 2>&1 &
+  --node-ip 127.0.0.1 --kubelet-port "$KUBELET_PORT" \
+  --flannel-backend vxlan >"$DD/agent.log" 2>&1 &
 AGENT_PID=$!
 for _ in $(seq 1 240); do grep -q "containerd healthy" "$DD/agent.log" 2>/dev/null && break; sleep 0.25; done
 grep -q "containerd healthy" "$DD/agent.log" || { echo "error: containerd never healthy (see $DD/agent.log)" >&2; exit 1; }

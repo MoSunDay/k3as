@@ -1,6 +1,6 @@
 [package]
 name = "storage"
-description = "Resource storage backends: StorageBackend trait + embedded etcd-compatible store + libsql/SQLite backend (T2.1/T2.2/T2.3 done)"
+description = "Resource storage backends: StorageBackend trait + embedded etcd-compatible store + rdb/RocksDB backend (T2.1/T2.2/T2.3 done)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,12 @@ publish.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-libsql = { workspace = true }
+rdb = { workspace = true }
+# Direct dep (T2.3/Q33): `rdb::store::ops::batch_write` commits the atomic
+# obj+log+meta record group from a `rocksdb::WriteBatch`, and the rdb crate
+# does not re-export that type. Version matches rdb's own pin so both crates
+# share one build (features unify to rdb's default set).
+rocksdb = "0.24"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

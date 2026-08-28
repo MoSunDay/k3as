@@ -1592,3 +1592,171 @@ consequences:
   `metadata.uid`, which is why Sprint 24 also fixed uid stamping at all
   three write seams (apiserver create, SSA create branch,
   StorageClient.create).
+
+---
+
+## Q32 — Router rides openrusty: h2c gateway embedded as a library, Lua data plane deleted (T5.1–T5.4 / Sprint 25)
+
+**Date.** 2026-08-28 (Sprint 25, "link_repos wave").
+
+- **Context.** The built-in Router (Q4) was built as an openresty Rust
+  port: an mlua/Lua data plane (coroutine↔async bridge Q12, per-phase
+  coroutines + filter semantics Q13/Q14, `resty.*` + shared dicts Q15)
+  over a hand-rolled HTTP/1.1 stack (raw TCP because axum's `Send` bound
+  is incompatible with the `!Send` Lua VM). That bought programmability
+  but kept a permanently bespoke HTTP substrate — the router spent its
+  tests on the plumbing (phase chain, cosocket, resty stdlib) instead of
+  the product. Sprint 25 adopted three upstream Rust repos as path
+  dependencies (`link_repos/{openrusty,rdb,flannel-rust}` symlinks,
+  git-ignored; root `Cargo.toml` `exclude = ["link_repos"]`), and wave 0
+  upstream work made openrusty embeddable: lib targets
+  (`openrusty-core` / `openrusty-server` usable as libraries),
+  `state::from_config`, `reload::apply_config`, `RouteConfig.host`
+  (203 upstream tests).
+- **Options.** (a) Keep the mlua plane and keep porting openresty
+  pieces piecemeal (Q15 roadmap: digests, full lua-resty-* corpus);
+  (b) supervise openrusty as a child process (k3s-style bundling);
+  (c) embed openrusty as an in-process library and delete the Lua plane.
+- **Decision.** (c). `crates/router` now embeds the openrusty h2c
+  gateway; the entire mlua data plane is deleted — the T5.1 bridge, the
+  T5.2 phase pipeline (`ngx.*`, request-body hooks), the T5.3
+  `resty.*`/shared-dict/cosocket stack, the T5.4 Lua routing + TLS +
+  Lua hot-reload machinery, and `scripts/router-coroutine-selftest.sh`.
+  The crate keeps the product-shaped parts: reflectors (services +
+  endpoints, `networking.k8s.io/v1` Ingress), the `RouteTable` route
+  model, and two gateways (per-`nodePort` + Ingress) behind the shared
+  503-on-empty-Endpoints gate, served on ONE dedicated thread with a
+  current-thread runtime. `networking.k8s.io/v1` Ingress + IngressClass
+  become first-class in `crates/api` (schema-registry + discovery
+  registration) and the source of truth for routing — the LuaRouter CRD
+  is no longer the primary path. The NodePort ServiceLB plane (Q28) is
+  ported onto the openrusty plane with its wire behavior intact
+  (ST1–ST6); `NodePortConfig.ingress_listen: Option<SocketAddr>` (default
+  `None`) exists for the Ingress listener but the CLI flag is not wired
+  yet (debt). Golden: `discovery-apis.json` regenerated (networking
+  group added), new `golden/discovery-networking-v1.json`, new check
+  **G31** (inventory G01–G31, 39 PASS sites).
+- **Consequences.** Lua programmability is gone — a deliberate scope
+  cut: no `ngx.*`, no per-phase hooks, no `resty.*` library, no
+  Lua-driven cert issuance; Q12–Q15 remain the historical record of the
+  spike that proved the plane could exist. openrusty becomes a hard
+  dependency: a fresh clone needs the `link_repos/openrusty` symlink in
+  place to build (documented in the root `Cargo.toml` comment). Hot
+  reload / live-config work (T5.5) continues on the openrusty
+  `apply_config` seam instead of the Lua generation swap; shared-dict,
+  drain and dynamic-cert equivalents must be re-shaped for openrusty.
+  Golden discovery grew G31. Wire deviations from the Lua era (wildcard
+  hosts, narrower TLS termination surface, no active health probes) are
+  documented per-module in the router crate; Q28's polarity (503 on
+  empty Endpoints, `--disable-kube-proxy` opt-out, no ClusterIP
+  dataplane) is preserved unchanged.
+
+---
+
+## Q33 — Durable datastore is rdb:// (RocksDB via the rdb crate); sqlite:// is Unsupported (T2.3 / Sprint 25)
+
+**Date.** 2026-08-28 (Sprint 25, "link_repos wave").
+
+- **Context.** Q29 closed T2.3 with `SqliteStorage` on libsql core-only:
+  a kine-style append-only `kv` table where the row table was both the
+  live-object store and the revision log, plus explicit PRAGMA
+  management and hand-rolled tx hardening. Sprint 25 adopted rdb — a
+  RocksDB-backed versioned KV store with etcd-ish semantics — as a path
+  dependency (`link_repos/rdb`), and wave 0 upstream work added the
+  `store` feature gate (981 upstream tests). The engine now supplies
+  natively what the SQLite layer re-implemented: versioned keys,
+  lexicographic ordering as revision ordering, atomic multi-key writes,
+  and column-family-grade prefix separation.
+- **Options.** (a) Keep sqlite and add rdb as a third backend;
+  (b) swap the durable slot to rdb and delete the sqlite implementation;
+  (c) drop durability and keep only the in-memory embedded store.
+- **Decision.** (b). New `crates/storage/src/rdb_backend/`
+  (`mod.rs` + `keys.rs` + `watch.rs`): `RdbStorage` on the rdb crate via
+  its `store` feature. Key layout inside one CF: `meta/revision` (the
+  cluster revision, 8-byte big-endian u64), `meta/compact` (compaction
+  watermark = lowest retained log rev), `obj/<key>` (live `StoredEntry`
+  JSON; deletion = absence), `log/<rev big-endian>` (one `LogRecord` JSON
+  per successful write). `log/` keys are fixed-width big-endian so
+  lexicographic order IS revision order — a range scan is a
+  revision-ordered replay. One write = one atomic WriteBatch
+  (obj upsert/delete + log append + revision bump) with fsync. The etcd
+  semantics (monotonic revision, create/mod revision, CAS, watch
+  historical replay, compaction watermark) are replicated from the
+  former sqlite write path; `RdbStorage::open(&Path)` is async. DSN:
+  `rdb://<path>` selects it via `Dsn::Rdb(PathBuf)` in
+  `crates/cli/src/runtime.rs` (startup log line contains
+  "rdb datastore (rocksdb) — T2.3/Q33", which `scripts/durability-e2e.sh`
+  greps); **`sqlite://` now returns `Unsupported` with a pointer to
+  `rdb://`** — a breaking DSN change. Deleted:
+  `crates/storage/src/sqlite/` and
+  `crates/storage/tests/sqlite_storage.rs`; libsql and mlua are removed
+  from the root and storage `Cargo.toml`s. Tests:
+  `crates/storage/tests/rdb_storage.rs` = 26 contract + 4 durability
+  (reopen / revision-monotonic / watch replay across restart /
+  compaction watermark) + double-open exclusion.
+- **Consequences.** Defaults are unchanged: `EmbeddedStorage` stays the
+  default and the durable option remains an explicit opt-in (Q17). The
+  kine-style append-only semantics survive the swap but on RocksDB, with
+  `obj/` and `log/` separated (unlike SQLite, where the row table was
+  both). One less FFI-ish dependency: libsql is out of the workspace
+  entirely. The durability gate keeps its shape —
+  `scripts/durability-e2e.sh` D1–D4 green on `rdb://`, including D3
+  (identical resourceVersions across a SIGTERM/restart cycle) and D4
+  (the revision counter resumes across restart, observed 15→16, plus
+  watch replay). The 26 portable contract cases still run against BOTH
+  backends via `storage_contract!`. Anything that scripted
+  `--datastore-endpoint sqlite://<path>` must move to `rdb://<path>`;
+  `scripts/local-up.sh` now boots
+  `rdb://$DD/server/state.rdb`.
+
+---
+
+## Q34 — CNI is flannel-rust embedded in the agent process; node podCIDRs from `--cluster-cidr` (T4.3 Scope A / Sprint 25)
+
+**Date.** 2026-08-28 (Sprint 25, "link_repos wave").
+
+- **Context.** T4.3 was not-started: pods had podIPs from the CNI bridge,
+  but node podCIDR allocation, pod-to-pod reachability over a real
+  fabric, and the `NetworkUnavailable` condition were unowned, and Q28
+  had explicitly reserved the pod-network CNI (and any ClusterIP
+  dataplane) for this task. `link_repos/flannel-rust` supplies a flanneld
+  daemon + flannel-cni plugin in Rust (350 upstream tests); wave 0
+  upstream work added an `install_signal_handlers` option on flanneld
+  `Options` so the daemon can be embedded without installing its own
+  signal handlers — init-pro sets it to false and bridges SIGTERM
+  through its own `infra::Shutdown` `CancellationToken`. The apiserver
+  also lacked a node status write path for flannel's F2 (clearing the
+  condition), and the vendored cni-plugins tarball had only loopback
+  staged so far — no delegated CNI to put a pod on a real bridge.
+- **Options.** (a) Supervise upstream Go flanneld as a child process
+  (k3s bundling model); (b) embed flannel-rust in the agent process and
+  ship the CNI plugin as a multicall alias; (c) defer CNI further.
+- **Decision.** (b) for Scope A. `crates/cli/src/flannel.rs` runs the
+  embedded flanneld (vxlan default backend) inside the agent process;
+  the multicall alias `flannel` dispatches `flannel_cni::skel::run()` —
+  the CNI meta-plugin invoked by containerd through the
+  `<runtime>/aux/flannel` symlink that `runtime::stage` creates alongside
+  `10-flannel.conflist` and the staged flannel binaries. Node podCIDRs
+  come from a new controllers reconciler (`Kind::NodeCidr`) that
+  allocates a /24 per node out of `ManagerConfig.cluster_cidr`
+  (`--cluster-cidr`, default `10.42.0.0/16`). The apiserver gained
+  `PUT/PATCH /api/v1/nodes/{name}/status` (`node_status.rs`) for
+  flannel's F2. `crates/cli/src/flannel_keeper.rs` keeps
+  `NetworkUnavailable=False` on the node in a 5s loop. C-side delegate
+  fixes: `isDefaultGateway` dropped (it produced a second default route)
+  and `iptables_forward_rules: true` pinned (the host's FORWARD-DROP
+  default killed pod↔pod traffic). New CLI flags `--flannel-backend` and
+  `--cluster-cidr`; new gate `scripts/flannel-e2e.sh` F1–F5.
+- **Consequences.** Scope A covers single-node vxlan pod networking
+  only: host-gw / wireguard backends, multi-node vxlan, and netpol are
+  deferred, and upstream flannel conformance is out of scope for this
+  slice (F5 records the gap; the T4.3 card tracks the remainder).
+  `NetworkUnavailable` is maintained by a 5s keeper loop because the
+  apiserver status patch has no merge key for `status/conditions` — a
+  one-shot condition write is not yet possible (debt; an upstream-style
+  status subresource merge is pending). ServiceLB L4 / LoadBalancer VIPs
+  remain the T4.3 ↔ T5.6 coordination item, untouched by Scope A.
+  Verified by `scripts/flannel-e2e.sh`: F1 podCIDR allocation,
+  F2 flannel annotations + `NetworkUnavailable=False`, F3 podIP inside
+  the node podCIDR, F4 pod↔pod over the vxlan fabric (F5 informational);
+  the multicall selftest now counts 9 aliases including `flannel`.

@@ -6,7 +6,7 @@
 //! case: `history_eviction_...` pins `with_history_capacity`, a knob the
 //! [`storage::StorageBackend`] trait does not expose (SQLite compaction is
 //! driven by the persisted watermark instead). The same 25 cases run
-//! against `SqliteStorage` in `tests/sqlite_storage.rs`.
+//! against `RdbStorage` in `tests/rdb_storage.rs` (**Q33**).
 
 mod contract;
 

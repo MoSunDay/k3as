@@ -27,11 +27,53 @@ pub fn add_label(obj: &mut Value, key: &str, value: &str) {
     }
 }
 
-/// FNV-1a 64 over the canonical JSON of `template` (BTreeMap maps make
-/// `serde_json::to_string` deterministic: construction order is irrelevant).
+/// FNV-1a 64 over the canonical JSON of `template`: object keys sorted
+/// lexicographically at every level, so construction order is irrelevant
+/// and the digest is stable across processes (RS/STS revision comparison
+/// depends on it).
+///
+/// Note: since the rdb storage integration pulls `serde_json/preserve_order`
+/// into the workspace feature set, `serde_json::Map` is insertion-ordered
+/// and a bare `to_string` is NOT canonical anymore -- hence the explicit
+/// sorted-key rendering below (byte-identical to the pre-preserve_order
+/// BTreeMap serialization, keeping historical hashes stable).
 pub fn template_hash(template: &Value) -> String {
-    let s = serde_json::to_string(template).unwrap_or_default();
+    let mut s = String::new();
+    canonical_json(template, &mut s);
     format!("{:016x}", fnv1a(s.as_bytes()))
+}
+
+/// Canonical JSON rendering: object keys sorted, recursively; arrays keep
+/// element order (order is significant there); scalars use serde's own
+/// escaping.
+fn canonical_json(v: &Value, out: &mut String) {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<(&String, &Value)> = map.iter().collect();
+            keys.sort_by(|a, b| a.0.cmp(b.0));
+            out.push('{');
+            for (i, (k, val)) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                out.push(':');
+                canonical_json(val, out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
 }
 
 fn fnv1a(data: &[u8]) -> u64 {

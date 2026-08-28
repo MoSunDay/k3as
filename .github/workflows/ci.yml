@@ -53,18 +53,15 @@ jobs:
           scripts/cli-flag-parity-test.sh
           scripts/graceful-shutdown-test.sh
 
-      - name: e2e — router coroutine/latency selftest
-        run: scripts/router-coroutine-selftest.sh
+      - name: e2e — service traffic (NodePort over the openrusty plane, Q32)
+        run: scripts/service-traffic-e2e.sh
 
       - name: e2e — discovery parity + golden conformance (T0.6)
         run: |
           scripts/apiserver-discovery-parity-test.sh
           scripts/golden-conformance.sh
 
-      - name: e2e — service traffic (Sprint 18, decision D)
-        run: scripts/service-traffic-e2e.sh
-
-      - name: e2e — durability across restart (T2.3, Sprint 19)
+      - name: e2e — durability across restart (T2.3, Q33)
         run: scripts/durability-e2e.sh
 
   bundle:

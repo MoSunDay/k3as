@@ -18,7 +18,7 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-aliases=(init-pro kubectl ctr crictl containerd server agent etcd)
+aliases=(init-pro kubectl ctr crictl containerd server agent etcd flannel)
 fail=0
 for a in "${aliases[@]}"; do
   ln -sf "$BIN" "$WORK/$a"

@@ -223,13 +223,49 @@ and node registration.
     `--disable-kube-proxy` opts out). T4.3 still owns the pod-network
     CNI and any future ClusterIP dataplane.
 
+  - **Scope A as-built (Sprint 25, Q34 — CNI 换底 flannel-rust):**
+    - 内嵌 flanneld：`crates/cli/src/flannel.rs` 把 flanneld daemon
+      （flannel-rust 上游, 默认 vxlan backend）跑在 agent 进程内；
+      上游 `install_signal_handlers` 关闭（wave 0 上游改造），SIGTERM 经
+      init-pro 自身 infra::Shutdown 的 CancellationToken 桥接。
+    - CNI meta-plugin：multicall 别名 `flannel` →
+      `flannel_cni::skel::run()`，由 containerd 经
+      `<runtime>/aux/flannel` symlink 调用（runtime::stage 负责 aux
+      staging + symlink）。
+    - node podCIDR 分配：`crates/controllers` 新 node-cidr reconciler
+      （`Kind::NodeCidr`），按 `ManagerConfig.cluster_cidr`
+      （`--cluster-cidr`, 默认 10.42.0.0/16）给每个 Node 写 `/24` podCIDR。
+    - conflist + 修复：`runtime::stage` 新增 `10-flannel.conflist`；
+      C 侧 delegate 去掉 `isDefaultGateway`（双默认路由）、钉住
+      `iptables_forward_rules: true`（FORWARD-DROP 杀 pod↔pod）。
+    - Node 条件：`crates/cli/src/flannel_keeper.rs` 以 5s 循环维持
+      `NetworkUnavailable=False`。**债务**：apiserver status patch 缺
+      `status/conditions` merge key，一次性条件写入尚不可行
+      （upstream 式 status subresource merge 待做）。
+    - 新 CLI flag：`--flannel-backend`、`--cluster-cidr`。
+  - **剩余 T4.3 范围（not-started）：** ServiceLB L4 / LoadBalancer VIP
+    allocate + announce（与 T5.6 协调，Q28 已记 gating）；上游 flannel
+    conformance 面（host-gw / wireguard backend、multi-node vxlan、
+    netpol）。
+
 - **验收手段 / Acceptance**
   - Golden: pod-to-pod across nodes; ClusterIP reachable; LoadBalancer
     Service gets an external IP and routes.
+  - As-built (Scope A): `scripts/flannel-e2e.sh` F1–F5 on a real
+    single-node cluster — F1 node podCIDR 从 cluster-cidr 分配；F2 flannel
+    注解（`flannel.alpha.coreos.com/*`）+ `NetworkUnavailable=False`；
+    F3 podIP 落在 node podCIDR 内；F4 flannel 织物上 pod↔pod 可达；
+    F5 信息性说明（上游 conformance host-gw/multi-node/netpol 不在
+    Scope A 内）。
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — Dataplane choice (iptables vs eBPF) — decide here.
+- **状态 / Status** — in-progress (Scope A flannel CNI done, Sprint 25, Q34)
+- **证据 / Evidence** — Sprint 25: flannel-e2e F1–F5 5/5（F5 信息性）；
+  service-traffic ST1–ST6 6/6（NodePort 面, Q28/Q32, 不属本卡）；
+  workspace 852 tests green; flannel multicall selftest 9 别名含 flannel。
+- **卡点 / Blockers** — 债务两项：flannel_keeper 依赖 5s 轮询（缺
+  `status/conditions` merge key，upstream 式 status subresource merge
+  待做）；`ingress_listen` CLI flag 未接线（router 侧, T5.5/T5.7 相邻）。
+  LoadBalancer VIP 需要 T5.6 dataplane 协调。
 - **依赖 / Depends on** — T4.2
 
 ---

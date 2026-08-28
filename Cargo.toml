@@ -2,6 +2,10 @@
 # See plans/init-pro/ for the SSOT.
 [workspace]
 resolver = "2"
+# link_repos/* are separate upstream workspaces (openrusty / rdb /
+# flannel-rust) consumed as path dependencies. Without the exclude, cargo
+# resolves their `workspace.*` inheritance against THIS root and fails.
+exclude = ["link_repos"]
 members = [
     "crates/init-pro",
     "crates/common",
@@ -28,7 +32,7 @@ license = "Apache-2.0"
 authors = ["init-pro"]
 # TODO: set to the real git hosting URL before publishing.
 repository = "https://github.com/init-pro/init-pro"
-description = "A k3s-compatible Kubernetes distribution in one Rust multicall binary, with a built-in Lua data plane."
+description = "A k3s-compatible Kubernetes distribution in one Rust multicall binary, with a built-in openrusty data plane (Q32)."
 publish = false
 
 [workspace.dependencies]
@@ -48,6 +52,17 @@ runtime = { path = "crates/runtime" }
 router = { path = "crates/router" }
 storage = { path = "crates/storage" }
 
+# Embedded upstream Rust components (link_repos/* symlinks; see decisions.md).
+# - openrusty: the h2c gateway engine behind the Router data plane (T5.x rewrite).
+openrusty-core = { path = "link_repos/openrusty/crates/openrusty-core" }
+openrusty-server = { path = "link_repos/openrusty/crates/openrusty-server" }
+# - rdb: RocksDB store engine behind the durable datastore (T2.3 rewrite).
+#   `store`-only feature keeps openraft/sqlparser/jieba out of the build.
+rdb = { path = "link_repos/rdb", default-features = false, features = ["store"] }
+# - flannel-rust: kube subnet-mgr flanneld + the flannel CNI meta-plugin (T4.3).
+flanneld = { path = "link_repos/flannel-rust/crates/flanneld" }
+flannel-cni = { path = "link_repos/flannel-rust/crates/flannel-cni" }
+
 # External
 anyhow = "1"
 async-trait = "0.1"
@@ -55,12 +70,9 @@ clap = { version = "4", features = ["derive", "env", "help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # YAML manifest parsing for `kubectl apply` (T7.3 Scope A, Q30). Caret-only
-# like every external dep (precedent: libsql).
+# like every external dep.
 serde_yaml_ng = "0.10"
 thiserror = "2"
-# SQLite storage backend (T2.3, Q29). Local-file mode only: no remote /
-# replication / sync / TLS features -- the server owns the single DB file.
-libsql = { version = "0.9", default-features = false, features = ["core"] }
 # Layer 1 resource model (T1.1). JSON-only for v1 (Q10).
 kube-core = { version = "4.2", default-features = false, features = ["json-patch"] }
 k8s-openapi = { version = "0.28", features = ["v1_32"] }
@@ -74,9 +86,6 @@ tower = { version = "0.5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process", "net"] }
 # Stream wrappers (watch body streaming, T1.2b).
 tokio-stream = "0.1"
-# Lua VM for the built-in Router (T5.1). LuaJIT via vendored luajit-src; `async` enables coroutine<->Rust-future bridging; `error-send` makes the
-# error type Send. `luajit52` is OFF (openresty = LuaJIT 2.1 = Lua 5.1).
-mlua = { version = "0.12", features = ["luajit", "vendored", "async", "error-send"], default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

@@ -13,6 +13,27 @@ use multicall::{resolve, Action};
 
 mod assets;
 
+/// T4.3 Scope A (Q34): the embedded `flannel` CNI meta-plugin. containerd
+/// execs the `<runtime>/aux/flannel` symlink (argv[0] dispatch) and `init-pro
+/// flannel` surfaces it k3s-style; CNI arguments come from the process
+/// environment and the netconf from stdin, so argv is ignored beyond a
+/// help nicety (must bypass clap — `skel::run` owns stdin).
+fn run_flannel_cni(extra: &[String]) -> ExitCode {
+    if extra.iter().any(|a| a == "-h" || a == "--help" || a == "help") {
+        println!(
+            "Usage (CNI plugin — invoked by containerd, not by hand):\n\
+             \x20 CNI_COMMAND=ADD|DEL|CHECK|VERSION  CNI_CONTAINERID=... \\\n\
+             \x20   netconf.json | flannel\n\
+             \n\
+             Reads the flannel netconf from stdin and the CNI_*, path and\n\
+             FLANNEL_SUBNET_FILE variables from the environment; writes the\n\
+             CNI result (or error) JSON to stdout."
+        );
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::from(flannel_cni::skel::run() as u8)
+}
+
 fn main() -> ExitCode {
     let manifest = EmbeddedManifest {
         assets: assets::embedded_assets(),
@@ -38,6 +59,12 @@ fn main() -> ExitCode {
         return multicall::external_stub(action, &extra[1..]);
     }
 
+    // T4.3 Scope A (Q34): `init-pro flannel` passthrough (pre-clap, like
+    // crictl/ctr above) — the CNI plugin must own stdin for the netconf.
+    if extra.first().map(String::as_str) == Some("flannel") {
+        return run_flannel_cni(&extra[1..]);
+    }
+
     match resolve(&argv0) {
         // init-pro itself (or an unknown name) -> drive the CLI; clap will
         // print help/version as appropriate.
@@ -48,6 +75,9 @@ fn main() -> ExitCode {
         // kubectl grew a real in-repo surface in T3.1b (`rollout status`
         // over plain HTTP, Q21) — split out of the external_stub catch-all.
         Some(Action::Kubectl) => kubectl::run(&extra),
+        // The flannel CNI meta-plugin, whether invoked through the staged
+        // `<runtime>/aux/flannel` symlink (argv[0]) or as a subcommand.
+        Some(Action::Flannel) => run_flannel_cni(&extra),
         // Bundled-peer aliases: Phase 1 stubs.
         Some(external) => multicall::external_stub(external, &extra),
     }

@@ -1,6 +1,6 @@
 [package]
 name = "router"
-description = "Built-in Router VM: mlua-driven HTTP data plane (T5.1 bridge + T5.2 phase pipeline + T5.4 ingress routing/proxy + TLS + hot reload)"
+description = "Built-in Router data plane: openrusty-powered h2c gateway (T5.x rewrite, decision Q32) — NodePort service plane + Ingress gateway, Q28 behavior parity"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,33 +9,30 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-mlua = { workspace = true }
+# Q32: the gateway engine. Config/state assembly + route compilation live in
+# this crate; openrusty serves the actual HTTP/1.1 + h2c connections.
+openrusty-core = { workspace = true }
+openrusty-server = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+# Serve loop: hyper-util's auto builder (own accept loop — openrusty's h2c
+# helper binds fixed addresses and needs a concrete `SocketAddr`; we need
+# `:0` ephemeral binds + a 503 gate per listener).
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 tokio = { workspace = true }
-http = "1"
-bytes = "1"
 tracing = { workspace = true }
-sha2 = { workspace = true }
-base64 = "0.22"
-getrandom = "0.4"
 # Sprint 18 / S4 (Q28): the NodePort service plane — live Endpoints/Services
 # reflectors over the storage backend + per-nodePort reverse-proxy listeners.
-# No new external dependencies: infra (Shutdown) + storage (workspace crates).
 infra = { workspace = true }
 storage = { workspace = true }
 serde_json = { workspace = true }
-# Layer 5 T5.4: Ingress -> route-table compilation uses the networking/v1 types.
-k8s-openapi = { workspace = true }
-# T5.4 Scope B: TLS termination (server SNI) + cosocket TLS (client).
-# `ring` crypto provider (Q16): smaller, widely audited; no aws-lc-rs FIPS path.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-rustls-pemfile = "2"
-# T5.3 Scope B: resty.http client verify=true path uses the Mozilla root store.
-webpki-roots = "0.26"
+# Q32: Ingress/IngressClass come from the in-tree `api` networking model
+# (replaces the Lua-era k8s-openapi networking types).
+api = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-# Test-only self-signed certificate generation (T5.4 Scope B TLS gate). Never
-# shipped in the release binary — dev-dependency only. No private keys are
-# committed: certs are freshly generated per test run (R5).
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+# Unit tests construct ObjectMeta for the api networking types (runtime code
+# stays free of kube-core; Q32 keeps the data plane lean).
+kube-core = { workspace = true }

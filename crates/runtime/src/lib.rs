@@ -27,7 +27,10 @@ use tokio::sync::watch;
 pub use config::{render, ContainerdConfigVars, DEFAULT_SANDBOX_IMAGE};
 pub use cri::{staged_crictl, CriCtl, CriError};
 pub use cri_json::{ContainerConfig, PodSandboxConfig};
-pub use stage::{stage_containerd_tree, vendor_bin_root, StageOutcome};
+pub use stage::{
+    ensure_cni_plugins, ensure_flannel_alias, stage_containerd_tree, vendor_bin_root,
+    vendor_cache_dir, StageOutcome,
+};
 pub use supervisor::{
     backoff_delay, supervise, supervisor_args, wait_socket, SuperviseStats, SupervisorSpec,
 };
@@ -116,6 +119,29 @@ pub fn start_agent_runtime(
     fs::write(&paths.config_path, render(&vars))?;
     stage::write_cni_conf(&vars.cni_conf_dir)?;
 
+    // T4.3 Scope A (Q34): guarantee the flannel delegate chain. The flannel
+    // meta-plugin runs as a multicall alias of THIS binary (Q1); the
+    // bridge/host-local/loopback plugins come from the staged aux tree or,
+    // failing that, are extracted from the vendored cni-plugins tarball.
+    match stage::ensure_cni_plugins(&paths.runtime_dir) {
+        Ok(extracted) if extracted.is_empty() => {}
+        Ok(extracted) => tracing::info!(
+            target: "init-pro",
+            plugins = ?extracted,
+            "extracted CNI plugins from the vendor cache"
+        ),
+        Err(e) => tracing::warn!(
+            target: "init-pro",
+            "CNI plugins incomplete ({e}); pod sandboxes will fail CNI ADD"
+        ),
+    }
+    if let Err(e) = stage::ensure_flannel_alias(&paths.runtime_dir) {
+        tracing::warn!(
+            target: "init-pro",
+            "flannel CNI alias not staged: {e}; pods will fail CNI ADD"
+        );
+    }
+
     // A stale socket from an unclean shutdown would both confuse the health
     // probe and block containerd's bind; the daemon is down by assumption here.
     let _ = fs::remove_file(&paths.socket);
@@ -126,6 +152,18 @@ pub fn start_agent_runtime(
         &paths.socket,
     );
     spec.path_prefix = Some(paths.runtime_dir.clone());
+    // The flannel CNI meta-plugin resolves subnet.env ONLY through
+    // FLANNEL_SUBNET_FILE (no `subnetFile` JSON key in the Rust NetConf);
+    // plugins inherit containerd's env, so the child carries the path.
+    spec.extra_env = vec![(
+        "FLANNEL_SUBNET_FILE".to_string(),
+        data_dir
+            .join("agent")
+            .join("flannel")
+            .join("subnet.env")
+            .display()
+            .to_string(),
+    )];
 
     let (pid_tx, _pid_rx) = watch::channel::<Option<u32>>(None);
     tracing::info!(
