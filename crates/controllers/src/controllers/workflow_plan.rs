@@ -5,9 +5,12 @@
 //! step groups -- a `steps` template yields one group per outer array
 //! element, a `dag` template is layered topologically (Kahn's algorithm
 //! over `dependencies` / `depends`, e.g. `"A && B"` with optional
-//! `.Succeeded`-style result suffixes), and a plain container/script
-//! entrypoint yields a single one-step group. Everything here is pure
-//! (no I/O), so the semantics are unit-testable in isolation.
+//! `.Succeeded`-style result suffixes), and a plain container/script or
+//! agent entrypoint yields a single one-step group. Every planned step
+//! carries its materialization target ([`StepTarget`], A5/Q35): Pods
+//! for container/script templates, `init-pro.io/v1 Agent` children for
+//! `agent` templates. Everything here is pure (no I/O), so the
+//! semantics are unit-testable in isolation.
 //!
 //! Unsupported constructs (suspend/http/resource/plugin templates, missing
 //! references, dependency cycles) surface as `None` via [`build_plan`] --
@@ -24,6 +27,17 @@ pub const ROOT_STEPS: &str = "Steps";
 pub const ROOT_DAG: &str = "DAG";
 pub const ROOT_POD: &str = "Pod";
 
+/// What one executable step materializes as (A5, decision **Q35**): a
+/// step Pod (`build_pod`, container/script templates) or an
+/// `init-pro.io/v1 Agent` child object (`build_agent`, `agent` templates).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepTarget {
+    /// Materialize as a step Pod (`workflow_pod::build_pod`).
+    Pod,
+    /// Materialize as an Agent child object (`workflow_agent::build_agent`).
+    Agent,
+}
+
 /// One executable unit: a resolved template plus its node/pod identity.
 #[derive(Clone, Debug)]
 pub struct PlannedStep {
@@ -35,8 +49,10 @@ pub struct PlannedStep {
     pub template_name: String,
     /// Deterministic DNS-1123 pod name ([`pod_name_for`]).
     pub pod_name: String,
-    /// The resolved template (always container/script; validated).
+    /// The resolved template (always container/script/agent; validated).
     pub template: Value,
+    /// What the controller materializes this step as (A5, Q35).
+    pub target: StepTarget,
 }
 
 /// A compiled execution plan: sequential groups of parallel steps.
@@ -88,6 +104,7 @@ pub(crate) fn compile(wf: &Value) -> Result<Plan, String> {
                 template_name: entrypoint.to_string(),
                 pod_name: pod_name_for(wf_name, wf_name),
                 template: entry.clone(),
+                target: step_target(entry),
             }]],
         });
     }
@@ -133,11 +150,13 @@ fn steps_groups(
                 .filter(|s| !s.is_empty())
                 .unwrap_or(template_name.as_str());
             let node_name = format!("{wf_name}[{g}].{label}");
+            let target = step_target(&template);
             planned.push(PlannedStep {
                 pod_name: pod_name_for(wf_name, &node_name),
                 node_name,
                 template_name,
                 template,
+                target,
             });
         }
         groups.push(planned);
@@ -173,9 +192,22 @@ pub(crate) fn resolve(
     Ok((tname.to_string(), t.clone()))
 }
 
-/// Only container/script templates are executable in v1.
+/// Only container/script/agent templates are executable in v1 (A5: the
+/// native `agent` variant materializes an Agent child, Q35).
 pub(crate) fn is_executable(t: &Value) -> bool {
-    t.get("container").is_some() || t.get("script").is_some()
+    t.get("container").is_some() || t.get("script").is_some() || t.get("agent").is_some()
+}
+
+/// A resolved template's materialization target: `agent` -> Agent, else
+/// Pod. Agent WINS when a template carries both `container` and `agent`:
+/// the native agent variant is the more specific intent (documented v1
+/// behavior, A5/Q35 -- the container is not silently executed too).
+pub(crate) fn step_target(template: &Value) -> StepTarget {
+    if template.get("agent").is_some() {
+        StepTarget::Agent
+    } else {
+        StepTarget::Pod
+    }
 }
 
 /// Human-readable rejection naming the unsupported construct.
@@ -250,6 +282,82 @@ mod tests {
             ),
             ("single", "single")
         );
+        // A container template still materializes a Pod (A5: unchanged).
+        assert_eq!(plan.groups[0][0].target, StepTarget::Pod);
+    }
+
+    #[test]
+    fn agent_templates_plan_agent_targets() {
+        // Agent-only root entrypoint: executable, targets an Agent child.
+        let wf = json!({
+            "metadata": {"name": "ask"},
+            "spec": {
+                "entrypoint": "main",
+                "templates": [
+                    {"name": "main", "agent": {"prompt": "hi", "model": {"name": "m"}}},
+                ],
+            },
+        });
+        assert!(is_executable(&json!({"agent": {}})));
+        let plan = build_plan(&wf).unwrap();
+        assert_eq!(plan.root_type, ROOT_POD);
+        assert_eq!(plan.groups[0][0].target, StepTarget::Agent);
+        assert_eq!(plan.groups[0][0].pod_name, "ask");
+    }
+
+    #[test]
+    fn mixed_steps_keep_per_step_targets() {
+        let wf = json!({
+            "metadata": {"name": "mix"},
+            "spec": {
+                "entrypoint": "main",
+                "templates": [
+                    {"name": "main", "steps": [
+                        [{"name": "ask", "template": "tmpl-agent"}],
+                        [{"name": "run", "template": "tmpl-container"},
+                         {"name": "gen", "template": "tmpl-script"}]]},
+                    {"name": "tmpl-agent", "agent": {"prompt": "p"}},
+                    {"name": "tmpl-container", "container": {"image": "busybox"}},
+                    {"name": "tmpl-script", "script": {"image": "busybox", "source": "x"}}],
+            },
+        });
+        let plan = build_plan(&wf).unwrap();
+        assert_eq!(plan.groups.len(), 2);
+        assert_eq!(plan.groups[0][0].target, StepTarget::Agent);
+        assert_eq!(plan.groups[1][0].target, StepTarget::Pod);
+        assert_eq!(plan.groups[1][1].target, StepTarget::Pod);
+        // An agent template referenced inline targets an Agent too.
+        let wf = json!({
+            "metadata": {"name": "inline"},
+            "spec": {
+                "entrypoint": "main",
+                "templates": [{"name": "main", "steps": [
+                    [{"name": "a", "template": "t", "inline": {"name": "t", "agent": {}}}]]}],
+            },
+        });
+        let plan = build_plan(&wf).unwrap();
+        assert_eq!(plan.groups[0][0].target, StepTarget::Agent);
+    }
+
+    #[test]
+    fn agent_wins_when_a_template_has_both_container_and_agent() {
+        // Documented v1 behavior (A5/Q35): the native agent variant is the
+        // more specific intent; the container is not executed as well.
+        let template = json!({
+            "container": {"image": "busybox"},
+            "agent": {"prompt": "p"},
+        });
+        assert_eq!(step_target(&template), StepTarget::Agent);
+        let wf = json!({
+            "metadata": {"name": "both"},
+            "spec": {
+                "entrypoint": "main",
+                "templates": [
+                    {"name": "main", "container": {"image": "busybox"}, "agent": {}},
+                ],
+            },
+        });
+        assert_eq!(build_plan(&wf).unwrap().groups[0][0].target, StepTarget::Agent);
     }
 
     #[test]

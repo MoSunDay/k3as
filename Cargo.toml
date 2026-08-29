@@ -16,6 +16,7 @@ members = [
     "crates/infra",
     "crates/vendor",
     "crates/api",
+    "crates/agent",
     "crates/apiserver",
     "crates/controllers",
     "crates/scheduler",
@@ -62,6 +63,13 @@ rdb = { path = "link_repos/rdb", default-features = false, features = ["store"] 
 # - flannel-rust: kube subnet-mgr flanneld + the flannel CNI meta-plugin (T4.3).
 flanneld = { path = "link_repos/flannel-rust/crates/flanneld" }
 flannel-cni = { path = "link_repos/flannel-rust/crates/flannel-cni" }
+# - opencoder: the Agent engine behind init-pro.io/Agent (T7.1 rewrite, Q35).
+#   Minimal closure core+llm+store+session; `store` brings libsql (bundled C
+#   SQLite) — same build-cost class as rdb/RocksDB, accepted.
+opencoder-core = { path = "link_repos/opencoder/crates/core" }
+opencoder-llm = { path = "link_repos/opencoder/crates/llm" }
+opencoder-store = { path = "link_repos/opencoder/crates/store" }
+opencoder-session = { path = "link_repos/opencoder/crates/session" }
 
 # External
 anyhow = "1"

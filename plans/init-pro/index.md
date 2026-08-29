@@ -40,14 +40,14 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
 | T6.2 | 6 | 标准 addon (CoreDNS/local-storage/metrics-server) | not-started | T6.1 |
-| T7.1 | 7 | AI Agent workload CRD + scheduler extender | not-started | T3.2, T1.2 |
+| T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A, Sprint 26, Q35; Phase B 节点执行/CLI 留 B1/B2) | T3.2, T1.2 |
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | done (Scope A+B+C, Sprint 23) | T1.2, T3.1 |
 
-**Counts:** 33 TODOs · 20 done · 2 in-progress (T5.6 NodePort plane:
+**Counts:** 33 TODOs · 21 done · 2 in-progress (T5.6 NodePort plane:
 Router service plane + service-traffic e2e, Q28; T4.3 Scope A flannel
 CNI done, Q34 — Scope B/ServiceLB L4 剩余)
-· 11 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 10 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=5 · Layer5=7 · Layer6=2 · Layer7=3.
 
 ---
@@ -74,6 +74,13 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 26 — 原生 Agent: init-pro.io/v1 一级资源 + 调度器同循环绑定 + Workflow template.agent + opencoder 库收编 (T7.1 Phase A done, Q35).**
+  `Agent`(Namespaced/`agents`/shortName `ag`) spec 携带与 Pod 对齐的调度字段(nodeName/nodeSelector/tolerations/affinity/schedulerName/resources, camelCase)
+  + opencoder 载荷(agent/prompt/model/provider, 无凭证——密钥只在 opencoder 内经 env 解析)。scheduler 以同一 filter/score/CAS 循环绑定
+  (`is_agent_pending` + `bind_agent`/`mark_agent_unschedulable` 写 spec.nodeName + Scheduled 条件, write-if-changed 不变; agents Phase A 不占节点容量);
+  Workflow `template.agent` 直接创建 Agent 子对象(Workflow ownerReference, GC 级联), 不再物化 Pod。opencoder 四 crate(core/llm/store/session)
+  以 `link_repos/opencoder` path-dep 收编(store 牵 libsql 捆绑 C 构建——接受, 同 rdb 先例), `crates/agent` 为纯 seam(AgentSpec→`opencoder_core::Config`)。
+  kubectl 白名单扩 agent→init-pro.io/v1。golden G04 fixture 再生成(仅增 agents 项), conformance 39/39; tests 852→882。
 - **Sprint 25 — link_repos wave: Router 换底 openrusty + datastore 换底 rdb/RocksDB + CNI 换底 flannel-rust (T2.3 重写 done, T4.3 Scope A → in-progress, T5.1–T5.4 重写 done, Q32/Q33/Q34).**
   三个上游 Rust 仓库以 path dependency 收编（`link_repos/{openrusty,rdb,flannel-rust}`
   symlink, git-ignore; 根 `Cargo.toml` `exclude = ["link_repos"]`）。wave 0 上游改造:

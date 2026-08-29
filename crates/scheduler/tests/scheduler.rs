@@ -269,3 +269,99 @@ async fn extender_prioritize_steers_placement_among_equal_nodes() {
             .unwrap_or(false)
     });
 }
+
+// ---- TODO A4: init-pro.io/v1 Agent scheduling (same loop, own kind) ----
+
+fn agent(name: &str, selector: Value) -> Value {
+    json!({
+        "apiVersion": "init-pro.io/v1",
+        "kind": "Agent",
+        "metadata": {"name": name, "namespace": "default"},
+        "spec": {"nodeSelector": selector},
+    })
+}
+
+async fn create_agent(env: &Env, a: Value) {
+    let name = a["metadata"]["name"].as_str().unwrap().to_string();
+    env.client
+        .create(&Key::new("init-pro.io", "agents", "default", &name), a)
+        .await
+        .unwrap();
+}
+
+async fn get_agent(env: &Env, name: &str) -> Value {
+    env.client
+        .get(&Key::new("init-pro.io", "agents", "default", name))
+        .await
+        .unwrap()
+        .expect("agent exists")
+}
+
+fn agent_condition(agent: &Value, status: &str, reason: Option<&str>) -> bool {
+    agent
+        .pointer("/status/conditions")
+        .and_then(|v| v.as_array())
+        .map(|cs| {
+            cs.iter().any(|c| {
+                c.get("type").and_then(|v| v.as_str()) == Some("Scheduled")
+                    && c.get("status").and_then(|v| v.as_str()) == Some(status)
+                    && reason
+                        .map(|r| c.get("reason").and_then(|v| v.as_str()) == Some(r))
+                        .unwrap_or(true)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn agent_scheduled(agent: &Value) -> bool {
+    agent_condition(agent, "True", None)
+}
+
+fn agent_unschedulable(agent: &Value) -> bool {
+    agent_condition(agent, "False", Some("Unschedulable"))
+}
+
+#[tokio::test]
+async fn binds_pending_agent_to_matching_node() {
+    let env = env(SchedulerConfig::new());
+    create_node(&env, node("a", json!({"disk": "ssd"}))).await;
+    create_agent(&env, agent("bot", json!({"disk": "ssd"}))).await;
+
+    eventually!(15_000, async {
+        get_agent(&env, "bot")
+            .await
+            .pointer("/spec/nodeName")
+            .and_then(|v| v.as_str())
+            == Some("a")
+    });
+    // The agent path stamps the `Scheduled` condition, not `PodScheduled`.
+    eventually!(15_000, async {
+        agent_scheduled(&get_agent(&env, "bot").await)
+    });
+}
+
+#[tokio::test]
+async fn agent_without_node_is_unschedulable_then_binds_when_node_appears() {
+    let env = env(SchedulerConfig::new());
+    create_node(&env, node("b", json!({}))).await;
+    create_agent(&env, agent("bot", json!({"disk": "ssd"}))).await;
+
+    // Nothing matches yet: Scheduled=False/Unschedulable via the agent path.
+    eventually!(15_000, async {
+        agent_unschedulable(&get_agent(&env, "bot").await)
+    });
+
+    // The matching node arrives: the node-Put fan-out covers pending agents
+    // too (they are re-enqueued into the agent queue and retried).
+    create_node(&env, node("a", json!({"disk": "ssd"}))).await;
+    eventually!(15_000, async {
+        get_agent(&env, "bot")
+            .await
+            .pointer("/spec/nodeName")
+            .and_then(|v| v.as_str())
+            == Some("a")
+    });
+    eventually!(15_000, async {
+        agent_scheduled(&get_agent(&env, "bot").await)
+    });
+}

@@ -23,14 +23,29 @@ const API_VERSION: &str = "argoproj.io/v1alpha1";
 const WORKFLOW_LABEL: &str = "workflows.argoproj.io/workflow";
 const TEMPLATE_LABEL: &str = "workflows.argoproj.io/template";
 
+/// Discovery labels shared by every step child object (A5): the owning
+/// workflow and the resolved template name (upstream parity with the pod
+/// labels `workflows.argoproj.io/workflow` / `/template`).
+pub(crate) fn step_labels(wf_name: &str, template_name: &str) -> Map<String, Value> {
+    let mut labels = Map::new();
+    labels.insert(WORKFLOW_LABEL.to_string(), json!(wf_name));
+    labels.insert(TEMPLATE_LABEL.to_string(), json!(template_name));
+    labels
+}
+
+/// The authoritative child -> node mapping annotation; stamped on step
+/// pods AND Agent children (A5/Q35) so one lookup serves both targets.
+pub(crate) fn node_annotation(node_name: &str) -> Map<String, Value> {
+    let mut annotations = Map::new();
+    annotations.insert(NODE_NAME_ANNOTATION.to_string(), json!(node_name));
+    annotations
+}
+
 /// Build one step pod (see the module doc for the spec semantics).
 pub(crate) fn build_pod(wf: &Value, ns: &str, uid: &str, step: &PlannedStep) -> Value {
     let wf_name = name(wf).unwrap_or_default();
-    let mut labels = Map::new();
-    labels.insert(WORKFLOW_LABEL.to_string(), json!(wf_name));
-    labels.insert(TEMPLATE_LABEL.to_string(), json!(step.template_name));
-    let mut annotations = Map::new();
-    annotations.insert(NODE_NAME_ANNOTATION.to_string(), json!(step.node_name));
+    let labels = step_labels(wf_name, &step.template_name);
+    let annotations = node_annotation(&step.node_name);
     json!({
         "apiVersion": "v1",
         "kind": "Pod",
@@ -140,6 +155,7 @@ fn main_container(template: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::workflow_plan::StepTarget;
 
     #[test]
     fn container_defaults_and_overlay() {
@@ -162,6 +178,7 @@ mod tests {
                 template_name: "tmpl".into(),
                 pod_name: "wf-0-s".into(),
                 template: template.clone(),
+                target: StepTarget::Pod,
             },
         );
         assert_eq!(pod["metadata"]["name"], "wf-0-s");

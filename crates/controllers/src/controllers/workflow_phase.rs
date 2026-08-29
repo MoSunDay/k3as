@@ -53,6 +53,17 @@ pub fn node_phase_from_pod(pod: &Value) -> &'static str {
     }
 }
 
+/// Node phase implied by an `init-pro.io/v1` Agent child's `status.phase`
+/// (A5, decision **Q35**). Agent phases are pod-shaped -- the apiserver
+/// decodes a fresh Agent as `Pending`, the scheduler moves it to
+/// `Running` on binding and the agent runtime reports `Succeeded`/
+/// `Failed` -- so this is exactly the [`node_phase_from_pod`] reduction
+/// applied to any object; a missing `status` (just created, pre-decode)
+/// maps to Pending.
+pub fn node_phase_from_agent(agent: &Value) -> &'static str {
+    node_phase_from_pod(agent)
+}
+
 /// Workflow phase over the per-step phases: any Failed/Error -> Failed;
 /// all Succeeded -> Succeeded (vacuously true for zero steps); otherwise
 /// Running once any pod exists, Pending while none does.
@@ -108,5 +119,31 @@ mod tests {
             PHASE_RUNNING
         );
         assert_eq!(node_phase_from_pod(&json!({})), PHASE_PENDING);
+    }
+
+    #[test]
+    fn agent_phase_reduction_matches_pod_semantics() {
+        // A5/Q35: Agent child phases are pod-shaped; the same reduction
+        // applies (delegated to node_phase_from_pod).
+        assert_eq!(
+            node_phase_from_agent(&json!({"status": {"phase": "Running"}})),
+            PHASE_RUNNING
+        );
+        assert_eq!(
+            node_phase_from_agent(&json!({"status": {"phase": "Succeeded"}})),
+            PHASE_SUCCEEDED
+        );
+        assert_eq!(
+            node_phase_from_agent(&json!({"status": {"phase": "Failed"}})),
+            PHASE_FAILED
+        );
+        // Boundary: a freshly created Agent has NO status yet -> Pending
+        // (status is not set at creation; the apiserver decodes Pending).
+        assert_eq!(node_phase_from_agent(&json!({})), PHASE_PENDING);
+        assert_eq!(node_phase_from_agent(&json!({"status": {}})), PHASE_PENDING);
+        assert_eq!(
+            node_phase_from_agent(&json!({"status": {"phase": "Unknown"}})),
+            PHASE_PENDING
+        );
     }
 }

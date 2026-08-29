@@ -11,11 +11,13 @@
 //! - [`serde_ext`] — round-trip-faithful JSON (de)serialization helpers.
 //! - [`patch`] — Strategic Merge Patch (core/v1 strategies) + JSON Patch fallback.
 //! - [`apply`] — Server-Side Apply field-manager (T1.2c).
+//! - [`agent`] — the `init-pro.io/v1` `Agent` resource (T7.1 rewrite, Q35).
 //! - [`initpro`] — the `init-pro.io/v1` CRD types (e.g. `LuaRouter`).
 //! - [`networking`] — the `networking.k8s.io/v1` group (Ingress/IngressClass;
 //!   consumed by the openrusty Ingress gateway, decision Q32).
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod apply;
 pub mod argoproj;
 pub mod discovery;
@@ -30,6 +32,10 @@ pub mod serde_ext;
 pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldEntry, Operation};
 pub use discovery::{api_group_list, api_resource_list, core_api_versions};
 pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
+pub use agent::{
+    Agent, AgentCondition, AgentList, AgentSpec, AgentStatus, KIND as AGENT_KIND,
+    PLURAL as AGENT_PLURAL,
+};
 pub use initpro::{LuaRouter, LuaRouterSpec};
 pub use networking::{
     API_VERSION as NETWORKING_API_VERSION, GROUP as NETWORKING_GROUP, VERSION as NETWORKING_VERSION,

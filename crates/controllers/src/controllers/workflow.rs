@@ -1,13 +1,19 @@
 //! Argo Workflow controller (TODO **T7.3 Scope B**, decision **Q30**).
 //!
-//! Reconciles `argoproj.io/v1alpha1` Workflow objects into Pods and writes
-//! back `status` with the node tree: root node (Steps/DAG/Pod), one
-//! StepGroup node per steps-group, and one Pod node per step/task with
-//! phases derived from the owned pods (`status.phase`). Level-driven like
-//! the ReplicaSet controller (T3.1a): pods are claimed via the controller
-//! ownerReference and the `workflows.argoproj.io/node-name` annotation;
-//! groups gate pod creation sequentially (only the active group gets
-//! pods), steps within a group are created together (parallel).
+//! Reconciles `argoproj.io/v1alpha1` Workflow objects into child objects
+//! and writes back `status` with the node tree: root node (Steps/DAG/Pod),
+//! one StepGroup node per steps-group, and one Pod node per step/task with
+//! phases derived from the owned children (`status.phase`). Level-driven
+//! like the ReplicaSet controller (T3.1a): children are claimed via the
+//! controller ownerReference and the `workflows.argoproj.io/node-name`
+//! annotation; groups gate creation sequentially (only the active group
+//! gets children), steps within a group are created together (parallel).
+//!
+//! A5 (decision **Q35**): `agent` templates materialize an `init-pro.io/v1`
+//! **Agent** child instead of a Pod (see [`workflow_agent`]); the phase
+//! readthrough is the same Pending/Running/Succeeded/Failed reduction, and
+//! Agent events fan out to the owning Workflow in the runner. The Pod path
+//! is untouched.
 //!
 //! Documented v1 simplifications:
 //! * node IDs are the node NAMES (upstream hashes them) -- deterministic,
@@ -20,7 +26,8 @@
 //!
 //! Companion modules: [`workflow_plan`] (entrypoint compilation),
 //! [`workflow_phase`] (pure naming/phase math), [`workflow_pod`] (pod
-//! assembly) and [`workflow_status`] (node-tree builders).
+//! assembly), [`workflow_agent`] (Agent children) and [`workflow_status`]
+//! (node-tree builders).
 //!
 //! Status writes are write-if-changed (`semantic_eq`, the anti-oscillation
 //! pattern shared with ReplicaSet/Deployment): timestamps recorded once
@@ -33,8 +40,11 @@ use serde_json::{json, Map, Value};
 use storage::{Key, KeyPrefix};
 
 use crate::client::Client;
-use crate::controllers::workflow_phase::{node_phase_from_pod, workflow_phase};
-use crate::controllers::workflow_plan::{compile, PlannedStep, ROOT_POD, ROOT_STEPS};
+use crate::controllers::workflow_agent::build_agent;
+use crate::controllers::workflow_phase::{
+    node_phase_from_agent, node_phase_from_pod, workflow_phase,
+};
+use crate::controllers::workflow_plan::{compile, PlannedStep, StepTarget, ROOT_POD, ROOT_STEPS};
 use crate::controllers::workflow_pod::build_pod;
 use crate::controllers::workflow_status::{
     display_name, kept_or_now, pod_node, pod_node_name, recorded_phase, root_node, stepgroup_id,
@@ -89,16 +99,37 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
         .into_iter()
         .filter(|p| !is_terminating(p) && owned_by(p, "Workflow", wf_name, uid))
         .collect();
+    // Owned Agent children (A5, Q35): `agent` templates materialize these
+    // instead of pods; the same controller ownerReference + node-name
+    // annotation contract applies.
+    let agent_prefix = KeyPrefix::new("init-pro.io", "agents", Some(ns.clone()));
+    let agents: Vec<Value> = client
+        .list(&agent_prefix)
+        .await?
+        .into_iter()
+        .filter(|a| !is_terminating(a) && owned_by(a, "Workflow", wf_name, uid))
+        .collect();
     let existing_nodes = wf
         .pointer("/status/nodes")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
 
-    let pod_for = |node_name: &str| pods.iter().find(|p| pod_node_name(p) == Some(node_name));
+    // The child object for a step's node name -- pods and Agents live in
+    // separate collections (different API groups), so the step's target
+    // picks the collection to search.
+    let child_for = |node_name: &str, target: StepTarget| -> Option<&Value> {
+        match target {
+            StepTarget::Agent => agents.iter().find(|a| pod_node_name(a) == Some(node_name)),
+            StepTarget::Pod => pods.iter().find(|p| pod_node_name(p) == Some(node_name)),
+        }
+    };
     let step_phase = |s: &PlannedStep| -> String {
-        pod_for(&s.node_name)
-            .map(node_phase_from_pod)
+        child_for(&s.node_name, s.target)
+            .map(|child| match s.target {
+                StepTarget::Agent => node_phase_from_agent(child),
+                StepTarget::Pod => node_phase_from_pod(child),
+            })
             .or_else(|| recorded_phase(&existing_nodes, &s.node_name))
             .unwrap_or("Pending")
             .to_string()
@@ -121,27 +152,58 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
         .find(|(_, p)| p.as_str() == "Failed" || p.as_str() == "Error")
         .map(|(s, _)| s.node_name.clone());
 
-    // Create the active group's missing pods (all at once: parallel steps).
-    // After a failure nothing further is created (v1: no continueOn).
+    // Create the active group's missing children (all at once: parallel
+    // steps). After a failure nothing further is created (v1: no continueOn).
+    // A5: `agent` templates create an Agent child under `init-pro.io`
+    // instead of a Pod; the Pod path is unchanged.
     let mut created = 0usize;
     if failed_node.is_none() {
         if let Some(gi) = active {
             for (i, step) in plan.groups[gi].iter().enumerate() {
-                if phases[gi][i] == "Succeeded" || pod_for(&step.node_name).is_some() {
+                if phases[gi][i] == "Succeeded"
+                    || child_for(&step.node_name, step.target).is_some()
+                {
                     continue;
                 }
-                let pod = build_pod(wf, &ns, uid, step);
-                match client
-                    .create(&Key::new("", "pods", &ns, &step.pod_name), pod)
-                    .await
-                {
-                    Ok(_) => {
-                        created += 1;
-                        tracing::debug!(workflow = wf_name, pod = %step.pod_name, "created step pod")
+                match step.target {
+                    StepTarget::Agent => {
+                        let agent = build_agent(wf, &ns, uid, step);
+                        match client
+                            .create(
+                                &Key::new("init-pro.io", "agents", &ns, &step.pod_name),
+                                agent,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                created += 1;
+                                tracing::debug!(
+                                    workflow = wf_name, agent = %step.pod_name,
+                                    "created step agent"
+                                )
+                            }
+                            // Deterministic names: a racing duplicate is benign.
+                            Err(e) if e.is_already_exists() => {}
+                            Err(e) => return Err(e),
+                        }
                     }
-                    // Deterministic names: a racing duplicate is benign.
-                    Err(e) if e.is_already_exists() => {}
-                    Err(e) => return Err(e),
+                    StepTarget::Pod => {
+                        let pod = build_pod(wf, &ns, uid, step);
+                        match client
+                            .create(&Key::new("", "pods", &ns, &step.pod_name), pod)
+                            .await
+                        {
+                            Ok(_) => {
+                                created += 1;
+                                tracing::debug!(
+                                    workflow = wf_name, pod = %step.pod_name, "created step pod"
+                                )
+                            }
+                            // Deterministic names: a racing duplicate is benign.
+                            Err(e) if e.is_already_exists() => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
             }
         }
@@ -149,14 +211,15 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
 
     // ---- status composition (cumulative node map) ----
     let flat: Vec<&str> = phases.iter().flatten().map(String::as_str).collect();
-    let wf_phase = workflow_phase(&flat, !pods.is_empty() || created > 0);
+    let wf_phase =
+        workflow_phase(&flat, !pods.is_empty() || !agents.is_empty() || created > 0);
     let mut nodes = existing_nodes.clone();
     let mut built: Vec<Value> = Vec::new();
     if plan.root_type == ROOT_POD {
         // Container/script entrypoint: the root node IS the pod node.
         let step = &plan.groups[0][0];
         let view = NodeView {
-            pod: pod_for(&step.node_name),
+            pod: child_for(&step.node_name, step.target),
             recorded: existing_nodes.get(wf_name),
             now: &now,
         };
@@ -199,7 +262,10 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
             if plan.root_type == ROOT_STEPS {
                 let sg_id = stepgroup_id(wf_name, g);
                 let started =
-                    Some(g) == active || group.iter().any(|s| pod_for(&s.node_name).is_some());
+                    Some(g) == active
+                        || group
+                            .iter()
+                            .any(|s| child_for(&s.node_name, s.target).is_some());
                 let phase = if phases[g].iter().all(|p| p == "Succeeded") {
                     "Succeeded"
                 } else if started {
@@ -221,7 +287,7 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
             };
             for (i, step) in group.iter().enumerate() {
                 let view = NodeView {
-                    pod: pod_for(&step.node_name),
+                    pod: child_for(&step.node_name, step.target),
                     recorded: existing_nodes.get(&step.node_name),
                     now: &now,
                 };

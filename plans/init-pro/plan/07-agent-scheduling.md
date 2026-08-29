@@ -9,26 +9,50 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
 
 ---
 
-## T7.1 — AI Agent workload CRD + scheduler extender
+## T7.1 — AI Agent workload (init-pro.io/v1 `Agent` 一级资源; Q35 重写)
 
 - **目标 / Goal**
-  A `init-pro.io/v1alpha1` `AgentWorkload` CRD and an out-of-process scheduler
-  extender (upstream-compatible) that places agent pods by agent-specific
-  semantics (affinity to peers, context locality, model availability).
+  Phase A: `init-pro.io/v1` `Agent` 一级资源 —— spec 携带与 Pod 相同的调度对齐
+  字段（nodeName/nodeSelector/tolerations/affinity/schedulerName/resources,
+  camelCase）+ opencoder 载荷（agent/prompt/model/provider, 无凭证），由内置
+  调度器以与 Pod 相同的 filter/score/CAS 循环绑定节点；Workflow `template.agent`
+  直接创建 Agent 子对象（不再物化 Pod）。opencoder 以库形式收编（`crates/agent`
+  纯 seam）。Phase B（节点侧 watch 已绑定 Agent → `opencoder_session::run_once`
+  → status CAS 回写；CLI run 模式）留 B1/B2。
 
 - **核心实现 / Core implementation**
-  - CRD with spec for agent group, model/image, context refs, SLO hints.
-  - Extender implements the upstream HTTP filter/score protocol; hooks
-    into T3.2's extender seam.
-  - Controller (T3.1 pattern) materializes `AgentWorkload` → Pod(s).
+  - `crates/api/src/agent.rs`: Agent/AgentSpec/AgentStatus/AgentCondition/AgentList,
+    `register_with_short_names(..., "agents", "AgentList", Namespaced, ["ag"])`。
+  - scheduler: agents informer + 专用 agent 队列/worker；`is_agent_pending`；
+    `Snapshot::build_with_agents`（agents 信息性, Phase A 不占节点容量, Pod 求和
+    逐字节不变）；`bind_object`/`mark_unschedulable_object` 按 group/resource/
+    condition 参数化 → `bind_agent`/`mark_agent_unschedulable`（Scheduled 条件,
+    CAS + write-if-changed 语义保持）；node-Put 扇出 + 30s backstop 覆盖 agents。
+  - controllers: `StepTarget::{Pod,Agent}`（agent 优先于 container）；`workflow_agent.rs`
+    构建 Agent 子对象（Workflow/argoproj.io/v1alpha1 ownerReference）；阶段聚合
+    兼读 `init-pro.io/agents` + `status.phase`→node phase 映射；GC `DEPENDENT_KINDS`
+    增 `("init-pro.io","agents")`（级联删除）；runner.rs 765→220 行，拆出
+    `runner_wiring.rs`(377)/`runner_worker.rs`(261)。
+  - kubectl: `resolve_target(kind)` → `("init-pro.io/v1","agents")`；
+    get/apply/delete 通路参数化（argo 路径逐字节不变）。
+  - opencoder: `link_repos/opencoder` path-dep（core/llm/store/session；store 牵
+    libsql 捆绑 C 构建——接受，同 rdb 先例）；`crates/agent` 纯 seam
+    （AgentSpec→`opencoder_core::Config`, 无 I/O/env, 凭证不进 spec）。
 
 - **验收手段 / Acceptance**
-  - Golden: schedule a co-located agent group; extender scored nodes per
-    policy; status reflects agent-specific conditions.
+  - api/cli/apiserver/scheduler/controllers/kubectl 新增单测+集成测试全绿
+    （api: register/round-trip/wire-shape/apply-decode；apiserver: agents CRUD
+    + watch 集成（零 src 改动）；scheduler: Agent 选节点 + 无节点→Scheduled=
+    False/Unschedulable→节点出现后绑定；controllers: agent 模板→Agent 子对象
+    +ownerRef、GC 级联；kubectl: kind 解析 + wire 路径）。
+  - golden G04 fixture 再生成（仅增 agents 项, LuaRouter 字节不变），
+    `scripts/golden-conformance.sh` 39/39；kubectl apply/get/delete agents 实测通过。
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — CRD API design not finalized; defer until M5.
+- **状态 / Status** — done (Phase A, Sprint 26, Q35)；Phase B（B1 节点执行 / B2 CLI run）not-started
+- **证据 / Evidence** — `cargo test --workspace --locked` 882 passed / 0 failed
+  （基线 852 + 30 新增）；`scripts/golden-conformance.sh` 39 passed / 0 failed
+- **卡点 / Blockers** — Phase B 状态回写走 merge-patch（status 子资源合并语义
+  为 Q34 已记同款债务）；argv[0] `agent` 已被节点代理占用（B2 需新子命令/别名）
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---

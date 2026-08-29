@@ -11,7 +11,9 @@
 //! Workflow + CronWorkflow, schema-only CRUD — no workflow controller yet). The actual HTTP serving is **T1.2**; this
 //! module hands T1.2 a byte-correct registry today and is exercised at startup.
 
-use api::{api_group_list, argoproj, core_api_versions, initpro, networking, SchemaRegistry};
+use api::{
+    agent, api_group_list, argoproj, core_api_versions, initpro, networking, SchemaRegistry,
+};
 
 /// The served schema registry: core/v1 + apps/v1 + coordination.k8s.io/v1
 /// native types + init-pro.io/v1 CRDs.
@@ -42,6 +44,9 @@ pub fn served_schema() -> SchemaRegistry {
     // routes, schema-only (the workflow controller is a later scope, Q30).
     argoproj::register(&mut reg);
     initpro::register(&mut reg);
+    // init-pro.io/v1 Agent (TODO **A3**, Q35): a schedulable opencoder session,
+    // served through the same generic CRUD/watch routes as any CRD.
+    agent::register(&mut reg);
     // networking.k8s.io/v1 (Q32): Ingress + IngressClass feed the built-in
     // openrusty gateway (generic CRUD/watch routes; the gateway reflects
     // the same objects through its storage watchers).
@@ -67,11 +72,12 @@ pub fn served_groups_summary(reg: &SchemaRegistry, server_addr: &str) -> String 
 mod tests {
     use super::*;
     use api::api_resource_list;
+    use api::GroupVersionKind;
 
     #[test]
     fn served_schema_has_core_and_initpro() {
         let reg = served_schema();
-        assert!(reg.len() >= 8); // 8 core/v1 + apps/v1 + coordination + networking.k8s.io + init-pro.io
+        assert!(reg.len() >= 21); // 9 core/v1 + 5 apps/v1 + coordination + 2 argoproj + 2 networking + 1 init-pro.io + agents
         let summary = served_groups_summary(&reg, "127.0.0.1:6443");
         assert!(summary.contains("(core)"));
         assert!(summary.contains("init-pro.io"));
@@ -142,5 +148,30 @@ mod tests {
             .resources
             .iter()
             .any(|r| r.name == "persistentvolumeclaims"));
+    }
+
+    #[test]
+    fn served_schema_has_agents() {
+        let reg = served_schema();
+        // TODO **A3** (Q35): `agents` rides the generic routes as-is, so the
+        // GVK<->GVR join must exist with the exact kubectl-facing metadata.
+        let info = reg
+            .get(&GroupVersionKind::gvk("init-pro.io", "v1", "Agent"))
+            .expect("Agent GVK resolved");
+        assert_eq!(info.kind, "Agent");
+        assert_eq!(info.resource, "agents");
+        assert_eq!(info.list_kind, "AgentList");
+        assert!(info.scope.is_namespaced());
+        assert_eq!(info.short_names, vec!["ag".to_string()]);
+        // ... and discovery projects it under the init-pro.io/v1 group.
+        let group = api_resource_list(&reg, "init-pro.io", "v1").expect("init-pro.io/v1 served");
+        let agents = group
+            .resources
+            .iter()
+            .find(|r| r.name == "agents")
+            .expect("agents served");
+        assert_eq!(agents.kind, "Agent");
+        assert_eq!(agents.short_names, Some(vec!["ag".to_string()]));
+        assert!(agents.namespaced);
     }
 }

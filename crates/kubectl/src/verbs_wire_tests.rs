@@ -148,9 +148,16 @@ async fn get_renders_list_table_and_handles_404() {
         ],
     });
     let (port, _) = serve_once(http_response("200 OK", &list.to_string())).await;
-    let out = get(&client(port), "default", "workflows", None, Output::Table)
-        .await
-        .unwrap();
+    let out = get(
+        &client(port),
+        "default",
+        "argoproj.io/v1alpha1",
+        "workflows",
+        None,
+        Output::Table,
+    )
+    .await
+    .unwrap();
     let last = out.lines().last().unwrap();
     assert!(last.starts_with("hello-world   Succeeded"), "{out}");
 
@@ -162,6 +169,7 @@ async fn get_renders_list_table_and_handles_404() {
     let err = get(
         &client(port),
         "default",
+        "argoproj.io/v1alpha1",
         "workflows",
         Some("nope"),
         Output::Json,
@@ -178,9 +186,15 @@ async fn delete_reports_success_and_404() {
         r#"{"kind":"Status","status":"Success"}"#,
     ))
     .await;
-    let out = delete(&client(port), "argo", "cronworkflows", "nightly")
-        .await
-        .unwrap();
+    let out = delete(
+        &client(port),
+        "argo",
+        "argoproj.io/v1alpha1",
+        "cronworkflows",
+        "nightly",
+    )
+    .await
+    .unwrap();
     assert_eq!(out, "cronworkflows/nightly deleted");
     let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
     assert!(
@@ -189,9 +203,15 @@ async fn delete_reports_success_and_404() {
     );
 
     let (port, _) = serve_once(http_response("404 Not Found", r#"{"reason":"NotFound"}"#)).await;
-    let err = delete(&client(port), "argo", "workflows", "nope")
-        .await
-        .unwrap_err();
+    let err = delete(
+        &client(port),
+        "argo",
+        "argoproj.io/v1alpha1",
+        "workflows",
+        "nope",
+    )
+    .await
+    .unwrap_err();
     assert!(err.contains("workflows/nope not found"), "{err}");
 }
 
@@ -233,11 +253,70 @@ async fn get_o_name_prints_qualified_names() {
         ],
     });
     let (port, _) = serve_once(http_response("200 OK", &list.to_string())).await;
-    let out = get(&client(port), "default", "workflows", None, Output::Name)
-        .await
-        .unwrap();
+    let out = get(
+        &client(port),
+        "default",
+        "argoproj.io/v1alpha1",
+        "workflows",
+        None,
+        Output::Name,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         out,
         "workflow.argoproj.io/hello-world\ncronworkflow.argoproj.io/nightly\n"
     );
+}
+
+#[tokio::test]
+async fn get_and_apply_agents_target_initpro_group() {
+    // T7.1/Q35: `kubectl get agents` must hit OUR group, not argoproj.io.
+    let list = json!({
+        "kind": "AgentList",
+        "items": [
+            {"apiVersion": "init-pro.io/v1", "kind": "Agent",
+             "metadata": {"name": "edge-1"}},
+        ],
+    });
+    let (port, captured) = serve_once(http_response("200 OK", &list.to_string())).await;
+    let out = get(
+        &client(port),
+        "default",
+        "init-pro.io/v1",
+        "agents",
+        None,
+        Output::Table,
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("edge-1"), "{out}");
+    let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+    assert!(
+        req.starts_with("GET /apis/init-pro.io/v1/namespaces/default/agents "),
+        "{req}"
+    );
+
+    // `kubectl apply -f` an Agent manifest: SSA PATCH against the same
+    // group, body passed through generically (Q10).
+    let manifest = temp_manifest("agent");
+    std::fs::write(
+        &manifest,
+        "apiVersion: init-pro.io/v1\nkind: Agent\nmetadata:\n  name: edge-1\n  namespace: default\n",
+    )
+    .unwrap();
+    let (port, captured) = serve_once(http_response("200 OK", r#"{"kind":"Agent"}"#)).await;
+    let out = apply(&client(port), "default", manifest.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(out, "Agent/edge-1 applied");
+    let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+    assert!(
+        req.starts_with(
+            "PATCH /apis/init-pro.io/v1/namespaces/default/agents/edge-1?fieldManager="
+        ),
+        "{req}"
+    );
+    assert!(req.contains("init-pro.io/v1"), "{req}");
+    std::fs::remove_file(&manifest).ok();
 }

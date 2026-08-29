@@ -1,8 +1,16 @@
 //! Scheduler wiring (T3.2, Q23): the `ControllerManager::spawn` shape applied
 //! to scheduling — in-process storage transport (**Q19**), Lease+CAS leader
-//! election under `init-pro-scheduler` (**Q18**), pod + node + PVC
-//! informers feeding one pending-pod [`WorkQueue`], and worker loops that
-//! run [`crate::cycle::schedule_one`] then bind or mark unschedulable.
+//! election under `init-pro-scheduler` (**Q18**), pod + node + PVC informers
+//! feeding one pending-pod [`WorkQueue`], and worker loops that run
+//! [`crate::cycle::schedule_one`] then bind or mark unschedulable.
+//!
+//! TODO A4 — Agent scheduling: `init-pro.io/v1 Agent` objects ride the SAME
+//! filter/score/binding loop through a SECOND [`WorkQueue`] (queue keys are
+//! bare `"{ns}/{name}"` and carry no kind, so kinds must not mix): an agent
+//! informer row (`init-pro.io`/`agents`) enqueues pending agents, a dedicated
+//! worker reconciles them against an agent-inclusive snapshot, and the node
+//! Put fan-out + 30 s backstop sweep both workloads. Agents do not consume
+//! node capacity in Phase A (see `plugin::Snapshot::agents`).
 //!
 //! Event fan-out (upstream parity): a pod event enqueues the pod **iff**
 //! pending; a node event re-enqueues every cached pending pod (new capacity
@@ -28,7 +36,9 @@ use controllers::workqueue::WorkQueue;
 use crate::bind;
 use crate::cycle::schedule_one;
 use crate::extender::{ExtenderConfig, ExtenderSet};
-use crate::plugin::{default_filters, default_scores, is_pending, Filter, Score};
+use crate::plugin::{
+    default_filters, default_scores, is_agent_pending, is_pending, Filter, Score,
+};
 
 /// Default scheduler name (`spec.schedulerName` values we claim).
 pub const DEFAULT_SCHEDULER_NAME: &str = "default-scheduler";
@@ -37,6 +47,9 @@ pub const DEFAULT_SCHEDULER_NAME: &str = "default-scheduler";
 const RESYNC: Duration = Duration::from_secs(30);
 /// Workers per queue (same shape as the controllers runner).
 const WORKERS: usize = 2;
+/// Dedicated agent workers (TODO A4): one is plenty — agents arrive at a
+/// far lower rate than pods and share the same snapshot-building cycle.
+const AGENT_WORKERS: usize = 1;
 
 /// Runtime configuration.
 #[derive(Debug, Clone)]
@@ -132,6 +145,7 @@ impl SchedulerManager {
         let supervisor = tokio::spawn(async move {
             let caches = Arc::new(Caches::new());
             let queue = Arc::new(WorkQueue::new());
+            let agent_queue = Arc::new(WorkQueue::new());
             let extenders = match ExtenderSet::from_configs(&cfg.extenders) {
                 Ok(set) => Arc::new(set),
                 Err(e) => {
@@ -153,7 +167,8 @@ impl SchedulerManager {
                 }
                 tracing::info!(target: "init-pro",
                     "scheduler active (leader via Lease init-pro-scheduler, Q18)");
-                let set = spawn_set(&client, &cfg, &caches, &queue, &extenders, stop.clone());
+                let set =
+                    spawn_set(&client, &cfg, &caches, &queue, &agent_queue, &extenders, stop.clone());
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => {
@@ -197,11 +212,27 @@ fn enqueue_pending(pods: &ObjectStore, queue: &WorkQueue, scheduler_name: &str) 
     }
 }
 
+/// Pending-agent keys from a cache snapshot (TODO A4) — the [`enqueue_pending`]
+/// walk over the agent cache into the AGENT queue (node fan-out + backstop).
+fn enqueue_pending_agents(agents: &ObjectStore, queue: &WorkQueue, scheduler_name: &str) {
+    for a in agents.list(None) {
+        if is_agent_pending(&a, scheduler_name) {
+            if let Some(name) = object::name(&a) {
+                let ns = object::namespace(&a).unwrap_or("default");
+                queue.add(format!("{ns}/{name}"));
+            }
+        }
+    }
+}
+
 /// Informer caches shared across leadership terms (one per object kind).
 pub struct Caches {
     pub pods: Arc<ObjectStore>,
     pub nodes: Arc<ObjectStore>,
     pub pvcs: Arc<ObjectStore>,
+    /// `init-pro.io/v1 Agent` objects (TODO A4) — scheduled through the SAME
+    /// filter/score/binding loop as pods via a dedicated queue + worker.
+    pub agents: Arc<ObjectStore>,
 }
 
 impl Default for Caches {
@@ -216,20 +247,28 @@ impl Caches {
             pods: Arc::new(ObjectStore::new()),
             nodes: Arc::new(ObjectStore::new()),
             pvcs: Arc::new(ObjectStore::new()),
+            agents: Arc::new(ObjectStore::new()),
         }
     }
 }
 
 /// Build the informers + workers + backstop for one leadership term.
+#[allow(clippy::too_many_arguments)]
 fn spawn_set(
     client: &Arc<dyn Client>,
     cfg: &SchedulerConfig,
     caches: &Arc<Caches>,
     queue: &Arc<WorkQueue>,
+    agent_queue: &Arc<WorkQueue>,
     extenders: &Arc<ExtenderSet>,
     stop: Stop,
 ) -> Vec<JoinHandle<()>> {
-    let Caches { pods, nodes, pvcs } = &**caches;
+    let Caches {
+        pods,
+        nodes,
+        pvcs,
+        agents,
+    } = &**caches;
     let scheduler_name = cfg.scheduler_name().to_string();
 
     // Pod events -> enqueue when pending (ours to schedule).
@@ -244,20 +283,43 @@ fn spawn_set(
         }
     });
 
-    // Node events (Put only) -> retry every pending pod: capacity changed.
+    // Agent events (TODO A4) -> the same gate on an Agent object, into the
+    // dedicated agent queue (the two queues never mix kinds: keys are bare
+    // "{ns}/{name}" and carry no kind).
+    let q = agent_queue.clone();
+    let gate = scheduler_name.clone();
+    let agent_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        let Some(obj) = event_object(ev) else { return };
+        if is_agent_pending(&obj, &gate) {
+            if let Some(k) = event_object_key(ev) {
+                q.add(k);
+            }
+        }
+    });
+
+    // Node events (Put only) -> retry every pending pod AND every pending
+    // agent: capacity changed for both workloads (TODO A4).
     let q = queue.clone();
+    let aq = agent_queue.clone();
     let pods_for_nodes = pods.clone();
+    let agents_for_nodes = agents.clone();
     let gate = scheduler_name.clone();
     let node_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if !matches!(ev, WatchEvent::Put(_)) {
             return;
         }
         enqueue_pending(&pods_for_nodes, &q, &gate);
+        enqueue_pending_agents(&agents_for_nodes, &aq, &gate);
     });
 
     // PVC informer feeds the (v1 passthrough) VolumeBinding snapshot.
     let informers: Vec<(KeyPrefix, Arc<ObjectStore>, EventHandler)> = vec![
         (KeyPrefix::new("", "pods", None), pods.clone(), pod_handler),
+        (
+            KeyPrefix::new("init-pro.io", "agents", None),
+            agents.clone(),
+            agent_handler,
+        ),
         (
             KeyPrefix::new("", "nodes", None),
             nodes.clone(),
@@ -282,9 +344,12 @@ fn spawn_set(
         .collect();
 
     // Backstop resync (missed edges only; write-if-changed keeps it cheap).
+    // TODO A4: sweeps pods AND agents.
     {
         let queue = queue.clone();
+        let agent_queue = agent_queue.clone();
         let pods = pods.clone();
+        let agents = agents.clone();
         let gate = scheduler_name.clone();
         let stop = stop.clone();
         handles.push(tokio::spawn(async move {
@@ -292,7 +357,10 @@ fn spawn_set(
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => return,
-                    _ = tick.tick() => enqueue_pending(&pods, &queue, &gate),
+                    _ = tick.tick() => {
+                        enqueue_pending(&pods, &queue, &gate);
+                        enqueue_pending_agents(&agents, &agent_queue, &gate);
+                    }
                 }
             }
         }));
@@ -318,6 +386,36 @@ fn spawn_set(
                         let Some(key) = key else { break };
                         reconcile_key(
                             &client, &gate, &pods, &nodes, &pvcs, &queue,
+                            &filters, &scores, Some(extenders.as_ref()), &key,
+                        ).await;
+                    }
+                }
+            }
+        }));
+    }
+
+    // Agent workers (TODO A4): the pod-worker loop shape over the dedicated
+    // agent queue, the agent snapshot (build_with_agents) and agent writers.
+    for _ in 0..AGENT_WORKERS {
+        let client = client.clone();
+        let pods = pods.clone();
+        let nodes = nodes.clone();
+        let pvcs = pvcs.clone();
+        let agents = agents.clone();
+        let queue = agent_queue.clone();
+        let extenders = extenders.clone();
+        let stop = stop.clone();
+        let gate = scheduler_name.clone();
+        handles.push(tokio::spawn(async move {
+            let filters: Vec<Box<dyn Filter>> = default_filters();
+            let scores: Vec<Box<dyn Score>> = default_scores();
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    key = queue.next() => {
+                        let Some(key) = key else { break };
+                        reconcile_agent_key(
+                            &client, &gate, &pods, &nodes, &pvcs, &agents, &queue,
                             &filters, &scores, Some(extenders.as_ref()), &key,
                         ).await;
                     }
@@ -378,6 +476,69 @@ async fn reconcile_key(
         Err(e) => {
             tracing::warn!(target: "init-pro", pod = %key, error = %e,
                 "scheduling attempt failed; rate-limited retry");
+            queue.add_rate_limited(key.to_string());
+            queue.done(key);
+        }
+    }
+}
+
+/// One agent reconciliation (TODO A4): the pod loop with the agent store,
+/// the `is_agent_pending` gate, an agent-inclusive snapshot
+/// (`Snapshot::build_with_agents`) and the agent writers (`bind_agent` /
+/// `mark_agent_unschedulable`). Error policy is identical to
+/// [`reconcile_key`]: conflict/notfound quiesce (done, no requeue), anything
+/// else is rate-limited — an agent that fails to bind never hot-loops.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_agent_key(
+    client: &Arc<dyn Client>,
+    scheduler_name: &str,
+    pods: &Arc<ObjectStore>,
+    nodes: &Arc<ObjectStore>,
+    pvcs: &Arc<ObjectStore>,
+    agents: &Arc<ObjectStore>,
+    queue: &Arc<WorkQueue>,
+    filters: &[Box<dyn Filter>],
+    scores: &[Box<dyn Score>],
+    extenders: Option<&ExtenderSet>,
+    key: &str,
+) {
+    let (ns, name) = match key.split_once('/') {
+        Some((ns, name)) => (ns, name),
+        None => ("default", key),
+    };
+    let result = match agents.get(ns, name) {
+        None => Ok(()), // deleted from cache: nothing to do
+        Some(agent) => {
+            if !is_agent_pending(&agent, scheduler_name) {
+                queue.done(key);
+                return; // bound / not ours / terminal: drop quietly
+            }
+            let snap = crate::plugin::Snapshot::build_with_agents(
+                &pods.list(None),
+                &nodes.list(None),
+                &pvcs.list(None),
+                &agents.list(None),
+            );
+            match schedule_one(&agent, &snap, filters, scores, extenders).await {
+                crate::Outcome {
+                    node: Some(node), ..
+                } => bind::bind_agent(client, &agent, &node).await,
+                crate::Outcome { node: None, reason } => {
+                    bind::mark_agent_unschedulable(client, &agent, &reason)
+                        .await
+                        .map(|_| ())
+                }
+            }
+        }
+    };
+    match result {
+        Ok(()) => queue.done(key),
+        Err(e) if e.is_conflict() || e.is_not_found() => {
+            queue.done(key);
+        }
+        Err(e) => {
+            tracing::warn!(target: "init-pro", agent = %key, error = %e,
+                "agent scheduling attempt failed; rate-limited retry");
             queue.add_rate_limited(key.to_string());
             queue.done(key);
         }

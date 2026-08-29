@@ -21,6 +21,8 @@ use tokio::net::{TcpListener, TcpStream};
 fn served() -> SchemaRegistry {
     let mut reg = SchemaRegistry::with_core_v1();
     api::initpro::register(&mut reg);
+    // A3: the watch stream must carry `agents` too — generic routes as-is.
+    api::agent::register(&mut reg);
     reg
 }
 
@@ -419,4 +421,78 @@ async fn deleted_watch_event_carries_final_object() {
         });
     assert_eq!(del["object"]["data"]["k"], "final2"); // final state, not "final"
     assert_eq!(del["object"]["metadata"]["resourceVersion"], "3"); // create=1 replace=2 delete=3
+}
+
+/// A3: the generic apiserver routes stream `agents` watch events over real
+/// TCP — ADDED on POST, DELETED on DELETE (mirrors the configmaps live test).
+#[tokio::test(flavor = "current_thread")]
+async fn watch_agents_events() {
+    let addr = spawn_server().await;
+
+    // Open the agents watch stream and keep the socket.
+    let mut watch = TcpStream::connect(addr).await.unwrap();
+    watch
+        .write_all(
+            b"GET /apis/init-pro.io/v1/namespaces/default/agents?watch=1 HTTP/1.1\r\n\
+              Host: localhost\r\nconnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // POST the Agent from a separate connection.
+    let agent = br#"{"apiVersion":"init-pro.io/v1","kind":"Agent","metadata":{"name":"ag1","namespace":"default"},"spec":{"prompt":"hi","nodeSelector":{"disk":"ssd"}},"status":{"phase":"Pending"}}"#;
+    let (st, _) = http(
+        addr,
+        "POST",
+        "/apis/init-pro.io/v1/namespaces/default/agents",
+        Some("application/json"),
+        Some(agent),
+    )
+    .await;
+    assert_eq!(st, 201);
+
+    // DELETE it from that separate connection.
+    let (st, _) = http(
+        addr,
+        "DELETE",
+        "/apis/init-pro.io/v1/namespaces/default/agents/ag1",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, 200);
+
+    // Drain the stream until ADDED(ag1) + DELETED(ag1) both arrive.
+    let mut buf = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let events = read_watch_until(&mut watch, &mut buf, deadline, |evs| {
+        evs.iter()
+            .any(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "ag1")
+            && evs.iter()
+                .any(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "ag1")
+    })
+    .await;
+    let added = events
+        .iter()
+        .find(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "ag1")
+        .unwrap_or_else(|| {
+            panic!(
+                "no ADDED for ag1; buffer:\n{}",
+                String::from_utf8_lossy(&buf)
+            )
+        });
+    assert_eq!(added["object"]["kind"], "Agent");
+    assert_eq!(added["object"]["status"]["phase"], "Pending");
+    assert!(added["object"]["metadata"]["resourceVersion"].as_str().is_some());
+    let deleted = events
+        .iter()
+        .find(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "ag1")
+        .unwrap_or_else(|| {
+            panic!(
+                "no DELETED for ag1; buffer:\n{}",
+                String::from_utf8_lossy(&buf)
+            )
+        });
+    assert_eq!(deleted["object"]["kind"], "Agent");
 }

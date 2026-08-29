@@ -12,7 +12,10 @@
 //! * [`controllers`] -- ReplicaSet / Deployment / Endpoints / StatefulSet
 //!   / DaemonSet reconcilers (T3.1a + T3.1b, done Sprint 14; incl. GC +
 //!   namespace lifecycle, decision Q20);
-//! * [`runner`] -- [`ControllerManager`] wiring the whole set together.
+//! * [`runner`] -- [`ControllerManager`] wiring the whole set together
+//!   (leadership supervisor); its informer fan-out table lives in
+//!   [`runner_wiring`] and the worker loop + per-kind dispatch in
+//!   [`runner_worker`] (A5 split, T7.3/Q35).
 //!
 //! Wire format is JSON-only (decision **Q10**): every object flowing through
 //! the framework is a raw `serde_json::Value`, canonical via BTreeMap maps.
@@ -26,6 +29,12 @@ pub mod informer;
 pub mod leaderelection;
 pub mod object;
 pub mod runner;
+/// A5 split (T7.3, Q35): the per-resource informer fan-out table +
+/// workqueue/worker spawning, moved verbatim out of `runner`.
+pub(crate) mod runner_wiring;
+/// A5 split (T7.3, Q35): reconciler workers, the GC delete hook, the
+/// child -> owner enqueuer and `reconcile_key` dispatch.
+pub(crate) mod runner_worker;
 pub mod stop;
 pub mod time;
 pub mod workqueue;

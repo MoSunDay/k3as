@@ -8,6 +8,9 @@
 //! GC + namespace termination semantics: decision **Q20**.
 
 pub mod conditions;
+/// A5 (T7.3, decision **Q35**): Workflow step -> `init-pro.io/v1 Agent`
+/// child assembly (the native agent template variant).
+pub mod workflow_agent;
 /// Pure cron expression parsing + next-fire math (T7.3 Scope C, Q30).
 pub mod cron_expr;
 /// CronWorkflow controller: schedule-driven child Workflow firing (T7.3
@@ -68,6 +71,11 @@ pub struct Caches {
     /// controller reads schedules through this cache; child Workflow
     /// events fan out to their owning CronWorkflow.
     pub cronworkflows: Arc<ObjectStore>,
+    /// `init-pro.io/agents` (A5, Q35): Workflow step Agent children. Their
+    /// events fan out to the owning Workflow; there is no Agent queue --
+    /// the scheduler owns binding, and the Workflow's 5s resync drives
+    /// phase aggregation. The GC sweeps the kind for orphaned children.
+    pub agents: Arc<ObjectStore>,
 }
 
 impl Default for Caches {
@@ -89,6 +97,7 @@ impl Caches {
             namespaces: Arc::new(ObjectStore::new()),
             workflows: Arc::new(ObjectStore::new()),
             cronworkflows: Arc::new(ObjectStore::new()),
+            agents: Arc::new(ObjectStore::new()),
         }
     }
 }

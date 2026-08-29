@@ -1760,3 +1760,50 @@ consequences:
   F2 flannel annotations + `NetworkUnavailable=False`, F3 podIP inside
   the node podCIDR, F4 pod↔pod over the vxlan fabric (F5 informational);
   the multicall selftest now counts 9 aliases including `flannel`.
+
+## Q35 — Agent is an init-pro.io/v1 first-class resource scheduled natively; opencoder embedded as a library (T7.1 rewrite / Sprint 26)
+
+**Date.** 2026-08-29 (Sprint 26, "native Agent").
+
+- **Context.** T7.1 originally planned an `init-pro.io/v1alpha1 AgentWorkload`
+  CRD whose controller materializes Pods, plus an out-of-process scheduler
+  extender. With T3.2 (in-process scheduler + extender seam) and T7.3
+  (Workflow first-class) landed, materializing Pods is the wrong level for AI
+  sessions: a session is not a container — the binding (`nodeName`) is what
+  matters, and Workflow `template.agent` should create the schedulable object
+  directly. The opencoder engine (session/core/llm/store) exists upstream in
+  Rust and can be consumed the same way as openrusty/rdb/flannel-rust.
+- **Options.** (a) keep AgentWorkload→Pod materialization + external
+  extender; (b) native `init-pro.io/v1 Agent` scheduled through the SAME
+  filter/score/CAS loop as Pods, opencoder embedded as path-dep libraries;
+  (c) external operator/crd outside the binary.
+- **Decision.** (b) for Phase A. `crates/api/src/agent.rs` defines `Agent`
+  (Namespaced, plural `agents`, shortName `ag`, list kind `AgentList`); spec
+  carries the Pod scheduling-alignment fields (nodeName/nodeSelector/
+  tolerations/affinity/schedulerName/resources, camelCase) plus the opencoder
+  payload (agent/prompt/model/provider) — NO credentials ever enter a spec;
+  keys resolve from env inside opencoder at runtime. The scheduler watches
+  `init-pro.io/agents` with a dedicated queue and binds via kind-parameterized
+  `bind_object`/`mark_unschedulable_object` (`bind_agent` writes spec.nodeName
+  + a `Scheduled` condition; CAS + write-if-changed semantics unchanged);
+  `Snapshot::build_with_agents` keeps agents informational — they consume no
+  node capacity in Phase A, so Pod filter/score sums are byte-identical.
+  Workflow `template.agent` (wins over `container` when both present) creates
+  Agent children with the Workflow ownerReference; phase aggregation lists
+  agents and maps `status.phase` like pod phases; GC sweeps agents via
+  `DEPENDENT_KINDS`. opencoder rides `link_repos/opencoder` path deps
+  (core/llm/store/session — `store` pulls libsql bundled-SQLite, an accepted
+  build-cost class per the rdb precedent); `crates/agent` is the pure seam
+  (AgentSpec→`opencoder_core::Config`, no I/O, no env reads). kubectl
+  `resolve_target` maps agent/agents/ag → `init-pro.io/v1`/`agents`.
+  Node-side execution (watch bound Agent → `opencoder_session::run_once` →
+  status CAS) and a CLI run mode are Phase B (B1/B2; argv[0] `agent` is taken
+  by the node agent, so B2 needs a new subcommand/alias).
+- **Consequences.** T7.1 Phase A is done with zero apiserver handlers (the
+  generic routes serve agents; discovery golden G04 regenerated, agents entry
+  only). The scheduler is now multi-kind but Pod semantics are provably
+  unchanged (G22/G23 + quiesce/fanout tests untouched and green). The original
+  AgentWorkload→Pod semantics and "scheduler extender for agent placement"
+  framing are retired; policy-grade placement (GPU/peer affinity) stays with
+  T7.2. Phase B status writes go through merge-patch today (status-subresource
+  merge is the same debt noted in Q34).

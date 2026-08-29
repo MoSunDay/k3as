@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use super::workflow_phase::pod_name_for;
-use super::workflow_plan::{is_executable, resolve, unsupported, PlannedStep};
+use super::workflow_plan::{is_executable, resolve, step_target, unsupported, PlannedStep};
 
 pub(super) fn dag_groups(
     wf_name: &str,
@@ -71,11 +71,13 @@ pub(super) fn dag_groups(
                 return Err(unsupported(&template_name, &template));
             }
             let node_name = format!("{wf_name}.{}", names[i]);
+            let target = step_target(&template);
             planned.push(PlannedStep {
                 pod_name: pod_name_for(wf_name, &node_name),
                 node_name,
                 template_name,
                 template,
+                target,
             });
         }
         groups.push(planned);

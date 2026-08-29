@@ -4,7 +4,8 @@
 //! the CLI clap path is intentionally untouched (plan T3.1b: argv[0] only).
 //!
 //! v1 surface: `kubectl rollout status (deployment/NAME | deployment NAME)`
-//! plus the argoproj.io verbs (T7.3 Scope A, Q30). Simplifications are
+//! plus the argoproj.io verbs (T7.3 Scope A, Q30) and the first-class
+//! `init-pro.io/v1` `Agent` kind (T7.1, Q35). Simplifications are
 //! locked by decision **Q21**:
 //! - transport: plain HTTP/1.1 over a raw `tokio::TcpStream`, no auth, no
 //!   https, no new dependencies (TLS + auth arrive with T1.3);
@@ -39,7 +40,7 @@ use std::time::Duration;
 use discovery::{api_resources, api_versions};
 use http::HttpClient;
 use rollout::{rollout_status, Outcome};
-use verbs::{apply, delete, get, parse_output, resolve_plural, Output};
+use verbs::{apply, delete, get, parse_output, Output};
 
 /// Default apiserver address (server default bind is 127.0.0.1:6443).
 pub(crate) const DEFAULT_SERVER: &str = "http://127.0.0.1:6443";
@@ -142,7 +143,7 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
-/// Parsed flags shared by the argoproj.io verbs (T7.3 Scope A).
+/// Parsed flags shared by the argoproj.io / init-pro.io verbs (T7.3, T7.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VerbFlags {
     server: String,
@@ -222,7 +223,7 @@ fn parse_verb_flags(
 fn resolve_positionals(
     positional: &[String],
     required_name: bool,
-) -> Result<(&'static str, Option<String>), String> {
+) -> Result<((&'static str, &'static str), Option<String>), String> {
     let (kind, name): (&str, Option<String>) = match positional {
         [single] => match single.split_once('/') {
             Some((k, n)) => (k, Some(n.to_string())),
@@ -232,7 +233,9 @@ fn resolve_positionals(
             None => (single.as_str(), None),
         },
         [kind, name] => (kind.as_str(), Some(name.clone())),
-        [] => return Err("you must specify a resource type (workflow | cronworkflow)".into()),
+        [] => {
+            return Err("you must specify a resource type (agent | workflow | cronworkflow)".into())
+        }
         _ => {
             return Err(format!(
                 "unexpected extra arguments: {}",
@@ -240,19 +243,22 @@ fn resolve_positionals(
             ))
         }
     };
-    let plural = resolve_plural(kind)?;
+    // Kind -> (apiVersion, plural): agents hit init-pro.io/v1, the Workflow
+    // family argoproj.io/v1alpha1 (T7.1/Q35, T7.3/Q30). Qualified path:
+    // lib.rs has its own (unrelated) `resolve_target` for rollout.
+    let (api_version, plural) = verbs::resolve_target(kind)?;
     match name.as_deref() {
         Some("") => Err("resource name must not be empty".to_string()),
-        other => Ok((plural, other.map(str::to_string))),
+        other => Ok(((api_version, plural), other.map(str::to_string))),
     }
 }
 
 /// `kubectl get (TYPE | TYPE/NAME | TYPE NAME) [-o json|yaml|name]`.
 fn run_get(args: &[String]) -> ExitCode {
-    let (flags, plural, name) =
+    let (flags, (api_version, plural), name) =
         match parse_verb_flags(args, true, false).and_then(|(flags, positional)| {
-            let (plural, name) = resolve_positionals(&positional, false)?;
-            Ok((flags, plural, name))
+            let (target, name) = resolve_positionals(&positional, false)?;
+            Ok((flags, target, name))
         }) {
             Ok(v) => v,
             Err(msg) => return verb_error(msg),
@@ -268,6 +274,7 @@ fn run_get(args: &[String]) -> ExitCode {
     match rt.block_on(get(
         &http,
         &flags.namespace,
+        api_version,
         plural,
         name.as_deref(),
         flags.output,
@@ -318,10 +325,10 @@ fn run_apply(args: &[String]) -> ExitCode {
 
 /// `kubectl delete (TYPE/NAME | TYPE NAME)`.
 fn run_delete(args: &[String]) -> ExitCode {
-    let (flags, plural, name) =
+    let (flags, (api_version, plural), name) =
         match parse_verb_flags(args, false, false).and_then(|(flags, positional)| {
-            let (plural, name) = resolve_positionals(&positional, true)?;
-            Ok((flags, plural, name))
+            let (target, name) = resolve_positionals(&positional, true)?;
+            Ok((flags, target, name))
         }) {
             Ok(v) => v,
             Err(msg) => return verb_error(msg),
@@ -337,7 +344,7 @@ fn run_delete(args: &[String]) -> ExitCode {
         Ok(rt) => rt,
         Err(msg) => return verb_error(msg),
     };
-    match rt.block_on(delete(&http, &flags.namespace, plural, &name)) {
+    match rt.block_on(delete(&http, &flags.namespace, api_version, plural, &name)) {
         Ok(text) => {
             println!("{text}");
             ExitCode::SUCCESS
@@ -519,7 +526,8 @@ fn usage() -> String {
         "kubectl controls the init-pro cluster.".into(),
         String::new(),
         "v1 surface: rollout status for Deployments (T3.1b, Q21 plain-HTTP transport)".into(),
-        "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30)".into(),
+        "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30),".into(),
+        "the init-pro.io/v1 Agent kind for get/apply/delete (T7.1, Q35),".into(),
         "the discovery listing verbs api-versions / api-resources (T7.3, Q30),".into(),
         "and pod logs / exec over the apiserver relay (T4.2 Scope C, Q31).".into(),
         String::new(),
@@ -534,7 +542,8 @@ fn usage() -> String {
         "  kubectl exec POD [-c CONTAINER] -- CMD [ARGS...] [flags]".into(),
         String::new(),
         "Target forms: deployment/NAME, deployments/NAME, deploy/NAME (deployment only in v1).".into(),
-        "argoproj types: workflow (wf), cronworkflow (cwf, cronwf) — argoproj.io/v1alpha1 only.".into(),
+        "argoproj types: workflow (wf), cronworkflow (cwf, cronwf) — argoproj.io/v1alpha1.".into(),
+        "init-pro type: agent (agents, ag) — init-pro.io/v1 (T7.1, Q35).".into(),
         String::new(),
         "Flags:".into(),
         "  -h, --help                 help for kubectl".into(),

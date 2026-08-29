@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::verbs::{
     age_between, manifest_target, parse_manifest, parse_output, render_table, resolve_plural,
-    resource_path, Output,
+    resolve_target, resource_path, Output,
 };
 
 // ---------- pure helpers ----------
@@ -17,9 +17,43 @@ use crate::verbs::{
 fn resolve_plural_whitelist_and_aliases() {
     for kind in ["Workflow", "workflows", "wf", "WF"] {
         assert_eq!(resolve_plural(kind).unwrap(), "workflows", "{kind}");
+        assert_eq!(resolve_target(kind).unwrap().1, "workflows", "{kind}");
+        assert_eq!(
+            resolve_target(kind).unwrap().0,
+            "argoproj.io/v1alpha1",
+            "{kind}"
+        );
     }
     for kind in ["CronWorkflow", "cronworkflows", "cwf", "cronwf"] {
         assert_eq!(resolve_plural(kind).unwrap(), "cronworkflows", "{kind}");
+        assert_eq!(
+            resolve_target(kind).unwrap(),
+            ("argoproj.io/v1alpha1", "cronworkflows"),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn resolve_target_maps_agent_to_initpro_group() {
+    // T7.1/Q35: Agent lives in OUR init-pro.io/v1 group, not argoproj.io.
+    for kind in ["Agent", "agent", "agents", "ag", "AGENTS"] {
+        assert_eq!(
+            resolve_target(kind).unwrap(),
+            ("init-pro.io/v1", "agents"),
+            "{kind}"
+        );
+        assert_eq!(resolve_plural(kind).unwrap(), "agents", "{kind}");
+    }
+}
+
+#[test]
+fn resolve_target_rejects_agent_lookalikes_and_empty() {
+    for kind in ["agentrun", "agentset", ""] {
+        let err = resolve_target(kind).unwrap_err();
+        assert!(err.contains("unsupported resource kind"), "{kind}: {err}");
+        assert!(err.contains("init-pro.io/v1"), "{kind}: {err}");
+        assert!(err.contains("agent"), "{kind}: {err}");
     }
 }
 
@@ -36,12 +70,26 @@ fn resolve_plural_rejects_out_of_scope_kinds() {
 #[test]
 fn resource_path_collection_and_item() {
     assert_eq!(
-        resource_path("workflows", "default", None),
+        resource_path("argoproj.io/v1alpha1", "workflows", "default", None),
         "/apis/argoproj.io/v1alpha1/namespaces/default/workflows"
     );
     assert_eq!(
-        resource_path("cronworkflows", "argo", Some("nightly")),
+        resource_path(
+            "argoproj.io/v1alpha1",
+            "cronworkflows",
+            "argo",
+            Some("nightly")
+        ),
         "/apis/argoproj.io/v1alpha1/namespaces/argo/cronworkflows/nightly"
+    );
+    // T7.1/Q35: agents build paths from init-pro.io/v1.
+    assert_eq!(
+        resource_path("init-pro.io/v1", "agents", "default", None),
+        "/apis/init-pro.io/v1/namespaces/default/agents"
+    );
+    assert_eq!(
+        resource_path("init-pro.io/v1", "agents", "default", Some("edge-1")),
+        "/apis/init-pro.io/v1/namespaces/default/agents/edge-1"
     );
 }
 

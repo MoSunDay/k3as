@@ -22,7 +22,7 @@ is complete; Phase 2 (persistence + control plane) is in progress. The Cargo wor
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q34
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q35
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -87,6 +87,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `common` | Shared primitives: embed descriptor + `version()`. |
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
 | `api` | Resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1). |
+| `agent` | Pure seam: `AgentSpec` ↔ opencoder session config bridging (T7.1 Phase A, Q35); no execution (Phase B). |
 | `apiserver` | HTTP discovery + REST CRUD/watch/SSA over the storage trait (T1.2 done). |
 | `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers + node podCIDR reconciler (T3.1; T4.3 Scope A, Q34). |
 | `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q19). |
@@ -107,7 +108,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   (T2.1/T2.2/T2.3 - storage, Q33), T3.1/T3.2 (controllers + scheduler),
   T4.1 (containerd bundling), T4.2 Scope A+B+C (kubelet + logs/exec, Q31),
   the Layer 5 M1 slice (T5.1-T5.4, Q32), and T7.3 (Argo Workflows, Q30).
-  Phase 1 (M0 + M1) is complete; 20/33 TODOs done.
+  Phase 1 (M0 + M1) is complete; 21/33 TODOs done (T7.1 Phase A, Q35).
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -147,5 +148,8 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - Q34 - CNI is flannel-rust embedded in the agent process (vxlan default)
   + the `flannel` multicall alias as CNI meta-plugin; node podCIDRs from
   `--cluster-cidr` via a controller reconciler.
+- Q35 - `Agent` is an init-pro.io/v1 first-class resource scheduled natively
+  through the same loop as Pods; Workflow `template.agent` creates Agents
+  (no Pod materialization); opencoder embedded as link_repos path deps.
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q34).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q35).

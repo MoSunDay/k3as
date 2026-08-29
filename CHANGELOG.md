@@ -7,6 +7,71 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 26 — native Agent: init-pro.io/v1 first-class resource + opencoder lib (Q35) (2026-08-29)
+
+**Goal:** make `Agent` a first-class resource that the built-in scheduler
+binds natively through the same filter/score/CAS loop as Pods, and that
+Workflow `template.agent` creates directly — no Pod materialization; embed
+opencoder as libraries so Phase B can execute sessions on nodes.
+**Tests: 882 passed / 0 failed** (`cargo test --workspace --locked`;
+baseline 852 + 30 new).
+
+### opencoder adoption (link_repos precedent)
+- `link_repos/opencoder` symlink; path deps `opencoder-core/llm/store/session`
+  (root `Cargo.toml` `exclude` already covers it). `store` pulls libsql
+  bundled-SQLite — accepted build-cost class per the rdb precedent (Q33).
+  Cargo.lock +69 packages, 0 removed, 0 downgraded; 16 workspace members
+  (opencoder stays outside ours).
+- NEW `crates/agent` (243 lines, `#![forbid(unsafe_code)]`): pure seam
+  `AgentSpec` → `opencoder_core::Config` (+ prompt/agent-preset passthroughs);
+  no I/O, no env reads; credentials never enter specs (env-resolved inside
+  opencoder at runtime). 5 tests (normal + empty-spec + no-provider
+  boundaries + no-credential invariant).
+
+### Agent resource + scheduling (T7.1 Phase A, Q35)
+- NEW `crates/api/src/agent.rs` (330 lines): `Agent`/`AgentSpec`/`AgentStatus`
+  (phase defaults Pending)/`AgentCondition`/`AgentList`;
+  `register_with_short_names("Agent","agents","AgentList",Namespaced,["ag"])`.
+  5 tests: register+resolve, serde round-trip, wire shape (camelCase
+  nodeName/nodeSelector/schedulerName), kubectl-apply decode, full JSON contract.
+- `crates/cli/src/discovery.rs`: `agent::register` wired; `reg.len()` floor
+  8→21; `served_schema_has_agents` test (63 cli tests green).
+- apiserver: ZERO src changes — generic routes serve agents; new integration
+  tests `agents_crud` (POST/GET/list/merge-PATCH status/DELETE→404) and
+  `watch_agents_events` (ADDED/DELETED over the real-TCP harness).
+- scheduler: agents informer row + dedicated agent queue/worker;
+  `is_agent_pending`; `Snapshot::build_with_agents` (agents informational,
+  consume no node capacity — pod filter/score sums byte-identical);
+  `bind_object`/`mark_unschedulable_object` parameterized by
+  group/resource/condition with `bind_agent`/`mark_agent_unschedulable`
+  wrappers (`Scheduled` condition; CAS + write-if-changed preserved);
+  node-Put fanout + 30s backstop cover agents. 4 unit + 2 integration tests;
+  golden plugin-order guard and every pre-existing pod/extender/quiesce test
+  untouched and green.
+- controllers: runner.rs 765→220 (pure motion split into `runner_wiring.rs`
+  377 + `runner_worker.rs` 261, both ≤400); `workflow_plan.rs` gains
+  `StepTarget::{Pod,Agent}` (agent wins over container) and admits `agent`
+  templates in `is_executable`; NEW `workflow_agent.rs` builds Agent children
+  with the Workflow ownerReference; phase aggregation lists
+  `init-pro.io/agents` and maps `status.phase` → node phase; GC
+  `DEPENDENT_KINDS` + `("init-pro.io","agents")` with a cascade test;
+  agents informer row + `enqueue_owner("Workflow")` handoff.
+- kubectl: `resolve_target(kind)` → (apiVersion, plural);
+  agent/agents/ag → `("init-pro.io/v1","agents")`; get/apply/delete paths
+  parameterized (argo paths byte-identical); wire tests for the init-pro paths.
+- golden: `golden/discovery-initpro-v1.json` regenerated — diff reviewed,
+  ONLY the `agents` entry added (shortNames ["ag"], sorted before
+  `luarouters`); `scripts/golden-conformance.sh` 39 passed / 0 failed.
+- live check: `kubectl apply -f agent.yaml` → `get agents` → `get ag -o name`
+  → `delete agent` all verified against a running server.
+
+### Gates
+`cargo build --workspace --locked` ✓ · `cargo test --workspace --locked`
+882/0 ✓ · `cargo clippy --workspace --all-targets -- -D warnings` ✓ ·
+line limits: new files ≤400 (agent.rs 330, agent/lib.rs 243, runner_wiring 377,
+runner_worker 261, workflow_agent 133), iterated ≤800 (scheduler/runner.rs 546,
+kubectl/lib.rs 685, rest_watch.rs 498) ✓
+
 ## Sprint 25 — link_repos wave: openrusty router + rdb/RocksDB datastore + flannel CNI (Q32/Q33/Q34) (2026-08-28)
 
 **Goal:** swap three load-bearing substrates to upstream Rust code

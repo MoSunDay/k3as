@@ -304,3 +304,110 @@ async fn dag_workflow_layers() {
     }
     assert_eq!(node(&wf, "diamond.D")["boundaryID"], "diamond");
 }
+
+// ---------------------------------------------------------------------------
+// A5 (decision Q35): native `agent` templates materialize `init-pro.io/v1`
+// Agent child objects instead of Pods. End-to-end through the real runner:
+// the reconciler creates the Agent child, the Agent's PUT events re-enqueue
+// the owning Workflow, and the phase readthrough completes it.
+// ---------------------------------------------------------------------------
+
+/// One step, but an `agent` template: no Pod, an Agent child.
+fn agent_workflow() -> Value {
+    json!({
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "Workflow",
+        "metadata": {"name": "ask", "namespace": NS},
+        "spec": {
+            "entrypoint": "main",
+            "templates": [
+                {"name": "main", "agent": {
+                    "prompt": "say hi",
+                    "model": {"name": "small"},
+                    "provider": "local",
+                }},
+            ],
+        },
+    })
+}
+
+async fn agents(env: &Env) -> Vec<Value> {
+    env.client
+        .list(&KeyPrefix::new("init-pro.io", "agents", Some(NS.into())))
+        .await
+        .unwrap()
+}
+
+/// Play the scheduler + agent runtime: CAS-move an Agent's `status.phase`.
+async fn set_agent_phase(env: &Env, agent_name: &str, phase: &str) {
+    let key = Key::new("init-pro.io", "agents", NS, agent_name);
+    let agent = env
+        .client
+        .get(&key)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("agent {agent_name} exists"));
+    let rv = agent["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut next = agent.clone();
+    next["status"] = json!({"phase": phase});
+    env.client.update(&key, next, Some(rv)).await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_template_creates_an_agent_child_not_a_pod() {
+    let env = env();
+    create_wf(&env, agent_workflow()).await;
+
+    // The reconciler materializes an Agent child (deterministic child
+    // name), and NO step pod exists for it.
+    eventually!(10_000, async { !agents(&env).await.is_empty() });
+    let agent = &agents(&env).await[0];
+    assert_eq!(agent["apiVersion"], "init-pro.io/v1");
+    assert_eq!(agent["kind"], "Agent");
+    assert_eq!(agent["metadata"]["name"], "ask");
+    assert_eq!(
+        agent["metadata"]["annotations"]["workflows.argoproj.io/node-name"],
+        "ask"
+    );
+    assert_eq!(
+        agent["metadata"]["labels"]["workflows.argoproj.io/workflow"],
+        "ask"
+    );
+    assert_eq!(agent["metadata"]["ownerReferences"][0]["kind"], "Workflow");
+    assert_eq!(agent["spec"]["prompt"], "say hi");
+    assert_eq!(agent["spec"]["provider"], "local");
+    // Status is not set at creation.
+    assert!(agent.get("status").is_none());
+    eventually!(10_000, async { pods(&env).await.is_empty() });
+
+    // The Agent child drives the Workflow's node tree (Pending until the
+    // child reports).
+    eventually!(10_000, async {
+        let wf = get_wf(&env, "ask").await;
+        wf["status"]["phase"] == "Running"
+            && node(&wf, "ask")["phase"] == "Pending"
+            && node(&wf, "ask")["templateName"] == "main"
+    });
+
+    // Play the scheduler/runtime: bind + finish the Agent.
+    set_agent_phase(&env, "ask", "Running").await;
+    eventually!(10_000, async {
+        node(&get_wf(&env, "ask").await, "ask")["phase"] == "Running"
+    });
+    set_agent_phase(&env, "ask", "Succeeded").await;
+
+    eventually!(10_000, async {
+        let wf = get_wf(&env, "ask").await;
+        wf["status"]["phase"] == "Succeeded" && has_completed_condition(&wf)
+    });
+    let wf = get_wf(&env, "ask").await;
+    let root = node(&wf, "ask");
+    assert_eq!(root["type"], "Pod"); // the leaf-node type stays pod-shaped
+    assert_eq!(root["phase"], "Succeeded");
+    assert!(root["finishedAt"].is_string());
+    assert!(pods(&env).await.is_empty(), "no pod was ever created");
+}

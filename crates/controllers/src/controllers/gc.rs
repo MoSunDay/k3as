@@ -37,14 +37,16 @@ use crate::object::{controller_of, name, namespace, resource_version};
 pub(crate) const ORPHAN_ANNOTATION: &str = "init-pro.io/deletion-propagation";
 
 /// `(group, resource)` of every kind the GC sweeps for dangling controller
-/// ownerReferences (cluster-wide list).
-pub(crate) const DEPENDENT_KINDS: [(&str, &str); 6] = [
+/// ownerReferences (cluster-wide list). A5: `init-pro.io/agents` (Workflow
+/// step Agent children) join the sweep universe (Q35).
+pub(crate) const DEPENDENT_KINDS: [(&str, &str); 7] = [
     ("", "pods"),
     ("apps", "replicasets"),
     ("", "endpoints"),
     ("", "persistentvolumeclaims"),
     ("apps", "controllerrevisions"),
     ("argoproj.io", "workflows"),
+    ("init-pro.io", "agents"),
 ];
 
 /// Owner kinds the GC is authoritative over (each has an informer cache);
@@ -193,7 +195,12 @@ fn owner_in_cache(caches: &Caches, kind: &str, ns: &str, owner_name: &str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::StorageClient;
+    use crate::controllers::workflow_agent::build_agent;
+    use crate::controllers::workflow_plan::{PlannedStep, StepTarget};
     use serde_json::json;
+    use std::sync::Arc;
+    use storage::{EmbeddedStorage, StoredEntry, WatchEvent};
 
     #[test]
     fn managed_owner_kind_table() {
@@ -215,13 +222,14 @@ mod tests {
 
     #[test]
     fn dependent_kinds_are_the_sweep_universe() {
-        assert_eq!(DEPENDENT_KINDS.len(), 6);
+        assert_eq!(DEPENDENT_KINDS.len(), 7);
         assert!(DEPENDENT_KINDS.contains(&("", "pods")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "replicasets")));
         assert!(DEPENDENT_KINDS.contains(&("", "endpoints")));
         assert!(DEPENDENT_KINDS.contains(&("", "persistentvolumeclaims")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "controllerrevisions")));
         assert!(DEPENDENT_KINDS.contains(&("argoproj.io", "workflows")));
+        assert!(DEPENDENT_KINDS.contains(&("init-pro.io", "agents")));
         // The drain kinds (namespace.rs) are a superset for teardown; the
         // sweep universe only needs owner-carrying kinds.
         for kind in DEPENDENT_KINDS {
@@ -295,5 +303,61 @@ mod tests {
             "web",
             ""
         ));
+    }
+
+    /// A5/Q35 acceptance: an `init-pro.io/agents` Agent child carrying a
+    /// Workflow controller ownerReference is swept exactly when the owner
+    /// left the informer caches (empty workflow cache -> deleted; owner
+    /// present -> survives). Real `EmbeddedStorage` + `StorageClient`, no
+    /// runner harness needed -- `sweep` is the cascade entry point.
+    #[tokio::test]
+    async fn sweep_cascades_agent_children_only_when_the_owner_is_gone() {
+        let store = Arc::new(EmbeddedStorage::new());
+        let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
+        let ns = "default";
+        let child_key = Key::new("init-pro.io", "agents", ns, "ask-wf-0-ask");
+        let wf = json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Workflow",
+            "metadata": {"name": "ask-wf", "namespace": ns, "uid": "u-wf"},
+            "spec": {"entrypoint": "main"},
+        });
+        let step = PlannedStep {
+            node_name: "ask-wf[0].ask".into(),
+            template_name: "tmpl".into(),
+            pod_name: "ask-wf-0-ask".into(),
+            template: json!({"agent": {"prompt": "p"}}),
+            target: StepTarget::Agent,
+        };
+        let agent = build_agent(&wf, ns, "u-wf", &step);
+        assert_eq!(
+            agent["metadata"]["ownerReferences"][0]["kind"],
+            "Workflow"
+        );
+
+        // Case 1: the owner is NOT in the caches -> the Agent is an orphan.
+        client.create(&child_key, agent.clone()).await.unwrap();
+        let caches = Arc::new(Caches::new());
+        assert!(caches.workflows.get(ns, "ask-wf").is_none());
+        sweep(&client, &caches).await.unwrap();
+        assert!(client.get(&child_key).await.unwrap().is_none());
+
+        // Case 2: the owner IS in the workflow cache -> the Agent survives.
+        client.create(&child_key, agent).await.unwrap();
+        caches.workflows.apply_event(&WatchEvent::Put(Arc::new(StoredEntry {
+            key: format!("/registry/argoproj.io/workflows/{ns}/ask-wf"),
+            value: wf,
+            create_revision: 1,
+            mod_revision: 1,
+            version: 1,
+        })));
+        assert!(caches.workflows.get(ns, "ask-wf").is_some());
+        sweep(&client, &caches).await.unwrap();
+        let survivor = client.get(&child_key).await.unwrap();
+        assert!(survivor.is_some(), "agent must survive a live owner");
+        assert_eq!(
+            survivor.unwrap()["metadata"]["labels"]["workflows.argoproj.io/workflow"],
+            "ask-wf"
+        );
     }
 }

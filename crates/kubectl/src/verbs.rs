@@ -1,8 +1,9 @@
 //! `kubectl get|apply|delete` for `argoproj.io/v1alpha1` (T7.3 Scope A,
-//! **Q30**).
+//! **Q30**) and the first-class `init-pro.io/v1` `Agent` (T7.1, **Q35**).
 //!
 //! Three layers, mirroring `rollout.rs`:
-//! - pure helpers ([`resolve_plural`], [`resource_path`], [`parse_output`],
+//! - pure helpers ([`resolve_target`], [`resolve_plural`],
+//!   [`resource_path`], [`parse_output`],
 //!   [`age_between`], [`render_table`], [`parse_manifest`],
 //!   [`manifest_target`]) — unit-tested with no server in sight;
 //! - one verb function per subcommand that drives the Q21 HTTP client;
@@ -15,8 +16,10 @@ use serde_json::Value;
 
 use crate::http::HttpClient;
 
-/// Namespaced REST root for the group served by Scope A.
-const GROUP_VERSION_PATH: &str = "/apis/argoproj.io/v1alpha1";
+/// Group/version for the built-in `Agent` resource (T7.1, **Q35**).
+pub(crate) const AGENT_API_VERSION: &str = "init-pro.io/v1";
+/// Group/version for the argo Workflow family (T7.3 Scope A, Q30).
+pub(crate) const ARGO_API_VERSION: &str = "argoproj.io/v1alpha1";
 /// SSA field manager identity (mirrors kubectl's `kubectl-client-side-apply`
 /// convention; visible in `metadata.managedFields`).
 const FIELD_MANAGER: &str = "init-pro-kubectl";
@@ -24,24 +27,46 @@ const FIELD_MANAGER: &str = "init-pro-kubectl";
 const APPLY_CONTENT_TYPE: &str = "application/apply-patch+yaml";
 const JSON_CONTENT_TYPE: &str = "application/json";
 
-/// Map a user-supplied kind/alias to the argoproj.io plural (v1 whitelist).
-pub(crate) fn resolve_plural(kind: &str) -> Result<&'static str, String> {
+/// Map a user-supplied kind/alias to its `(apiVersion, plural)` REST
+/// target — `Agent` lives in **our own** `init-pro.io/v1` group (T7.1,
+/// Q35), the Workflow family stays in `argoproj.io/v1alpha1` (T7.3, Q30).
+pub(crate) fn resolve_target(kind: &str) -> Result<(&'static str, &'static str), String> {
     match kind.to_ascii_lowercase().as_str() {
-        "workflow" | "workflows" | "wf" => Ok("workflows"),
-        "cronworkflow" | "cronworkflows" | "cwf" | "cronwf" => Ok("cronworkflows"),
+        "agent" | "agents" | "ag" => Ok((AGENT_API_VERSION, "agents")),
+        "workflow" | "workflows" | "wf" => Ok((ARGO_API_VERSION, "workflows")),
+        "cronworkflow" | "cronworkflows" | "cwf" | "cronwf" => {
+            Ok((ARGO_API_VERSION, "cronworkflows"))
+        }
         other => Err(format!(
             "unsupported resource kind {other:?}: argoproj.io/v1alpha1 supports \
              workflow (aliases: workflows, wf) and cronworkflow \
-             (aliases: cronworkflows, cwf, cronwf) in v1 (T7.3 Scope A)"
+             (aliases: cronworkflows, cwf, cronwf) in v1 (T7.3 Scope A); \
+             init-pro.io/v1 supports agent (aliases: agents, ag) in v1 \
+             (T7.1, Q35)"
         )),
     }
 }
 
-/// Namespaced collection/item REST path for a plural.
-pub(crate) fn resource_path(plural: &str, ns: &str, name: Option<&str>) -> String {
+/// Map a user-supplied kind/alias to the plural (delegates to
+/// [`resolve_target`]); retained for callers that only need the plural
+/// segment (currently the unit tests; keep in the non-test build so the
+/// whitelist seam stays exercisable).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn resolve_plural(kind: &str) -> Result<&'static str, String> {
+    resolve_target(kind).map(|(_, plural)| plural)
+}
+
+/// Namespaced collection/item REST path for an `(apiVersion, plural)`
+/// target: `/apis/{api_version}/namespaces/{ns}/{plural}[/{name}]`.
+pub(crate) fn resource_path(
+    api_version: &str,
+    plural: &str,
+    ns: &str,
+    name: Option<&str>,
+) -> String {
     match name {
-        Some(name) => format!("{GROUP_VERSION_PATH}/namespaces/{ns}/{plural}/{name}"),
-        None => format!("{GROUP_VERSION_PATH}/namespaces/{ns}/{plural}"),
+        Some(name) => format!("/apis/{api_version}/namespaces/{ns}/{plural}/{name}"),
+        None => format!("/apis/{api_version}/namespaces/{ns}/{plural}"),
     }
 }
 
@@ -254,11 +279,14 @@ fn qualified_name(item: &Value) -> String {
 pub(crate) async fn get(
     http: &HttpClient,
     ns: &str,
+    api_version: &str,
     plural: &str,
     name: Option<&str>,
     output: Output,
 ) -> Result<String, String> {
-    let (code, body) = http.get_json(&resource_path(plural, ns, name)).await?;
+    let (code, body) = http
+        .get_json(&resource_path(api_version, plural, ns, name))
+        .await?;
     if code == 404 {
         let what = name
             .map(|n| format!("{plural}/{n}"))
@@ -295,7 +323,10 @@ pub(crate) async fn apply(http: &HttpClient, ns: &str, file: &str) -> Result<Str
         std::fs::read_to_string(file).map_err(|e| format!("cannot read file {file:?}: {e}"))?;
     let obj = parse_manifest(&raw, file)?;
     let (kind, name, _generate_name, ns_override) = manifest_target(&obj)?;
-    let plural = resolve_plural(&kind)?;
+    // Agents resolve to init-pro.io/v1, Workflow family to
+    // argoproj.io/v1alpha1 (T7.1/Q35 + T7.3/Q30) — the manifest body itself
+    // passes through generically (YAML/JSON -> JSON, Q10).
+    let (api_version, plural) = resolve_target(&kind)?;
     // Namespace precedence: manifest `.metadata.namespace` > `-n` flag.
     let target_ns = ns_override.unwrap_or_else(|| ns.to_string());
     let body = serde_json::to_string(&obj).map_err(|e| format!("serialize manifest: {e}"))?;
@@ -303,7 +334,7 @@ pub(crate) async fn apply(http: &HttpClient, ns: &str, file: &str) -> Result<Str
     // kubectl falls back to a plain create and lets the server pick the
     // suffix (T7.3 Scope A).
     let Some(name) = name else {
-        let path = resource_path(plural, &target_ns, None);
+        let path = resource_path(api_version, plural, &target_ns, None);
         let (code, resp) = http
             .request_json("POST", &path, Some(JSON_CONTENT_TYPE), Some(&body))
             .await?;
@@ -317,7 +348,7 @@ pub(crate) async fn apply(http: &HttpClient, ns: &str, file: &str) -> Result<Str
     };
     let path = format!(
         "{}?fieldManager={FIELD_MANAGER}",
-        resource_path(plural, &target_ns, Some(&name))
+        resource_path(api_version, plural, &target_ns, Some(&name))
     );
     let (code, resp) = http
         .request_json("PATCH", &path, Some(APPLY_CONTENT_TYPE), Some(&body))
@@ -336,11 +367,17 @@ pub(crate) async fn apply(http: &HttpClient, ns: &str, file: &str) -> Result<Str
 pub(crate) async fn delete(
     http: &HttpClient,
     ns: &str,
+    api_version: &str,
     plural: &str,
     name: &str,
 ) -> Result<String, String> {
     let (code, body) = http
-        .request_json("DELETE", &resource_path(plural, ns, Some(name)), None, None)
+        .request_json(
+            "DELETE",
+            &resource_path(api_version, plural, ns, Some(name)),
+            None,
+            None,
+        )
         .await?;
     match code {
         200..=299 => Ok(format!("{plural}/{name} deleted")),

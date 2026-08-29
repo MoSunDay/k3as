@@ -17,6 +17,8 @@ use tower::ServiceExt;
 fn served() -> SchemaRegistry {
     let mut reg = SchemaRegistry::with_core_v1();
     api::initpro::register(&mut reg);
+    // A3: the generic routes serve `agents` as-is — no apiserver-src changes.
+    api::agent::register(&mut reg);
     reg
 }
 
@@ -369,6 +371,90 @@ async fn grouped_crd_crud() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+}
+
+/// A3: the `Agent` resource rides the same generic CRUD routes — full
+/// lifecycle: POST -> GET one -> GET list -> merge-patch status -> DELETE ->
+/// 404. Mirrors [`grouped_crd_crud`].
+#[tokio::test]
+async fn agents_crud() {
+    let r = app();
+    let agent = json!({
+        "apiVersion": "init-pro.io/v1",
+        "kind": "Agent",
+        "metadata": { "name": "ag1", "namespace": "default" },
+        "spec": { "prompt": "hi", "nodeSelector": { "disk": "ssd" } },
+        "status": { "phase": "Pending" }
+    });
+
+    // CREATE -> 201 with the Agent kind echoed back.
+    let (st, body) = send(
+        r.clone(),
+        "POST",
+        "/apis/init-pro.io/v1/namespaces/default/agents",
+        json_body(&agent),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(body["kind"], "Agent");
+    assert_eq!(body["status"]["phase"], "Pending");
+
+    // GET one -> OK.
+    let (st, _) = send(
+        r.clone(),
+        "GET",
+        "/apis/init-pro.io/v1/namespaces/default/agents/ag1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // GET list -> AgentList with exactly one item.
+    let (st, body) = send(
+        r.clone(),
+        "GET",
+        "/apis/init-pro.io/v1/namespaces/default/agents",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["kind"], "AgentList");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+    // PATCH (RFC 7386 merge) flips the status phase.
+    let patch = json!({ "status": { "phase": "Running" } });
+    let (st, body) = send(
+        r.clone(),
+        "PATCH",
+        "/apis/init-pro.io/v1/namespaces/default/agents/ag1",
+        Some((
+            "application/merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["status"]["phase"], "Running");
+    assert_eq!(body["spec"]["prompt"], "hi"); // untouched by the merge
+
+    // DELETE -> OK, then GET one again -> 404.
+    let (st, body) = send(
+        r.clone(),
+        "DELETE",
+        "/apis/init-pro.io/v1/namespaces/default/agents/ag1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["kind"], "Agent");
+    let (st, _) = send(
+        r,
+        "GET",
+        "/apis/init-pro.io/v1/namespaces/default/agents/ag1",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
