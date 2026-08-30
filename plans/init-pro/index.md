@@ -75,6 +75,12 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 28 — supervisor 关停顺序根因修复: CRI 清零前不停 containerd (T4.1 后续项 closed, Q24-Q26 域).**
+  kubelet shutdown 新增 `sync::drain_sandboxes`(15s 预算逐 sweep: 容器 task 先 stop/rm、再 stopp/rmp, 瞬态拒绝重试);
+  supervisor 改用独立 Shutdown token, cli drain 顺序 kubelet join → `wait_sandboxes_gone`(5s) → 停 containerd;
+  golden harness `purge_run_shims` 退化为 `assert_no_run_shims` 断言。压负载 3× golden 39/0 全绿、零 shim 残留、
+  无 purge 兜底; 微 e2e 实测 `teardown done → CRI drained(13ms) → containerd drained` 后 shims=0 mounts=0。
+  Tests: 935 → 940 (NEW tests/sync_drain.rs 5 例)。
 - **Sprint 27 — anyhome 一级公民 + workspace 自动挂载 (T7.4 done, Q36).**
   `link_repos/any-home`(nfsserve 单端口 NFS/MOUNT/portmap 复用)作为 path-dep 内嵌, `server` 默认自启(`--disable-anyhome`/`--anyhome-addr`,
   env `INIT_PRO_ANYHOME_ADDR`/`INIT_PRO_DISABLE_ANYHOME`); workspace 路径 SSOT 收敛到 `common::workspace`(`MOUNT_TARGET=/workspace`,

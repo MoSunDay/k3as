@@ -48,7 +48,7 @@ else
     fi
   fi
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  purge_run_shims "$G24TMP"
+  assert_no_run_shims "$G24TMP" || FAIL=$((FAIL+1))
   rm -rf "$G24TMP" "$LOG24" 2>/dev/null || true
 fi
 
@@ -136,7 +136,7 @@ for p in items:
   fi
   kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  purge_run_shims "$G25TMP"
+  assert_no_run_shims "$G25TMP" || FAIL=$((FAIL+1))
   rm -rf "$G25TMP" "$G25SRV" "$G25AG" 2>/dev/null || true
 fi
 
@@ -346,7 +346,7 @@ for p in items:
   done
   kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  purge_run_shims "$G26TMP"
+  assert_no_run_shims "$G26TMP" || FAIL=$((FAIL+1))
   rm -rf "$G26TMP" "$G26SRV" "$G26AG" 2>/dev/null || true
 fi
 
@@ -504,6 +504,6 @@ for p in items:
   done
   kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  purge_run_shims "$G30TMP"
+  assert_no_run_shims "$G30TMP" || FAIL=$((FAIL+1))
   rm -rf "$G30TMP" "$G30SRV" "$G30AG" 2>/dev/null || true
 fi

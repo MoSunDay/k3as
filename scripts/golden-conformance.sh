@@ -57,32 +57,43 @@ LOG="$(mktemp)"
 "$BIN" server --data-dir "$DD" --bind-address 127.0.0.1 --https-listen-port "$PORT" >"$LOG" 2>&1 &
 SRV=$!
 SRV2=""; STUB_PID=""
-# Orphaned-shim purge (T4.1/T4.2 suites; mirrors the flannel-e2e /
-# service-traffic teardown): under load a containerd-shim can outlive the
-# agent's SIGTERM while holding shm/overlay mounts in the host namespace,
-# which makes the datadir rm hit EBUSY. Kill only THIS run's shims (matched
-# by datadir path, never a global pkill) and unmount the run's mounts.
-purge_run_shims() {
-  local dd="$1" p m
+# Zero-shim-leftover assertion (T4.1 follow-up, Sprint 28): since the
+# kubelet tears its sandboxes down BEFORE the agent stops containerd, no
+# shim of this run may outlive the daemon. Assert, never silently purge:
+# a leftover (matched by datadir path, never a global pkill) FAILs the run;
+# the kill/umount afterwards is test-host hygiene so the datadir rm cannot
+# hit EBUSY, not a fallback the product may rely on.
+assert_no_run_shims() {
+  local dd="$1" p m left=0 mounts
+  for p in $(pgrep -f "$dd/.*containerd-shim" 2>/dev/null || true); do
+    left=$((left+1))
+  done
+  mounts="$(mount | awk -v dd="$dd/" 'index($3, dd) == 1 {print $3}' | sort -r)"
+  if [[ "$left" -eq 0 && -z "$mounts" ]]; then
+    return 0
+  fi
+  echo "FAIL zero-shim-leftovers  (shims=$left mounts=$(wc -l <<<"$mounts"))"
   for p in $(pgrep -f "$dd/.*containerd-shim" 2>/dev/null || true); do
     kill -KILL "$p" 2>/dev/null || true
   done
-  for m in $(mount | awk -v dd="$dd/" 'index($3, dd) == 1 {print $3}' | sort -r); do
+  for m in $mounts; do
     umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
   done
+  return 1
 }
+LEFTOVER=0
 cleanup() {
   kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true
   [[ -n "$SRV2" ]] && { kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; }
   [[ -n "$STUB_PID" ]] && kill "$STUB_PID" 2>/dev/null || true
   [[ -n "${AGENT_PID:-}" ]] && { kill "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; }
-  # Containerd shims usually exit on their own once the agent's containerd
-  # goes away (T4.1/T4.2 suites); under load one can linger holding mounts.
-  # Give them a bounded window (<=5s) to exit, then purge only THIS run's
-  # leftovers (purge_run_shims) so the datadir rm below cannot hit EBUSY.
+  # Grace window (<=5s) mirrors the agent's SANDBOX_GONE_TIMEOUT; after the
+  # Sprint-28 drain ordering this returns immediately.
   for _ in $(seq 1 20); do pgrep -f containerd-shim >/dev/null 2>&1 || break; sleep 0.25; done
-  purge_run_shims "$DD"
+  assert_no_run_shims "$DD" || LEFTOVER=1
   rm -rf "$DD" "$LOG" 2>/dev/null || true
+  [[ "$LEFTOVER" -eq 1 ]] && exit 1
+  return 0
 }
 trap cleanup EXIT
 

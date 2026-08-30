@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ::runtime as node_runtime;
 use common::embed::EmbeddedManifest;
@@ -77,6 +78,41 @@ pub fn run_agent(
 /// crictl, the kubelet loops (T4.2 Scope A) under `node_name`. The kubelet's
 /// local log/exec listener (Scope C, Q31) binds/advertises
 /// `(node_ip, kubelet_port)` when present.
+/// How long the drain waits for CRI to report zero sandboxes after the
+/// kubelet's teardown (T4.1 follow-up, Sprint 28). Matches the golden
+/// harness's shim grace window so the two bounds agree.
+const SANDBOX_GONE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Poll the CRI sandbox list until it is empty (bounded by `max`). An empty
+/// list means every shim of this run is gone, so stopping containerd cannot
+/// orphan one. Two consecutive list errors are tolerated (the daemon may
+/// already be gone); persistent failure ends the wait as "not confirmed".
+async fn wait_sandboxes_gone(cri: &node_runtime::CriCtl, max: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + max;
+    let mut errors = 0u32;
+    loop {
+        match cri.list_pod_sandboxes().await {
+            Ok(list) if list.is_empty() => return true,
+            Ok(_) => errors = 0,
+            Err(e) => {
+                errors += 1;
+                if errors > 2 {
+                    tracing::debug!(
+                        target: "init-pro",
+                        error = %e,
+                        "CRI list failed during drain; assuming daemon gone"
+                    );
+                    return false;
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 fn run_supervised(
     role: &'static str,
     cfg: Config,
@@ -129,6 +165,12 @@ fn run_supervised(
         // render config -> supervise with backoff). The server keeps the
         // runtime off by default (single-node UX arrives with T4.5/e2e).
         let mut runtime_drain: Option<tokio::task::JoinHandle<()>> = None;
+        // T4.1 follow-up (Sprint 28): the supervisor reacts to its OWN token,
+        // fired only after the kubelet's sandbox teardown drained CRI. The
+        // shared process token must not race the daemon kill against
+        // in-flight teardown — that race orphaned shims under load (they
+        // outlive containerd holding shm/overlay mounts; datadir rm EBUSY).
+        let runtime_shutdown = Shutdown::new();
         // T4.3 Scope A (Q34): embedded flanneld (kube subnet-mgr). Drained
         // after the kubelet, before the containerd runtime.
         let mut flannel_drain: Option<tokio::task::JoinHandle<()>> = None;
@@ -136,7 +178,7 @@ fn run_supervised(
         // (server-only). Drained after flanneld, before the API surface.
         let mut anyhome_drain: Option<tokio::task::JoinHandle<()>> = None;
         if bind.is_none() {
-            match node_runtime::start_agent_runtime(&cfg.data_dir, shutdown.clone()) {
+            match node_runtime::start_agent_runtime(&cfg.data_dir, runtime_shutdown.clone()) {
                 Ok(task) => {
                     runtime_drain = Some(tokio::spawn(async move {
                         let _ = task.await;
@@ -156,6 +198,9 @@ fn run_supervised(
         // (agent keeps booting) when the staged crictl tree (T4.1) or a
         // v1-compatible http:// URL is missing.
         let mut kubelet_drain: Option<Vec<tokio::task::JoinHandle<()>>> = None;
+        // The same CRI handle the kubelet drives, kept for the drain's
+        // "sandboxes gone" confirmation (T4.1 follow-up, Sprint 28).
+        let mut cri_drain: Option<node_runtime::CriCtl> = None;
         if bind.is_none() {
             if let Some(url) = server_url {
                 let node = node_name.unwrap_or_else(kubelet::default_node_name);
@@ -193,7 +238,7 @@ fn run_supervised(
                             };
                             let handles = kubelet::spawn(
                                 kc,
-                                Arc::new(kubelet::CriCtlBackend::new(cri)),
+                                Arc::new(kubelet::CriCtlBackend::new(cri.clone())),
                                 shutdown.clone(),
                             );
                             tracing::info!(
@@ -204,6 +249,7 @@ fn run_supervised(
                                 "kubelet started (T4.2)"
                             );
                             kubelet_drain = Some(handles);
+                            cri_drain = Some(cri);
                         }
                     }
                     None => tracing::warn!(
@@ -386,17 +432,40 @@ fn run_supervised(
 
         shutdown.cancelled().await;
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining");
-        // T4.2: drain the kubelet loops BEFORE the runtime — the kubelet
-        // must stop driving CRI before containerd dies (the shared Shutdown
-        // token has already stopped both; this only orders the joins).
+        // T4.2: drain the kubelet loops BEFORE the runtime — this join now
+        // WAITS for the sync task's shutdown teardown (T4.1 follow-up,
+        // Sprint 28: stopp+rmp of every sandbox, bounded), so CRI work is
+        // finished, not merely stopped, before containerd goes away.
         if let Some(handles) = kubelet_drain {
             for h in handles {
                 let _ = h.await;
             }
             tracing::info!(target: "init-pro", role, "kubelet drained");
+            // T4.1 follow-up (Sprint 28): confirm CRI reports no sandboxes
+            // before the daemon kill — an empty CRI list means no shim of
+            // this run can outlive containerd.
+            if let Some(cri) = cri_drain.as_ref() {
+                if wait_sandboxes_gone(cri, SANDBOX_GONE_TIMEOUT).await {
+                    tracing::info!(target: "init-pro", role, "CRI drained: no sandboxes remain");
+                } else {
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "CRI not confirmed empty; stopping containerd anyway"
+                    );
+                }
+            }
         }
-        // T4.3 (Q34): then drain flanneld — no new pods after the kubelet
-        // stopped, so the CNI data plane can come down before containerd.
+        // T4.1: only now fire the supervisor's token (kill + bounded wait),
+        // mirroring k3s stopping the runtime before the control plane.
+        if let Some(h) = runtime_drain {
+            runtime_shutdown.trigger();
+            let _ = h.await;
+            tracing::info!(target: "init-pro", role, "containerd runtime drained (supervisor exited)");
+        }
+        // T4.3 (Q34): flanneld after the runtime — the kubelet's sandbox
+        // teardown (CNI DEL) ran while it was still up; its task exits on
+        // the shared token, this join only confirms.
         if let Some(h) = flannel_drain {
             let _ = h.await;
             tracing::info!(target: "init-pro", role, "flannel drained");
@@ -406,12 +475,6 @@ fn run_supervised(
         if let Some(h) = anyhome_drain {
             let _ = h.await;
             tracing::info!(target: "init-pro", role, "anyhome drained");
-        }
-        // T4.1: then drain the containerd supervisor (kill + bounded wait),
-        // mirroring k3s stopping the runtime before the control plane.
-        if let Some(h) = runtime_drain {
-            let _ = h.await;
-            tracing::info!(target: "init-pro", role, "containerd runtime drained (supervisor exited)");
         }
         // Sprint 18 / S4 (Q28): drain the Router service plane AFTER the
         // agent runtime and BEFORE the API surface — nodePort listeners stop

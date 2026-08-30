@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Duration;
 
 use runtime::cri_json::{
     container_labels, pod_labels, ContainerMetadata, ImageSpec, SandboxMetadata, LABEL_POD_NAME,
@@ -13,7 +14,7 @@ use runtime::cri_json::{
 };
 use runtime::{ContainerConfig, PodSandboxConfig};
 
-use crate::cri_backend::{ContainerView, SandboxView};
+use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
 use crate::objects::{ContainerSpec, PodView};
 use crate::probes::PodProbeState;
 
@@ -355,4 +356,108 @@ fn container_pod_key(c: &ContainerView, sandboxes: &[SandboxView]) -> Option<Str
         return None;
     }
     Some(format!("{}/{}", sb.namespace, sb.name))
+}
+
+/// Bound for the whole shutdown teardown ([`drain_sandboxes`]): generous
+/// enough for several retry sweeps of `crictl stop/rm/stopp/rmp` round-trips,
+/// tight enough that a wedged CRI cannot hang the agent's drain (T4.1
+/// follow-up, Sprint 28).
+pub const SANDBOX_DRAIN_BUDGET: Duration = Duration::from_secs(15);
+
+/// Pause between drain sweeps when the previous sweep left sandboxes behind
+/// (crictl/CRI state needs a beat to settle before a retry).
+const DRAIN_SWEEP_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Shutdown teardown (T4.1 follow-up, Sprint 28): drive CRI to zero
+/// sandboxes so no shim outlives the containerd daemon the agent is about to
+/// stop. Sweeps until CRI reports none or `budget` expires:
+///
+/// 1. stop + remove every container (`task`) of each sandbox FIRST — a
+///    RUNNING sandbox makes CRI `StopPodSandbox` stop live containers inside
+///    the request, which blows crictl's 2s deadline (`DeadlineExceeded`);
+///    the sync path never sees this because `plan` tears containers down a
+///    cycle before the sandbox.
+/// 2. then `stopp` + `rmp` the sandbox itself.
+///
+/// Already-gone objects are tolerated (NotFound); transient rejections heal
+/// on the next sweep. The budget bounds the whole pass — on expiry it logs
+/// and returns; the caller stops containerd regardless, after THIS task is
+/// joined. Returns the number of sandbox attempts issued across sweeps.
+pub async fn drain_sandboxes(cri: &dyn CriBackend, budget: Duration) -> usize {
+    let sweeps = async {
+        let mut attempts = 0usize;
+        loop {
+            let sandboxes = match cri.list_sandboxes().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "init-pro",
+                        error = %e,
+                        "kubelet drain: CRI sandbox list failed"
+                    );
+                    return attempts;
+                }
+            };
+            if sandboxes.is_empty() {
+                return attempts;
+            }
+            let containers = cri.list_containers().await.unwrap_or_default();
+            let mut rejected = false;
+            for sb in &sandboxes {
+                attempts += 1;
+                for c in containers.iter().filter(|c| c.sandbox_id == sb.id) {
+                    if let Err(e) = cri.stop_container(&c.id).await {
+                        rejected = true;
+                        tracing::debug!(
+                            target: "init-pro",
+                            container = %c.id,
+                            error = %e,
+                            "kubelet drain: container stop rejected (retried)"
+                        );
+                    }
+                    if let Err(e) = cri.remove_container(&c.id).await {
+                        rejected = true;
+                        tracing::debug!(
+                            target: "init-pro",
+                            container = %c.id,
+                            error = %e,
+                            "kubelet drain: container rm rejected (retried)"
+                        );
+                    }
+                }
+                if let Err(e) = cri.stop_pod_sandbox(&sb.id).await {
+                    rejected = true;
+                    tracing::debug!(
+                        target: "init-pro",
+                        sandbox = %sb.id,
+                        error = %e,
+                        "kubelet drain: stopp rejected (retried)"
+                    );
+                }
+                if let Err(e) = cri.remove_pod_sandbox(&sb.id).await {
+                    rejected = true;
+                    tracing::debug!(
+                        target: "init-pro",
+                        sandbox = %sb.id,
+                        error = %e,
+                        "kubelet drain: rmp rejected (retried)"
+                    );
+                }
+            }
+            if rejected {
+                tokio::time::sleep(DRAIN_SWEEP_BACKOFF).await;
+            }
+        }
+    };
+    match tokio::time::timeout(budget, sweeps).await {
+        Ok(n) => n,
+        Err(_) => {
+            tracing::warn!(
+                target: "init-pro",
+                budget_ms = budget.as_millis() as u64,
+                "kubelet drain: sandbox teardown budget exceeded"
+            );
+            0
+        }
+    }
 }

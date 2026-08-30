@@ -292,7 +292,24 @@ async fn sync_task(
     let mut probes = PodProbeState::new();
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => return,
+            _ = shutdown.cancelled() => {
+                // T4.1 follow-up (Sprint 28): tear every sandbox down before
+                // this task exits, so the agent can stop containerd without
+                // orphaning shims. Bounded; the supervisor fires only after
+                // the caller joins THIS task, so the order is structural.
+                let n = crate::sync::drain_sandboxes(
+                    cri.as_ref(),
+                    crate::sync::SANDBOX_DRAIN_BUDGET,
+                )
+                .await;
+                tracing::info!(
+                    target: "init-pro",
+                    node = %cfg.node_name,
+                    sandboxes = n,
+                    "kubelet drained (sandbox teardown done)"
+                );
+                return;
+            }
             _ = tick.tick() => {}
         }
         sync_once(

@@ -7,6 +7,66 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 28 — supervisor 关停顺序根因修复: CRI 清零前不停 containerd (Q24-Q26 域, T4.1 后续项) (2026-08-30)
+
+**Goal:** close the Sprint-27 forensics follow-up — orphaned containerd
+shims when the agent drains under load. Product-side fix per the recorded
+direction (stop tasks/sandboxes first → wait until CRI is empty → only
+then stop containerd), and demote the golden-harness purge to an assertion.
+**Tests: 940 passed / 0 failed** (`cargo test --workspace --locked`;
+Sprint-27 close 935 + 5).
+
+### Root cause (two layers, both fixed)
+- Layer 1, wiring: the containerd supervisor reacted to the SAME process
+  Shutdown token as the kubelet, so the daemon kill raced the kubelet's
+  (then non-existent) teardown — the join order in `run_supervised` only
+  ordered awaits, never the actual stop. Fix: a dedicated
+  `runtime_shutdown` token for the supervisor, triggered only after the
+  kubelet tasks joined AND a bounded CRI poll confirms zero sandboxes
+  (`wait_sandboxes_gone`, 5s, mirroring the harness grace window) —
+  `crates/cli/src/runtime.rs`; drain order is now kubelet → CRI-empty
+  confirm → containerd → flannel → anyhome.
+- Layer 2, teardown shape: the kubelet's shutdown path did NO teardown
+  (`sync_task` just returned). New `kubelet::sync::drain_sandboxes`
+  (SANDBOX_DRAIN_BUDGET 15s): sweep until CRI reports no sandboxes — per
+  sandbox, stop + remove its containers (tasks) FIRST, then `stopp` +
+  `rmp`; NotFound tolerated, transient rejections heal on the next sweep
+  (250ms backoff). The task-first ordering is load-bearing: StopPodSandbox
+  on a sandbox with a RUNNING container stops live containers inside the
+  request and blows crictl's 2s deadline (`DeadlineExceeded`), after which
+  `rmp` bounces with "is running, please stop it first" — the sync path
+  never hits this because `plan` tears containers down a cycle before the
+  sandbox.
+- Micro e2e (vendor + cc, fresh): naive one-shot stopp/rmp left
+  shims=1 mounts=2 in the datadir; the two-phase drain logs
+  `sandbox teardown done (sandboxes=1) -> CRI drained: no sandboxes remain
+  (13ms) -> containerd runtime drained` and the datadir ends at
+  shims=0 mounts=0.
+
+### Harness: purge -> assertion
+- `purge_run_shims` deleted from `scripts/golden-conformance.sh`;
+  `assert_no_run_shims` FAILs the run on this-datadir shim/mount leftovers
+  (the kill/umount afterwards is test-host hygiene only, never silent); a
+  leftover in the main cleanup forces exit 1. The four per-suite call
+  sites in `scripts/golden/suites/nodes.sh` (G24/G25/G26/G30 teardowns)
+  converted in the same sweep.
+
+### Acceptance evidence (fresh, this sprint)
+- Under load (two nice-19 busy loops): 3x `scripts/golden-conformance.sh`
+  **39 passed / 0 failed**, exit 0, zero `zero-shim-leftovers` failures —
+  no purge fallback involved (the function no longer exists).
+- Regression face: `scripts/cli-flag-parity-test.sh` 19/19;
+  `scripts/multicall-selftest.sh` OK; `cargo clippy --workspace
+  --all-targets -- -D warnings` clean.
+- Tests: NEW `crates/kubelet/tests/sync_drain.rs` (5): stopp->rmp per
+  sandbox with order pinned; empty-CRI no-op; rejected stopp tolerated
+  (rmp still runs); budget expiry on a wedged CRI (SlowList fixture);
+  container-before-sandbox ordering (the DeadlineExceeded regression).
+- Note (out-of-scope observation): G23 (scheduler extender) once failed
+  under an intentionally hostile full-core load — its fixed 6s/20s suite
+  wait windows starved; no runtime/kubelet involvement, not reproduced at
+  realistic load; recorded as pre-existing harness timing sensitivity.
+
 ## Sprint 27 — anyhome 一级公民: embedded NFSv3 memory service + workspace auto-mount (Q36, T7.4) (2026-08-30)
 
 **Goal:** make anyhome an embedded first-class NFS memory service in the

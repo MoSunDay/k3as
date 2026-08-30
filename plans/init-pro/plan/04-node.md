@@ -66,15 +66,28 @@ and node registration.
   golden G24; Q25/Q26 ADRs
 - **卡点 / Blockers** — none (debt for T4.2: image pre-pull/airgap
   store, cgroup delegation, native CRI client trigger per Q26)
-- **后续项 / Follow-up (Sprint 27 取证, Q24-Q26 域)** — supervisor 关停顺序
-  竞态：agent 收 SIGTERM 时 kubelet 的 pod 清理与 supervisor 停 containerd
-  互相竞争，慢的 pod teardown 可被孤儿化 shim（在宿主命名空间残留
-  shm/overlay 挂载，datadir `rm -rf` 命中 EBUSY）。当前由 golden harness
-  定向 purge 围堵（`purge_run_shims`：按 datadir 匹配杀本 run 的 shim、
-  倒序 umount，绝不全局 pkill）。修复方向（产品侧）：先停 task/sandbox
-  （CRI StopPodSandbox 路径）→ 等 shim 退出 → 再停 containerd。验收：压
-  负载下 3× golden 后 shim 残留为 0 **且无需 purge 兜底**（purge 退化为
-  断言或删除）。
+- **后续项 / Follow-up — FIXED (Sprint 28, Q24-Q26 域)** — supervisor 关停
+  顺序竞态（Sprint 27 取证：慢的 pod teardown 被孤儿化 shim，宿主残留
+  shm/overlay 挂载）按既定方向修复：**先停 task/sandbox → 等 CRI 清零 →
+  再停 containerd**。两层根因均修：(1) 装配层——supervisor 只听共享
+  Shutdown token，join 顺序只排 await 不排实际停机；改为专用
+  `runtime_shutdown` token，cli drain 顺序 kubelet join → CRI sandbox 清零
+  确认（`wait_sandboxes_gone` 5s 有界轮询，与 harness 宽限窗对齐）→
+  trigger supervisor → flannel → anyhome（`crates/cli/src/runtime.rs`）。
+  (2) teardown 形状——kubelet 收到 shutdown 原本直接 return；新增
+  `sync::drain_sandboxes`（15s 预算内逐 sweep：每个 sandbox **先 stop/rm
+  其容器 task，再 stopp/rmp**；NotFound 容忍、瞬态拒绝 250ms 退避下个
+  sweep 重试）。task-first 是承重墙：对带 RUNNING 容器的 sandbox 直接
+  StopPodSandbox 会在请求内停活容器、撞破 crictl 2s 截止
+  （DeadlineExceeded），rmp 随即 "is running" 弹回；同步路径因 `plan`
+  分周期 teardown 从未踩到。harness `purge_run_shims` 退化为
+  `assert_no_run_shims`（残留 = FAIL；杀/umount 仅为测试主机卫生，四个
+  per-suite 调用点同批转换）。验收证据（当次复跑）：压负载（nice 19 双
+  忙循环）3× golden **39/0 全绿、exit 0、`zero-shim-leftovers` 零触发、
+  无需 purge 兜底**；微 e2e 实测 drain 时序 `teardown done(sandboxes=1)
+  → CRI drained(13ms) → containerd drained`，随后 datadir shims=0
+  mounts=0（对照：一次性 stopp/rmp 下 shims=1 mounts=2）。Tests: 935 →
+  940（NEW `tests/sync_drain.rs` 5 例，含容器先于 sandbox 的顺序回归钉）。
 - **依赖 / Depends on** — T0.2
 
 ---
