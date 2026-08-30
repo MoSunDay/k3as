@@ -248,10 +248,11 @@ that every later TODO must keep green.
 
 - **状态 / Status** — done
 - **证据 / Evidence** — `golden/` (4 byte-stable discovery fixtures: GET `/api`, `/apis`, `/api/v1`, `/apis/init-pro.io/v1`) + `golden/README.md` (documents the 6 cases and the `@@PORT@@` normalization of the only volatile field, `APIVersions.serverAddress`); `scripts/golden-conformance.sh` boots a real `init-pro server` on a free loopback port and diffs live responses against the fixtures — **6/6 green** (G01–G04 byte-exact body matches, G05/G06 assert 404 for unknown group/version and not-yet-existing collection endpoints). The empty-cluster baseline is delivered: *the harness itself is the deliverable*; cases are appended as CRUD/watch/storage/scheduling layers land. `.github/workflows/ci.yml` runs it on every change as a required `golden` check (DoD #3).
-  As of Sprint 29 the set is **72 checks across 12 suite files** (G01-G82; agent-backed
+  As of Sprint 29 the set is **73 checks across 12 suite files** (G01-G82; post-review
+  hardening 72 → 73: G46 ControllerRevision direct CRUD; agent-backed
   cases SKIP without the vendor bundle/cc per Q25): storage G06-G15, controllers G16-G21,
   scheduler G22-G23, node layer G24-G26 + logs/exec G30, argoproj G27-G29, networking
-  discovery G31, plus the Sprint-29 resource-surface round — G32-G45 full-kind CRUD/CAS/
+  discovery G31, plus the Sprint-29 resource-surface round — G32-G46 full-kind CRUD/CAS/
   watch/SSA sweep (incl. the first cluster-scoped wire path, ingressclasses), G50-G55
   negative/locked-semantics surface, G60-G66 real-workload behavior (STS/DS/CronWorkflow
   on real containerd), G70-G72 served-router-plane pinning, G80-G82 live namespace-cascade

@@ -76,14 +76,18 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
 - **Sprint 29 — 21 类 served 资源全量 e2e 真实回归 + 2 个真 bug 根因修复 (T0.6 扩容; DRAIN_KINDS/Q20, T3.1b OrderedReady).**
-  golden 39 → **72 checks**: G32-G45 资源面全类 CRUD/CAS/patch/generateName + watch ADDED/DELETED/replay + SSA 组代表(含首个 cluster-scoped
+  golden 39 → **73 checks**(评审后 72→73): G32-G46 资源面全类 CRUD/CAS/patch/generateName(含 ControllerRevision 直连 CRUD)+ watch ADDED/DELETED/replay + SSA 组代表(含首个 cluster-scoped
   IngressClass wire 路径); G50-G55 负面面(eviction 404 / deletecollection 405 / labelSelector 无过滤 / Q21 https 拒绝 / Q33 sqlite:// Unsupported /
   重复 binding 409); G60-G66 真实工作负载(STS 真沙箱+序号 PVC、DS 每节点+删 Node 跟随、CronWorkflow 真 tick 子 Workflow Succeeded); G70-G72 钉住
   Ingress host 路由监听未服务(T5.6 剩余范围的可执行证据, 空后端 503 门); G80-G82 ns 终删级联真集群证明(2 Running pod → 0 容器, crictl 交叉验证)。
   修复①: `namespace.rs` DRAIN_KINDS 12→18 — events/workflows/cronworkflows/agents/luarouters/ingresses 曾在 ns 终删后泄漏为孤儿(gc.rs 红→绿回归)。
   修复②: `statefulset.rs` OrderedReady 真门控 — 新建 pod 曾 prev_ready=true 一次 reconcile 建满序号; 新 `pod_gate_ready` 严格门(Ready 条件在且 True),
   `pod_is_ready` 计数语义不变; G61 真实栈抓到活证, tests/statefulset.rs 新文件含 red-checked 回归。文档漂移修正: DaemonSet "schema-only" 注释、
-  G31 注释(ST 只证 nodePort 平面)。Tests: 940 → 945; golden ×3 72/0(1× 4×nice-19 压负载, G26c 一次瞬态重跑绿)。
+  G31 注释(ST 只证 nodePort 平面)。Tests: 940 → 945; golden ×3 72/0(1× 4×nice-19 压负载)。
+  评审后加固: G26c 断言 `bc==3` → 数值安全 `bc>=3`(压负载下 liveness 可多一次合法重启, 实测 ≥2 红/~6 次 ≈30% 基率——
+  精确匹配的时敏断言进了合并门禁, 升级为 P2 门禁完整性项, 以放宽到持久语义"计数跨重启递增且 /data 存活"根修, 非重跑);
+  resources.sh 增 ControllerRevision 直连 REST CRUD **G46**(A1 行 + A2 watch 行, 封掉最后一个仅由 STS 控制器间接写入、
+  无直连 wire CRUD 的 served kind); golden ×5 73/0 全绿(72→73, 新增 G46 复合检查; 唯一 SKIP 为既有无 registry 的 g24)。
 - **Sprint 28 — supervisor 关停顺序根因修复: CRI 清零前不停 containerd (T4.1 后续项 closed, Q24-Q26 域).**
   kubelet shutdown 新增 `sync::drain_sandboxes`(15s 预算逐 sweep: 容器 task 先 stop/rm、再 stopp/rmp, 瞬态拒绝重试);
   supervisor 改用独立 Shutdown token, cli drain 顺序 kubelet join → `wait_sandboxes_gone`(5s) → 停 containerd;

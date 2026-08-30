@@ -13,15 +13,21 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
 coordination.k8s.io/v1, networking.k8s.io/v1 ×2, init-pro.io/v1 ×2,
 argoproj.io/v1alpha1 ×2) gets real-wire regression coverage; every RED
 is either root-cause-fixed with a red-checked regression test or
-recorded as a locked deviation. Golden grows **39 → 72 checks** across
+recorded as a locked deviation. Golden grows **39 → 72 checks** (post-review
+hardening: 72 → 73, see "Post-review hardening" below) across
 12 suite files (every new file ≤400 lines, suite roster in
 `scripts/golden-conformance.sh` header).
 **Tests: 945 passed / 0 failed** (`cargo test --workspace --locked`;
 Sprint-28 close 940 + 5).
 **Gate sweep (all green):** golden ×3 = 72/0 each (1× under 4×nice-19
-busy-loop load, Sprint-28 precedent; the under-load run hit one G26c
-transient — emptyDir bootcount — cleared on its single permitted rerun,
-same starvation family as G29/G30c below), multicall selftest 10/10,
+busy-loop load, Sprint-28 precedent; that run's G26c red — emptyDir
+bootcount — was recorded at sprint close as a one-off transient cleared on
+its single permitted rerun. Post-review correction: it was NOT a one-off —
+G26c went red in >=2 of ~6 observed runs (~30% base rate), i.e. an
+exact-match, time-sensitive assertion inside a merge gate; upgraded to a
+P2 gate-integrity item and ROOT-FIXED by widening the assertion to
+`bc>=3` (the persistence semantics), not by rerunning — see "Post-review
+hardening" below), multicall selftest 10/10,
 flag parity 19/19, discovery parity, service-traffic ST1-ST6 6/6,
 flannel F1-F5 5/5, anyhome 4/4, durability D1-D4 (resourceVersion
 identity + watch replay across restart), graceful shutdown; zero
@@ -61,7 +67,9 @@ assertion kept, more real than before.
   Ingress/Service/Endpoints (incl. the first-ever cluster-scoped wire
   path, ingressclasses); live ADDED/DELETED watch + `resourceVersion=0`
   replay across 10 kinds; SSA apply-create/re-apply for the group
-  representatives Secret/Deployment/Ingress/Agent.
+  representatives Secret/Deployment/Ingress/Agent. Post-review: **+G46**
+  ControllerRevision direct CRUD + a ControllerRevision row in the watch
+  table (10 → 11 kinds) — see "Post-review hardening" below.
 - `negative.sh` **G50-G55** — eviction 404, deletecollection 405,
   labelSelector no-op, https reject (Q21), sqlite:// Unsupported (Q33),
   duplicate binding 409 — each commented locked-vs-implemented.
@@ -94,9 +102,37 @@ assertion kept, more real than before.
   future Q-note (deliberately not encoded in the suite).
 - **G26c/G29/G30c load-starvation family**: harness time-sensitivity
   under heavy concurrent CPU load; cleared on permitted reruns. Windows
-  intentionally not widened this round (P2 watch item).
+  intentionally not widened this round (P2 watch item). Post-review
+  correction: G26c was **not** the same family as G29/G30c — it flaked
+  >=2 in ~6 observed runs (~30% base rate) because the assertion was an
+  exact `bc==3` (time-sensitive) inside a merge gate; reclassified as a
+  P2 gate-integrity item and root-fixed by widening to numeric-safe
+  `bc>=3`, not by rerunning (see "Post-review hardening" below). G29/G30c
+  remain the rerun-permitted watch item.
 - **Doc drift fixed**: DaemonSet "schema-only" comments in
   `discovery.rs` (controller-driven since T3.1b); G31 suite comment.
+
+### Post-review hardening (delivery-review follow-ups; no Rust changes)
+- **G26c root fix** (`scripts/golden/suites/nodes.sh`): the emptyDir
+  persistence assertion was an exact `bc==3` — boots #1 original container,
+  #2 liveness restart, #3 the kill — but under CPU load liveness may fire
+  ONE EXTRA legitimate restart, so the exact match flaked the merge gate
+  (~30% observed base rate). Widened to numeric-safe `bc>=3` (with a
+  `^[0-9]+$` guard: BC can be empty/garbage while the pod is still coming
+  up): the durable semantic is "count increments across restarts and /data
+  survives". Fixed by widening the assertion, NOT by rerunning.
+- **ControllerRevision direct REST CRUD** (`resources.sh`): new **G46**
+  row in the A1 table (POST 201 / GET+marker /
+  LIST+listKind `ControllerRevisionList` / CAS 409 / PUT 200 / merge-patch
+  200 / DELETE 200 / GET 404) plus a ControllerRevision row in the generic
+  A2 watch table (ADDED + DELETED legs; G40/G41). Closes the last served
+  kind that had no direct first-class wire CRUD — until now it was only
+  ever written indirectly, by the StatefulSet controller's revision
+  history. Suite range becomes G32-G46.
+- **Gate re-proof**: golden ×5 consecutive runs (serial; the script flocks
+  internally) = **73/0 each** (72 → 73: the new G46 compound check; only
+  SKIP is the pre-existing registry-less g24 sandbox smoke). Tests stay
+  **945 passed / 0 failed** (no Rust changes).
 
 ## Sprint 28 — supervisor 关停顺序根因修复: CRI 清零前不停 containerd (Q24-Q26 域, T4.1 后续项) (2026-08-30)
 
