@@ -63,6 +63,11 @@ pub struct ManagerConfig {
     /// `--cluster-cidr`: when set, Nodes without `spec.podCIDR` are
     /// allocated the first free `/24` inside it (decision **Q34**).
     pub cluster_cidr: Option<String>,
+    /// The anyhome NFS endpoint (`host:port`, **T-anyhome**, decision
+    /// **Q36**): when set, Workflow step pods get the `/workspace` shared
+    /// volume auto-mounted from it; `None` (the `spawn` default) leaves
+    /// step pods byte-identical to the pre-Q36 builder output.
+    pub workspace_nfs: Option<String>,
 }
 
 pub(crate) struct Queues {
@@ -115,6 +120,9 @@ impl ControllerManager {
         if let (Some(flag), None) = (cfg.cluster_cidr.as_deref(), cluster_cidr.as_ref()) {
             tracing::warn!(cluster_cidr = flag, "invalid --cluster-cidr; podCIDR allocation disabled");
         }
+        // T-anyhome (Q36): the Workflow controller's `/workspace` auto-mount
+        // endpoint, threaded to the worker dispatch next to cluster_cidr.
+        let workspace_nfs: Arc<Option<String>> = Arc::new(cfg.workspace_nfs.clone());
         let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
         let now: NowFn = Arc::new(|| {
             SystemTime::now()
@@ -168,6 +176,7 @@ impl ControllerManager {
                     stop.clone(),
                     now.clone(),
                     cluster_cidr.clone(),
+                    workspace_nfs.clone(),
                 );
                 loop {
                     tokio::select! {

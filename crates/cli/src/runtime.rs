@@ -43,6 +43,10 @@ pub struct ServerBind {
     /// `--cluster-cidr`: the node-cidr controller carves Node `/24`
     /// podCIDRs from it (T4.3 Scope A, Q34).
     pub cluster_cidr: String,
+    /// Embedded anyhome NFSv3 workspace plane (T-anyhome, Q36):
+    /// `Some(addr)` = serve on that address; `None` = disabled
+    /// (`--disable-anyhome`).
+    pub anyhome: Option<String>,
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
@@ -128,6 +132,9 @@ fn run_supervised(
         // T4.3 Scope A (Q34): embedded flanneld (kube subnet-mgr). Drained
         // after the kubelet, before the containerd runtime.
         let mut flannel_drain: Option<tokio::task::JoinHandle<()>> = None;
+        // T-anyhome (Q36): embedded anyhome NFSv3 workspace plane
+        // (server-only). Drained after flanneld, before the API surface.
+        let mut anyhome_drain: Option<tokio::task::JoinHandle<()>> = None;
         if bind.is_none() {
             match node_runtime::start_agent_runtime(&cfg.data_dir, shutdown.clone()) {
                 Ok(task) => {
@@ -264,10 +271,33 @@ fn run_supervised(
                             // T4.3 Scope A (Q34): allocate Node podCIDRs
                             // from --cluster-cidr.
                             cluster_cidr: Some(b.cluster_cidr.clone()),
+                            // T-anyhome (Q36): Workflow step pods + Agent
+                            // children get the /workspace contract from the
+                            // anyhome endpoint (None = --disable-anyhome).
+                            workspace_nfs: b.anyhome.clone(),
                         },
                     );
                     tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
                     controllers_drain = Some((cm_handles, cm_stop));
+                }
+                // T-anyhome (Q36): the NFSv3 workspace plane rides the SAME
+                // storage Arc (Q19) right after the controllers spawn.
+                // Degraded-but-booting (flannel precedent): a bind/fs failure
+                // is a warn, the API surface still comes up.
+                if let Some(addr) = &b.anyhome {
+                    match crate::anyhome::spawn_anyhome(
+                        &cfg.data_dir,
+                        addr,
+                        store.clone(),
+                        shutdown.clone(),
+                    ) {
+                        Ok(handle) => anyhome_drain = Some(handle),
+                        Err(e) => tracing::warn!(
+                            target: "init-pro",
+                            role,
+                            "anyhome disabled (fs root unreadable): {e}"
+                        ),
+                    }
                 }
                 // T3.2 (Q23): the scheduler reuses the controllers framework
                 // (informer/workqueue/leader-election) over the same storage
@@ -370,6 +400,12 @@ fn run_supervised(
         if let Some(h) = flannel_drain {
             let _ = h.await;
             tracing::info!(target: "init-pro", role, "flannel drained");
+        }
+        // T-anyhome (Q36): drain the NFS data plane here too (data plane,
+        // before the API surface) so no workspace IO survives the drain.
+        if let Some(h) = anyhome_drain {
+            let _ = h.await;
+            tracing::info!(target: "init-pro", role, "anyhome drained");
         }
         // T4.1: then drain the containerd supervisor (kill + bounded wait),
         // mirroring k3s stopping the runtime before the control plane.

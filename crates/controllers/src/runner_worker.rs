@@ -73,21 +73,34 @@ pub(crate) fn spawn_worker(
     caches: &Arc<Caches>,
     queue: &Arc<WorkQueue>,
     kind: Kind,
+    workspace_nfs: Arc<Option<String>>,
     stop: &Stop,
     now: NowFn,
 ) -> JoinHandle<()> {
-    spawn_worker_with_cluster_cidr(client, caches, queue, kind, Arc::new(None), stop, now)
+    spawn_worker_with_cluster_cidr(
+        client,
+        caches,
+        queue,
+        kind,
+        Arc::new(None),
+        workspace_nfs,
+        stop,
+        now,
+    )
 }
 
 /// [`spawn_worker`] variant carrying the podCIDR allocator config
-/// (T4.3 Scope A): `Kind::NodeCidr` needs the parsed `--cluster-cidr`.
-#[allow(clippy::too_many_arguments)] // 7 = the lint's own ceiling; all live config
+/// (T4.3 Scope A, Q34: `Kind::NodeCidr` needs the parsed `--cluster-cidr`)
+/// plus the workspace NFS endpoint (T-anyhome, Q36: `Kind::Workflow` needs
+/// it for the step-pod `/workspace` auto-mount).
+#[allow(clippy::too_many_arguments)] // 8 = over the lint's ceiling; all live config
 pub(crate) fn spawn_worker_with_cluster_cidr(
     client: &Arc<dyn Client>,
     caches: &Arc<Caches>,
     queue: &Arc<WorkQueue>,
     kind: Kind,
     cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
+    workspace_nfs: Arc<Option<String>>,
     stop: &Stop,
     now: NowFn,
 ) -> JoinHandle<()> {
@@ -112,6 +125,7 @@ pub(crate) fn spawn_worker_with_cluster_cidr(
                 &queue,
                 kind,
                 &cluster_cidr,
+                &workspace_nfs,
                 &key,
                 &now,
             )
@@ -156,12 +170,19 @@ const WORKFLOW_RESYNC: Duration = Duration::from_secs(5);
 /// same shape as WORKFLOW_RESYNC).
 const CRONWORKFLOW_RESYNC: Duration = Duration::from_secs(5);
 
+/// Per-kind dispatch (see the module doc). Grows one config parameter per
+/// plumb-through (Q34 podCIDR, T-anyhome/Q36 workspace), hence the allow.
+#[allow(clippy::too_many_arguments)] // 8 = over the lint's ceiling; all live config
 pub(crate) async fn reconcile_key(
     client: &Arc<dyn Client>,
     caches: &Caches,
     queue: &Arc<WorkQueue>,
     kind: Kind,
     cluster_cidr: &Option<node_cidr::ClusterCidr>,
+    // T-anyhome (Q36): Some(addr) = Workflow step pods get the /workspace
+    // NFS volume auto-mounted from the anyhome endpoint (and Agent children
+    // get the workspace contract annotation).
+    workspace_nfs: &Option<String>,
     key: &str,
     now: &NowFn,
 ) -> Result<(), ControllerError> {
@@ -240,7 +261,7 @@ pub(crate) async fn reconcile_key(
             let Some(wf) = caches.workflows.get(ns, name) else {
                 return Ok(()); // deleted from cache: nothing to do
             };
-            workflow::reconcile(client, &wf).await?;
+            workflow::reconcile(client, &wf, workspace_nfs).await?;
             // Resync backstop (see WORKFLOW_RESYNC); the loop self-
             // terminates once the object leaves the cache.
             queue.add_after(key.to_string(), WORKFLOW_RESYNC);

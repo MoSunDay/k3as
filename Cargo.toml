@@ -64,12 +64,18 @@ rdb = { path = "link_repos/rdb", default-features = false, features = ["store"] 
 flanneld = { path = "link_repos/flannel-rust/crates/flanneld" }
 flannel-cni = { path = "link_repos/flannel-rust/crates/flannel-cni" }
 # - opencoder: the Agent engine behind init-pro.io/Agent (T7.1 rewrite, Q35).
-#   Minimal closure core+llm+store+session; `store` brings libsql (bundled C
-#   SQLite) — same build-cost class as rdb/RocksDB, accepted.
+#   Minimal closure is core+session; `session` transitively pulls llm+store
+#   (and libsql) inside the upstream opencoder workspace — same build-cost
+#   class as rdb/RocksDB, accepted. Only core+session are declared here
+#   (root [workspace] excludes link_repos, so the upstream crates resolve
+#   their own `workspace = true` refs against their own workspace).
 opencoder-core = { path = "link_repos/opencoder/crates/core" }
-opencoder-llm = { path = "link_repos/opencoder/crates/llm" }
-opencoder-store = { path = "link_repos/opencoder/crates/store" }
 opencoder-session = { path = "link_repos/opencoder/crates/session" }
+# - anyhome: mountable NFSv3 memory service behind workflow/agent workspaces
+#   (T-anyhome, decision Q36). Default features only — the real semantic
+#   embedder (`embed-fastembed`) stays off, like rdb's `store`-only cut.
+anyhome = { path = "link_repos/any-home/crates/anyhome" }
+nfsserve = { path = "link_repos/any-home/link_repos/nfsserve" }
 
 # External
 anyhow = "1"

@@ -54,7 +54,7 @@ cleanup() {
   [[ -n "$SRV" ]] && { kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; }
   # Post-mortem copy, same convention as graceful-shutdown-test.sh.
   cat "$LOG1" "$LOG2" 2>/dev/null > /tmp/init-pro-durability.log || true
-  rm -rf "$DD"
+  rm -rf "$DD" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -242,6 +242,6 @@ if grep -q "panic" "$LOG1" || grep -q "panic" "$LOG2"; then
 fi
 ok "D4  controllers/informers resynced cleanly (deployment stable, no panic)"
 
-rm -f "$TMP_NS" "$TMP_CM" "$TMP_DEP" "$TMP_CM2"
+rm -f "$TMP_NS" "$TMP_CM" "$TMP_DEP" "$TMP_CM2" 2>/dev/null || true
 echo
 echo "ALL durability checks passed (D1..D4)"

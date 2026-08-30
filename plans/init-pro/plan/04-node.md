@@ -66,6 +66,15 @@ and node registration.
   golden G24; Q25/Q26 ADRs
 - **卡点 / Blockers** — none (debt for T4.2: image pre-pull/airgap
   store, cgroup delegation, native CRI client trigger per Q26)
+- **后续项 / Follow-up (Sprint 27 取证, Q24-Q26 域)** — supervisor 关停顺序
+  竞态：agent 收 SIGTERM 时 kubelet 的 pod 清理与 supervisor 停 containerd
+  互相竞争，慢的 pod teardown 可被孤儿化 shim（在宿主命名空间残留
+  shm/overlay 挂载，datadir `rm -rf` 命中 EBUSY）。当前由 golden harness
+  定向 purge 围堵（`purge_run_shims`：按 datadir 匹配杀本 run 的 shim、
+  倒序 umount，绝不全局 pkill）。修复方向（产品侧）：先停 task/sandbox
+  （CRI StopPodSandbox 路径）→ 等 shim 退出 → 再停 containerd。验收：压
+  负载下 3× golden 后 shim 残留为 0 **且无需 purge 兜底**（purge 退化为
+  断言或删除）。
 - **依赖 / Depends on** — T0.2
 
 ---
@@ -188,7 +197,24 @@ and node registration.
     持久化模式。测试 workspace 903/0；clippy 0; parity 16/16;
     discovery ALL。
 
-- **状态 / Status** — done (Scope A+B+C, Sprint 24; **Q31**)
+  - **As-built (Sprint 27, `nfs` 卷类型 — T-anyhome, Q36):** kubelet
+    volumes 新增第四种 inline 卷 `nfs`（k8s `NFSVolumeSource` 形状:
+    `server`/`path` 必填, `readOnly` 缺省 false —— `objects.rs::nfs_source`,
+    server/path 缺失或为空的条目跳过不报错）。挂载走宿主机 `mount.nfs`
+    子进程（`nfs_mount.rs`, 经 PATH 查找）：
+    `mount.nfs -o vers=3,tcp,nolock,noacl[,port=P,mountport=P]
+    server:path target` —— anyhome 把 NFS/MOUNT/portmap 复用在 ONE
+    端口上，所以 `port=` 与 `mountport=` 是同一个值（上游 README 的
+    官方挂载行）；`server` 无可用数字端口时省略 `port=` 选项，内核
+    缺省 2049 生效。幂等性来自 `/proc/self/mounts` 内省（内核八进制
+    转义解码）：已是挂载点则跳过；清理 `cleanup_volumes_in` 先
+    `umount`（嵌套挂载按路径深度倒序、子先于父）后删目录 —— umount
+    失败保留整棵树并返回 Err，绝不穿过活挂载点删除内容。测试策略：
+    纯 helper 与子进程 runner 分离，测试注入 fake 可执行脚本（fake
+    `mount.nfs`/`umount` 记录 argv、可注入退出码），不污染进程环境。
+
+- **状态 / Status** — done (Scope A+B+C, Sprint 24; **Q31**; Sprint 27
+  补 `nfs` 卷类型/Q36)
 - **证据 / Evidence** — Sprint 24: workspace 903 通过 / 0 失败;
   golden **38/38** ×(G25/G26/G30 vendor+cc); flag parity 16/16;
   discovery parity ALL; clippy -D warnings 0. 前序: golden G25 27/27,

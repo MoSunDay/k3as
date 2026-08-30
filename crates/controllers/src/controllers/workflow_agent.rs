@@ -14,12 +14,19 @@
 //! agent runtime (execution) own every later phase transition.
 //!
 //! JSON-only wire (Q10); pure functions, no classes.
+//!
+//! T-anyhome (decision **Q36**): with an anyhome endpoint configured,
+//! [`build_agent_with`] stamps the `init-pro.io/workspace` contract
+//! annotation (the NFS URL backing this Agent's memory workspace). Phase B
+//! (agent execution) and kubectl consume this annotation; the mount target
+//! is [`common::workspace::MOUNT_TARGET`] (`/workspace`).
 
 use serde_json::{json, Value};
 
 use crate::controllers::workflow_plan::PlannedStep;
 use crate::controllers::workflow_pod::{node_annotation, step_labels};
 use crate::object::{name, owner_reference};
+use common::workspace;
 
 /// API group/version of the child object (the `init-pro.io` CRD group).
 const AGENT_API_VERSION: &str = "init-pro.io/v1";
@@ -27,10 +34,30 @@ const AGENT_API_VERSION: &str = "init-pro.io/v1";
 /// the group the apiserver registered the Workflow under).
 const WORKFLOW_API_VERSION: &str = "argoproj.io/v1alpha1";
 
-/// Build one step's Agent child object. `spec` is the template's `agent`
-/// object verbatim (a non-object/missing `agent` yields an empty spec --
-/// the plan only routes `agent` templates here, so this is defensive).
-pub(crate) fn build_agent(wf: &Value, ns: &str, uid: &str, step: &PlannedStep) -> Value {
+/// The workspace contract annotation (T-anyhome, Q36): the anyhome NFS URL
+/// (`nfs://<addr>/agent/<child-name>`) backing the Agent's memory
+/// workspace, mounted at `common::workspace::MOUNT_TARGET`.
+pub const WORKSPACE_ANNOTATION: &str = "init-pro.io/workspace";
+
+/// Build one step's Agent child object (pre-Q36 shape: no workspace
+/// contract annotation -- [`build_agent_with`] with `None`).
+pub fn build_agent(wf: &Value, ns: &str, uid: &str, step: &PlannedStep) -> Value {
+    build_agent_with(wf, ns, uid, step, None)
+}
+
+/// Build one step's Agent child object, extending the annotation map with
+/// the workspace contract (T-anyhome, Q36) when `workspace_nfs` is set and
+/// `step.pod_name` (the child Agent's name) passes the SSOT path guard;
+/// invalid/None -> no annotation. `spec` is the template's `agent` object
+/// verbatim (a non-object/missing `agent` yields an empty spec -- the plan
+/// only routes `agent` templates here, so this is defensive).
+pub fn build_agent_with(
+    wf: &Value,
+    ns: &str,
+    uid: &str,
+    step: &PlannedStep,
+    workspace_nfs: Option<&str>,
+) -> Value {
     let wf_name = name(wf).unwrap_or_default();
     let spec = step
         .template
@@ -38,6 +65,16 @@ pub(crate) fn build_agent(wf: &Value, ns: &str, uid: &str, step: &PlannedStep) -
         .filter(|v| v.as_object().is_some())
         .cloned()
         .unwrap_or_else(|| json!({}));
+    // T-anyhome (Q36): extend the node-name annotation map, never replace.
+    let mut annotations = node_annotation(&step.node_name);
+    if let Some(addr) = workspace_nfs {
+        if let Some(path) = workspace::agent_workspace_path(&step.pod_name) {
+            annotations.insert(
+                WORKSPACE_ANNOTATION.to_string(),
+                json!(workspace::workspace_nfs_url(addr, &path)),
+            );
+        }
+    }
     json!({
         "apiVersion": AGENT_API_VERSION,
         "kind": "Agent",
@@ -45,7 +82,7 @@ pub(crate) fn build_agent(wf: &Value, ns: &str, uid: &str, step: &PlannedStep) -
             "name": step.pod_name,
             "namespace": ns,
             "labels": step_labels(wf_name, &step.template_name),
-            "annotations": node_annotation(&step.node_name),
+            "annotations": annotations,
             "ownerReferences": [
                 owner_reference(wf_name, uid, "Workflow", WORKFLOW_API_VERSION)
             ],
@@ -129,5 +166,66 @@ mod tests {
         assert_eq!(agent["spec"], json!({}));
         let bare = build_agent(&wf, "default", "", &step(json!({})));
         assert_eq!(bare["spec"], json!({}));
+    }
+
+    // ---- workspace contract annotation (T-anyhome, Q36) ----
+
+    #[test]
+    fn workspace_annotation_carries_the_nfs_contract_url() {
+        let wf = json!({"metadata": {"name": "wf"}});
+        let agent = build_agent_with(
+            &wf,
+            "default",
+            "u-1",
+            &step(json!({"agent": {}})),
+            Some("anyhome.default.svc:2049"),
+        );
+        // Exact contract: nfs://<addr>/agent/<child-name>; the child name IS
+        // step.pod_name.
+        assert_eq!(
+            agent["metadata"]["annotations"][WORKSPACE_ANNOTATION],
+            "nfs://anyhome.default.svc:2049/agent/wf-0-ask"
+        );
+        // The node-name annotation map was EXTENDED, not replaced.
+        assert_eq!(
+            agent["metadata"]["annotations"]["workflows.argoproj.io/node-name"],
+            "wf[0].ask"
+        );
+    }
+
+    #[test]
+    fn workspace_annotation_absent_without_endpoint() {
+        let wf = json!({"metadata": {"name": "wf"}});
+        let agent = build_agent_with(&wf, "default", "u-1", &step(json!({"agent": {}})), None);
+        assert!(
+            agent["metadata"]["annotations"]
+                .get(WORKSPACE_ANNOTATION)
+                .is_none(),
+            "no anyhome endpoint -> no workspace contract"
+        );
+        // The pre-Q36 builder stays annotation-identical.
+        let plain = build_agent(&wf, "default", "u-1", &step(json!({"agent": {}})));
+        assert_eq!(
+            agent["metadata"]["annotations"],
+            plain["metadata"]["annotations"]
+        );
+    }
+
+    #[test]
+    fn workspace_annotation_absent_for_invalid_child_id() {
+        let wf = json!({"metadata": {"name": "wf"}});
+        let mut bad = step(json!({"agent": {}}));
+        bad.pod_name = String::new(); // fails the SSOT path guard
+        let agent = build_agent_with(&wf, "default", "u-1", &bad, Some("10.0.0.5:2049"));
+        assert!(
+            agent["metadata"]["annotations"]
+                .get(WORKSPACE_ANNOTATION)
+                .is_none(),
+            "invalid child id -> no annotation, no panic"
+        );
+        assert_eq!(
+            agent["metadata"]["annotations"]["workflows.argoproj.io/node-name"], "wf[0].ask",
+            "node-name annotation is kept regardless"
+        );
     }
 }

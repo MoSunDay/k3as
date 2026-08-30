@@ -48,7 +48,8 @@ else
     fi
   fi
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  rm -rf "$G24TMP" "$LOG24"
+  purge_run_shims "$G24TMP"
+  rm -rf "$G24TMP" "$LOG24" 2>/dev/null || true
 fi
 
 # --- T4.2: kubelet runs a real pod end-to-end (G25) ---
@@ -135,7 +136,8 @@ for p in items:
   fi
   kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  rm -rf "$G25TMP" "$G25SRV" "$G25AG"
+  purge_run_shims "$G25TMP"
+  rm -rf "$G25TMP" "$G25SRV" "$G25AG" 2>/dev/null || true
 fi
 
 # --- T4.2 Scope B: probes, volumes, configMap + hostname (G26) ---
@@ -327,9 +329,25 @@ for p in items:
     FAIL=$((FAIL+1))
   fi
   curl -s -o /dev/null -X DELETE "$BASE26/apis/apps/v1/namespaces/default/deployments/g26-dep" || true
+  # Bounded pod-gone wait (G26 tail): the fire-and-forget DELETE returns long
+  # before the kubelet finishes teardown, and killing the agent while its
+  # containerd shims still hold the emptyDir/log mounts makes the rm -rf below
+  # hit EBUSY — which set -euo pipefail turns into a hard abort that would
+  # skip G31 and the argoproj suites. Poll <=20s for zero pods labelled
+  # app=g26 before killing SRV2/AGENT_PID (errors ignored: never fatal).
+  for _ in $(seq 1 40); do
+    G26_LEFT="$(curl -s "$BASE26/api/v1/namespaces/default/pods" | python3 -c 'import json,sys
+try: items=json.load(sys.stdin).get("items",[])
+except Exception: sys.exit(0)
+for p in items:
+  if p.get("metadata",{}).get("labels",{}).get("app")=="g26": print("LEFT"); break' 2>/dev/null || true)"
+    [[ "$G26_LEFT" != "LEFT" ]] && break
+    sleep 0.5
+  done
   kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  rm -rf "$G26TMP" "$G26SRV" "$G26AG"
+  purge_run_shims "$G26TMP"
+  rm -rf "$G26TMP" "$G26SRV" "$G26AG" 2>/dev/null || true
 fi
 
 # --- T4.2 Scope C: kubectl logs/exec data plane over the apiserver relay ---
@@ -472,7 +490,20 @@ for p in items:
 
   unset INIT_PRO_SERVER
   curl -s -o /dev/null -X DELETE "$BASE30/apis/apps/v1/namespaces/default/deployments/g30-dep" || true
+  # Same bounded pod-gone wait as the G26 tail (label app=g30): do not race
+  # the kubelet/containerd teardown into the rm -rf below (<=20s, errors
+  # ignored so the wait itself can never abort the script).
+  for _ in $(seq 1 40); do
+    G30_LEFT="$(curl -s "$BASE30/api/v1/namespaces/default/pods" | python3 -c 'import json,sys
+try: items=json.load(sys.stdin).get("items",[])
+except Exception: sys.exit(0)
+for p in items:
+  if p.get("metadata",{}).get("labels",{}).get("app")=="g30": print("LEFT"); break' 2>/dev/null || true)"
+    [[ "$G30_LEFT" != "LEFT" ]] && break
+    sleep 0.5
+  done
   kill "$SRV2" 2>/dev/null || true; wait "$SRV2" 2>/dev/null || true; SRV2=""
   kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""
-  rm -rf "$G30TMP" "$G30SRV" "$G30AG"
+  purge_run_shims "$G30TMP"
+  rm -rf "$G30TMP" "$G30SRV" "$G30AG" 2>/dev/null || true
 fi

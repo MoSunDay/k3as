@@ -40,12 +40,12 @@ use serde_json::{json, Map, Value};
 use storage::{Key, KeyPrefix};
 
 use crate::client::Client;
-use crate::controllers::workflow_agent::build_agent;
+use crate::controllers::workflow_agent::build_agent_with;
 use crate::controllers::workflow_phase::{
     node_phase_from_agent, node_phase_from_pod, workflow_phase,
 };
 use crate::controllers::workflow_plan::{compile, PlannedStep, StepTarget, ROOT_POD, ROOT_STEPS};
-use crate::controllers::workflow_pod::build_pod;
+use crate::controllers::workflow_pod::build_pod_with;
 use crate::controllers::workflow_status::{
     display_name, kept_or_now, pod_node, pod_node_name, recorded_phase, root_node, stepgroup_id,
     stepgroup_node, NodeView, TERMINAL_NODE_PHASES,
@@ -59,8 +59,14 @@ const GROUP: &str = "argoproj.io";
 
 /// Reconcile one Workflow: plan -> create the active group's pods ->
 /// status (write-if-changed). Terminal workflows are a no-op (upstream
-/// keeps the final status forever).
-pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), ControllerError> {
+/// keeps the final status forever). `workspace_nfs` (T-anyhome, Q36) is the
+/// anyhome endpoint for the step-pod `/workspace` auto-mount and the Agent
+/// workspace contract annotation; `None` keeps children workspace-free.
+pub async fn reconcile(
+    client: &Arc<dyn Client>,
+    wf: &Value,
+    workspace_nfs: &Option<String>,
+) -> Result<(), ControllerError> {
     let ns = namespace(wf).unwrap_or("default").to_string();
     let Some(wf_name) = name(wf) else {
         return Ok(()); // unparseable object: nothing to converge
@@ -167,7 +173,9 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
                 }
                 match step.target {
                     StepTarget::Agent => {
-                        let agent = build_agent(wf, &ns, uid, step);
+                        // T-anyhome (Q36): the child Agent carries the
+                        // workspace contract annotation when anyhome is on.
+                        let agent = build_agent_with(wf, &ns, uid, step, workspace_nfs.as_deref());
                         match client
                             .create(
                                 &Key::new("init-pro.io", "agents", &ns, &step.pod_name),
@@ -188,7 +196,9 @@ pub async fn reconcile(client: &Arc<dyn Client>, wf: &Value) -> Result<(), Contr
                         }
                     }
                     StepTarget::Pod => {
-                        let pod = build_pod(wf, &ns, uid, step);
+                        // T-anyhome (Q36): `/workspace` NFS volume + mount
+                        // unless the user already wired one (A4).
+                        let pod = build_pod_with(wf, &ns, uid, step, workspace_nfs.as_deref());
                         match client
                             .create(&Key::new("", "pods", &ns, &step.pod_name), pod)
                             .await

@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+mod anyhome;
+mod anyhome_keeper;
 mod cmd;
 mod config_scan;
 pub mod discovery;
@@ -144,6 +146,11 @@ where
                         scheduler_args: svc.kube_scheduler_arg.clone(),
                         datastore_endpoint: svc.datastore_endpoint.clone(),
                         cluster_cidr: svc.cluster_cidr.clone(),
+                        // T-anyhome (Q36): None = --disable-anyhome.
+                        anyhome: crate::anyhome::anyhome_endpoint(
+                            svc.disable_anyhome,
+                            &svc.anyhome_addr,
+                        ),
                     },
                 ),
                 Err(e) => {
@@ -310,6 +317,34 @@ mod tests {
                 !help.contains(flag),
                 "agent --help should not list server-only flag {flag}"
             );
+        }
+    }
+
+    /// T-anyhome (Q36): `--anyhome-addr`/`--disable-anyhome` are init-pro
+    /// (not k3s) flags, so they must NOT be in the T0.4 noop-strip table --
+    /// this parse proves they survive `strip_noop` and reach clap end-to-end
+    /// (a registration mistake would silently drop them from argv).
+    #[test]
+    fn anyhome_flags_survive_noop_strip_and_parse() {
+        let cli = Cli::try_parse_from([
+            "init-pro",
+            "server",
+            "--anyhome-addr",
+            "127.0.0.1:11111",
+            "--disable-anyhome",
+        ])
+        .expect("anyhome flags accepted");
+        match cli.command {
+            Some(Command::Server(s)) => {
+                assert_eq!(s.anyhome_addr, "127.0.0.1:11111");
+                assert!(s.disable_anyhome);
+                // The wired endpoint honors the disable flag.
+                assert_eq!(
+                    crate::anyhome::anyhome_endpoint(s.disable_anyhome, &s.anyhome_addr),
+                    None
+                );
+            }
+            _ => panic!("expected Server"),
         }
     }
 

@@ -126,6 +126,14 @@ live_help() { # scope subcommand flags...
 live_help "t43-server" server --cluster-cidr
 live_help "t43-agent" agent --cluster-cidr --flannel-backend --flannel-iface --flannel-conf
 
+# ---------------------------------------------------------------------------
+# T-anyhome (Q36) live-help surface: the embedded anyhome workspace flags
+# are wired on `server` (the only subcommand that hosts the NFS plane).
+# Same LIVE `--help` doctrine as the T4.3 block above -- the frozen
+# snapshots predate the flag and must not be regenerated here.
+# ---------------------------------------------------------------------------
+live_help "t-anyhome" server --anyhome-addr --disable-anyhome
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

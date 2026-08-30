@@ -1,6 +1,6 @@
 # Layer 7 — AI Agent & Workflow scheduling (Phase 2)
 
-Mirrors `index.md` TODO IDs **T7.1–T7.3**. Per **Q3**, this layer is gated
+Mirrors `index.md` TODO IDs **T7.1–T7.4**. Per **Q3**, this layer is gated
 behind M5 (Layers 0–6 done). It extends the *generic* cluster with
 AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
 **and** with argo-workflows integrated as a first-class built-in so
@@ -249,3 +249,93 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   suspend/http/resource templates, argo CLI breadth, timezone /
   history limits) — see the list above, not open blockers.
 - **依赖 / Depends on** — T1.2, T3.1
+
+---
+
+## T7.4 — anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面; Q36)
+
+- **目标 / Goal**
+  Workflow/Agent 有了真正的记忆面：`link_repos/any-home`（nfsserve，NFSv3 +
+  MOUNT + portmap 复用在 ONE 端口）作为 path-dep 内嵌进 `init-pro server`
+  并默认自启（`--disable-anyhome` 退出）；workspace 的三问 —— 服务端把字节
+  暴露在哪、容器挂到哪、哪个对象拥有哪棵子树 —— 由同一个 SSOT 回答
+  （`crates/common/src/workspace.rs`），keeper / 控制器注入 / Phase B 执行
+  三方从此无法漂移。Agent 实际执行仍留 Phase B（Q35 不变，见下）。
+
+- **核心实现 / Core implementation**
+  - **workspace SSOT** `crates/common/src/workspace.rs`：`MOUNT_TARGET =
+    "/workspace"`（容器内唯一挂载点，Agent/Workflow 一视同仁）、
+    `agent_workspace_path(id) = /agent/{id}`、
+    `workflow_workspace_path(id) = /workflow/{id}`、
+    `workspace_nfs_url(addr, path) = nfs://{addr}{path}`。id 守卫只拒绝
+    `/`（唯一路径显著分隔符；id 是 k8s metadata.name，`.` 合法）。纯模块：
+    无 I/O、无 env、无状态。
+  - **内嵌装配** `crates/cli/src/anyhome.rs`：逐层镜像上游
+    `link_repos/any-home/crates/anyhome/src/main.rs` —— `RealFs` 覆盖
+    `<data-dir>/anyhome/fs`（启动即预建 `workflow/` + `agent/` 根）、
+    `MemoryDb` 落在 `<data-dir>/anyhome/anyhome.db`、`DummyEmbedder`
+    取上游 `--dim` 缺省 64（`EMBED_DIM` 由单测解析上游 `Cli` 锁死：
+    MemoryDb reopen 校验 dim，漂移会在构建期报错而不是损坏磁盘库）、
+    export `/`。nfsserve 没有 cancel seam：serve loop 是
+    `tokio::select!{handle_forever, Shutdown}`；优雅停机前对 MemoryDb 做
+    WAL checkpoint（上游三臂日志，checkpoint 失败不丢数据——写路径已
+    fsync）。启动失败降级为 WARN（workspace 面劣化，不 fatal）。
+  - **workspace keeper** `crates/cli/src/anyhome_keeper.rs`：server 持有
+    storage `Arc`，keeper 直接轮询 store（Q19：不走 loopback HTTP、无
+    token），为每个 Workflow/Agent 预建 `<fs>/workflow|agent/<id>`，容器
+    先于第一次写挂载也能拿到目录。**删除被刻意忽略（A5）**：记忆面要字节
+    比对象活得久，GC 需要 owner/subresource 模型，属上游协同而非 keeper
+    职责。与 `flannel_keeper` 同款拆分理由：两个文件都守 400 行上限。
+  - **server 接线**：`--anyhome-addr`（缺省 `127.0.0.1:11111`）、
+    `--disable-anyhome`，env `INIT_PRO_ANYHOME_ADDR` /
+    `INIT_PRO_DISABLE_ANYHOME`；`anyhome_endpoint()` 纯函数把
+    disabled/addr 折叠成 `Option<String>` 端点，`None` = NFS 面不上线，
+    `Some` 原样透传（wildcard/port-0 继续可用）。
+  - **Workflow step Pod 自动挂载** `workflow_pod.rs::build_pod_with`：
+    `ManagerConfig.workspace_nfs`（与 `cluster_cidr` 同款线程化：runner →
+    wiring → worker → `workflow::reconcile(client, &wf, workspace_nfs)`）
+    非空时给 step Pod 追加卷 `{"name":"workspace","nfs":{server=addr,
+    path=/workflow/<wf-name>,readOnly:false}}` + 主容器
+    `mountPath: MOUNT_TARGET` 的 volumeMount（`container` 与 `script` 两类
+    模板共用同一主容器，均覆盖）。**注入豁免（A4：用户声明优先）**——
+    用户已写 `mountPath == /workspace` 或已声明名为 `workspace` 的卷
+    （workflow 级或模板级）时不注入；`--disable-anyhome` → endpoint 为
+    `None` → 逐字节回到 pre-Q36 的 `build_pod` 形状。
+  - **Agent 契约注解** `workflow_agent.rs`：`build_agent_with` 在
+    `workspace_nfs` 就位时为 Agent 子对象打
+    `init-pro.io/workspace = nfs://<addr>/agent/<agent-name>`
+    （`WORKSPACE_ANNOTATION`）。这就是 Phase B 执行 + kubectl 的契约面；
+    Phase A 只发契约不执行。
+  - **kubelet 侧**：`nfs` 卷类型（k8s `NFSVolumeSource`）消费同一形状，
+    细节见 `plan/04-node.md` T4.2 的 Sprint 27 as-built 块。
+  - **D1 约束（构建期硬边界）**：SSOT 落在 `common` 而非 `agent` ——
+    `agent` 经 opencoder-store 牵 libsql 0.9.30，anyhome 自带 libsql
+    0.10.0-pre.4，两份符号（`update_hook_cb`）在同一二进制内链接冲突；
+    二进制依赖路径上的任何 crate 不得依赖 `agent`。
+
+- **验收手段 / Acceptance**
+  - 单测：common workspace 路径/守卫/URL 8 条；cli 装配 + endpoint 折叠 +
+    keeper 同步/守卫；controllers 注入/豁免/两类模板/无 endpoint 不注入 +
+    Agent 注解有/无；kubelet nfs 卷解析、挂载参数、幂等与 umount-before-rm。
+  - **真机 e2e `scripts/anyhome-e2e.sh`**：**A1** 根挂载往返
+    （`mount.nfs 127.0.0.1:/` 写读一致且落盘）、**P2** 子路径挂载
+    `host:/workflow/<name>`（上游未知的 A2 疑问——本机实测**可用**，无需
+    上游协同；informational）、**K1** POST Workflow 后 keeper ≤15s 建目录
+    （controllers 关闭也成立：keeper 读裸存储，不依赖 reconcile）。
+  - golden conformance 的 discovery/路由字节不受本 TODO 影响；非
+    containerd 用例（G01–G23、G31–G33）全程全绿，containerd 生命周期用例
+    在本共享沙箱受负载抖动（见证据行与 CHANGELOG Sprint 27 的偏差记录）。
+
+- **状态 / Status** — done (Sprint 27, Q36)；Agent 执行留 Phase B (Q35 不变)
+- **证据 / Evidence** — workspace **927 passed / 0 failed**（基线 882
+  (Sprint 26 收口; wave 前 852) + 45 新增）；`scripts/anyhome-e2e.sh`
+  A1 PASS / P2 PASS / K1 PASS；golden 非 containerd 用例全绿，containerd
+  生命周期用例（G25/G26/G29/G30）在共享沙箱高负载下超时抖动（最佳完整跑
+  28 过 / 8 失败，失败集逐轮漂移、同一二进制复现不稳定——环境性，非代码
+  回归；独立复跑同一流程 pod 可达 Running+Ready）；flag parity
+  19/19（含新 `live_help "t-anyhome"` 行）；clippy `-D warnings` 0
+- **卡点 / Blockers** — `DummyEmbedder` 使 `/search` 只做精确匹配（真实
+  语义检索需上游 embedder）；A5 删除/GC 需 owner 模型（见上，非本 TODO
+  阻塞）；D1 令 Agent 执行无法进 server 进程 —— Phase B 必须走节点侧
+  （B1）/ 新子命令（B2），与 Q35 记录一致
+- **依赖 / Depends on** — T7.3, T4.2

@@ -1,6 +1,6 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 33 TODOs. The
+This file is the **single source of truth** for all 34 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
 grouping for easier editing). **Edit both in lock-step.**
 
@@ -43,12 +43,13 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A, Sprint 26, Q35; Phase B 节点执行/CLI 留 B1/B2) | T3.2, T1.2 |
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | done (Scope A+B+C, Sprint 23) | T1.2, T3.1 |
+| T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 
-**Counts:** 33 TODOs · 21 done · 2 in-progress (T5.6 NodePort plane:
+**Counts:** 34 TODOs · 22 done · 2 in-progress (T5.6 NodePort plane:
 Router service plane + service-traffic e2e, Q28; T4.3 Scope A flannel
 CNI done, Q34 — Scope B/ServiceLB L4 剩余)
 · 10 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
-Layer4=5 · Layer5=7 · Layer6=2 · Layer7=3.
+Layer4=5 · Layer5=7 · Layer6=2 · Layer7=4.
 
 ---
 
@@ -74,6 +75,13 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 27 — anyhome 一级公民 + workspace 自动挂载 (T7.4 done, Q36).**
+  `link_repos/any-home`(nfsserve 单端口 NFS/MOUNT/portmap 复用)作为 path-dep 内嵌, `server` 默认自启(`--disable-anyhome`/`--anyhome-addr`,
+  env `INIT_PRO_ANYHOME_ADDR`/`INIT_PRO_DISABLE_ANYHOME`); workspace 路径 SSOT 收敛到 `common::workspace`(`MOUNT_TARGET=/workspace`,
+  `/agent/{id}`、`/workflow/{id}`, D1 约束: 不得依赖 `agent`——libsql 双份符号冲突);
+  Workflow step Pod 自动注入 `/workspace`→`/workflow/<name>` NFS 卷(用户显式声明优先), Agent 子对象带 `init-pro.io/workspace`
+  契约 annotation; kubelet 新增 `nfs` 卷类型(mount.nfs vers=3 单端口, umount-before-rm)。e2e `scripts/anyhome-e2e.sh` A1/P2/K1
+  全绿(P2 证实子路径挂载可用, A2 无需上游协同); Agent 实际执行仍留 Phase B (Q35 不变)。
 - **Sprint 26 — 原生 Agent: init-pro.io/v1 一级资源 + 调度器同循环绑定 + Workflow template.agent + opencoder 库收编 (T7.1 Phase A done, Q35).**
   `Agent`(Namespaced/`agents`/shortName `ag`) spec 携带与 Pod 对齐的调度字段(nodeName/nodeSelector/tolerations/affinity/schedulerName/resources, camelCase)
   + opencoder 载荷(agent/prompt/model/provider, 无凭证——密钥只在 opencoder 内经 env 解析)。scheduler 以同一 filter/score/CAS 循环绑定

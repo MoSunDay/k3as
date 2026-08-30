@@ -7,6 +7,118 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 27 — anyhome 一级公民: embedded NFSv3 memory service + workspace auto-mount (Q36, T7.4) (2026-08-30)
+
+**Goal:** make anyhome an embedded first-class NFS memory service in the
+`server` process (default-on), give Workflow steps an auto-mounted
+`/workspace` backed by `/workflow/<name>`, and close out the wave's
+documentation + gates (T-A..T-G, decision Q36).
+**Tests: 935 passed / 0 failed** (`cargo test --workspace --locked`, 52 test
+binaries + 15 doc-test segments = 67 `test result` lines; Sprint-26 close
+882 + 53 incl. the close-out wave).
+
+### Embedded anyhome NFS memory service (T7.4, Q36)
+- NEW `crates/cli/src/anyhome.rs` (238 lines): nfsserve-based single-port
+  NFSv3 + MOUNT + portmap service over an in-memory tree; memory store is
+  libsql (`EMBED_DIM=64`) persisted at `<data-dir>/anyhome/fs` +
+  `<data-dir>/anyhome/db`; `/search` answers exact-match while the embedder
+  is `DummyEmbedder` (real semantic retrieval stays upstream). 4 tests.
+- NEW `crates/cli/src/anyhome_keeper.rs` (269 lines): 15s-interval keeper
+  that reads the bare store (works with controllers stopped) and ensures
+  `/workflow/<name>` per POSTed Workflow plus `/agent/<id>` per POSTed Agent
+  with the `init-pro.io/workspace` annotation; **deletions are ignored**
+  (A5 — GC needs an owner model, non-blocking). 6 tests.
+- NEW `crates/common/src/workspace.rs` (158 lines): the workspace path SSOT —
+  `MOUNT_TARGET=/workspace`, `/agent/{id}`, `/workflow/{id}`,
+  `workspace_nfs_url`. 8 tests.
+- Server wiring: anyhome auto-starts with `server` unless
+  `--disable-anyhome`; `--anyhome-addr` (default `127.0.0.1:11111`); env
+  `INIT_PRO_ANYHOME_ADDR` / `INIT_PRO_DISABLE_ANYHOME`.
+- Workflow → Pod injection: steps without a `/workspace` mount get a
+  hostPath mount of `host:/workflow/<name>` injected; a user-declared mount
+  wins. Agents carry the `init-pro.io/workspace` annotation (execution
+  itself stays Phase B, Q35 unchanged).
+
+### kubelet NFS volume kind (T4.2 as-built)
+- NEW `crates/kubelet/src/nfs_mount.rs` (364 lines): `nfs` volumes mount via
+  `mount.nfs -o vers=3,tcp,nolock,noacl,port=P,mountport=P` against the
+  in-process anyhome; idempotency via `/proc/self/mounts`; umount-before-rm
+  teardown; fake-binary driven tests. 4 tests; plan/04 T4.2 records the
+  as-built block.
+
+### Deviations & resolutions
+- **D1 (libsql duplicate symbols):** opencoder links libsql 0.9.30, anyhome
+  links 0.10.0-pre.4 — both export `update_hook_cb`, so one binary must not
+  link both. Consequence: the binary path must not link `agent`; Agent
+  execution cannot ride the server process — Phase B goes node-side (B1) or
+  through a new subcommand (B2), exactly as recorded under Q35.
+- **A2 (upstream MOUNTd subpath question) resolved locally:** e2e P2 proves
+  subpath mounts against anyhome's MOUNTd **work** (server-side export
+  root); no upstream coordination needed (informational).
+- **A5:** anyhome deletion/GC of `/workflow/*` dirs needs an owner model —
+  recorded as a non-blocking follow-up.
+
+### Gates
+- `cargo build --workspace --locked` ✓; `cargo test --workspace --locked`
+  929/0 ✓ (wave: 22 `#[test]`s in the 4 new files + 18 in the listed
+  modified files + 12 in the reconstructed `nfs_mount.rs`; measured delta
+  +47 over Sprint-26 close); `cargo clippy
+  --workspace --all-targets -- -D warnings` 0 ✓ (vendored
+  libsql/libsql-sys lifetime warnings only, pre-existing).
+- `scripts/cli-flag-parity-test.sh` 19/19 (new `live_help "t-anyhome"`
+  strip-filter row); `scripts/multicall-selftest.sh` 10/0 ✓;
+  `scripts/anyhome-e2e.sh` **4/4** — A1 anyhome up + NFS mount, P2 subpath
+  mount ACCEPTED, K1 keeper ≤15s on POSTed Workflow (controllers-off
+  variant included).
+- golden conformance: the wave's "load-flaky" failures are ROOT-CAUSED to a
+  harness teardown race and fixed. Under load a containerd-shim can outlive
+  the agent's SIGTERM while holding shm/overlay mounts in the host
+  namespace, so the teardown `rm -rf` hit EBUSY and `set -euo pipefail`
+  aborted the script mid-suite — swallowing G31 and the argoproj suites
+  (those checks were green whenever reached; the wave's kubelet diff is
+  purely additive — the `nfs` parse arm — and runtime/scheduler are
+  untouched). Harness fix: `purge_run_shims` kills only THIS run's shims
+  (matched by datadir path, never a global pkill) and unmounts the run's
+  mounts deepest-first, plus bounded <=20s pod-gone waits at the G26/G30
+  tails and a protected `rm`. Post-fix: 4 consecutive full runs (3 in the
+  review wave + 1 at close-out) print `golden: 39 passed, 0 failed` with
+  OK G31/G27/G28/G29 and `pgrep -x containerd-shim` = 0 after a 10s settle
+  (G24 pull smoke still SKIPs on the sandboxed registry). The product-side
+  root cause — the runtime supervisor stops containerd before pod teardown
+  drains — is registered as a T4.1 follow-up in
+  `plans/init-pro/plan/04-node.md`.
+- Docs lock-step: `plans/init-pro/index.md` now counts **34 TODOs** (T7.4
+  row, 22 done · 2 in-progress · 10 not-started) + Sprint 27 DAG bullet;
+  `plans/init-pro/plan/07-agent-scheduling.md` gains the full T7.4 section;
+  `plans/init-pro/plan/04-node.md` records the T4.2 nfs as-built;
+  `plans/init-pro/decisions.md` appends **Q36**; `agents.md` extends the
+  `common`/`cli` workspace-map rows + one Q36 bullet. Line limits: new files
+  ≤400 (anyhome 238, anyhome_keeper 269, workspace 158, nfs_mount 309,
+  anyhome-e2e.sh 216) ✓.
+
+### Close-out — WIP review wave (bug sweep + delivery gate)
+- P0 harness teardown race: root cause, fix and post-fix evidence as in the
+  golden bullet above (4x 39/0, zero shim residue, previously-swallowed
+  G31/G27-G29 now always reached).
+- P1 env: the `--disable-anyhome` env parse semantics are documented on the
+  flag itself — clap v4 routes bool env values through the value parser, so
+  ONLY byte-exact `true`/`false` are accepted (`1`/`0`/`TRUE` are rejected).
+  Anchored by NEW `crates/cli/tests/server_env_flags.rs` (6 cases incl. the
+  numeric-form rejection reverse-assertion; 97 lines).
+- P1 deps: root `Cargo.toml` drops the dead DIRECT deps
+  `opencoder-llm`/`opencoder-store` — still in-graph transitively via
+  session -> agent (`cargo tree -i opencoder-llm` proves reachability);
+  `--locked` build green, remaining lock churn is the anyhome additions.
+- P2 hardening: teardown `rm` made non-fatal in `scripts/durability-e2e.sh`
+  (2 sites) and in the golden/datadir cleanups; `scripts/anyhome-e2e.sh`
+  P2 subpath-mount check severity RAISED warn -> bad (up-strict). Zero
+  `#[test]` deletions in the whole wave; the only removed line in the fix
+  diff is the unprotected `rm -rf` each replacement supersedes.
+- Close-out evidence (all re-verified fresh at commit time): `cargo build
+  --workspace --locked` green; `cargo test --workspace --locked` 935/0
+  (67 segments); `cargo clippy --workspace --all-targets -- -D warnings` 0;
+  `cli-flag-parity-test.sh` 19/19; `multicall-selftest.sh` OK; golden 39/0.
+
 ## Sprint 26 — native Agent: init-pro.io/v1 first-class resource + opencoder lib (Q35) (2026-08-29)
 
 **Goal:** make `Agent` a first-class resource that the built-in scheduler

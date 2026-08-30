@@ -8,6 +8,11 @@
 //! (plan R5: avoids informer races entirely). Errors are values; one bad
 //! fetch never fails the whole pass — the missing host dir makes the CRI
 //! create fail and the cycle retries.
+//!
+//! nfs volumes (T-anyhome, Q36) bind the anyhome NFSv3 export at
+//! `<log-root>/<uid>/volumes/nfs/<name>` via a host `mount.nfs` subprocess
+//! (mechanics live in [`crate::nfs_mount`]); cleanup unmounts BEFORE
+//! deleting the tree so the server-side files always survive.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +21,7 @@ use runtime::cri_json::Mount;
 use serde_json::Value;
 
 use crate::http::HttpJson;
+use crate::nfs_mount;
 use crate::objects::{ContainerSpec, PodView, VolumeKind, VolumeSpec};
 
 /// Marker file holding the hex fingerprint of the last-written key files.
@@ -41,6 +47,12 @@ pub fn config_map_path(log_root: &Path, uid: &str, name: &str, key: &str) -> Pat
 /// Host path of one secret key file (the volume dir is its parent).
 pub fn secret_path(log_root: &Path, uid: &str, name: &str, key: &str) -> PathBuf {
     volume_dir(log_root, uid, "secret", name).join(key)
+}
+
+/// Host mountpoint of one nfs volume (T-anyhome, Q36): the `mount.nfs`
+/// target under `<log-root>/<uid>/volumes/nfs/<name>`.
+pub fn nfs_volume_path(log_root: &Path, uid: &str, name: &str) -> PathBuf {
+    volume_dir(log_root, uid, "nfs", name)
 }
 
 fn volume_dir(log_root: &Path, uid: &str, kind: &str, name: &str) -> PathBuf {
@@ -95,6 +107,20 @@ async fn ensure_one_volume(
         VolumeKind::Secret { name } => {
             let path = format!("/api/v1/namespaces/{}/secrets/{name}", view.namespace);
             refresh_files(client, &path, view, log_root, "secret", name).await
+        }
+        VolumeKind::Nfs { server, path, .. } => {
+            let dir = nfs_volume_path(log_root, &view.uid, &vol.name);
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| format!("create nfs dir {}: {e}", dir.display()))?;
+            let mounts = std::fs::read_to_string(PROC_MOUNTS)
+                .map_err(|e| format!("read {PROC_MOUNTS}: {e}"))?;
+            if nfs_mount::is_mountpoint(&mounts, &dir) {
+                return Ok(()); // already mounted: idempotent re-converge
+            }
+            // The bare name lets PATH lookup find the real helper; tests
+            // inject a fake binary through nfs_mount, never this arm.
+            nfs_mount::mount_nfs(Path::new("mount.nfs"), server, path, &dir).await
         }
     }
 }
@@ -176,9 +202,33 @@ fn is_safe_key(key: &str) -> bool {
 }
 
 /// Remove one pod's whole volume root; NotFound is tolerated (the pod
-/// never materialized a volume, or was already cleaned).
+/// never materialized a volume, or was already cleaned). Live NFS mounts
+/// under the root are unmounted FIRST -- see [`cleanup_volumes_in`].
 pub async fn cleanup_volumes(log_root: &Path, uid: &str) -> Result<(), String> {
+    let mounts = std::fs::read_to_string(PROC_MOUNTS)
+        .map_err(|e| format!("read {PROC_MOUNTS}: {e}"))?;
+    cleanup_volumes_in(Path::new("umount"), &mounts, log_root, uid).await
+}
+
+/// The real `/proc/self/mounts` path (factored out so tests can pass
+/// synthetic mounts text instead of touching the host mount table).
+const PROC_MOUNTS: &str = "/proc/self/mounts";
+
+/// The cleanup BODY with the mounts text injected (T-anyhome, Q36): the
+/// `umount_bin` parameter is the prod PATH name (`umount`); tests inject
+/// a fake script. Safety ordering is the whole point -- a live NFS mount
+/// must be unmounted BEFORE `remove_dir_all`, because deleting through
+/// the mount would destroy the SERVER-side files (anyhome memory). A
+/// umount failure leaves the tree in place and returns `Err` (the cycle
+/// retries).
+async fn cleanup_volumes_in(
+    umount_bin: &Path,
+    mounts_text: &str,
+    log_root: &Path,
+    uid: &str,
+) -> Result<(), String> {
     let root = volume_root(log_root, uid);
+    nfs_mount::unmount_under(umount_bin, mounts_text, &root).await?;
     match tokio::fs::remove_dir_all(&root).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -210,6 +260,13 @@ pub fn resolve_mounts(
                     (volume_dir(log_root, uid, "configMap", name), true)
                 }
                 VolumeKind::Secret { name } => (volume_dir(log_root, uid, "secret", name), true),
+                // nfs honors BOTH flags (unlike configMap/secret, which
+                // force true): the mount-level readOnly ORs with the
+                // volume-source readOnly (T-anyhome, Q36).
+                VolumeKind::Nfs { read_only, .. } => (
+                    nfs_volume_path(log_root, uid, &vol.name),
+                    m.read_only || *read_only,
+                ),
             };
             Some(Mount {
                 container_path: m.mount_path.clone(),
@@ -326,6 +383,127 @@ mod tests {
         );
         assert_eq!(mounts[0].host_path, "/dd/pods/u1/volumes/secret/s1");
         assert!(mounts[0].readonly);
+    }
+
+    #[test]
+    fn resolve_mounts_nfs_readonly_or_folding() {
+        // Source readOnly=false: the volumeMount flag decides.
+        let pod = pod_with_volumes(serde_json::json!([
+            {"name": "cache", "nfs": {"server": "anyhome:2049", "path": "/exports/u1"}},
+        ]));
+        let mounts = resolve_mounts(
+            &pod.containers[0],
+            &pod.volumes,
+            &pod.uid,
+            Path::new("/dd/pods"),
+        );
+        assert_eq!(
+            mounts[0].host_path, "/dd/pods/u1/volumes/nfs/cache",
+            "nfs mounts the volume dir, not the export string"
+        );
+        assert!(!mounts[0].readonly, "rw source + rw mount -> rw");
+        // Source readOnly=true forces read-only even for a rw volumeMount...
+        let pod = pod_with_volumes(serde_json::json!([
+            {"name": "cache", "nfs": {"server": "anyhome", "path": "/r", "readOnly": true}},
+        ]));
+        let mounts = resolve_mounts(
+            &pod.containers[0],
+            &pod.volumes,
+            &pod.uid,
+            Path::new("/dd/pods"),
+        );
+        assert!(mounts[0].readonly, "source readOnly participates (Q36)");
+        // ...and the mount-level flag alone still forces it.
+        let pod = pod_with_volumes(serde_json::json!([
+            {"name": "cfg", "nfs": {"server": "anyhome", "path": "/r"}},
+        ]));
+        let mut c = pod.containers[0].clone();
+        c.volume_mounts[0].read_only = true;
+        let mounts = resolve_mounts(&c, &pod.volumes, &pod.uid, Path::new("/dd/pods"));
+        assert!(mounts[0].readonly, "mount readOnly still wins on its own");
+    }
+
+    /// A fake `umount` binary (executable script); the log path is baked
+    /// in so PATH/env is never touched (parallel-test race safety).
+    fn fake_umount(dir: &Path, tag: &str, exit: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join(format!("{tag}.log"));
+        let script = dir.join(format!("fake-umount-{tag}.sh"));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\necho 'umount: failed' >&2\nexit {exit}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    #[tokio::test]
+    async fn cleanup_umount_failure_preserves_tree_and_returns_err() {
+        let root = temp_root("umount-fail");
+        let nfs_dir = nfs_volume_path(&root, "u1", "x");
+        tokio::fs::create_dir_all(&nfs_dir).await.unwrap();
+        tokio::fs::write(nfs_dir.join("canary"), "server-side data")
+            .await
+            .unwrap();
+        let mounts = format!(
+            "anyhome:/exports /run/nfs nfs3 rw 0 0\nanyhome:/exports {} nfs3 rw 0 0\n",
+            nfs_dir.display()
+        );
+        let umount = fake_umount(&root, "fail", 16);
+        let err = cleanup_volumes_in(&umount, &mounts, &root, "u1")
+            .await
+            .unwrap_err();
+        assert!(err.contains("umount: failed"), "stderr surfaced: {err}");
+        assert!(
+            volume_root(&root, "u1").exists()
+                && tokio::fs::try_exists(nfs_dir.join("canary")).await.unwrap(),
+            "umount-before-rm: the tree (and canary) SURVIVE a failed umount -- \
+             deleting through a live NFS mount would destroy server-side memory (Q36)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_successful_umount_then_removes_tree() {
+        let root = temp_root("umount-ok");
+        let nfs_dir = nfs_volume_path(&root, "u1", "x");
+        tokio::fs::create_dir_all(&nfs_dir).await.unwrap();
+        tokio::fs::write(nfs_dir.join("canary"), "server-side data")
+            .await
+            .unwrap();
+        let mounts = format!("anyhome:/exports {} nfs3 rw 0 0\n", nfs_dir.display());
+        let umount = fake_umount(&root, "ok", 0);
+        cleanup_volumes_in(&umount, &mounts, &root, "u1")
+            .await
+            .unwrap();
+        assert!(
+            !volume_root(&root, "u1").exists(),
+            "unmounted cleanly, tree removed"
+        );
+        // NotFound tolerance still holds with the mounts text present.
+        cleanup_volumes_in(&umount, &mounts, &root, "u1")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_without_mounts_still_removes_tree() {
+        let root = temp_root("plain");
+        let dir = volume_dir(&root, "u1", "emptyDir", "cache");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let umount = fake_umount(&root, "none", 0);
+        cleanup_volumes_in(&umount, "nodev /proc procfs rw 0 0", &root, "u1")
+            .await
+            .unwrap();
+        assert!(
+            !volume_root(&root, "u1").exists(),
+            "no nfs mounts under root -> plain rmdir-all"
+        );
     }
 
     #[tokio::test]

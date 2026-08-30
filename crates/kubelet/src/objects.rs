@@ -36,10 +36,11 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// One `spec.volumes[]` entry (Sprint 20 S2). Only emptyDir, configMap, and
-/// secret are supported; optional/defaultMode/subPath/CSI volumes are
-/// deferred — unsupported entries parse to `None` and are skipped by the
-/// sync loop (the CRI create then fails and the cycle retries).
+/// One `spec.volumes[]` entry (Sprint 20 S2). emptyDir, configMap, secret,
+/// and nfs are supported (T-anyhome); optional/defaultMode/subPath/CSI
+/// volumes are deferred — unsupported entries parse to `None` and are
+/// skipped by the sync loop (the CRI create then fails and the cycle
+/// retries).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeSpec {
     pub name: String,
@@ -47,12 +48,21 @@ pub struct VolumeSpec {
 }
 
 /// Volume kind: configMap references `spec.volumes[].configMap.name`,
-/// secret references `spec.volumes[].secret.secretName`.
+/// secret references `spec.volumes[].secret.secretName`, and nfs carries
+/// the k8s `NFSVolumeSource` shape (`server`/`path` required, `readOnly`
+/// defaulting to false). The in-cluster nfs server is anyhome (Q36): the
+/// host dir is bind-mounted from the NFSv3 export via `mount.nfs`
+/// (see [`crate::nfs_mount`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolumeKind {
     EmptyDir,
     ConfigMap { name: String },
     Secret { name: String },
+    Nfs {
+        server: String,
+        path: String,
+        read_only: bool,
+    },
 }
 
 /// Pod identity + the fields the sync loop consumes. `marker` is the pod's
@@ -211,8 +221,9 @@ fn container_volume_mounts(c: &Value) -> Vec<VolumeMount> {
         .unwrap_or_default()
 }
 
-/// `spec.volumes[]` (Sprint 20 S2): only emptyDir/configMap/secret kinds;
-/// nameless or unsupported entries are skipped, never fatal.
+/// `spec.volumes[]` (Sprint 20 S2): emptyDir/configMap/secret/nfs kinds
+/// (nfs since T-anyhome, Q36); nameless or unsupported entries are
+/// skipped, never fatal.
 pub fn pod_volumes(pod: &Value) -> Vec<VolumeSpec> {
     let Some(items) = pod.pointer("/spec/volumes").and_then(Value::as_array) else {
         return Vec::new();
@@ -243,7 +254,7 @@ pub fn pod_volumes(pod: &Value) -> Vec<VolumeSpec> {
                     name: sn.to_string(),
                 }
             } else {
-                return None;
+                nfs_source(v)?
             };
             Some(VolumeSpec {
                 name: name.to_string(),
@@ -251,6 +262,28 @@ pub fn pod_volumes(pod: &Value) -> Vec<VolumeSpec> {
             })
         })
         .collect()
+}
+
+/// The `nfs` inline volume source (k8s `NFSVolumeSource`, Q2 shape):
+/// `server` + `path` are REQUIRED (missing either -> `None`, skipped like
+/// any other unsupported entry); `readOnly` defaults to false.
+fn nfs_source(v: &Value) -> Option<VolumeKind> {
+    let server = v
+        .pointer("/nfs/server")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let path = v
+        .pointer("/nfs/path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    Some(VolumeKind::Nfs {
+        server: server.to_string(),
+        path: path.to_string(),
+        read_only: v
+            .pointer("/nfs/readOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 /// Reduce one pod JSON object to the fields the sync loop needs. `None`
@@ -554,6 +587,59 @@ mod tests {
         );
         assert!(pod_volumes(&json!({})).is_empty());
         assert!(pod_containers(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn nfs_volume_parses_with_read_only_default_false() {
+        let p = json!({
+            "metadata": {"name": "p", "namespace": "d", "uid": "u"},
+            "spec": {"volumes": [
+                {"name": "data", "nfs": {"server": "anyhome.default.svc:2049", "path": "/exports/u1"}},
+                {"name": "ro", "nfs": {"server": "anyhome", "path": "/exports/ro", "readOnly": true}},
+            ]},
+        });
+        assert_eq!(
+            pod_volumes(&p),
+            vec![
+                VolumeSpec {
+                    name: "data".into(),
+                    kind: VolumeKind::Nfs {
+                        server: "anyhome.default.svc:2049".into(),
+                        path: "/exports/u1".into(),
+                        read_only: false,
+                    },
+                },
+                VolumeSpec {
+                    name: "ro".into(),
+                    kind: VolumeKind::Nfs {
+                        server: "anyhome".into(),
+                        path: "/exports/ro".into(),
+                        read_only: true,
+                    },
+                },
+            ],
+            "k8s NFSVolumeSource shape; readOnly defaults to false (T-anyhome, Q36)"
+        );
+    }
+
+    #[test]
+    fn nfs_volume_without_server_or_path_is_skipped() {
+        let p = json!({
+            "metadata": {"name": "p", "namespace": "d", "uid": "u"},
+            "spec": {"volumes": [
+                {"name": "no-server", "nfs": {"path": "/exports/u1"}},
+                {"name": "no-path", "nfs": {"server": "anyhome"}},
+                {"name": "empty-server", "nfs": {"server": "", "path": "/x"}},
+                {"name": "empty-path", "nfs": {"server": "anyhome", "path": ""}},
+                {"name": "ok", "emptyDir": {}},
+            ]},
+        });
+        let vols = pod_volumes(&p);
+        assert_eq!(
+            vols.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            vec!["ok"],
+            "missing/empty server or path -> skipped, same as unsupported kinds"
+        );
     }
 
     #[test]

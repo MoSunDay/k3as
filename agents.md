@@ -34,7 +34,8 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - T2.1/T2.2 status-vs-code drift was reconciled in Sprint 10 and T2.2 closed
   as done in Sprint 12 (watch replay + compaction landed; see CHANGELOG).
 - `crates/router/src/lib.rs` previously claimed "T5.4 in progress, Scope A".
-  NOW fixed: header says T5.4 done (TLS + hot reload are implemented and tested).
+  NOW fixed: header says T5.4 done (hot reload implemented and tested); TLS
+  is T5.5 and NOT started (post-Q32 there is no TLS code in the router).
 - The repo's root project-instructions header (the `# agents.md` preamble fed to
   the agent) still describes the PRE-SPRINT-25 state (mlua/Lua Router,
   libsql/sqlite T2.3, T4.3 not started); trust index.md + CHANGELOG.md as
@@ -82,9 +83,9 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 |-------|------|
 | `init-pro` | Single binary; argv[0] dispatch + build.rs asset bundling. |
 | `multicall` | Alias table + reexec + peer stubs (T0.1). |
-| `cli` | clap CLI + subcommands + flag-parity strip filter (T0.4); embedded flanneld runner + node-condition keeper (T4.3 Scope A, Q34). |
+| `cli` | clap CLI + subcommands + flag-parity strip filter (T0.4); embedded flanneld runner + node-condition keeper (T4.3 Scope A, Q34); embedded anyhome NFS supervisor + workspace keeper (T7.4, Q36). |
 | `infra` | tracing, layered config, graceful shutdown (T0.3). |
-| `common` | Shared primitives: embed descriptor + `version()`. |
+| `common` | Shared primitives: embed descriptor + `version()`; workspace path conventions — `MOUNT_TARGET=/workspace`, `/agent/{id}`, `/workflow/{id}` (T7.4, Q36). |
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
 | `api` | Resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1). |
 | `agent` | Pure seam: `AgentSpec` ↔ opencoder session config bridging (T7.1 Phase A, Q35); no execution (Phase B). |
@@ -94,7 +95,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `runtime` | Agent-side containerd: config templating, idempotent vendor staging (incl. CNI conflists + flannel aux staging/`aux/flannel` symlink), supervisor + CRI plumbing (T4.1, Q24-Q26; T4.3 Scope A). |
 | `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer incl. podIP/podIPs/hostIP emission (T4.2 Scope A+B: probes/volumes/pull-policy/hostname, S20). |
 | `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
-| `router` | Built-in Router riding openrusty (h2c gateway, Q32): Ingress networking.k8s.io/v1 -> route compiler, balancer, reverse proxy, TLS (T5.1-T5.6 Scope A done). |
+| `router` | Built-in Router riding openrusty (h2c gateway, Q32): Ingress networking.k8s.io/v1 -> route compiler, balancer, reverse proxy, hot reload (T5.1-T5.4 done; TLS = T5.5 not started). |
 | `storage` | `StorageBackend` trait + `EmbeddedStorage` + `RdbStorage` (RocksDB via the rdb crate; durable opt-in `rdb://`) incl. watch replay + compaction (T2.1/T2.2/T2.3, Q33). |
 
 ## Critical path & current state
@@ -151,5 +152,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - Q35 - `Agent` is an init-pro.io/v1 first-class resource scheduled natively
   through the same loop as Pods; Workflow `template.agent` creates Agents
   (no Pod materialization); opencoder embedded as link_repos path deps.
+- Q36 - anyhome is an embedded first-class NFS memory service (default-on,
+  `--disable-anyhome`); workflow step pods get `/workspace` auto-mounted
+  from `/workflow/<name>` and Agents carry the `init-pro.io/workspace`
+  annotation; workspace path SSOT lives in `common` (D1: the binary path
+  must not link `agent` — duplicate libsql symbols).
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q35).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q36).

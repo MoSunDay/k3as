@@ -33,3 +33,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 sha2.workspace = true
 zstd.workspace = true
+# T-anyhome (Q36): anyhome NFSv3 memory service plus its nfsserve engine, to
+# be embedded by the anyhome workspace supervisor. Declared here so the
+# path deps stay in the build graph ahead of use.
+anyhome = { workspace = true }
+nfsserve = { workspace = true }

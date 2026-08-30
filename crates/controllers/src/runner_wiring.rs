@@ -42,6 +42,7 @@ pub(crate) fn spawn_set(
     stop: Stop,
     now: NowFn,
     cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
+    workspace_nfs: Arc<Option<String>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -320,6 +321,7 @@ pub(crate) fn spawn_set(
                 caches,
                 &queue,
                 kind,
+                workspace_nfs.clone(),
                 &stop,
                 now.clone(),
             ));
@@ -340,6 +342,7 @@ pub(crate) fn spawn_set(
             &queue,
             Kind::NodeCidr,
             cluster_cidr,
+            workspace_nfs.clone(),
             &stop,
             now.clone(),
         ));

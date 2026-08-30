@@ -25,6 +25,7 @@ pub mod cri_backend;
 pub mod exec;
 pub mod framing;
 pub mod http;
+pub mod nfs_mount;
 pub mod node;
 pub mod objects;
 pub mod probes;
@@ -48,5 +49,7 @@ pub use runner::{default_node_name, spawn, KubeletConfig};
 pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 pub use sync::{plan, Action, Snapshot};
-pub use volumes::{cleanup_volumes, empty_dir_path, ensure_volumes, resolve_mounts, volume_root};
+pub use volumes::{
+    cleanup_volumes, empty_dir_path, ensure_volumes, nfs_volume_path, resolve_mounts, volume_root,
+};
 pub use watch::WatchConn;

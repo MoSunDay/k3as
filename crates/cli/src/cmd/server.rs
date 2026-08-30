@@ -70,6 +70,26 @@ pub struct ServerCmd {
     #[arg(long = "disable-kube-proxy")]
     pub disable_kube_proxy: bool,
 
+    /// Embedded anyhome NFSv3 memory service listen address (T-anyhome,
+    /// Q36): NFS/MOUNT/portmap multiplex on this ONE port; export `/`.
+    /// env `INIT_PRO_ANYHOME_ADDR`. v1 assumes bind==advertise: pods dial
+    /// this same address; the split advertise address is Phase B (Q36).
+    #[arg(
+        long = "anyhome-addr",
+        env = "INIT_PRO_ANYHOME_ADDR",
+        default_value = "127.0.0.1:11111",
+        value_name = "ADDR"
+    )]
+    pub anyhome_addr: String,
+
+    /// Disable the embedded anyhome workspace plane (T-anyhome, Q36).
+    /// env `INIT_PRO_DISABLE_ANYHOME`: clap v4 reads the env value through
+    /// the bool value parser, so ONLY the exact spellings `true`/`false`
+    /// are accepted — `1`/`0` (and any other casing, e.g. `TRUE`) fail the
+    /// parse; an unset env + no flag leaves anyhome enabled.
+    #[arg(long = "disable-anyhome", env = "INIT_PRO_DISABLE_ANYHOME")]
+    pub disable_anyhome: bool,
+
     /// Disable the network-policy controller.
     #[arg(long = "disable-network-policy")]
     pub disable_network_policy: bool,

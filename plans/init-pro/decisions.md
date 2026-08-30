@@ -1807,3 +1807,63 @@ consequences:
   framing are retired; policy-grade placement (GPU/peer affinity) stays with
   T7.2. Phase B status writes go through merge-patch today (status-subresource
   merge is the same debt noted in Q34).
+
+## Q36 — anyhome is an embedded first-class NFS memory service; Workflow `/workspace` auto-mount + Agent workspace annotation (T7.4 / Sprint 27)
+
+**Date.** 2026-08-29 (Sprint 27, "anyhome + workspace").
+
+- **Context.** Workflow/Agent workloads had no memory plane: a Workflow's
+  steps shared nothing on disk, and an Agent (Q35) had nowhere to persist a
+  session workspace, so "memory outlives the object that produced it" was
+  unimplementable. `link_repos/any-home` (nfsserve) already provides an
+  NFSv3 memory service with a `RealFs`/`MemoryDb`(libsql)/`Embedder`
+  assembly, and it multiplexes NFS + MOUNT + portmap on ONE port, so it can
+  be embedded without a portmapper/rpcbind dependency. Any consumer of that
+  plane needs the same three answers — where the server exposes bytes, where
+  containers mount them, and which object owns which subtree — or the
+  server-side export paths and the pod-side mounts drift apart.
+- **Options.** (a) out-of-process anyhome daemon + user-managed NFS PVs;
+  (b) embed anyhome in `server` as a first-class plane, default-on, with a
+  `--disable-anyhome` opt-out, and pin the path conventions in one shared
+  module; (c) object-store/artifact sidecar instead of NFS.
+- **Decision.** (b). `link_repos/any-home` is a path dep; `init-pro server`
+  auto-starts it on `--anyhome-addr` (default `127.0.0.1:11111`, env
+  `INIT_PRO_ANYHOME_ADDR` / `INIT_PRO_DISABLE_ANYHOME`) unless
+  `--disable-anyhome`. Layout: `<data-dir>/anyhome/fs` (pre-created
+  `workflow/` + `agent/` roots) + `<data-dir>/anyhome/anyhome.db`
+  (libsql, `DummyEmbedder` at the upstream `--dim` default 64, validated on
+  reopen), export `/`; graceful shutdown WAL-checkpoints the db. A server-side
+  keeper (`crates/cli/src/anyhome_keeper.rs`) pre-creates one directory per
+  Workflow/Agent by polling the store directly (Q19: no loopback HTTP, no
+  token); deletion is deliberately ignored (A5: memory persistence beats GC).
+  The path SSOT is `crates/common/src/workspace.rs`: `MOUNT_TARGET =
+  "/workspace"`, `agent_workspace_path(id) = /agent/{id}`,
+  `workflow_workspace_path(id) = /workflow/{id}` (ids guarded: no `/`),
+  `workspace_nfs_url(addr, path)`. The Workflow controller injects, per step
+  pod, a `workspace` NFS volume (`server = anyhome addr`,
+  `path = /workflow/<wf-name>`) + a `mountPath: /workspace` volumeMount on
+  the single main container (covers `container` and `script` template kinds)
+  — skipped when the user already declared a `/workspace` mountPath or a
+  volume literally named `workspace` (user declaration wins) and absent when
+  anyhome is disabled. Agent children (Q35) carry the contract annotation
+  `init-pro.io/workspace = nfs://<addr>/agent/<agent-name>`; the kubelet
+  consumes the same shape through its new `nfs` volume kind (k8s
+  `NFSVolumeSource`; `mount.nfs -o vers=3,tcp,nolock,noacl,port=P,mountport=P`
+  — the same port twice because anyhome is single-port — idempotent via
+  `/proc/self/mounts`, umount-before-rm on cleanup).
+- **Consequences.** anyhome is a workspace plane, not a general-purpose
+  storage product: `DummyEmbedder` means `/search` is exact-match only, and
+  the plane degrades to a WARN (not a fatal) if it fails to start.
+  **D1 constraint:** the path SSOT lives in `common`, NOT in `agent` —
+  `agent` transitively pulls opencoder's libsql 0.9.30 while anyhome vendors
+  libsql 0.10.0-pre.4, and both copies in one binary collide at link time
+  (`duplicate symbol: update_hook_cb`); therefore no crate on the server
+  binary's dependency path may depend on `agent`, which in turn keeps Agent
+  EXECUTION Phase B (Q35 unchanged: B1 runs on nodes, outside this link
+  graph). The Phase B/kubectl contract is the annotation string, so Phase B
+  work cannot move the paths without touching `common`. Deletion/GC of
+  workspace directories is out of scope (A5, needs an owner/subresource
+  model upstream). Verified by `scripts/anyhome-e2e.sh`: A1 root-mount
+  roundtrip, P2 subpath mount (`host:/workflow/<name>` WORKS — coordination
+  item A2 resolved, no upstream change needed), K1 keeper directory creation
+  after a Workflow POST.
