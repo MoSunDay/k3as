@@ -6,7 +6,8 @@
 //! pod template is recorded as an `apps/v1` ControllerRevision
 //! (`<name>-<hash10>` of `crate::id::template_hash`, bumped `revision`).
 //! `podManagementPolicy`: `OrderedReady` (default) gates ordinal i on pod
-//! i-1 existing AND ready ([`crate::object::pod_is_ready`]); `Parallel`
+//! i-1 existing AND GATE-ready ([`crate::object::pod_gate_ready`]: a `Ready`
+//! condition present AND `True` — kubelet-parity, golden G61); `Parallel`
 //! creates unconditionally. `updateStrategy`: `RollingUpdate` (default)
 //! deletes stale-revision pods at ordinals >= `rollingUpdate.partition`,
 //! highest first (the create path recreates them at the new revision);
@@ -33,7 +34,7 @@ use crate::controllers::{is_terminating, owned_by};
 use crate::error::ControllerError;
 use crate::id::{add_label, template_hash};
 use crate::object::{
-    name, namespace, owner_reference, pod_is_ready, resource_version, semantic_eq,
+    name, namespace, owner_reference, pod_gate_ready, pod_is_ready, resource_version, semantic_eq,
 };
 
 const POD_INDEX_LABEL: &str = "apps.kubernetes.io/pod-index";
@@ -125,14 +126,17 @@ pub async fn reconcile(client: &Arc<dyn Client>, sts: &Value) -> Result<(), Cont
         tracing::debug!(sts = sts_name, pod = %victim, "deleted statefulset pod");
     }
 
-    // Creates in ordinal order; OrderedReady gates ordinal i on pod i-1.
+    // Creates in ordinal order. OrderedReady gates ordinal i on pod i-1
+    // being GATE-ready (`pod_gate_ready`: a real `Ready` condition, T3.1b /
+    // golden G61); the status counters below still use ready-by-default
+    // `pod_is_ready` (the documented T3.1a no-kubelet semantic).
     let mut prev_ready = true; // ordinal 0 has no predecessor
     for ordinal in 0..desired {
         match by_ordinal.get(&ordinal) {
-            Some(pod) => prev_ready = pod_is_ready(pod),
+            Some(pod) => prev_ready = pod_gate_ready(pod),
             None => {
                 if !parallel && !prev_ready {
-                    break; // OrderedReady: wait for i-1 to be ready
+                    break; // OrderedReady: wait for i-1 to be gate-ready
                 }
                 let pod = pod_body(&template, ns, sts_name, uid, ordinal, short, service_name);
                 let key = Key::new("", "pods", ns, pod_name(sts_name, ordinal).as_str());
@@ -142,7 +146,14 @@ pub async fn reconcile(client: &Arc<dyn Client>, sts: &Value) -> Result<(), Cont
                     Err(e) => return Err(e),
                 }
                 by_ordinal.insert(ordinal, pod);
-                prev_ready = true; // fresh pod: no conditions -> ready
+                // A fresh pod carries NO status yet: under OrderedReady it
+                // must hold back the NEXT ordinal until the kubelet (T4.2)
+                // reports Ready=True, i.e. at most ONE new ordinal per
+                // reconcile (the removed `prev_ready = true` here was the
+                // G61 bug: ordinals 0+1 materialized in one pass). Parallel
+                // never consults the gate, so it keeps creating every
+                // ordinal in the same pass.
+                prev_ready = false;
             }
         }
     }
@@ -150,6 +161,8 @@ pub async fn reconcile(client: &Arc<dyn Client>, sts: &Value) -> Result<(), Cont
     ensure_revision(client, ns, sts_name, uid, &template, &revision_name, short).await?;
 
     // Status write-if-changed, computed from the post-mutation state.
+    // Counters keep ready-by-default `pod_is_ready` (T3.1a); only the
+    // ordinal-creation gate above is strict.
     let replicas = by_ordinal.len() as u64;
     let ready = by_ordinal.values().filter(|p| pod_is_ready(p)).count() as u64;
     let updated = by_ordinal

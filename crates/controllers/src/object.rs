@@ -140,6 +140,32 @@ pub fn pod_is_ready(pod: &Value) -> bool {
     }
 }
 
+/// STRICT readiness: a `Ready` condition is PRESENT with `status: "True"`.
+///
+/// Two readiness notions coexist on purpose (T3.1a vs T3.1b):
+///  - [`pod_is_ready`] (the COUNTERS: ReplicaSet/DaemonSet/STS status,
+///    Endpoints) is ready-BY-DEFAULT. Without a kubelet nothing would ever
+///    report Ready and every count would stay at zero -- the documented
+///    T3.1a design choice, unit-tested as such.
+///  - [`pod_gate_ready`] (the ORDEREDREADY GATE, T3.1b) must reflect REAL
+///    readiness: a freshly created pod has no status yet, so counting it
+///    ready would open ordinal i+1 in the same reconcile and ordinals
+///    0+1 appear together -- exactly the regression golden G61 pins
+///    ("ordinal 1 withheld while ordinal 0 never went Ready"). With the
+///    real kubelet (T4.2) writing `pods/status` conditions, the gate is
+///    kubelet-parity: no `Ready` condition, no next ordinal.
+pub fn pod_gate_ready(pod: &Value) -> bool {
+    pod.pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|c| c.get("type").and_then(Value::as_str) == Some("Ready"))
+                .map(|c| c.get("status").and_then(Value::as_str) == Some("True"))
+        })
+        .unwrap_or(false)
+}
+
 /// Deep equality ignoring volatile metadata: `uid`, `resourceVersion`,
 /// `creationTimestamp`, `managedFields`. `status` IS compared (controllers
 /// use this for write-if-changed decisions).
@@ -276,6 +302,28 @@ mod tests {
         ]}})));
         // Conditions present but no Ready entry -> ready-by-default.
         assert!(pod_is_ready(&json!({"status": {"conditions": [
+            {"type": "PodScheduled", "status": "True"},
+        ]}})));
+    }
+
+    #[test]
+    fn pod_gate_ready_is_strict_no_condition_no_gate() {
+        use super::pod_gate_ready;
+        // The OrderedReady gate (T3.1b, golden G61): a condition-less pod
+        // (freshly created, kubelet has not reported yet) is NOT gate-ready.
+        assert!(!pod_gate_ready(&json!({"metadata": {"name": "p"}})));
+        assert!(!pod_gate_ready(&json!({"status": {}})));
+        // An explicit Ready condition honors it -- True opens the gate.
+        assert!(pod_gate_ready(&json!({"status": {"conditions": [
+            {"type": "PodScheduled", "status": "True"},
+            {"type": "Ready", "status": "True"},
+        ]}})));
+        assert!(!pod_gate_ready(&json!({"status": {"conditions": [
+            {"type": "Ready", "status": "False"},
+        ]}})));
+        // Conditions present but no Ready entry: still not gate-ready (the
+        // exact inverse of pod_is_ready's ready-by-default for this case).
+        assert!(!pod_gate_ready(&json!({"status": {"conditions": [
             {"type": "PodScheduled", "status": "True"},
         ]}})));
     }

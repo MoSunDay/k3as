@@ -135,15 +135,31 @@ rm -f "$TMP_G18" "$TMP_G18.new"
 # G19: StatefulSet ordered identity + PVC retention. Scale 3 -> web-0/1/2 +
 # one PVC per claim template per ordinal; scale to 1 removes high ordinals
 # but NEVER the PVCs.
+#
+# The OrderedReady gate (T3.1b, hardened for golden G61) only opens ordinal
+# i once pod i-1 carries a REAL `Ready` condition -- a condition-less pod no
+# longer counts as ready. This suite runs on the kubelet-less main server,
+# so the case itself plays kubelet (T4.2 parity): each time an ordinal
+# appears, PUT its status subresource with the same condition shape the
+# agent writes (crates/kubelet/src/status.rs: PodScheduled True + Ready
+# True/ContainersReady). One new ordinal per round-trip, bounded poll.
 TMP_G19="$(mktemp)"
 printf '%s' '{"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"golden-web"},"spec":{"replicas":3,"serviceName":"golden-web","selector":{"matchLabels":{"app":"golden-web"}},"template":{"metadata":{"labels":{"app":"golden-web"}},"spec":{"containers":[{"name":"web","image":"nginx:1.29"}]}},"volumeClaimTemplates":[{"metadata":{"name":"data"},"spec":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"1Gi"}}}}]}}' > "$TMP_G19"
+g19_ready() {
+  curl -s -o /dev/null -X PUT -H "Content-Type: application/json" \
+    --data-binary '{"status":{"phase":"Running","conditions":[{"type":"PodScheduled","status":"True","reason":"Scheduler","message":"assigned to this node"},{"type":"Ready","status":"True","reason":"ContainersReady","message":"all containers ready"}]}}' \
+    "$BASE/api/v1/namespaces/default/pods/$1/status"
+}
 G19_CREATE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" --data-binary "@$TMP_G19" "$BASE/apis/apps/v1/namespaces/default/statefulsets")"
 STS_PATH="/apis/apps/v1/namespaces/default/statefulsets/golden-web"
 G19_UP=0
 for _ in $(seq 1 60); do
   P0="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/namespaces/default/pods/golden-web-0")"
+  [[ "$P0" == "200" ]] && g19_ready golden-web-0
   P1="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/namespaces/default/pods/golden-web-1")"
+  [[ "$P1" == "200" ]] && g19_ready golden-web-1
   P2="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/namespaces/default/pods/golden-web-2")"
+  [[ "$P2" == "200" ]] && g19_ready golden-web-2
   PVC="$(curl -s "$BASE/api/v1/namespaces/default/persistentvolumeclaims" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('items',[])))" 2>/dev/null || echo 99)"
   if [[ "$P0" == "200" && "$P1" == "200" && "$P2" == "200" && "$PVC" -eq 3 ]]; then G19_UP=1; break; fi
   sleep 0.25
