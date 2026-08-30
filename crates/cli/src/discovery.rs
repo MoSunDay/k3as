@@ -4,8 +4,8 @@
 //! pass-through (now including `endpoints` for the T3.1a endpoints
 //! controller and `persistentvolumeclaims` for the T3.1b StatefulSet
 //! controller), the `apps/v1` group (T3.1a Deployment/ReplicaSet
-//! controllers, T3.1b StatefulSet + its `controllerrevisions` history;
-//! DaemonSet stays schema-only until its T3.1b slice),
+//! controllers, T3.1b StatefulSet + its `controllerrevisions` history and
+//! the controller-driven DaemonSet — T3.1b),
 //! `coordination.k8s.io/v1` (Lease — leader election, decision **Q18**), the
 //! `init-pro.io/v1` group, and `argoproj.io/v1alpha1` (T7.3 Scope A:
 //! Workflow + CronWorkflow, schema-only CRUD — no workflow controller yet). The actual HTTP serving is **T1.2**; this
@@ -28,9 +28,9 @@ pub fn served_schema() -> SchemaRegistry {
     reg.register_native::<k8s_openapi::api::core::v1::PersistentVolumeClaim>();
     // apps/v1: Deployment + ReplicaSet are driven by the T3.1a controllers;
     // StatefulSet (T3.1b) records its pod-template history as
-    // ControllerRevision objects; DaemonSet is SCHEMA-ONLY for now (inert —
-    // no controller until its T3.1b slice), registered so the group/version
-    // contract is stable.
+    // ControllerRevision objects; DaemonSet (T3.1b) is controller-driven
+    // too (per-node one-pod-per-matching-node scheduling, golden G20),
+    // registered so the group/version contract is stable.
     reg.register_native::<k8s_openapi::api::apps::v1::Deployment>();
     reg.register_native::<k8s_openapi::api::apps::v1::ReplicaSet>();
     reg.register_native::<k8s_openapi::api::apps::v1::StatefulSet>();
