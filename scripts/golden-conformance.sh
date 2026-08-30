@@ -183,6 +183,12 @@ source "$SCRIPT_DIR/golden/suites/scheduler.sh"
 source "$SCRIPT_DIR/golden/suites/nodes.sh"
 source "$SCRIPT_DIR/golden/suites/networking.sh"
 source "$SCRIPT_DIR/golden/suites/argoproj.sh"
+source "$SCRIPT_DIR/golden/suites/resources.sh"
+source "$SCRIPT_DIR/golden/suites/workloads.sh"
+source "$SCRIPT_DIR/golden/suites/cronworkflows.sh"
+source "$SCRIPT_DIR/golden/suites/realtraffic.sh"
+source "$SCRIPT_DIR/golden/suites/nscascade.sh"
+source "$SCRIPT_DIR/golden/suites/negative.sh"
 
 echo
 echo "golden: $PASS passed, $FAIL failed"
