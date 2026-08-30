@@ -12,6 +12,14 @@
 //! Deleting a Deployment cascades to its ReplicaSet/Pods via the GC, but
 //! the drain deletes each kind directly anyway -- one pass, no reliance on
 //! cross-controller ordering. JSON-only wire (Q10).
+//!
+//! The drain table below covers EVERY namespaced kind the apiserver serves
+//! (the `cli::discovery::served_schema` registry): the core/v1 set incl.
+//! `events`, the apps/v1 workload set, `coordination.k8s.io/leases`, plus
+//! the served custom groups -- Workflows + CronWorkflows (T7.3, Q30),
+//! Agents (A3, Q35) and LuaRouters + Ingresses (Q32). Missing one of these
+//! used to orphan the kind at the terminal delete (the ns object vanished
+//! while its contents survived).
 
 use std::sync::Arc;
 
@@ -23,18 +31,30 @@ use crate::error::ControllerError;
 use crate::object::{name, resource_version};
 
 /// `(group, resource)` kinds drained before a Namespace may finalize.
-pub(crate) const DRAIN_KINDS: [(&str, &str); 12] = [
+/// Group strings are the group WITHOUT the version (e.g. `argoproj.io`,
+/// not `argoproj.io/v1alpha1`) -- that is how `KeyPrefix`/`Key` scope
+/// storage keys. Order matters mildly: Pods drain before the workload
+/// controllers that would recreate them, CronWorkflows before Workflows
+/// (a live CronWorkflow re-fires children), and leases (leader election)
+/// drain last.
+pub(crate) const DRAIN_KINDS: [(&str, &str); 18] = [
     ("", "pods"),
     ("", "services"),
     ("", "endpoints"),
     ("", "configmaps"),
     ("", "secrets"),
     ("", "persistentvolumeclaims"),
+    ("", "events"),
     ("apps", "deployments"),
     ("apps", "replicasets"),
     ("apps", "statefulsets"),
     ("apps", "daemonsets"),
     ("apps", "controllerrevisions"),
+    ("argoproj.io", "cronworkflows"),
+    ("argoproj.io", "workflows"),
+    ("init-pro.io", "agents"),
+    ("init-pro.io", "luarouters"),
+    ("networking.k8s.io", "ingresses"),
     ("coordination.k8s.io", "leases"),
 ];
 
@@ -106,7 +126,7 @@ mod tests {
 
     #[test]
     fn drain_kind_table_covers_the_controller_footprint() {
-        assert_eq!(DRAIN_KINDS.len(), 12);
+        assert_eq!(DRAIN_KINDS.len(), 18);
         for kind in [
             ("", "pods"),
             ("", "services"),
@@ -114,23 +134,45 @@ mod tests {
             ("", "configmaps"),
             ("", "secrets"),
             ("", "persistentvolumeclaims"),
+            ("", "events"),
             ("apps", "deployments"),
             ("apps", "replicasets"),
             ("apps", "statefulsets"),
             ("apps", "daemonsets"),
             ("apps", "controllerrevisions"),
+            ("argoproj.io", "cronworkflows"),
+            ("argoproj.io", "workflows"),
+            ("init-pro.io", "agents"),
+            ("init-pro.io", "luarouters"),
+            ("networking.k8s.io", "ingresses"),
             ("coordination.k8s.io", "leases"),
         ] {
             assert!(DRAIN_KINDS.contains(&kind), "missing {kind:?}");
         }
         // Pods drain before the workload controllers that would recreate
-        // them; leases (leader election) drain last.
+        // them; every served custom-group kind (T7.3 Q30, A3 Q35, Q32) is
+        // in the table so the terminal delete cannot orphan it; leases
+        // (leader election) drain last.
         let pods = DRAIN_KINDS.iter().position(|k| k == &("", "pods")).unwrap();
         let deps = DRAIN_KINDS
             .iter()
             .position(|k| k == &("apps", "deployments"))
             .unwrap();
         assert!(pods < deps, "pods must drain before deployments");
+        let cwfs = DRAIN_KINDS
+            .iter()
+            .position(|k| k == &("argoproj.io", "cronworkflows"))
+            .unwrap();
+        let wfs = DRAIN_KINDS
+            .iter()
+            .position(|k| k == &("argoproj.io", "workflows"))
+            .unwrap();
+        assert!(cwfs < wfs, "cronworkflows must drain before workflows");
+        assert_eq!(
+            DRAIN_KINDS.last(),
+            Some(&("coordination.k8s.io", "leases")),
+            "leases drain last"
+        );
     }
 
     #[test]
