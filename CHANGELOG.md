@@ -7,6 +7,97 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 29 — 21 类 served 资源全量 e2e 真实回归 + 2 个真 bug 根因修复 (T0.6 扩容; DRAIN_KINDS/Q20, T3.1b OrderedReady) (2026-08-30)
+
+**Goal:** every served kind (21 across core/v1 ×9, apps/v1 ×5,
+coordination.k8s.io/v1, networking.k8s.io/v1 ×2, init-pro.io/v1 ×2,
+argoproj.io/v1alpha1 ×2) gets real-wire regression coverage; every RED
+is either root-cause-fixed with a red-checked regression test or
+recorded as a locked deviation. Golden grows **39 → 72 checks** across
+12 suite files (every new file ≤400 lines, suite roster in
+`scripts/golden-conformance.sh` header).
+**Tests: 945 passed / 0 failed** (`cargo test --workspace --locked`;
+Sprint-28 close 940 + 5).
+**Gate sweep (all green):** golden ×3 = 72/0 each (1× under 4×nice-19
+busy-loop load, Sprint-28 precedent; the under-load run hit one G26c
+transient — emptyDir bootcount — cleared on its single permitted rerun,
+same starvation family as G29/G30c below), multicall selftest 10/10,
+flag parity 19/19, discovery parity, service-traffic ST1-ST6 6/6,
+flannel F1-F5 5/5, anyhome 4/4, durability D1-D4 (resourceVersion
+identity + watch replay across restart), graceful shutdown; zero
+shim/mount residue from the round.
+
+### Bug 1 (P1) — Namespace terminal delete leaked 6 kinds (DRAIN_KINDS 12→18)
+`namespace.rs` drained only 12 namespaced kinds before finalizing, so
+`events`, `argoproj.io/workflows`, `argoproj.io/cronworkflows`,
+`init-pro.io/agents`, `init-pro.io/luarouters` and
+`networking.k8s.io/ingresses` survived namespace finalization as
+orphans — ownerless objects are unreachable by the GC cascade (Q20).
+Table extended to the full served footprint (18), ordered so
+cronworkflows drain before workflows (a live CronWorkflow re-fires
+children mid-pass) and leases drain last. Regression tests in
+`tests/gc.rs`: all-6-leaked-kinds drain, ownerless-kind drain (the exact
+leak shape), 12 pre-existing kinds + empty-ns one-pass finalize;
+red-check proven (reverting the table fails 2 of 7).
+
+### Bug 2 — StatefulSet OrderedReady was not actually gated (caught live by G61)
+The create loop flipped `prev_ready = true` right after a fresh create
+and the gate read `pod_is_ready` (ready-by-default since T3.1a's
+no-kubelet era), so ordinals 0+1 landed in ONE reconcile — SSOT
+(plan/03 "OrderedReady gated on prior-ordinal readiness") contradicted
+by behavior. New strict `pod_gate_ready` (a `Ready` condition present
+and `True`) gates ordinal creation only; `pod_is_ready` stays the
+counter semantic for RS/DS/Endpoints/STS status, both documented side
+by side in `object.rs`. `controllers.rs` split at the size caps: STS
+tests move to the new `tests/statefulset.rs` with a red-checked
+regression test (condition-less ordinal 0 withholds ordinal 1 until
+kubelet-parity conditions are pinned). Golden G19 now injects
+kubelet-shaped status via `/status` per ordinal — every original
+assertion kept, more real than before.
+
+### New suites (each self-contained or table-driven, ≤400 lines)
+- `resources.sh` **G32-G45** — full-kind REST sweep: CRUD + CAS 409 +
+  merge-patch + generateName for Secret/Event/PVC/Lease/IngressClass/
+  Ingress/Service/Endpoints (incl. the first-ever cluster-scoped wire
+  path, ingressclasses); live ADDED/DELETED watch + `resourceVersion=0`
+  replay across 10 kinds; SSA apply-create/re-apply for the group
+  representatives Secret/Deployment/Ingress/Agent.
+- `negative.sh` **G50-G55** — eviction 404, deletecollection 405,
+  labelSelector no-op, https reject (Q21), sqlite:// Unsupported (Q33),
+  duplicate binding 409 — each commented locked-vs-implemented.
+- `workloads.sh` **G60-G66** — self-contained server+agent+containerd
+  pair: STS ordinals as real sandboxes + per-ordinal PVCs stay Pending
+  (Q22), OrderedReady breach probe (G61, drove Bug 2), DS one-real-pod-
+  per-node + node-deletion follow, CronWorkflow eager tick fires a child
+  that runs to Succeeded (airgap wfstep) with no minute-boundary
+  stampede.
+- `realtraffic.sh` **G70-G72** — REST-created Ingress/Service/Endpoints
+  driven through the served router plane; empty-backend 503 gate;
+  per-service isolation; pins the Ingress-listener gap (ledger below).
+- `nscascade.sh` **G80-G82** — live proof of Bug 1's fix: a namespace
+  with 2 Running pods + all 18 kinds deletes down to zero containers
+  (crictl cross-check) and terminal-deletes clean under kubelet/lease
+  churn.
+
+### Ledger — recorded, not "fixed" (locked semantics / scope)
+- **Ingress host-routing listener absent**: the compiled host table has
+  no consumer — `NodePortConfig::default().ingress_listen: None`, no
+  caller sets it. T5.6 remaining scope (in-progress, "NodePort plane
+  done"), pinned executably by G70-G72; the T5.4 done-scope was route
+  compilation only. G31's old comment overstated ST coverage — fixed.
+- **labelSelector silently ignored** on collection lists (upstream
+  filters server-side) — v1 scope gap, pinned by G52.
+- **eviction subresource 404 / deletecollection 405** — v1 scope,
+  pinned by G50/G51.
+- **PUT with `resourceVersion:"0"`** maps to CAS-on-revision-0 (409);
+  upstream treats rv=0 as unconditional — low-sev candidate for a
+  future Q-note (deliberately not encoded in the suite).
+- **G26c/G29/G30c load-starvation family**: harness time-sensitivity
+  under heavy concurrent CPU load; cleared on permitted reruns. Windows
+  intentionally not widened this round (P2 watch item).
+- **Doc drift fixed**: DaemonSet "schema-only" comments in
+  `discovery.rs` (controller-driven since T3.1b); G31 suite comment.
+
 ## Sprint 28 — supervisor 关停顺序根因修复: CRI 清零前不停 containerd (Q24-Q26 域, T4.1 后续项) (2026-08-30)
 
 **Goal:** close the Sprint-27 forensics follow-up — orphaned containerd

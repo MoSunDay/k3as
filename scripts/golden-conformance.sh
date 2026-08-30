@@ -29,6 +29,12 @@
 # apiserver relay -> kubelet local listener -> crictl subprocess chain
 # (Q31 plain-HTTP single-shot; SKIPs like G25 without vendor bundle or cc).
 #
+# Sprint 29 suites: resources.sh G32-G45 (full-kind CRUD/watch/SSA sweep),
+# negative.sh G50-G55 (locked/edge semantics), workloads.sh G60-G66 (real
+# STS/DS/CronWorkflow on the agent/containerd stack), realtraffic.sh G70-G72
+# (served router plane + Ingress-listener gap pin), nscascade.sh G80-G82
+# (live namespace terminal-delete cascade).
+#
 # Volatility: the only non-deterministic field is APIVersions.serverAddress
 # (the bind host:port); it is normalized to the token @@PORT@@ before diffing.
 set -euo pipefail

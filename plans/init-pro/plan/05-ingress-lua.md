@@ -241,6 +241,10 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
   - As-built (NodePort scope): `crates/router/tests/nodeport_plane.rs`
     (live proxy / 503 / re-target / retire over real TCP backends) +
     `scripts/service-traffic-e2e.sh` ST1–ST6 on a real local cluster.
+  - As-built pin (Sprint 29): golden G70-G72 drive the SERVED plane and assert
+    the remaining scope executably — the compiled Ingress host-routing table
+    has no listener yet (`NodePortConfig::default().ingress_listen: None`, no
+    caller sets it); the empty-backend 503 gate and per-service isolation hold.
 
 - **状态 / Status** — in-progress (NodePort plane done, openrusty 承载,
     Sprint 18 Q28 + Sprint 25 Q32)

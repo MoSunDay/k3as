@@ -53,7 +53,9 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
   - Golden (T0.6): G17 scale 1→3→1 + endpoints; G18 rolling update +
     `kubectl rollout status` exit codes; G19 StatefulSet ordinal
     identity + PVC retention; G20 DaemonSet per-node placement + node
-    lifecycle; G21 GC cascade + namespace drain/finalize.
+    lifecycle; G21 GC cascade + namespace drain/finalize; G60/G61 real-stack STS
+    ordinals + OrderedReady gating (Sprint 29 strict `pod_gate_ready`);
+    G80-G82 namespace drain full-footprint live proof (DRAIN_KINDS 18).
 
 - **状态 / Status** — done (T3.1a Sprint 13, T3.1b Sprint 14)
 - **证据 / Evidence** — Sprint 13 (T3.1a): `crates/controllers` —
@@ -67,7 +69,15 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
   21/21 — G18 (rolling update + rollout status exit codes), G19
   (ordinal identity + PVC retention), G20 (per-node placement + node
   lifecycle), G21 (GC cascade + namespace drain/finalize) on the real
-  binary. clippy `-D warnings` + fmt clean.
+  binary. clippy `-D warnings` + fmt clean. Sprint 29 (regression round):
+  DRAIN_KINDS 12→18 (`namespace.rs` — events/argoproj workflows+cronworkflows/
+  init-pro agents+luarouters/networking ingresses leaked past terminal delete;
+  tests/gc.rs red-checked), and STS OrderedReady actually gates now — the fresh
+  create no longer flips prev_ready=true; the gate reads the new strict
+  `pod_gate_ready` (Ready condition present and True) while `pod_is_ready`
+  stays the ready-by-default counter semantic (tests/statefulset.rs, split
+  out of controllers.rs at the size caps); golden G61 caught the breach live
+  on the real containerd stack.
 - **卡点 / Blockers** — none for v1 scope; PV binding for StatefulSet
   PVCs arrives with T6.2 (**Q22**, Pending until then).
 - **依赖 / Depends on** — T1.2, T2.2
