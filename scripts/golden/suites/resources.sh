@@ -2,12 +2,15 @@
 # across the served kinds that had zero or weak wire coverage until now --
 # Secret, Event (no producer yet: hand-created), PersistentVolumeClaim,
 # Lease, IngressClass (the ONLY cluster-scoped kind never yet exercised over
-# the wire), Ingress, Service and Endpoints -- plus the A2 watch sweep
+# the wire), Ingress, Service and Endpoints -- plus ControllerRevision
+# (normally written only by the StatefulSet controller; exercised here by
+# DIRECT REST CRUD, closing the last served kind without first-class wire
+# coverage) -- plus the A2 watch sweep
 # (incl. the cluster-scoped node path and rv=0 history replay) and the A3
 # SSA sweep by group representative (Secret/Deployment/Ingress/Agent).
 # Sourced by golden-conformance.sh; runs in the main script's shell
 # (helpers: check_body/check_status/check_method/ok, counters, $BASE, $BIN).
-# Owned by plan item: A1+A2+A3. Check-ID range reserved: G32-G45. Cap: 400.
+# Owned by plan item: A1+A2+A3. Check-ID range reserved: G32-G46. Cap: 400.
 #
 # Safety: every curl is guarded (`|| true`, `2>/dev/null || true`) so one
 # refused request can never abort the golden run; watch streams are bounded
@@ -101,6 +104,9 @@ B_INGCLASS='{"apiVersion":"networking.k8s.io/v1","kind":"IngressClass","metadata
 B_ING='{"apiVersion":"networking.k8s.io/v1","kind":"Ingress","metadata":{"name":"golden-res-ing","namespace":"default"},"spec":{"ingressClassName":"golden-res-ic","rules":[{"host":"golden-res.example.com","http":{"paths":[{"path":"/","pathType":"Prefix","backend":{"service":{"name":"golden-res-svc","port":{"number":80}}}}]}}]}}'
 B_SVC='{"apiVersion":"v1","kind":"Service","metadata":{"name":"golden-res-svc","namespace":"default"},"spec":{"ports":[{"port":80,"protocol":"TCP"}]}}'
 B_EPS='{"apiVersion":"v1","kind":"Endpoints","metadata":{"name":"golden-res-ep","namespace":"default"},"subsets":[{"addresses":[{"ip":"10.0.0.42"}],"ports":[{"port":80,"protocol":"TCP"}]}]}'
+# ControllerRevision (apps/v1, namespaced): the registered schema carries the
+# `revision` int + `data` payload the STS controller writes; no spec section.
+B_CR='{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"golden-res-cr","namespace":"default"},"revision":1,"data":{"k":"v"}}'
 RES_ROWS=(
   "G32|core|v1|secrets|namespaced|default|golden-res-secret|dGVzdA==|SecretList|B_SECRET"
   "G33|core|v1|events|namespaced|default|golden-res-event|\"reason\":\"GoldenReason\"|EventList|B_EVENT"
@@ -110,6 +116,7 @@ RES_ROWS=(
   "G37|networking.k8s.io|v1|ingresses|namespaced|default|golden-res-ing|golden-res.example.com|IngressList|B_ING"
   "G38|core|v1|services|namespaced|default|golden-res-svc|\"port\":80|ServiceList|B_SVC"
   "G39|core|v1|endpoints|namespaced|default|golden-res-ep|10.0.0.42|EndpointsList|B_EPS"
+  "G46|apps|v1|controllerrevisions|namespaced|default|golden-res-cr|\"revision\":1|ControllerRevisionList|B_CR"
 )
 printf '%s' '{"metadata":{"annotations":{"golden-resources/patch":"yes"}}}' > "$RES_TMPD/patch.json"
 for row in "${RES_ROWS[@]}"; do
@@ -155,6 +162,7 @@ done
 W_POD='{"apiVersion":"v1","kind":"Pod","metadata":{"name":"golden-res-w-pod","namespace":"default"},"spec":{"containers":[{"name":"c","image":"nginx:1.29"}]}}'
 W_DEP='{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"golden-res-w-dep","namespace":"default"},"spec":{"replicas":1,"selector":{"matchLabels":{"app":"golden-res-w-dep"}},"template":{"metadata":{"labels":{"app":"golden-res-w-dep"}},"spec":{"containers":[{"name":"c","image":"nginx:1.29"}]}}}}'
 W_RS='{"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"name":"golden-res-w-rs","namespace":"default"},"spec":{"replicas":0,"selector":{"matchLabels":{"app":"golden-res-w-rs"}},"template":{"metadata":{"labels":{"app":"golden-res-w-rs"}},"spec":{"containers":[{"name":"c","image":"nginx:1.29"}]}}}}'
+W_CR='{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"golden-res-w-cr","namespace":"default"},"revision":1,"data":{"k":"v"}}'
 W_NODE='{"apiVersion":"v1","kind":"Node","metadata":{"name":"golden-res-w-node"}}'
 W_SVC='{"apiVersion":"v1","kind":"Service","metadata":{"name":"golden-res-w-svc","namespace":"default"},"spec":{"ports":[{"port":80,"protocol":"TCP"}]}}'
 W_EPS='{"apiVersion":"v1","kind":"Endpoints","metadata":{"name":"golden-res-w-ep","namespace":"default"},"subsets":[{"addresses":[{"ip":"10.0.0.43"}],"ports":[{"port":80,"protocol":"TCP"}]}]}'
@@ -164,6 +172,7 @@ RES_WROWS=(
   "Pod|/api/v1/namespaces/default/pods|golden-res-w-pod|W_POD"
   "Deployment|/apis/apps/v1/namespaces/default/deployments|golden-res-w-dep|W_DEP"
   "ReplicaSet|/apis/apps/v1/namespaces/default/replicasets|golden-res-w-rs|W_RS"
+  "ControllerRevision|/apis/apps/v1/namespaces/default/controllerrevisions|golden-res-w-cr|W_CR"
   "Node|/api/v1/nodes|golden-res-w-node|W_NODE"
   "Service|/api/v1/namespaces/default/services|golden-res-w-svc|W_SVC"
   "Endpoints|/api/v1/namespaces/default/endpoints|golden-res-w-ep|W_EPS"
@@ -193,14 +202,14 @@ for row in "${RES_WROWS[@]}"; do
   res_watch_wait '"type":"DELETED"' "\"name\":\"$W_NAME\"" || RES_W_DEL+="$W_KIND "
 done
 if [[ -z "$RES_W_ADD" ]]; then
-  ok "G40  watch ADDED sweep over pod/deployment/rs/node/service/endpoints/workflow/ingress  (A2 resources)"
+  ok "G40  watch ADDED sweep over pod/deployment/rs/cr/node/service/endpoints/workflow/ingress  (A2 resources)"
   PASS=$((PASS+1))
 else
   echo "FAIL G40  watch ADDED sweep, kinds without ADDED: $RES_W_ADD"
   FAIL=$((FAIL+1))
 fi
 if [[ -z "$RES_W_DEL" ]]; then
-  ok "G41  watch DELETED sweep at resourceVersion=<create> over the same 8 kinds  (A2 resources)"
+  ok "G41  watch DELETED sweep at resourceVersion=<create> over the same 9 kinds  (A2 resources)"
   PASS=$((PASS+1))
 else
   echo "FAIL G41  watch DELETED sweep, kinds without DELETED: $RES_W_DEL"

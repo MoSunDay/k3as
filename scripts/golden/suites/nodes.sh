@@ -267,8 +267,11 @@ sys.exit(1)' 2>/dev/null; then
   fi
   # G26c: emptyDir /data persists across restarts. Boots so far: #1 the
   # original container, #2 the G26b liveness restart, #3 this kill -> the
-  # echo server must answer /bootcount == 3 (host dir survives, sandbox
-  # stays).
+  # echo server must answer /bootcount >= 3 (host dir survives, sandbox
+  # stays). The durable semantic is "count increments across restarts and
+  # /data survives": under CPU load liveness may fire ONE EXTRA legitimate
+  # restart between #2 and #3, so the claim is >= 3 -- the old exact ==3
+  # was time-sensitive and flaked this merge gate ~30% under load.
   G26C=0
   if [[ "$G26B" -eq 1 ]]; then
     CID="$(INIT_PRO_DATA_DIR="$G26TMP/ag" "$BIN" crictl ps -q 2>/dev/null | head -1)"
@@ -276,13 +279,13 @@ sys.exit(1)' 2>/dev/null; then
       INIT_PRO_DATA_DIR="$G26TMP/ag" "$BIN" crictl stop --timeout 5 "$CID" >/dev/null 2>&1 || true
       for _ in $(seq 1 120); do
         BC="$(curl -s --max-time 5 "http://$PODIP:8080/bootcount" 2>/dev/null || true)"
-        [[ "$BC" == "3" ]] && { G26C=1; break; }
+        [[ "$BC" =~ ^[0-9]+$ ]] && [[ "$BC" -ge 3 ]] && { G26C=1; break; }
         sleep 0.5
       done
     fi
   fi
   if [[ "$G26C" -eq 1 ]]; then
-    ok "G26  emptyDir /data/bootcount=3 across container restarts  (kubelet volumes, T4.2)"
+    ok "G26  emptyDir /data/bootcount>=3 across container restarts  (kubelet volumes, T4.2)"
     PASS=$((PASS+1))
   else
     echo "FAIL G26c emptyDir bootcount (bc=${BC:-?}; agent log: $G26AG)"
