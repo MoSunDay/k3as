@@ -21,6 +21,9 @@
 //!   [`spawn`].
 #![forbid(unsafe_code)]
 
+pub mod agent_exec;
+pub mod agent_objects;
+pub mod agents;
 pub mod cri_backend;
 pub mod exec;
 pub mod framing;
@@ -45,7 +48,9 @@ pub use objects::{
     node_object, pod_view, ContainerSpec, PodView, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use probes::{HttpGetSpec, PodProbeState, ProbeSpec};
+pub use agents::AgentRunnerConfig;
 pub use runner::{default_node_name, spawn, KubeletConfig};
+pub use agents::spawn_agent_runner;
 pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 pub use sync::{plan, Action, Snapshot};

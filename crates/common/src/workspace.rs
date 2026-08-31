@@ -19,6 +19,14 @@
 /// so tooling inside the container never needs the backing id.
 pub const MOUNT_TARGET: &str = "/workspace";
 
+/// The workspace contract annotation key (T-anyhome, Q36): stamped by the
+/// Workflow controller on Agent children (`build_agent_with`) and consumed
+/// by the node-side Agent runner (T7.1 Phase B, Q37). Value shape is
+/// [`workspace_nfs_url`] output: `nfs://<addr>/agent/<name>`. Defined HERE
+/// (the SSOT) so the producer (controllers) and the consumer (kubelet)
+/// cannot drift -- kubelet cannot depend on controllers.
+pub const WORKSPACE_ANNOTATION: &str = "init-pro.io/workspace";
+
 /// Path-safety guard shared by [`agent_workspace_path`] and
 /// [`workflow_workspace_path`] (T-anyhome, Q36).
 ///
@@ -75,6 +83,13 @@ mod tests {
         assert_eq!(MOUNT_TARGET, "/workspace");
         assert!(MOUNT_TARGET.starts_with('/'), "absolute path");
         assert!(!MOUNT_TARGET.ends_with('/'), "no trailing slash");
+    }
+
+    #[test]
+    fn workspace_annotation_key_is_stable() {
+        // Q37: the runner parses exactly this key off Agent metadata.
+        assert_eq!(WORKSPACE_ANNOTATION, "init-pro.io/workspace");
+        assert!(WORKSPACE_ANNOTATION.starts_with("init-pro.io/"));
     }
 
     #[test]

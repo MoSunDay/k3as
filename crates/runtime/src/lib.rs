@@ -14,6 +14,7 @@
 pub mod config;
 pub mod cri;
 pub mod cri_json;
+pub mod opencoder;
 pub mod stage;
 pub mod supervisor;
 
@@ -27,6 +28,7 @@ use tokio::sync::watch;
 pub use config::{render, ContainerdConfigVars, DEFAULT_SANDBOX_IMAGE};
 pub use cri::{staged_crictl, CriCtl, CriError};
 pub use cri_json::{ContainerConfig, PodSandboxConfig};
+pub use opencoder::{discover_runner_bin, stage_runner, RUNNER_NAME, ENV_RUNNER_BIN};
 pub use stage::{
     ensure_cni_plugins, ensure_flannel_alias, stage_containerd_tree, vendor_bin_root,
     vendor_cache_dir, StageOutcome,

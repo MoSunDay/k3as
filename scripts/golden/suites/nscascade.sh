@@ -52,7 +52,7 @@ except Exception: print("ERR")' 2>/dev/null || echo ERR
   PAUSE_REF="init-pro.local/pause:0.1"
   NSC_IMG="$NSCTMP/pause.tar"
   "$SCRIPT_DIR/build-pause-image.sh" "$NSC_IMG" "$PAUSE_REF" >/dev/null 2>&1 || true
-  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$NSCTMP/ag" --token dev \
+  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$NSCTMP/ag" --token dev --disable-agent-exec \
       --server "$BASENSC" --node-name nsc-node >"$NSCAG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 300); do grep -q "containerd healthy" "$NSCAG" && break; sleep 0.1; done

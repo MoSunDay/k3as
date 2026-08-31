@@ -7,6 +7,64 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 30 — T7.1 Phase B: 节点侧 Agent 真实执行 + 三个真 bug 根因修复 (Q37) (2026-08-31)
+
+**Goal:** a bound `init-pro.io/v1 Agent` is EXECUTED on its node by a real
+opencoder CLI subprocess (Q35 key-env contract, D1 subprocess isolation),
+workspace bytes shared via the anyhome plane (Q36), state machine written
+back with merge-patch; ship with a dedicated e2e and the SSOT in lock-step.
+
+**Delivered**
+- `kubelet::agents` (326 lines) watch+execute loop: LIST+watch over agents
+  with client-side `spec.nodeName` binding filtering, one attempt per
+  Pending Agent (runner resolution -> workspace mount/prepare -> opencoder
+  subprocess -> merge-patch write-if-changed), DELETE (both paths) kills
+  the child via `/proc/<pid>`. Split out of the earlier monolith; state
+  machine Pending->Running(`Executing`)->Succeeded(`Completed`, `exit 0;
+  session <id>`)/Failed(`RunnerFailed`/`ExecTimeout`/`WorkspaceMountFailed`/
+  `WorkspacePrepareFailed`/`RunnerMissing`).
+- `kubelet::agent_exec`: parent-export mount design (`/agent` boot-present
+  root per server address, per-Agent leaf created THROUGH the mount),
+  `MOUNT_WAIT` bounded retries, idempotent /proc/mounts detection, node
+  local fallback. `runtime::opencoder` runner discovery/staging chain with
+  the pure `stage_from` seam (7 unit tests).
+- `scripts/agent-exec-e2e.sh` S1/S2+G1-G7: real NFS mount + real stub
+  runner lifecycle on a three-agent topology (executor / runnerless /
+  loop-off), teardown unmounts (zero mount leak, KEEP_TMP=1 debuggable).
+- `crates/cli/src/anyhome_keeper.rs` agent scaffold (skills/tools/mem +
+  prompt template, only-if-missing).
+
+**Root-cause fixes found BY the e2e (all verified empirically)**
+1. `mount.nfs` source poisoning: `host:port:/path` is parsed as hostname +
+   dirpath `port:/path` and sent verbatim (captured on the wire:
+   dirpath `43141:/agent`), so the mountd resolved the junk component and
+   answered MNT3ERR_NOENT for every attempt while identical host-only
+   mounts succeeded. Fix: `nfs_mount::mount_source` emits `host:/path`;
+   ports travel only via `port=`/`mountport=` (unit test pins the shape).
+2. `--anyhome-addr=""` killed the whole agent-exec loop (loop enable was
+   folded into the mount address). Fix: only `--disable-agent-exec` turns
+   the loop off; an empty addr means loop on with the node-local workspace
+   fallback (restores the no-root degraded e2e mode).
+3. Watch events bypassed the binding filter: a foreign node's Agent
+   inserted via watch ADDED was executed locally (the e2e runnerless agent
+   got stolen and Succeeded with the other node's stub session). Fix: the
+   same `agent_node` filter applies to watch events; regression test
+   `foreign_bound_agent_is_never_executed_locally`.
+4. Golden hermeticity: golden agent boots now pin `--disable-agent-exec` —
+   link_repos runner discovery (a dev-built opencoder release binary)
+   otherwise flips G29-class cases from RunnerMissing to mounting against
+   the run's own anyhome default port and leaks the mount into the
+   zero-shim-leftovers check (Q37 coordination note 3).
+
+**Gates (final)** — `cargo build --workspace --locked` ok; `cargo test
+--workspace --locked` **973 passed / 0 failed** (971 -> 973: mount-source
+shape + binding-filter regression); clippy `--workspace --all-targets --
+-D warnings` clean (pre-existing link_repos third-party warning only);
+`scripts/golden-conformance.sh` ALL passed; `scripts/cli-flag-parity-test.sh`
+19/19; `scripts/anyhome-e2e.sh` 4/4; `scripts/agent-exec-e2e.sh` 9 passed /
+0 failed. SSOT: decisions.md Q37, plan/07 T7.1 -> done (Phase A+B), index.md
+counts 34 TODOs · 23 done · 2 in-progress · 9 not-started.
+
 ## Sprint 29 — 21 类 served 资源全量 e2e 真实回归 + 2 个真 bug 根因修复 (T0.6 扩容; DRAIN_KINDS/Q20, T3.1b OrderedReady) (2026-08-30)
 
 **Goal:** every served kind (21 across core/v1 ×9, apps/v1 ×5,

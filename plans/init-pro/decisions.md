@@ -1867,3 +1867,63 @@ consequences:
   roundtrip, P2 subpath mount (`host:/workflow/<name>` WORKS — coordination
   item A2 resolved, no upstream change needed), K1 keeper directory creation
   after a Workflow POST.
+
+## Q37 — T7.1 Phase B: node-side Agent execution (opencoder CLI subprocess) (2026-08-31)
+
+**Context** — Q35 shipped the `Agent` resource end-to-end (API, scheduler
+binding, Workflow `template.agent` subobjects) but nothing EXECUTED a bound
+Agent on its node. Phase B needs a node-side loop that watches bound Agents,
+runs the opencoder payload, and writes phase/conditions back — over the
+anyhome workspace plane (Q36) shared with the server-side keeper.
+
+**Options** — (a) execute inside the kubelet pod loop by materializing Pods
+(rejected: Q35 deleted Pod materialization); (b) a separate daemon binary
+(rejected: Q1 single multicall binary, `agent` subcommand already owns node
+supervision); (c) a watch+execute loop embedded in the `agent` subcommand,
+one opencoder CLI subprocess per Agent (chosen).
+
+**Decision** — (c). `kubelet::agents` runs LIST+watch over
+`/apis/init-pro.io/v1/agents` with a client-side `spec.nodeName` binding
+filter (same filter on LIST and watch events), drives every Pending bound
+Agent through one attempt: resolve runner -> mount/prepare workspace ->
+spawn opencoder as a subprocess (args via argv, credentials ONLY via child
+env, Q35) -> merge-patch status write-if-changed to
+`/apis/init-pro.io/v1/namespaces/{ns}/agents/{name}`. State machine:
+Pending -> Running (`Executing`) -> Succeeded (`Completed`, `exit 0; session
+<id>`) / Failed (`RunnerFailed` exit code, `ExecTimeout` on the exec budget,
+`WorkspaceMountFailed`/`WorkspacePrepareFailed`, `RunnerMissing` when no
+runner binary is discoverable). A DELETE observed in LIST or watch kills the
+subprocess via `/proc/<pid>`. Runner discovery order: env
+`INIT_PRO_AGENT_RUNNER_BIN` (set-but-missing is terminal, no fallback) ->
+staged `<data>/bin/opencoder` -> embed `<data>/data/current/bin/opencoder`
+-> link_repos ancestors of the exe/cwd (dev layouts). Workspace source:
+`init-pro.io/workspace` annotation `nfs://<addr>/agent/<name>` -> else
+`--anyhome-addr` -> else node-local `<data>/agent-ws/<name>` (empty addr =
+loop on, node-local fallback; only `--disable-agent-exec` turns the loop
+off). The keeper (Q36) scaffolds the SHARED bytes (skills/tools/mem +
+prompt template); the node creates its per-Agent leaves THROUGH the mount,
+so they are visible to other nodes.
+
+**Coordination notes (upstream-frozen behaviors, verified empirically)** —
+1. any-home's mountd resolves export paths against the tree as of server
+   boot; out-of-band disk writes after boot are invisible to path
+   resolution. Therefore the node mounts the PARENT export (`/agent`, boot
+   present) once per server address into
+   `<data>/agent-ws/nfs-<addr>` (persistent across Agents, idempotent via
+   /proc/mounts) and works in `<leaf>` through it. 2. `mount.nfs` parses
+   `host:port:/path` as hostname + dirpath `port:/path` and sends that
+   dirpath verbatim (observed on the wire: `43141:/agent`), so the mountd
+   resolves the junk component and answers MNT3ERR_NOENT. The mount SOURCE
+   must be `host:/path`; ports travel only via `port=`/`mountport=`
+   options. 3. Golden agent boots (G24-G30, nscascade, workloads) pin
+   `--disable-agent-exec`: the loop must stay hermetic against
+   link_repos runner discovery (a dev-built opencoder binary must not flip
+   golden cases from RunnerMissing to mounting/executing).
+
+**Consequences** — Agent execution needs only the API surface (runs even
+when the CRI stack is off); opencoder stays a subprocess (D1), so its
+libsql linkage never enters the init-pro binary (Q36 D1 unchanged). The
+state machine is merge-patch based (status subresource merge semantics
+remain a Q34-style debt). Gate: `scripts/agent-exec-e2e.sh` S1/S2+G1-G7
+(NFS mode), kubelet `agents_runner_integration` (6 tests, local fallback +
+binding-filter regression), `crates/runtime/src/opencoder.rs` unit tests.

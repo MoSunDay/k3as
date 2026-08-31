@@ -26,7 +26,7 @@ if [[ -z "$G24_VENDOR_BIN" ]]; then
 else
   G24=0
   G24TMP="$(mktemp -d)"; LOG24="$(mktemp)"
-  "$BIN" agent --data-dir "$G24TMP/g24-dd" --token dev --server https://127.0.0.1:6443 >"$LOG24" 2>&1 &
+  "$BIN" agent --data-dir "$G24TMP/g24-dd" --token dev --disable-agent-exec --server https://127.0.0.1:6443 >"$LOG24" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 200); do grep -q "containerd healthy" "$LOG24" && break; sleep 0.1; done
   G24_V="$(INIT_PRO_DATA_DIR="$G24TMP/g24-dd" "$BIN" crictl version 2>&1 || true)"
@@ -74,7 +74,7 @@ else
   PAUSE_REF="init-pro.local/pause:0.1"
   G25_IMG="$G25TMP/pause.tar"
   "$SCRIPT_DIR/build-pause-image.sh" "$G25_IMG" "$PAUSE_REF" >/dev/null 2>&1 || true
-  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G25TMP/ag" --token dev \
+  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G25TMP/ag" --token dev --disable-agent-exec \
       --server "$BASE25" --node-name g25-node >"$G25AG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 300); do grep -q "containerd healthy" "$G25AG" && break; sleep 0.1; done
@@ -164,7 +164,7 @@ else
   G26_ECHO="$G26TMP/echo.tar"
   "$SCRIPT_DIR/build-pause-image.sh" "$G26TMP/pause.tar" "$PAUSE_REF" >/dev/null 2>&1 || true
   "$SCRIPT_DIR/build-echo-image.sh" "$G26_ECHO" "init-pro.local/echo:0.1" >/dev/null || true
-  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G26TMP/ag" --token dev \
+  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G26TMP/ag" --token dev --disable-agent-exec \
       --server "$BASE26" --node-name g26-node >"$G26AG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 300); do grep -q "containerd healthy" "$G26AG" && break; sleep 0.1; done
@@ -380,7 +380,7 @@ else
   # Explicit --node-ip/--kubelet-port prove the flag wiring AND force the
   # node-annotation addressing path (the relay must NOT rely on a lucky
   # well-known 10250 here — the port is random).
-  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G30TMP/ag" --token dev \
+  INIT_PRO_SANDBOX_IMAGE="$PAUSE_REF" "$BIN" agent --data-dir "$G30TMP/ag" --token dev --disable-agent-exec \
       --server "$BASE30" --node-name g30-node \
       --node-ip 127.0.0.1 --kubelet-port "$G30_KPORT" >"$G30AG" 2>&1 &
   AGENT_PID=$!

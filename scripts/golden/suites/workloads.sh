@@ -49,7 +49,7 @@ else
   WL_STEP_REF="init-pro.local/wfstep:0.1"
   "$SCRIPT_DIR/build-pause-image.sh" "$WLTMP/pause.tar" "$WL_PAUSE_REF" >/dev/null 2>&1 || true
   "$SCRIPT_DIR/build-workflow-image.sh" "$WLTMP/wfstep.tar" "$WL_STEP_REF" >/dev/null 2>&1 || true
-  INIT_PRO_SANDBOX_IMAGE="$WL_PAUSE_REF" "$BIN" agent --data-dir "$WLTMP/ag" --token dev \
+  INIT_PRO_SANDBOX_IMAGE="$WL_PAUSE_REF" "$BIN" agent --data-dir "$WLTMP/ag" --token dev --disable-agent-exec \
       --server "$WLBASE" --node-name "$WL_NODE" >"$WLAG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 300); do grep -q "containerd healthy" "$WLAG" && break; sleep 0.1; done

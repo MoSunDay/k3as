@@ -37,7 +37,7 @@ const WORKFLOW_API_VERSION: &str = "argoproj.io/v1alpha1";
 /// The workspace contract annotation (T-anyhome, Q36): the anyhome NFS URL
 /// (`nfs://<addr>/agent/<child-name>`) backing the Agent's memory
 /// workspace, mounted at `common::workspace::MOUNT_TARGET`.
-pub const WORKSPACE_ANNOTATION: &str = "init-pro.io/workspace";
+pub use common::workspace::WORKSPACE_ANNOTATION;
 
 /// Build one step's Agent child object (pre-Q36 shape: no workspace
 /// contract annotation -- [`build_agent_with`] with `None`).

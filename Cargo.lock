@@ -1163,6 +1163,7 @@ dependencies = [
  "flannel-core",
  "futures",
  "nix 0.29.0",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tracing",

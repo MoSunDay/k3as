@@ -176,6 +176,12 @@ where
                     iface: ag.flannel_iface.clone(),
                     conf: ag.flannel_conf.clone(),
                 },
+                // T7.1 Phase B (Q37): Some(addr) enables the node-side
+                // Agent execution loop (`--disable-agent-exec` disables it).
+                // An EMPTY addr keeps the loop on with the node-local
+                // workspace fallback (no NFS); only the flag's absence of a
+                // value is a mount address, never a loop switch.
+                (!ag.disable_agent_exec).then(|| ag.anyhome_addr.clone()),
             )
         }
         Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, manifest),

@@ -114,6 +114,18 @@ impl HttpJson {
     }
 
     fn request_head(&self, method: &str, path: &str, payload: Option<&str>) -> String {
+        self.request_head_ct(method, path, payload, "application/json")
+    }
+
+    /// [`request_head`] with an explicit request Content-Type (PATCH needs
+    /// `application/merge-patch+json`; T7.1 Phase B / Q37).
+    fn request_head_ct(
+        &self,
+        method: &str,
+        path: &str,
+        payload: Option<&str>,
+        content_type: &str,
+    ) -> String {
         let mut req = format!(
             "{method} {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nAccept: application/json\r\n",
             target = self.target(path),
@@ -121,7 +133,7 @@ impl HttpJson {
         );
         if let Some(p) = payload {
             req.push_str(&format!(
-                "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
                 p.len()
             ));
         }
@@ -140,9 +152,20 @@ impl HttpJson {
         path: &str,
         body: Option<&Value>,
     ) -> Result<(u16, Vec<u8>), HttpError> {
+        self.request_ct(method, path, body, "application/json").await
+    }
+
+    /// [`request`] with an explicit request Content-Type.
+    async fn request_ct(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        content_type: &str,
+    ) -> Result<(u16, Vec<u8>), HttpError> {
         let mut stream = self.connect().await?;
         let payload = body.map(|v| v.to_string());
-        let req = self.request_head(method, path, payload.as_deref());
+        let req = self.request_head_ct(method, path, payload.as_deref(), content_type);
         stream
             .write_all(req.as_bytes())
             .await
@@ -185,6 +208,34 @@ impl HttpJson {
     /// POST with a JSON body, returning `(status, json)`.
     pub async fn post_json(&self, path: &str, body: &Value) -> Result<(u16, Value), HttpError> {
         self.json_exchange("POST", path, Some(body)).await
+    }
+
+    /// PATCH with an RFC 7386 merge-patch body (agents carry no `/status`
+    /// subresource: the runner patches `status` on the main resource, Q37).
+    pub async fn patch_json(&self, path: &str, body: &Value) -> Result<(u16, Value), HttpError> {
+        self.json_exchange_ct(
+            "PATCH",
+            path,
+            Some(body),
+            "application/merge-patch+json",
+        )
+        .await
+    }
+
+    async fn json_exchange_ct(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        content_type: &str,
+    ) -> Result<(u16, Value), HttpError> {
+        let (code, bytes) = self.request_ct(method, path, body, content_type).await?;
+        if bytes.is_empty() {
+            return Ok((code, Value::Null));
+        }
+        let value = serde_json::from_slice(&bytes)
+            .map_err(|e| HttpError::BadResponse(format!("invalid JSON body: {e}")))?;
+        Ok((code, value))
     }
 
     /// DELETE, returning `(status, json)`.

@@ -86,7 +86,7 @@ else
   G29_WF_REF="init-pro.local/wfstep:0.1"
   "$SCRIPT_DIR/build-pause-image.sh" "$G29TMP/pause.tar" "$G29_PAUSE_REF" >/dev/null 2>&1 || true
   "$SCRIPT_DIR/build-workflow-image.sh" "$G29TMP/wfstep.tar" "$G29_WF_REF" >/dev/null 2>&1 || true
-  INIT_PRO_SANDBOX_IMAGE="$G29_PAUSE_REF" "$BIN" agent --data-dir "$G29TMP/ag" --token dev \
+  INIT_PRO_SANDBOX_IMAGE="$G29_PAUSE_REF" "$BIN" agent --data-dir "$G29TMP/ag" --token dev --disable-agent-exec \
       --server "$BASE29" --node-name g29-node >"$G29AG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 300); do grep -q "containerd healthy" "$G29AG" && break; sleep 0.1; done

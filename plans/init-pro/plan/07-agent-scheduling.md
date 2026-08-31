@@ -48,11 +48,38 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   - golden G04 fixture 再生成（仅增 agents 项, LuaRouter 字节不变），
     `scripts/golden-conformance.sh` 39/39；kubectl apply/get/delete agents 实测通过。
 
-- **状态 / Status** — done (Phase A, Sprint 26, Q35)；Phase B（B1 节点执行 / B2 CLI run）not-started
-- **证据 / Evidence** — `cargo test --workspace --locked` 882 passed / 0 failed
-  （基线 852 + 30 新增）；`scripts/golden-conformance.sh` 39 passed / 0 failed
-- **卡点 / Blockers** — Phase B 状态回写走 merge-patch（status 子资源合并语义
-  为 Q34 已记同款债务）；argv[0] `agent` 已被节点代理占用（B2 需新子命令/别名）
+- **Phase B 实现 (Sprint 30, Q37) / Phase B implementation**
+  - `kubelet::agents` 执行循环：LIST+watch agents，客户端 `spec.nodeName`
+    绑定过滤同时作用于 LIST 与 watch 事件；Pending 绑定 Agent 每个一次
+    尝试：runner 解析 → workspace 挂载/准备 → opencoder 子进程（argv 传参、
+    凭证仅经子进程 env, Q35）→ merge-patch 回写（write-if-changed）。
+  - 状态机：Pending→Running(`Executing`)→Succeeded(`Completed`, `exit 0;
+    session <id>`)/Failed(`RunnerFailed`/`ExecTimeout`/`WorkspaceMountFailed`/
+    `WorkspacePrepareFailed`/`RunnerMissing`)；DELETE（LIST/watch 两路）
+    经 `/proc/<pid>` 杀子进程。
+  - `runtime::opencoder` runner 发现/staging：env override（缺失即终态不回
+    退）→ staged `<data>/bin` → embed → link_repos 祖先目录（exe/cwd 两级）。
+  - workspace 源：注解 `nfs://addr/agent/<name>` → `--anyhome-addr` → 节点
+    本地 `<data>/agent-ws/<name>`；挂载父导出 `/agent`（Q37 协调注记 1：
+    mountd 冻结 boot 时刻目录树）；mount 源串 host-only（Q37 协调注记 2：
+    `host:port:/path` 会被 mount.nfs 原样发成 dirpath `port:/path`）。
+  - golden agent boots（G24-G30/nscascade/workloads）钉 `--disable-agent-exec`
+    （Q37 协调注记 3：link_repos runner 不得翻转 golden 用例）。
+  - e2e：`scripts/agent-exec-e2e.sh` S1/S2+G1-G7（真实挂载 + 真实子进程，
+    teardown umount 不泄漏挂载）。
+
+- **状态 / Status** — done (Phase A Sprint 26 + Phase B 节点执行 Sprint 30,
+  Q35/Q37)；B2 专用 CLI run 动词不再单列（`init-pro agent` 子命令 + kubectl
+  apply 已覆盖创建路径，需求再现时并入后续 TODO）
+- **验收 / Acceptance** — `cargo test --workspace --locked` 973 passed /
+  0 failed（Phase B 新增 kubelet agents_runner_integration 6 项：本地回退全
+  生命周期、RunnerMissing、RunnerFailed、ExecTimeout、DELETE 杀子进程、
+  绑定过滤回归；opencoder 单测 7 项）；`scripts/agent-exec-e2e.sh`
+  9 passed / 0 failed；`scripts/golden-conformance.sh` ALL passed；
+  `scripts/cli-flag-parity-test.sh` 19/19；`scripts/anyhome-e2e.sh` 4/4；
+  clippy `--workspace --all-targets -- -D warnings` 清零
+- **债务 / Debts** — 状态回写走 merge-patch（status 子资源合并语义为 Q34
+  已记同款债务）
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---

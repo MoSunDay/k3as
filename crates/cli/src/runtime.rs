@@ -51,7 +51,7 @@ pub struct ServerBind {
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
-    run_supervised("server", cfg, Some(bind), None, None, None, None)
+    run_supervised("server", cfg, Some(bind), None, None, None, None, None)
 }
 
 pub fn run_agent(
@@ -61,6 +61,9 @@ pub fn run_agent(
     node_ip: String,
     kubelet_port: u16,
     flannel: crate::flannel::FlannelNet,
+    // T7.1 Phase B (Q37): `Some(anyhome_addr)` enables the node-side Agent
+    // execution loop (see `run_supervised`).
+    agent_exec_addr: Option<String>,
 ) -> ExitCode {
     run_supervised(
         "agent",
@@ -70,6 +73,7 @@ pub fn run_agent(
         node_name,
         Some((node_ip, kubelet_port)),
         Some(flannel),
+        agent_exec_addr,
     )
 }
 
@@ -113,6 +117,7 @@ async fn wait_sandboxes_gone(cri: &node_runtime::CriCtl, max: Duration) -> bool 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_supervised(
     role: &'static str,
     cfg: Config,
@@ -121,6 +126,10 @@ fn run_supervised(
     node_name: Option<String>,
     kubelet_addr: Option<(String, u16)>,
     flannel: Option<crate::flannel::FlannelNet>,
+    // T7.1 Phase B (Q37): agent-mode only. `Some(addr)` runs the Agent
+    // execution loop with `addr` as the fallback anyhome NFS address for
+    // Agents without a workspace annotation.
+    agent_exec_addr: Option<String>,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -257,6 +266,54 @@ fn run_supervised(
                         role,
                         "no staged crictl; kubelet off (T4.1 tree missing)"
                     ),
+                }
+                // T7.1 Phase B (Q37): node-side Agent execution — stage
+                // (or discover) the opencoder runner binary, then run the
+                // watch + execute loops. Needs ONLY the API surface (no
+                // CRI), so it starts even when the kubelet stays off.
+                // Degradations: no runner binary / bad data dir => bound
+                // Agents report `Ready=False, reason=RunnerMissing` and
+                // stay Pending; `agent_exec_addr == None` keeps the loop
+                // off entirely (`--disable-agent-exec`). An EMPTY addr
+                // keeps the loop on; only workspace mounting degrades to
+                // the node-local fallback (Q37).
+                if let Some(anyhome_addr) = &agent_exec_addr {
+                    let runner_bin =
+                        match node_runtime::opencoder::stage_runner(&cfg.data_dir) {
+                            Ok(Some(path)) => Some(path),
+                            Ok(None) => {
+                                tracing::warn!(
+                                    target: "init-pro",
+                                    role,
+                                    "no opencoder runner found; agents will report RunnerMissing (Q37)"
+                                );
+                                None
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "init-pro",
+                                    role,
+                                    error = %e,
+                                    "opencoder runner staging failed; agents will                                      report RunnerMissing (Q37)"
+                                );
+                                None
+                            }
+                        };
+                    let mut ac = kubelet::AgentRunnerConfig::new(
+                        url.clone(),
+                        node.clone(),
+                        cfg.data_dir.clone(),
+                    );
+                    ac.runner_bin = runner_bin;
+                    // Empty `--anyhome-addr` = loop on, node-local
+                    // workspace fallback (Q37); only a non-empty value is
+                    // a mount address.
+                    ac.anyhome_addr = (!anyhome_addr.trim().is_empty())
+                        .then(|| anyhome_addr.clone());
+                    let handles = kubelet::spawn_agent_runner(ac, shutdown.clone());
+                    let mut drain = kubelet_drain.take().unwrap_or_default();
+                    drain.extend(handles);
+                    kubelet_drain = Some(drain);
                 }
                 // T4.3 Scope A (Q34): embedded flanneld as the kube subnet
                 // manager — same apiserver URL as the kubelet (plain HTTP,

@@ -55,6 +55,26 @@ pub struct AgentCmd {
     )]
     pub flannel_backend: String,
 
+    /// Disable the node-side Agent execution loop (T7.1 Phase B, Q37):
+    /// bound Agents stay `Pending` (only the scheduler's `Scheduled`
+    /// condition is written). env `INIT_PRO_DISABLE_AGENT_EXEC` (clap bool
+    /// env: ONLY the spellings `true`/`false` are accepted).
+    #[arg(long = "disable-agent-exec", env = "INIT_PRO_DISABLE_AGENT_EXEC")]
+    pub disable_agent_exec: bool,
+
+    /// anyhome NFS endpoint the Agent runner mounts workspaces from when an
+    /// Agent carries no `init-pro.io/workspace` annotation (T7.1 Phase B,
+    /// Q36/Q37). Defaults to the server's anyhome default, so single-node
+    /// setups need no flag; multi-node agents point at the server's
+    /// `--anyhome-addr`. env `INIT_PRO_ANYHOME_ADDR`.
+    #[arg(
+        long = "anyhome-addr",
+        env = "INIT_PRO_ANYHOME_ADDR",
+        default_value = "127.0.0.1:11111",
+        value_name = "ADDR"
+    )]
+    pub anyhome_addr: String,
+
     /// Interface (name or IP) flanneld binds the data plane on; defaults
     /// to autodetection (k3s `--flannel-iface` parity).
     /// env `INIT_PRO_FLANNEL_IFACE`.

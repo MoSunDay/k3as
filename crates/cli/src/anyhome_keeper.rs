@@ -86,10 +86,42 @@ pub fn sync_workspaces(
             let dir = workspace_dir(fs_root, &export_path);
             std::fs::create_dir_all(&dir)
                 .map_err(|e| format!("workspace dir {}: {e}", dir.display()))?;
+            // Agent workspaces additionally get the shared persona/tools
+            // bytes (Q37): `skills/`, `tools/`, `mem/` plus a `prompt.md`
+            // template -- created ONLY when absent, never overwritten (the
+            // user edits persona bytes through the NFS mount; the runner's
+            // node-local `prepare_workspace` only adds the per-node
+            // `.opencoder` symlink on top).
+            if kind == "agent" {
+                scaffold_agent_workspace(&dir)?;
+            }
         }
     }
     Ok(())
 }
+
+/// Lay down the shared agent-workspace bytes (create-if-absent). Fails the
+/// batch on a real I/O error, like the directory materialization above.
+fn scaffold_agent_workspace(dir: &Path) -> Result<(), String> {
+    for sub in ["skills", "tools", "mem"] {
+        std::fs::create_dir_all(dir.join(sub))
+            .map_err(|e| format!("agent workspace dir {}: {e}", dir.join(sub).display()))?;
+    }
+    let prompt = dir.join("prompt.md");
+    if !prompt.exists() {
+        std::fs::write(&prompt, AGENT_PROMPT_TEMPLATE)
+            .map_err(|e| format!("agent workspace {}: {e}", prompt.display()))?;
+    }
+    Ok(())
+}
+
+/// Seed `prompt.md` (Q37). Presence of this file makes the runner pass
+/// `--prompt-file` (the persona); `spec.prompt` stays the positional task.
+/// Kept tiny and self-explanatory; never re-written once it exists.
+const AGENT_PROMPT_TEMPLATE: &str = "# Agent persona
+
+Edit this file to define the agent persona (system prompt). It is passed to the runner via --prompt-file; spec.prompt remains the per-run task.
+";
 
 /// Join an export path (`/workflow/<id>`) onto the fs root. The export path
 /// always starts at `/`, so the join replaces the root instead of climbing
@@ -240,6 +272,31 @@ mod tests {
         assert_eq!(std::fs::read_dir(root.join("workflow")).unwrap().count(), 1);
         assert_eq!(std::fs::read_dir(root.join("agent")).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn agent_workspaces_get_shared_scaffold() {
+        let root = tmp_dir("scaffold");
+        sync_workspaces(&root, &[], &["a1".to_string()]).unwrap();
+        let dir = workspace_dir(&root, "/agent/a1");
+        for sub in ["skills", "tools", "mem"] {
+            assert!(dir.join(sub).is_dir(), "missing {sub}");
+        }
+        let prompt = dir.join("prompt.md");
+        assert!(prompt.is_file());
+        // Re-sync must NOT overwrite user-edited bytes.
+        std::fs::write(&prompt, b"# mine").unwrap();
+        sync_workspaces(&root, &[], &["a1".to_string()]).unwrap();
+        assert_eq!(std::fs::read(&prompt).unwrap(), b"# mine");
+    }
+
+    #[test]
+    fn workflow_workspaces_are_not_agent_scaffolded() {
+        let root = tmp_dir("no-scaffold");
+        sync_workspaces(&root, &["w1".to_string()], &[]).unwrap();
+        let dir = workspace_dir(&root, "/workflow/w1");
+        assert!(!dir.join("prompt.md").exists());
+        assert!(!dir.join("skills").exists());
     }
 
     #[test]

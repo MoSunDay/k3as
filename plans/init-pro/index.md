@@ -40,15 +40,15 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
 | T6.2 | 6 | 标准 addon (CoreDNS/local-storage/metrics-server) | not-started | T6.1 |
-| T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A, Sprint 26, Q35; Phase B 节点执行/CLI 留 B1/B2) | T3.2, T1.2 |
+| T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A Sprint 26, Q35 + Phase B 节点执行 Sprint 30, Q37) | T3.2, T1.2 |
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | done (Scope A+B+C, Sprint 23) | T1.2, T3.1 |
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 
-**Counts:** 34 TODOs · 22 done · 2 in-progress (T5.6 NodePort plane:
+**Counts:** 34 TODOs · 23 done · 2 in-progress (T5.6 NodePort plane:
 Router service plane + service-traffic e2e, Q28; T4.3 Scope A flannel
 CNI done, Q34 — Scope B/ServiceLB L4 剩余)
-· 10 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 9 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=5 · Layer5=7 · Layer6=2 · Layer7=4.
 
 ---

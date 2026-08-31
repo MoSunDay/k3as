@@ -66,14 +66,30 @@ pub fn is_mountpoint(mounts_text: &str, dir: &Path) -> bool {
         .any(|mp| mp == &dir.to_path_buf())
 }
 
-/// CLI shape for `mount.nfs`: `-o <opts> <server:path> <dir>`.
+/// CLI shape for `mount.nfs`: `-o <opts> <host:path> <dir>`.
 fn mount_args(server: &str, path: &str, dir: &Path) -> Vec<String> {
     vec![
         "-o".to_string(),
         mount_options(server),
-        format!("{server}:{path}"),
+        mount_source(server, path),
         dir.display().to_string(),
     ]
+}
+
+/// The mount SOURCE string, `host:path`. The transport port must NOT be
+/// folded into the source: mount.nfs parses `host:port:/path` as hostname
+/// `host` + dirpath `port:/path` and sends that dirpath verbatim, so the
+/// mountd resolves the junk component `port:` and answers MNT3ERR_NOENT
+/// (observed on the wire: dirpath `43141:/agent`). The port travels only
+/// through `port=`/`mountport=` options (see [`mount_options`]).
+fn mount_source(server: &str, path: &str) -> String {
+    match nfs_port(server) {
+        Some(_) => {
+            let (host, _) = server.rsplit_once(':').unwrap_or((server, ""));
+            format!("{host}:{path}")
+        }
+        None => format!("{server}:{path}"),
+    }
 }
 
 /// NFSv3/TCP options; `port=`/`mountport=` pin both services to the
@@ -224,8 +240,21 @@ mod tests {
         let args = mount_args("h:1", "/workflow/wf", Path::new("/mnt/x"));
         assert_eq!(args[0], "-o");
         assert_eq!(args[1], "vers=3,tcp,nolock,noacl,port=1,mountport=1");
-        assert_eq!(args[2], "h:1:/workflow/wf");
+        // Source is host-only; `h:1:/workflow/wf` would be sent to the
+        // server as dirpath `1:/workflow/wf` and answered NOENT.
+        assert_eq!(args[2], "h:/workflow/wf");
         assert_eq!(args[3], "/mnt/x");
+    }
+
+    #[test]
+    fn mount_source_keeps_host_only_when_server_carries_port() {
+        assert_eq!(
+            mount_source("127.0.0.1:35289", "/agent"),
+            "127.0.0.1:/agent"
+        );
+        // No port: verbatim. IPv6 literal without port: verbatim.
+        assert_eq!(mount_source("127.0.0.1", "/workflow/w"), "127.0.0.1:/workflow/w");
+        assert_eq!(mount_source("[::1]", "/agent"), "[::1]:/agent");
     }
 
     #[test]
@@ -250,7 +279,7 @@ mod tests {
             .await
             .expect("mount should succeed");
         let args = recorded(&bin);
-        assert_eq!(args[2], "h:1:/workflow/wf");
+        assert_eq!(args[2], "h:/workflow/wf");
         assert_eq!(args[3], "/mnt/x");
     }
 

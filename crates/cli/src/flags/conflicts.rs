@@ -129,6 +129,8 @@ mod tests {
             flannel_backend: "vxlan".to_string(),
             flannel_iface: None,
             flannel_conf: None,
+            disable_agent_exec: false,
+            anyhome_addr: "127.0.0.1:11111".to_string(),
         }
     }
 
