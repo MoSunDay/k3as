@@ -2486,6 +2486,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "opencoder-dag"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "opencoder-llm"
 version = "0.1.0"
 dependencies = [
@@ -2547,6 +2556,7 @@ dependencies = [
  "chrono",
  "libsql 0.9.30",
  "opencoder-core",
+ "opencoder-dag",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2565,6 +2575,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "openrusty-k8s"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "openrusty-core",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "openrusty-proxy"
 version = "0.1.0"
 dependencies = [
@@ -2574,6 +2607,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "openrusty-core",
+ "socket2",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -2591,11 +2625,17 @@ dependencies = [
  "hyper",
  "hyper-util",
  "openrusty-core",
+ "openrusty-k8s",
  "openrusty-proxy",
  "openrusty-wasm",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
+ "tokio-rustls",
+ "toml 1.1.4+spec-1.1.0",
  "tower",
  "tracing",
  "tracing-appender",
@@ -3247,12 +3287,22 @@ version = "0.23.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

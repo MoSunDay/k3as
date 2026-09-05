@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 
 use openrusty_core::config::{
-    validate, BalancerKind, Config, FailPolicy, HealthConfig, PeerConfig, PluginsConfig,
-    RouteConfig, ServerConfig, UpstreamConfig,
+    validate, BalancerKind, Config, EgressConfig, FailPolicy, HealthConfig, IngressConfig,
+    PeerConfig, PluginsConfig, RouteConfig, ServerConfig, UpstreamConfig,
 };
 
 use crate::route::{HostMatcher, PathMatcher, PortRef, RouteTable, UpstreamRef};
@@ -54,10 +54,20 @@ fn base_config(listen: SocketAddr) -> Config {
             listen,
             log_level: "warn".to_string(),
             http1_only: false,
+            // Single-socket shape: `listen` above stays the sole authority
+            // while `listeners` is empty (openrusty `effective_listeners`).
+            listeners: Vec::new(),
+            // Mirrors openrusty's serde default (`default_shutdown_grace_ms`).
+            shutdown_grace_ms: 5_000,
         },
         plugins: plugins_noop(),
         upstreams: Vec::new(),
         routes: Vec::new(),
+        // Inert by construction: the router compiles Ingress routes itself
+        // (T5.1-T5.4) and never adopts openrusty's own k8s watch plane, and
+        // intercepted egress keeps dialing the original destination.
+        ingress: IngressConfig::default(),
+        egress: EgressConfig::default(),
     }
 }
 
@@ -80,6 +90,9 @@ fn upstream_entry(name: String, peers: Vec<SocketAddr>) -> UpstreamConfig {
         retry_on_timeout: false,
         connect_timeout_ms: 2000,
         pool_idle_timeout_ms: 60_000,
+        // DNS-endpoint discovery stays off: the router's Endpoints watch
+        // (T5.3) resolves Service backends to concrete `peers` itself.
+        endpoints: Vec::new(),
         peers: peers
             .into_iter()
             .map(|addr| PeerConfig { addr, weight: 1 })
@@ -107,6 +120,7 @@ pub(crate) fn nodeport_config(
         host: None,
         upstream: name,
         timeout_ms: 0,
+        exact: false,
     });
     cfg
 }
@@ -197,6 +211,9 @@ pub(crate) fn ingress_config(
             host,
             upstream,
             timeout_ms: 0,
+            // Prefix semantics: pathType Exact is emulated upstream of here
+            // (exact path + "{p}/" fallback routes); see `compile`.
+            exact: false,
         });
     };
 
