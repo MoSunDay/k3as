@@ -195,7 +195,9 @@ pub(crate) async fn reconcile_key(
             return Ok(()); // allocator disabled: no --cluster-cidr
         };
         return match client.get(&Key::new("", "nodes", "", key)).await? {
-            Some(node) => node_cidr::allocate(client, cluster, &node).await.map(|_| ()),
+            Some(node) => node_cidr::allocate(client, cluster, &node)
+                .await
+                .map(|_| ()),
             None => Ok(()), // node deleted: nothing to allocate
         };
     }

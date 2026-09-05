@@ -7,6 +7,87 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 31 — T0.2b 发版闭环: link_repos 钉定物化 (pin-clone) + 内网 h2c 发版形态 (Q38) (2026-09-05)
+
+**Goal:** make a zero-cache cold clone of this repo buildable and
+CI-provable, retiring the manual pinned-snapshot verification loop for
+good. Two owner decisions embedded: pin-clone script keeps the link_repos
+layout, and the release ships intranet h2c on openrusty `4180ad3` without
+waiting for TLS (forward adaptation is post-release P2-1).
+
+**Delivered**
+- `link_repos.lock` — TOML pin manifest (name/url/sha + path/patch/marker)
+  for the 7 build path-dep repos: openrusty `4180ad3`, rdb `8de5dcc`,
+  flannel-rust `76397b5`, opencoder `c1a1b2e`, any-home `a1e2d9c` + nested
+  nfsserve `c00c361` (carrying the AUTH_SYS identity patch, canonical copy
+  pinned inside any-home) and libsql `6f451a1`. The 7th pin was DISCOVERED
+  during closure: anyhome's workspace deps pull libsql transitively — the
+  6-repo assumption was wrong.
+- `scripts/bootstrap-link-repos.sh`: clone + `checkout --detach <sha>` when
+  missing; verify-only for existing/symlinked dev checkouts (HEAD==sha,
+  tracked-dirty refusal with `--force` escape, untracked artifacts
+  ignored); nfsserve patch applied idempotently via marker file. Idempotent
+  re-runs, non-zero exit on any failure.
+- Pin reachability (P0-0): any-home `a1e2d9c` pushed to origin/main (was
+  34 commits ahead); rdb's validated line was absent from origin (upstream
+  main is a parallel rewrite at `d52ef49`) — published as branch
+  `pin/init-pro` on MoSunDay/rdb. All pins are public https; CI needs no
+  deploy keys.
+- CI: both jobs run bootstrap right after checkout. `cargo fmt --all
+  --check` moved BEFORE bootstrap: cargo-fmt walks materialized path-dep
+  trees (foreign code, formatted by their own toolchains); with link_repos
+  absent it scopes to this workspace only.
+- Dockerfile: builder stage COPYs lock+script and RUNs bootstrap before
+  `COPY crates/` (layer-cache friendly), plus a `clang libclang-dev` apt
+  layer — `librocksdb-sys`'s bindgen build script needs libclang, which
+  `rust:1.89-bookworm` does not ship (local box and GH runners have it
+  preinstalled; found by the first containerized release build).
+- One-time `cargo fmt --all` reformat of the workspace (~47 files,
+  mechanical): k3as crates had drifted vs current stable rustfmt
+  (toolchain floats on `stable`; local/CI-fresh rustfmt 1.9.0). Test
+  count unchanged at 973.
+
+**Cold-clone evidence (the release gate)**
+- Fresh `git clone` -> `scripts/bootstrap-link-repos.sh` (3m28s incl. the
+  nfsserve patch) -> `cargo build --workspace --locked` green (4m48s);
+  `cargo test --workspace --locked` exit 0;
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` green
+  (3m35s). Zero manual /tmp snapshots.
+- Local loop re-materialized at the pins (openrusty/rdb/opencoder as real
+  dirs; their live WIP dev symlinks parked under `link_repos/.dev-symlinks/`,
+  any-home/flannel-rust clean symlinks verified in place): build green,
+  tests **973 passed / 0 failed** (baseline parity), clippy 0 warnings,
+  fmt clean (workspace scope). The local loop had been BROKEN against the
+  dirty openrusty tree (uncommitted `UpstreamConfig.tls` breaks k3as's
+  exhaustive construction) — pins restore it.
+- e2e all green: multicall, CLI parity 19:0, graceful shutdown, discovery
+  parity, **golden 73:0** (T0.6 gate), durability D1-D4, flannel F1-F4
+  (F5 = T4.3 Scope B, out of round), service-traffic ST1-ST6. Two initial
+  reds (durability readiness, flannel) were host-load flakes (foreign
+  compile storm, load avg 233 on 16 cores) — both green on rerun with
+  identical code.
+- `docker build` (EMBED=0) green + container smoke passed: image
+  `init-pro:rc` (classic builder, host networking for this sandbox)
+  runs the in-container bootstrap — it survived a GnuTLS disconnect on
+  the opencoder clone via the retry path, materialized all 7 pins +
+  patch, and compiled the workspace in release mode. Smoke:
+  `docker run --rm init-pro:rc --version` -> `init-pro 0.2.0`;
+  `kubectl` alias via `--entrypoint` dispatches the kubectl subset;
+  full multicall selftest in-container **10/10 OK** (9 aliases +
+  unknown->help).
+
+**Notes & follow-ups**
+- openrusty live tree still carries the uncommitted TLS refactor
+  (`dynamic` / `UpstreamConfig.tls`). Post-release forward adaptation
+  (P2-1): bump the pin, then add `tls: None` at the `UpstreamConfig`
+  construction in `gateway_config.rs` (the 00a0483 pattern), rerun gates.
+- rdb live-tree WIP corresponds to the rewritten origin/main (`d52ef49`);
+  k3as stays on validated `8de5dcc` via `pin/init-pro` (P1-1 closed as
+  documented, non-blocking — cold build proves no WIP dependency).
+- Local dev: symlinks stay valid (verify-only); building against WIP
+  link_repos trees requires `--force` plus awareness that upstream API
+  drift breaks k3as-side exhaustive construction.
+
 ## Sprint 30 — T7.1 Phase B: 节点侧 Agent 真实执行 + 三个真 bug 根因修复 (Q37) (2026-08-31)
 
 **Goal:** a bound `init-pro.io/v1 Agent` is EXECUTED on its node by a real

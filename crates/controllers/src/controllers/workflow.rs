@@ -166,8 +166,7 @@ pub async fn reconcile(
     if failed_node.is_none() {
         if let Some(gi) = active {
             for (i, step) in plan.groups[gi].iter().enumerate() {
-                if phases[gi][i] == "Succeeded"
-                    || child_for(&step.node_name, step.target).is_some()
+                if phases[gi][i] == "Succeeded" || child_for(&step.node_name, step.target).is_some()
                 {
                     continue;
                 }
@@ -221,8 +220,7 @@ pub async fn reconcile(
 
     // ---- status composition (cumulative node map) ----
     let flat: Vec<&str> = phases.iter().flatten().map(String::as_str).collect();
-    let wf_phase =
-        workflow_phase(&flat, !pods.is_empty() || !agents.is_empty() || created > 0);
+    let wf_phase = workflow_phase(&flat, !pods.is_empty() || !agents.is_empty() || created > 0);
     let mut nodes = existing_nodes.clone();
     let mut built: Vec<Value> = Vec::new();
     if plan.root_type == ROOT_POD {
@@ -271,11 +269,10 @@ pub async fn reconcile(
             let step_children: Vec<String> = group.iter().map(|s| s.node_name.clone()).collect();
             if plan.root_type == ROOT_STEPS {
                 let sg_id = stepgroup_id(wf_name, g);
-                let started =
-                    Some(g) == active
-                        || group
-                            .iter()
-                            .any(|s| child_for(&s.node_name, s.target).is_some());
+                let started = Some(g) == active
+                    || group
+                        .iter()
+                        .any(|s| child_for(&s.node_name, s.target).is_some());
                 let phase = if phases[g].iter().all(|p| p == "Succeeded") {
                     "Succeeded"
                 } else if started {

@@ -112,13 +112,13 @@ impl ControllerManager {
         stop: Stop,
         cfg: ManagerConfig,
     ) -> Vec<JoinHandle<()>> {
-        let cluster_cidr: Arc<Option<node_cidr::ClusterCidr>> = Arc::new(
-            cfg.cluster_cidr
-                .as_deref()
-                .and_then(node_cidr::parse_cidr),
-        );
+        let cluster_cidr: Arc<Option<node_cidr::ClusterCidr>> =
+            Arc::new(cfg.cluster_cidr.as_deref().and_then(node_cidr::parse_cidr));
         if let (Some(flag), None) = (cfg.cluster_cidr.as_deref(), cluster_cidr.as_ref()) {
-            tracing::warn!(cluster_cidr = flag, "invalid --cluster-cidr; podCIDR allocation disabled");
+            tracing::warn!(
+                cluster_cidr = flag,
+                "invalid --cluster-cidr; podCIDR allocation disabled"
+            );
         }
         // T-anyhome (Q36): the Workflow controller's `/workspace` auto-mount
         // endpoint, threaded to the worker dispatch next to cluster_cidr.

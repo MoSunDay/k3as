@@ -1927,3 +1927,50 @@ state machine is merge-patch based (status subresource merge semantics
 remain a Q34-style debt). Gate: `scripts/agent-exec-e2e.sh` S1/S2+G1-G7
 (NFS mode), kubelet `agents_runner_integration` (6 tests, local fallback +
 binding-filter regression), `crates/runtime/src/opencoder.rs` unit tests.
+
+---
+
+## Q38 — link_repos pin-clone bootstrap + intranet h2c release posture (2026-09-05)
+
+**Context** — Release was blocked by two P0s. (1) Cold clones could not
+build: `link_repos/` (7 path-dep repos: openrusty, rdb, flannel-rust,
+opencoder, any-home, plus any-home's nested nfsserve/libsql) is gitignored
+and materialized only via local `/root/*` checkouts + symlinks — zero-cache
+checkouts (CI, Docker, new machines) failed at path-dep resolution, and
+local green relied on manually pinned /tmp snapshots because the openrusty
+live tree carries uncommitted TLS-refactor WIP (new `dynamic` /
+`UpstreamConfig.tls` fields break k3as's exhaustive config construction).
+(2) Shared deps were un-pinned: rdb's validated line was rewritten out of
+its own upstream main, and the release needed a network posture call on the
+Router plane.
+
+**Options** — for provisioning: (a) git submodules (rejected: nested
+any-home layout + patch handling + the Q35/Q36 link_repos convention);
+(b) vendor the sources into this repo (rejected: ~7 foreign histories
+inlined, license noise, no upstream movement); (c) checked-in pin manifest
++ clone/checkout bootstrap script (chosen). For release posture: wait for
+openrusty TLS vs ship intranet h2c on the pinned `4180ad3` — chosen: ship
+h2c now, pin `4180ad3`, treat TLS as post-release forward adaptation.
+
+**Decision** — (c) + h2c now. `link_repos.lock` (TOML: name/url/sha +
+path/patch/marker) is the SSOT for pins; `scripts/bootstrap-link-repos.sh`
+materializes it: clone+`checkout --detach <sha>` when missing, verify-only
+for existing/symlinked dev checkouts (HEAD==sha; tracked-dirty refusal with
+`--force` escape; untracked artifacts ignored). nfsserve's AUTH_SYS patch
+(Q37) is applied on top, canonical copy pinned inside any-home so patch and
+consumer move together. Both CI jobs and the Dockerfile builder run the
+bootstrap before compiling. rdb's pin is published as branch `pin/init-pro`
+on MoSunDay/rdb (upstream main is a parallel rewrite, d52ef49). The Router
+ships intranet h2c at openrusty `4180ad3`; when the TLS work lands, bump
+the pin and forward-adapt `gateway_config.rs` (`dynamic: None` handling,
+`tls: None` at the `UpstreamConfig` construction, the 00a0483 pattern).
+
+**Consequences** — every push CI-proves cold-clone buildability; manual
+pinned-snapshot verification is retired. Local dev: symlinks stay valid
+(verify-only), but building k3as against WIP link_repos trees requires
+`--force` + awareness that uncommitted upstream API drift breaks k3s-side
+exhaustive construction. Pin bumps are single-lockfile diffs (revert =
+single commit). Non-build reference checkouts (argo-workflows, flannel)
+stay unmanaged and are documented as such. Discovered during closure: the
+transitive anyhome->libsql path dep makes libsql a 7th mandatory pin (the
+6-repo assumption was wrong).

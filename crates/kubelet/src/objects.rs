@@ -56,8 +56,12 @@ pub struct VolumeSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VolumeKind {
     EmptyDir,
-    ConfigMap { name: String },
-    Secret { name: String },
+    ConfigMap {
+        name: String,
+    },
+    Secret {
+        name: String,
+    },
     Nfs {
         server: String,
         path: String,

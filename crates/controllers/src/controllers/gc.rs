@@ -330,10 +330,7 @@ mod tests {
             target: StepTarget::Agent,
         };
         let agent = build_agent(&wf, ns, "u-wf", &step);
-        assert_eq!(
-            agent["metadata"]["ownerReferences"][0]["kind"],
-            "Workflow"
-        );
+        assert_eq!(agent["metadata"]["ownerReferences"][0]["kind"], "Workflow");
 
         // Case 1: the owner is NOT in the caches -> the Agent is an orphan.
         client.create(&child_key, agent.clone()).await.unwrap();
@@ -344,13 +341,15 @@ mod tests {
 
         // Case 2: the owner IS in the workflow cache -> the Agent survives.
         client.create(&child_key, agent).await.unwrap();
-        caches.workflows.apply_event(&WatchEvent::Put(Arc::new(StoredEntry {
-            key: format!("/registry/argoproj.io/workflows/{ns}/ask-wf"),
-            value: wf,
-            create_revision: 1,
-            mod_revision: 1,
-            version: 1,
-        })));
+        caches
+            .workflows
+            .apply_event(&WatchEvent::Put(Arc::new(StoredEntry {
+                key: format!("/registry/argoproj.io/workflows/{ns}/ask-wf"),
+                value: wf,
+                create_revision: 1,
+                mod_revision: 1,
+                version: 1,
+            })));
         assert!(caches.workflows.get(ns, "ask-wf").is_some());
         sweep(&client, &caches).await.unwrap();
         let survivor = client.get(&child_key).await.unwrap();

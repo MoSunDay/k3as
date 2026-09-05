@@ -469,7 +469,8 @@ async fn watch_agents_events() {
     let events = read_watch_until(&mut watch, &mut buf, deadline, |evs| {
         evs.iter()
             .any(|e| e["type"] == "ADDED" && e["object"]["metadata"]["name"] == "ag1")
-            && evs.iter()
+            && evs
+                .iter()
                 .any(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "ag1")
     })
     .await;
@@ -484,7 +485,9 @@ async fn watch_agents_events() {
         });
     assert_eq!(added["object"]["kind"], "Agent");
     assert_eq!(added["object"]["status"]["phase"], "Pending");
-    assert!(added["object"]["metadata"]["resourceVersion"].as_str().is_some());
+    assert!(added["object"]["metadata"]["resourceVersion"]
+        .as_str()
+        .is_some());
     let deleted = events
         .iter()
         .find(|e| e["type"] == "DELETED" && e["object"]["metadata"]["name"] == "ag1")

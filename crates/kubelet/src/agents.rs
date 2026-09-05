@@ -112,7 +112,14 @@ pub fn spawn_agent_runner(
             killers.clone(),
             shutdown.clone(),
         )),
-        tokio::spawn(run_task(client, Arc::new(cfg), desired, killers, written, shutdown)),
+        tokio::spawn(run_task(
+            client,
+            Arc::new(cfg),
+            desired,
+            killers,
+            written,
+            shutdown,
+        )),
     ]
 }
 
@@ -156,13 +163,24 @@ async fn watch_cycle(
         return Err(format!("agent LIST returned {code}"));
     }
     let mut map = BTreeMap::new();
-    for item in list.pointer("/items").and_then(Value::as_array).into_iter().flatten() {
+    for item in list
+        .pointer("/items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         if objs::agent_node(item).as_deref() != Some(node_name) {
             continue;
         }
         if let Some(view) = objs::agent_view(item) {
             let key = view.key.clone();
-            map.insert(key, AgentRecord { view, raw: item.clone() });
+            map.insert(
+                key,
+                AgentRecord {
+                    view,
+                    raw: item.clone(),
+                },
+            );
         }
     }
     // A DELETE missed during a watch gap still kills an in-flight execution.
@@ -222,7 +240,10 @@ async fn watch_cycle(
             continue;
         }
         if let Some(view) = objs::agent_view(&obj) {
-            desired.lock().await.insert(key, AgentRecord { view, raw: obj });
+            desired
+                .lock()
+                .await
+                .insert(key, AgentRecord { view, raw: obj });
         }
     }
 }
@@ -277,7 +298,12 @@ async fn run_task(
 
 /// Reset an orphan `Running` Agent to `Pending` (at-least-once, Q37). The
 /// guard slot keeps this to one patch until the watch delivers `Pending`.
-async fn reset_orphan(client: &HttpJson, written: &Written, killers: &Killers, view: &objs::AgentView) {
+async fn reset_orphan(
+    client: &HttpJson,
+    written: &Written,
+    killers: &Killers,
+    view: &objs::AgentView,
+) {
     let (tx, _rx) = watch::channel(true);
     killers.lock().await.insert(view.key.clone(), tx);
     let killers = killers.clone();
@@ -327,7 +353,13 @@ async fn execute_one(
 ) {
     let outcome = run_attempt(&client, &cfg, &written, &record, &mut keep_going).await;
     if let Some((phase, cond)) = outcome {
-        patch_if_changed(&client, &written, &record.view, &objs::status_patch(phase, &[cond])).await;
+        patch_if_changed(
+            &client,
+            &written,
+            &record.view,
+            &objs::status_patch(phase, &[cond]),
+        )
+        .await;
     }
     killers.lock().await.remove(&record.view.key);
 }

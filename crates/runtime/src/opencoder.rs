@@ -186,17 +186,29 @@ mod tests {
         // Deployed shape: <repo>/target/debug/init-pro -> repo-root hit.
         let repo = tmp_dir("repo2");
         let exe = write_bin(&repo.join("target/debug/init-pro"), b"bin");
-        let src = write_bin(&repo.join("link_repos/opencoder/target/release/opencoder"), b"rls");
+        let src = write_bin(
+            &repo.join("link_repos/opencoder/target/release/opencoder"),
+            b"rls",
+        );
         let got = runner_bin_from(None, &tmp_dir("d2"), Some(&exe), None).unwrap();
         // The join is un-normalized (`target/debug/../../link_repos/...`);
         // compare resolved files, not spellings.
-        assert_eq!(fs::canonicalize(got).unwrap(), fs::canonicalize(&src).unwrap());
+        assert_eq!(
+            fs::canonicalize(got).unwrap(),
+            fs::canonicalize(&src).unwrap()
+        );
         // Cargo-test shape: one level deeper (target/debug/deps/<bin>).
         let repo3 = tmp_dir("repo3");
         let exe3 = write_bin(&repo3.join("target/debug/deps/runtime-ab12"), b"bin");
-        let src3 = write_bin(&repo3.join("link_repos/opencoder/target/release/opencoder"), b"rls");
+        let src3 = write_bin(
+            &repo3.join("link_repos/opencoder/target/release/opencoder"),
+            b"rls",
+        );
         let got3 = runner_bin_from(None, &tmp_dir("d3"), Some(&exe3), None).unwrap();
-        assert_eq!(fs::canonicalize(got3).unwrap(), fs::canonicalize(&src3).unwrap());
+        assert_eq!(
+            fs::canonicalize(got3).unwrap(),
+            fs::canonicalize(&src3).unwrap()
+        );
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&repo3);
     }
@@ -208,7 +220,10 @@ mod tests {
         let repo = tmp_dir("repo4");
         let emb = write_bin(&data.join("data/current/bin/opencoder"), b"embed");
         let exe = write_bin(&repo.join("target/debug/init-pro"), b"bin");
-        write_bin(&repo.join("link_repos/opencoder/target/release/opencoder"), b"rls");
+        write_bin(
+            &repo.join("link_repos/opencoder/target/release/opencoder"),
+            b"rls",
+        );
         assert_eq!(runner_bin_from(None, &data, Some(&exe), None), Some(emb));
         let _ = fs::remove_dir_all(&repo);
         let _ = fs::remove_dir_all(&data);
@@ -225,7 +240,10 @@ mod tests {
     fn stage_copies_sets_mode_and_is_idempotent() {
         let data = tmp_dir("stage");
         let repo = tmp_dir("stage-src");
-        let src = write_bin(&repo.join("link_repos/opencoder/target/release/opencoder"), b"v1");
+        let src = write_bin(
+            &repo.join("link_repos/opencoder/target/release/opencoder"),
+            b"v1",
+        );
         let dest = data.join("bin/opencoder");
         // Pure seam: explicit source (the real repo must not leak in).
         assert_eq!(stage_from(&src, &data).unwrap(), Some(dest.clone()));

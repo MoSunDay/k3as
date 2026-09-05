@@ -109,13 +109,22 @@ pub(crate) async fn run_attempt(
         view,
         &objs::status_patch(
             objs::PHASE_RUNNING,
-            &[objs::condition(objs::COND_READY, "True", "Executing", "runner started")],
+            &[objs::condition(
+                objs::COND_READY,
+                "True",
+                "Executing",
+                "runner started",
+            )],
         ),
     )
     .await;
     let prompt_file = {
         let p = ws.join("prompt.md");
-        if p.is_file() { Some(p) } else { None }
+        if p.is_file() {
+            Some(p)
+        } else {
+            None
+        }
     };
     let plan = objs::build_spawn_plan(view, &ws, prompt_file, None);
     let mut cmd = tokio::process::Command::new(runner);
@@ -143,17 +152,27 @@ pub(crate) async fn run_attempt(
             objs::PHASE_FAILED,
             fail_cond(
                 "ExecTimeout",
-                &format!("execution exceeded {}s and was killed", cfg.exec_timeout.as_secs()),
+                &format!(
+                    "execution exceeded {}s and was killed",
+                    cfg.exec_timeout.as_secs()
+                ),
             ),
         )),
         Verdict::Done(Err(e)) => Some((objs::PHASE_FAILED, fail_cond("RunnerError", &e))),
         Verdict::Done(Ok(out)) => {
             let session = objs::session_id_from_stderr(&String::from_utf8_lossy(&out.stderr));
-            let session_note = session.map(|s| format!("; session {s}")).unwrap_or_default();
+            let session_note = session
+                .map(|s| format!("; session {s}"))
+                .unwrap_or_default();
             if out.status.success() {
                 Some((
                     objs::PHASE_SUCCEEDED,
-                    objs::condition(objs::COND_READY, "True", "Completed", &format!("exit 0{session_note}")),
+                    objs::condition(
+                        objs::COND_READY,
+                        "True",
+                        "Completed",
+                        &format!("exit 0{session_note}"),
+                    ),
                 ))
             } else {
                 let code = out.status.code().unwrap_or(-1);
@@ -248,7 +267,11 @@ async fn mount_workspace(
     let export = path.trim_end_matches('/');
     let (parent, leaf) = match export.rsplit_once('/') {
         Some((p, l)) if !l.is_empty() => {
-            let parent = if p.is_empty() { "/".to_string() } else { p.to_string() };
+            let parent = if p.is_empty() {
+                "/".to_string()
+            } else {
+                p.to_string()
+            };
             (parent, l.to_string())
         }
         _ => (export.to_string(), name.to_string()),
@@ -302,8 +325,14 @@ mod tests {
     #[test]
     fn workspace_dir_is_per_agent_and_rejects_separators() {
         let data = Path::new("/d");
-        assert_eq!(workspace_dir(data, "ag-1"), PathBuf::from("/d/agent-ws/ag-1"));
-        assert_eq!(workspace_dir(data, "a/b"), PathBuf::from("/d/agent-ws/invalid"));
+        assert_eq!(
+            workspace_dir(data, "ag-1"),
+            PathBuf::from("/d/agent-ws/ag-1")
+        );
+        assert_eq!(
+            workspace_dir(data, "a/b"),
+            PathBuf::from("/d/agent-ws/invalid")
+        );
     }
 
     #[test]
@@ -317,11 +346,8 @@ mod tests {
 
     #[test]
     fn exec_timeout_env_overrides_default() {
-        let cfg = AgentRunnerConfig::new(
-            "http://127.0.0.1:1".into(),
-            "n".into(),
-            PathBuf::from("/d"),
-        );
+        let cfg =
+            AgentRunnerConfig::new("http://127.0.0.1:1".into(), "n".into(), PathBuf::from("/d"));
         assert_eq!(
             cfg.exec_timeout,
             crate::agents::exec_timeout_from_env().unwrap_or(crate::agents::DEFAULT_EXEC_TIMEOUT)

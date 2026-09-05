@@ -79,12 +79,7 @@ async fn post_agent(client: &HttpJson, name: &str, prompt: &str) {
     assert_eq!(code, 201, "agent POST rejected");
 }
 
-async fn post_agent_on(
-    client: &HttpJson,
-    name: &str,
-    prompt: &str,
-    node: &str,
-) {
+async fn post_agent_on(client: &HttpJson, name: &str, prompt: &str, node: &str) {
     let mut obj = agent_object(name, prompt);
     obj["spec"]["nodeName"] = json!(node);
     let (code, _) = client
@@ -102,7 +97,12 @@ fn cfg_of(url: &str, data: &Path, runner: Option<PathBuf>, timeout: Duration) ->
     cfg
 }
 
-async fn wait_for(client: &HttpJson, path: &str, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
+async fn wait_for(
+    client: &HttpJson,
+    path: &str,
+    what: &str,
+    pred: impl Fn(&Value) -> bool,
+) -> Value {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Ok((200, v)) = client.get_json(path).await {
@@ -140,7 +140,10 @@ async fn pending_running_succeeded_with_session_and_local_workspace() {
     let url = spawn_server().await;
     let client = HttpJson::parse_url(&url).unwrap();
     let shutdown = infra::Shutdown::new();
-    let _handles = spawn_agent_runner(cfg_of(&url, &data, Some(runner), Duration::from_secs(60)), shutdown.clone());
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, Some(runner), Duration::from_secs(60)),
+        shutdown.clone(),
+    );
 
     post_agent(&client, "ok-agent", "task one").await;
     let path = "/apis/init-pro.io/v1/namespaces/default/agents/ok-agent";
@@ -178,7 +181,10 @@ async fn missing_runner_stays_pending_with_runnermissing_condition() {
     let url = spawn_server().await;
     let client = HttpJson::parse_url(&url).unwrap();
     let shutdown = infra::Shutdown::new();
-    let _handles = spawn_agent_runner(cfg_of(&url, &data, None, Duration::from_secs(60)), shutdown.clone());
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, None, Duration::from_secs(60)),
+        shutdown.clone(),
+    );
 
     post_agent(&client, "no-runner", "task two").await;
     let path = "/apis/init-pro.io/v1/namespaces/default/agents/no-runner";
@@ -197,7 +203,10 @@ async fn nonzero_exit_fails_with_runnerfailed_reason() {
     let url = spawn_server().await;
     let client = HttpJson::parse_url(&url).unwrap();
     let shutdown = infra::Shutdown::new();
-    let _handles = spawn_agent_runner(cfg_of(&url, &data, Some(runner), Duration::from_secs(60)), shutdown.clone());
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, Some(runner), Duration::from_secs(60)),
+        shutdown.clone(),
+    );
 
     post_agent(&client, "bad-exit", "task three").await;
     let path = "/apis/init-pro.io/v1/namespaces/default/agents/bad-exit";
@@ -206,8 +215,14 @@ async fn nonzero_exit_fails_with_runnerfailed_reason() {
     })
     .await;
     let msg = v["status"]["conditions"][0]["message"].as_str().unwrap();
-    assert!(msg.contains("exit 7"), "message should carry the exit code: {msg}");
-    assert!(msg.contains("session s-9"), "message should carry the session id: {msg}");
+    assert!(
+        msg.contains("exit 7"),
+        "message should carry the exit code: {msg}"
+    );
+    assert!(
+        msg.contains("session s-9"),
+        "message should carry the session id: {msg}"
+    );
     shutdown.trigger();
 }
 
@@ -218,7 +233,10 @@ async fn hung_runner_is_killed_and_marked_exectimeout() {
     let url = spawn_server().await;
     let client = HttpJson::parse_url(&url).unwrap();
     let shutdown = infra::Shutdown::new();
-    let _handles = spawn_agent_runner(cfg_of(&url, &data, Some(runner), Duration::from_millis(300)), shutdown.clone());
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, Some(runner), Duration::from_millis(300)),
+        shutdown.clone(),
+    );
 
     post_agent(&client, "hung", "task four").await;
     let path = "/apis/init-pro.io/v1/namespaces/default/agents/hung";
@@ -244,7 +262,10 @@ async fn deleting_a_running_agent_kills_the_subprocess() {
     let url = spawn_server().await;
     let client = HttpJson::parse_url(&url).unwrap();
     let shutdown = infra::Shutdown::new();
-    let _handles = spawn_agent_runner(cfg_of(&url, &data, Some(runner), Duration::from_secs(60)), shutdown.clone());
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, Some(runner), Duration::from_secs(60)),
+        shutdown.clone(),
+    );
 
     post_agent(&client, "deleted-mid-run", "task five").await;
     let path = "/apis/init-pro.io/v1/namespaces/default/agents/deleted-mid-run";
@@ -260,7 +281,10 @@ async fn deleting_a_running_agent_kills_the_subprocess() {
         assert!(Instant::now() < deadline, "stub never wrote its pid");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_string();
 
     // DELETE cascade: watch DELETED -> keep_going=false -> kill_on_drop.
     let (code, _) = client.delete_json(path).await.unwrap();
@@ -270,7 +294,10 @@ async fn deleting_a_running_agent_kills_the_subprocess() {
         if !Path::new(&format!("/proc/{pid}")).exists() {
             break;
         }
-        assert!(Instant::now() < deadline, "subprocess {pid} survived DELETE");
+        assert!(
+            Instant::now() < deadline,
+            "subprocess {pid} survived DELETE"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     shutdown.trigger();
@@ -316,5 +343,8 @@ async fn foreign_bound_agent_is_never_executed_locally() {
         .get_json("/apis/init-pro.io/v1/namespaces/default/agents/foreign-bound")
         .await
         .unwrap();
-    assert_eq!(after["status"]["phase"], "Pending", "stolen by other node: {after}");
+    assert_eq!(
+        after["status"]["phase"], "Pending",
+        "stolen by other node: {after}"
+    );
 }

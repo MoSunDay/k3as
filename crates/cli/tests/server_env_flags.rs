@@ -34,7 +34,10 @@ fn env_true_disables_anyhome() {
     std::env::set_var(VAR, "true");
     let disabled = parse_disable_anyhome(&["server"]).expect("env true parses");
     std::env::remove_var(VAR);
-    assert!(disabled, "INIT_PRO_DISABLE_ANYHOME=true must disable anyhome");
+    assert!(
+        disabled,
+        "INIT_PRO_DISABLE_ANYHOME=true must disable anyhome"
+    );
 }
 
 /// ACTUAL clap v4 behavior (4.6): a `bool` field is `ArgAction::SetTrue` and
@@ -81,8 +84,7 @@ fn env_absent_and_no_flag_keeps_anyhome_enabled() {
 fn explicit_flag_disables_anyhome() {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::remove_var(VAR);
-    let disabled =
-        parse_disable_anyhome(&["server", "--disable-anyhome"]).expect("flag parses");
+    let disabled = parse_disable_anyhome(&["server", "--disable-anyhome"]).expect("flag parses");
     assert!(disabled, "--disable-anyhome must disable anyhome");
 }
 
@@ -90,8 +92,7 @@ fn explicit_flag_disables_anyhome() {
 fn explicit_flag_overrides_env_false() {
     let _g = ENV_LOCK.lock().unwrap();
     std::env::set_var(VAR, "false");
-    let disabled = parse_disable_anyhome(&["server", "--disable-anyhome"])
-        .expect("flag beats env");
+    let disabled = parse_disable_anyhome(&["server", "--disable-anyhome"]).expect("flag beats env");
     std::env::remove_var(VAR);
     assert!(disabled, "argv --disable-anyhome must override env false");
 }

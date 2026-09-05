@@ -40,8 +40,8 @@ pub mod time;
 pub mod workqueue;
 
 pub use client::{Client, StorageClient};
-pub use controllers::Caches;
 pub use controllers::node_cidr;
+pub use controllers::Caches;
 pub use error::ControllerError;
 pub use informer::{EventHandler, Informer, ObjectStore};
 pub use leaderelection::{LeaderElector, LeaseConfig};

@@ -238,6 +238,9 @@ mod tests {
         // compiled seam function.
         let event = opencoder_session::SessionEvent::LlmRoundEnd;
         assert_eq!(session_event_kind(&event), "llm-round");
-        assert_eq!(session_event_kind(&SessionEvent::TextDelta("x".into())), "text");
+        assert_eq!(
+            session_event_kind(&SessionEvent::TextDelta("x".into())),
+            "text"
+        );
     }
 }

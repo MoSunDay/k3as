@@ -70,8 +70,14 @@ async fn drain_stops_containers_before_their_sandbox() {
     let rm_ct = calls.iter().position(|c| c == &format!("rm:{ct}"));
     let stopp_sb = calls.iter().position(|c| c.starts_with("stopp:"));
     let rmp_sb = calls.iter().position(|c| c.starts_with("rmp:"));
-    assert!(stop_ct.is_some_and(|i| rmp_sb.is_some_and(|j| i < j)), "container stop before sandbox rmp: {calls:?}");
-    assert!(rm_ct.is_some_and(|i| stopp_sb.is_some_and(|j| i < j)), "container rm before sandbox stopp: {calls:?}");
+    assert!(
+        stop_ct.is_some_and(|i| rmp_sb.is_some_and(|j| i < j)),
+        "container stop before sandbox rmp: {calls:?}"
+    );
+    assert!(
+        rm_ct.is_some_and(|i| stopp_sb.is_some_and(|j| i < j)),
+        "container rm before sandbox stopp: {calls:?}"
+    );
     assert!(
         cri.peek_containers().is_empty(),
         "container removed too: {:?}",

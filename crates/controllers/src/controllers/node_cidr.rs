@@ -135,7 +135,9 @@ pub fn next_free(cluster: &ClusterCidr, used: &[u32]) -> Option<u32> {
     }
     let step = 1u32 << (32 - u32::from(node_prefix));
     let mut subnet = cluster.base;
-    let end = cluster.base.wrapping_add(1u32 << (32 - u32::from(cluster.prefix)));
+    let end = cluster
+        .base
+        .wrapping_add(1u32 << (32 - u32::from(cluster.prefix)));
     while subnet != end {
         if !used.contains(&subnet) {
             return Some(subnet);
@@ -170,9 +172,7 @@ pub async fn allocate(
     {
         return Ok(None); // already allocated: idempotent no-op
     }
-    let nodes = client
-        .list(&KeyPrefix::new("", "nodes", None))
-        .await?;
+    let nodes = client.list(&KeyPrefix::new("", "nodes", None)).await?;
     let used = used_subnets(&nodes);
     let Some(subnet) = next_free(cluster, &used) else {
         return Err(ControllerError::Internal(format!(
@@ -182,9 +182,10 @@ pub async fn allocate(
     };
     let cidr = cidr_string(subnet, cluster.node_prefix());
     let mut updated = node.clone();
-    let spec = updated
-        .as_object_mut()
-        .map(|o| o.entry("spec").or_insert_with(|| Value::Object(serde_json::Map::new())));
+    let spec = updated.as_object_mut().map(|o| {
+        o.entry("spec")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+    });
     let Some(spec) = spec else {
         return Ok(None);
     };
@@ -192,7 +193,10 @@ pub async fn allocate(
         .as_object_mut()
         .ok_or_else(|| ControllerError::Internal("node spec is not an object".into()))?;
     obj.insert("podCIDR".into(), Value::String(cidr.clone()));
-    obj.insert("podCIDRs".into(), Value::Array(vec![Value::String(cidr.clone())]));
+    obj.insert(
+        "podCIDRs".into(),
+        Value::Array(vec![Value::String(cidr.clone())]),
+    );
     let key = Key::new("", "nodes", "", &node_name);
     client
         .update(&key, updated, resource_version(node))
@@ -235,12 +239,18 @@ mod tests {
     fn parses_and_masks_cidrs() {
         assert_eq!(
             parse_cidr("10.42.0.0/16"),
-            Some(ClusterCidr { base: 0x0a2a_0000, prefix: 16 })
+            Some(ClusterCidr {
+                base: 0x0a2a_0000,
+                prefix: 16
+            })
         );
         // Host bits are masked off, not an error (inet_cidr behavior).
         assert_eq!(
             parse_cidr("10.42.7.9/16"),
-            Some(ClusterCidr { base: 0x0a2a_0000, prefix: 16 })
+            Some(ClusterCidr {
+                base: 0x0a2a_0000,
+                prefix: 16
+            })
         );
         assert_eq!(parse_cidr("10.42.0.0/33"), None);
         assert_eq!(parse_cidr("10.42.0.0/o16"), None);
@@ -284,7 +294,13 @@ mod tests {
     #[test]
     fn allocation_exhausts_with_internal_error() {
         let cluster = parse_cidr("10.42.0.0/30").unwrap(); // 4 subnets of /30
-        assert_eq!(next_free(&cluster, &[0x0a2a_0000, 0x0a2a_0004, 0x0a2a_0008, 0x0a2a_000c]), None);
+        assert_eq!(
+            next_free(
+                &cluster,
+                &[0x0a2a_0000, 0x0a2a_0004, 0x0a2a_0008, 0x0a2a_000c]
+            ),
+            None
+        );
     }
 
     #[tokio::test]
@@ -301,16 +317,31 @@ mod tests {
 
         // Two sequential allocations take distinct subnets (single-worker
         // serialization is the runner's job; here we exercise the math).
-        let na = client.get(&Key::new("", "nodes", "", "node-a")).await.unwrap().unwrap();
+        let na = client
+            .get(&Key::new("", "nodes", "", "node-a"))
+            .await
+            .unwrap()
+            .unwrap();
         let first = allocate(&client, &cluster, &na).await.unwrap().unwrap();
-        let nb = client.get(&Key::new("", "nodes", "", "node-b")).await.unwrap().unwrap();
+        let nb = client
+            .get(&Key::new("", "nodes", "", "node-b"))
+            .await
+            .unwrap()
+            .unwrap();
         let second = allocate(&client, &cluster, &nb).await.unwrap().unwrap();
-        assert_ne!(parse_cidr(&first).unwrap().base, parse_cidr(&second).unwrap().base);
+        assert_ne!(
+            parse_cidr(&first).unwrap().base,
+            parse_cidr(&second).unwrap().base
+        );
         assert_eq!(first, "10.42.0.0/24");
         assert_eq!(second, "10.42.1.0/24");
 
         // Reconciling the same node again is a no-op (idempotent).
-        let na2 = client.get(&Key::new("", "nodes", "", "node-a")).await.unwrap().unwrap();
+        let na2 = client
+            .get(&Key::new("", "nodes", "", "node-a"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(allocate(&client, &cluster, &na2).await.unwrap(), None);
     }
 
@@ -322,14 +353,24 @@ mod tests {
         // A node that only carries podCIDR (no podCIDRs list) still marks
         // the subnet used; a legacy 0th subnet is honored, next free is .1.
         client
-            .create(&Key::new("", "nodes", "", "legacy"), node_with_cidr("legacy", "10.42.0.0/24"))
+            .create(
+                &Key::new("", "nodes", "", "legacy"),
+                node_with_cidr("legacy", "10.42.0.0/24"),
+            )
             .await
             .unwrap();
         client
             .create(&Key::new("", "nodes", "", "fresh"), node("fresh"))
             .await
             .unwrap();
-        let n = client.get(&Key::new("", "nodes", "", "fresh")).await.unwrap().unwrap();
-        assert_eq!(allocate(&client, &cluster, &n).await.unwrap().unwrap(), "10.42.1.0/24");
+        let n = client
+            .get(&Key::new("", "nodes", "", "fresh"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            allocate(&client, &cluster, &n).await.unwrap().unwrap(),
+            "10.42.1.0/24"
+        );
     }
 }

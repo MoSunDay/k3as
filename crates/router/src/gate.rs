@@ -123,8 +123,7 @@ mod tests {
 
     /// A resolver over an empty cluster (no Services, no Endpoints).
     fn empty_resolver() -> EndpointsResolver {
-        let (state_tx, state_rx) =
-            tokio::sync::watch::channel(Arc::new(ResolverState::default()));
+        let (state_tx, state_rx) = tokio::sync::watch::channel(Arc::new(ResolverState::default()));
         let (_, ingress_rx) =
             tokio::sync::watch::channel(Arc::new(crate::ingress_watch::IngressMap::default()));
         drop(state_tx);
@@ -162,7 +161,11 @@ mod tests {
     #[test]
     fn short_circuits_to_503_when_peers_are_empty() {
         let resolver = empty_resolver();
-        let gated = GatedRouter::new(axum::Router::new(), fixed(UpstreamRef::port("default/web", 80)), resolver);
+        let gated = GatedRouter::new(
+            axum::Router::new(),
+            fixed(UpstreamRef::port("default/web", 80)),
+            resolver,
+        );
         let resp = gated.short_circuit(&req("anything.example", "/")).unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(

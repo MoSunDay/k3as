@@ -253,7 +253,10 @@ mod tests {
             "127.0.0.1:/agent"
         );
         // No port: verbatim. IPv6 literal without port: verbatim.
-        assert_eq!(mount_source("127.0.0.1", "/workflow/w"), "127.0.0.1:/workflow/w");
+        assert_eq!(
+            mount_source("127.0.0.1", "/workflow/w"),
+            "127.0.0.1:/workflow/w"
+        );
         assert_eq!(mount_source("[::1]", "/agent"), "[::1]:/agent");
     }
 

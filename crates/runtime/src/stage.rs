@@ -472,8 +472,7 @@ mod tests {
         fs::write(cache.join(CNI_PLUGINS_TGZ), b"tgz").unwrap();
         let exe = d.join("target/debug/init-pro");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
-        let got =
-            vendor_cache_dir_from(None, Some(&exe), None).expect("exe-relative candidate");
+        let got = vendor_cache_dir_from(None, Some(&exe), None).expect("exe-relative candidate");
         assert!(got.join(CNI_PLUGINS_TGZ).is_file());
     }
 

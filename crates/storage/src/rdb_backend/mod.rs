@@ -27,8 +27,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rocksdb::WriteBatch;
 use rdb::store::{open as engine_open, ops, Store};
+use rocksdb::WriteBatch;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::backend::{StorageBackend, Watch};

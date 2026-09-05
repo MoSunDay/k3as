@@ -140,10 +140,7 @@ mod tests {
         // character and '/' -- not '.' -- is the only path-significant char.
         // A separator-free id cannot climb out of /agent or /workflow; the
         // apiserver owns name-shape validation.
-        assert_eq!(
-            agent_workspace_path(".."),
-            Some("/agent/..".to_string())
-        );
+        assert_eq!(agent_workspace_path(".."), Some("/agent/..".to_string()));
         assert_eq!(
             workflow_workspace_path("v1.2.3"),
             Some("/workflow/v1.2.3".to_string())

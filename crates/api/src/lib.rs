@@ -29,20 +29,20 @@ pub mod schema;
 pub mod serde_ext;
 
 // Convenience re-exports so consumers depend on `api` only.
-pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldEntry, Operation};
-pub use discovery::{api_group_list, api_resource_list, core_api_versions};
-pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use agent::{
     Agent, AgentCondition, AgentList, AgentSpec, AgentStatus, KIND as AGENT_KIND,
     PLURAL as AGENT_PLURAL,
 };
+pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldEntry, Operation};
+pub use discovery::{api_group_list, api_resource_list, core_api_versions};
+pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use initpro::{LuaRouter, LuaRouterSpec};
 pub use networking::{
-    API_VERSION as NETWORKING_API_VERSION, GROUP as NETWORKING_GROUP, VERSION as NETWORKING_VERSION,
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressClass, IngressClassList,
-    IngressClassSpec, IngressList, IngressLoadBalancerIngress, IngressLoadBalancerStatus, IngressRule,
-    IngressServiceBackend, IngressSpec, IngressStatus, IngressTLS, ServiceBackendPort,
-    TypedLocalObjectReference,
+    IngressClassSpec, IngressList, IngressLoadBalancerIngress, IngressLoadBalancerStatus,
+    IngressRule, IngressServiceBackend, IngressSpec, IngressStatus, IngressTLS, ServiceBackendPort,
+    TypedLocalObjectReference, API_VERSION as NETWORKING_API_VERSION, GROUP as NETWORKING_GROUP,
+    VERSION as NETWORKING_VERSION,
 };
 pub use patch::{strategic_merge, PatchStrategy};
 pub use schema::{SchemaRegistry, Scope, TypeInfo};

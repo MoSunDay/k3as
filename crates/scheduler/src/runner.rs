@@ -36,9 +36,7 @@ use controllers::workqueue::WorkQueue;
 use crate::bind;
 use crate::cycle::schedule_one;
 use crate::extender::{ExtenderConfig, ExtenderSet};
-use crate::plugin::{
-    default_filters, default_scores, is_agent_pending, is_pending, Filter, Score,
-};
+use crate::plugin::{default_filters, default_scores, is_agent_pending, is_pending, Filter, Score};
 
 /// Default scheduler name (`spec.schedulerName` values we claim).
 pub const DEFAULT_SCHEDULER_NAME: &str = "default-scheduler";
@@ -167,8 +165,15 @@ impl SchedulerManager {
                 }
                 tracing::info!(target: "init-pro",
                     "scheduler active (leader via Lease init-pro-scheduler, Q18)");
-                let set =
-                    spawn_set(&client, &cfg, &caches, &queue, &agent_queue, &extenders, stop.clone());
+                let set = spawn_set(
+                    &client,
+                    &cfg,
+                    &caches,
+                    &queue,
+                    &agent_queue,
+                    &extenders,
+                    stop.clone(),
+                );
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => {

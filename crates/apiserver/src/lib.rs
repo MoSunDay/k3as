@@ -21,6 +21,7 @@ mod discovery_handlers;
 mod error;
 mod item;
 pub(crate) mod kubelet_hop;
+pub(crate) mod node_status;
 pub(crate) mod pod_io;
 #[cfg(test)]
 mod pod_io_tests;
@@ -30,7 +31,6 @@ mod pod_io_wire_common;
 mod pod_io_wire_resolution_tests;
 #[cfg(test)]
 mod pod_io_wire_tests;
-pub(crate) mod node_status;
 pub(crate) mod pod_status;
 mod serve;
 mod service;

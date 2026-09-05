@@ -19,7 +19,10 @@ mod assets;
 /// environment and the netconf from stdin, so argv is ignored beyond a
 /// help nicety (must bypass clap — `skel::run` owns stdin).
 fn run_flannel_cni(extra: &[String]) -> ExitCode {
-    if extra.iter().any(|a| a == "-h" || a == "--help" || a == "help") {
+    if extra
+        .iter()
+        .any(|a| a == "-h" || a == "--help" || a == "help")
+    {
         println!(
             "Usage (CNI plugin — invoked by containerd, not by hand):\n\
              \x20 CNI_COMMAND=ADD|DEL|CHECK|VERSION  CNI_CONTAINERID=... \\\n\

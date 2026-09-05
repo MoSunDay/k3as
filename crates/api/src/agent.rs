@@ -276,13 +276,15 @@ mod tests {
         let s = String::from_utf8(to_json(&no_status).unwrap()).unwrap();
         assert!(!s.contains("\"status\""));
         // Decoding an empty status defaults the phase to Pending.
-        let empty: Agent = from_json(br#"{
+        let empty: Agent = from_json(
+            br#"{
             "apiVersion": "init-pro.io/v1",
             "kind": "Agent",
             "metadata": {"name": "s", "namespace": "default"},
             "spec": {"agent": "opencoder", "prompt": "hi"},
             "status": {}
-        }"#)
+        }"#,
+        )
         .unwrap();
         assert_eq!(empty.status.unwrap().phase, PHASE_PENDING);
     }

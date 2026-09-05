@@ -199,16 +199,12 @@ pub fn spawn_flannel(
     Ok(daemon)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "init-pro-flannel-{tag}-{}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("init-pro-flannel-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -291,10 +287,7 @@ mod tests {
             ..net
         };
         ensure_net_conf(&dd, &net2).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            net_conf_body(&net2)
-        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), net_conf_body(&net2));
 
         // --flannel-conf passes a user file through verbatim (no write).
         let user = dd.join("user-net-conf.json");

@@ -39,10 +39,7 @@ storage_contract!(rdb, || async {
 fn temp_data_dir() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::SeqCst);
-    let path = std::env::temp_dir().join(format!(
-        "init-pro-rdb-test-{}-{n}",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("init-pro-rdb-test-{}-{n}", std::process::id()));
     cleanup_dir(&path);
     path
 }
@@ -229,8 +226,5 @@ async fn double_open_fails_cleanly_while_locked() {
         Err(e) => e,
         Ok(_) => panic!("second open must fail while the first handle is alive"),
     };
-    assert!(
-        matches!(err, StorageError::Backend(_)),
-        "got {err:?}"
-    );
+    assert!(matches!(err, StorageError::Backend(_)), "got {err:?}");
 }

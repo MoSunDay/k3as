@@ -205,8 +205,8 @@ fn is_safe_key(key: &str) -> bool {
 /// never materialized a volume, or was already cleaned). Live NFS mounts
 /// under the root are unmounted FIRST -- see [`cleanup_volumes_in`].
 pub async fn cleanup_volumes(log_root: &Path, uid: &str) -> Result<(), String> {
-    let mounts = std::fs::read_to_string(PROC_MOUNTS)
-        .map_err(|e| format!("read {PROC_MOUNTS}: {e}"))?;
+    let mounts =
+        std::fs::read_to_string(PROC_MOUNTS).map_err(|e| format!("read {PROC_MOUNTS}: {e}"))?;
     cleanup_volumes_in(Path::new("umount"), &mounts, log_root, uid).await
 }
 

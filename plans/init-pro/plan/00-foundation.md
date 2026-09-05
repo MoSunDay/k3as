@@ -108,6 +108,54 @@ that every later TODO must keep green.
 
 ---
 
+
+---
+
+## T0.2b — link_repos 钉定物化 (pin-clone bootstrap)
+
+- **目标 / Goal**
+  A zero-cache cold clone of this repo must build: `link_repos/` is
+  gitignored by design (read-only path deps), so the 7 pinned repos
+  (openrusty, rdb, flannel-rust, opencoder, any-home + nested nfsserve,
+  libsql) must be materialized reproducibly from a checked-in manifest.
+
+- **核心实现 / Core implementation**
+  - `link_repos.lock` (repo root): TOML pin manifest — name / https url /
+    sha (+ optional path / patch / patch_marker). Entries materialize in
+    listed order; any-home precedes its nested link_repos children.
+  - `scripts/bootstrap-link-repos.sh`: missing target -> full clone +
+    `git checkout --detach <sha>`; existing git dir -> verify HEAD==sha
+    (auto-re-pin when clean, refuse when dirty); symlink target (local
+    dev layout `link_repos/<name> -> /root/<name>`) -> verify-only,
+    never modify, dirty refusal escaped via `--force`.
+  - nfsserve carries the anyhome AUTH_SYS identity patch (Q37); its
+    canonical copy is pinned INSIDE any-home (`scripts/patches/`), applied
+    idempotently via marker file after checkout.
+  - Reachability: MoSunDay pins are origin/main tips except rdb — its
+    validated line was rewritten out of upstream main, so it is published
+    as branch `pin/init-pro` on MoSunDay/rdb. All pins https (public);
+    no CI credentials needed.
+  - CI (`ci.yml`): both jobs run bootstrap right after checkout; the
+    Dockerfile builder stage COPYs lock+script and RUNs bootstrap before
+    `COPY crates/` (layer-cache friendly).
+
+- **验收手段 / Acceptance**
+  - Cold clone -> `scripts/bootstrap-link-repos.sh` ->
+    `cargo build/test/clippy --workspace --locked` green, no manual
+    snapshots; idempotent re-run verifies only; `docker build` (EMBED=0)
+    + container smoke green.
+
+- **状态 / Status** — done
+- **证据 / Evidence** — cold-clone build/test/clippy green at the pinned
+  SHAs (see CHANGELOG Sprint 31); docker build + multicall container
+  smoke green; `--force` verified against the live symlink dev layout
+  (HEAD==pin for all 7, WIP trees untouched).
+- **卡点 / Blockers** — none (openrusty live-tree TLS WIP is post-release
+  forward adaptation: bump pin + `gateway_config.rs` upstream `tls: None`,
+  see Q38/P2-1).
+- **依赖 / Depends on** — T0.2
+
+
 ## T0.3 — 公共基础设施 crate (log/config/signal)
 
 - **目标 / Goal**

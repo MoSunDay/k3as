@@ -14,11 +14,20 @@ ARG EMBED
 WORKDIR /src
 # Copy the manifest + lock first for layer caching, then the sources.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# Materialize the pinned link_repos path dependencies (T0.2b, Q38) before
+# the workspace sources land, so source edits don't bust this layer.
+COPY link_repos.lock ./
+COPY scripts/bootstrap-link-repos.sh ./scripts/
+RUN ./scripts/bootstrap-link-repos.sh
 COPY crates/ ./crates/
 COPY vendor/versions.toml ./vendor/versions.toml
 # Replicate the gitignored vendor cache layout expected by build.rs when
 # EMBED=1. Provide an empty cache when EMBED=0 (no network, fast build).
 RUN mkdir -p vendor/bin vendor/cache
+# librocksdb-sys (rdb storage backend) runs bindgen in its build script,
+# which needs libclang present at build time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang libclang-dev && rm -rf /var/lib/apt/lists/*
 ENV INIT_PRO_VENDOR=${EMBED} \
     INIT_PRO_EMBED=${EMBED}
 RUN cargo build --workspace --locked --release

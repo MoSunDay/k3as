@@ -1,6 +1,6 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 34 TODOs. The
+This file is the **single source of truth** for all 35 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
 grouping for easier editing). **Edit both in lock-step.**
 
@@ -12,6 +12,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 |----|-------|-------|--------|------------|
 | T0.1 | 0 | 单一二进制 multicall crate 骨架 | done | — |
 | T0.2 | 0 | 构建与 bundling pipeline | done | T0.1 |
+| T0.2b | 0 | link_repos 钉定物化 (pin-clone bootstrap, Q38) | done | T0.2 |
 | T0.3 | 0 | 公共基础设施 crate (log/config/signal) | done | T0.1 |
 | T0.4 | 0 | CLI: multicall + k3s 兼容 flag | done | T0.1, T0.3 |
 | T0.5 | 0 | 规划体系与文档中枢 | done | — |
@@ -45,10 +46,10 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | done (Scope A+B+C, Sprint 23) | T1.2, T3.1 |
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 
-**Counts:** 34 TODOs · 23 done · 2 in-progress (T5.6 NodePort plane:
+**Counts:** 35 TODOs · 24 done · 2 in-progress (T5.6 NodePort plane:
 Router service plane + service-traffic e2e, Q28; T4.3 Scope A flannel
 CNI done, Q34 — Scope B/ServiceLB L4 剩余)
-· 9 not-started · Layer0=6 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 9 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=5 · Layer5=7 · Layer6=2 · Layer7=4.
 
 ---

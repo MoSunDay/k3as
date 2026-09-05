@@ -18,7 +18,11 @@ use tower::ServiceExt;
 
 fn app(store: Arc<EmbeddedStorage>) -> axum::Router {
     let any: Arc<dyn StorageBackend> = store;
-    apiserver::api_app(Arc::new(SchemaRegistry::with_core_v1()), any, "127.0.0.1:6443".into())
+    apiserver::api_app(
+        Arc::new(SchemaRegistry::with_core_v1()),
+        any,
+        "127.0.0.1:6443".into(),
+    )
 }
 
 async fn send(
@@ -34,11 +38,7 @@ async fn send(
         None => builder,
     };
     let resp = app(store)
-        .oneshot(
-            builder
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
     let code = resp.status();
@@ -54,7 +54,14 @@ async fn create_node(name: &str, store: Arc<EmbeddedStorage>) -> Value {
         "metadata": {"name": name, "labels": {"role": "agent"}},
         "spec": {"providerID": "init-pro://worker-1"}
     });
-    let (code, body) = send("POST", "/api/v1/nodes", Some("application/json"), node, store).await;
+    let (code, body) = send(
+        "POST",
+        "/api/v1/nodes",
+        Some("application/json"),
+        node,
+        store,
+    )
+    .await;
     assert_eq!(code, StatusCode::CREATED, "create body: {body}");
     body
 }
@@ -163,7 +170,10 @@ async fn status_patch_merges_and_persists_status_only() {
     )
     .await;
     assert_eq!(code, StatusCode::OK, "body: {body}");
-    assert_eq!(body["status"]["capacity"]["cpu"], "2", "deep-merge keeps cpu");
+    assert_eq!(
+        body["status"]["capacity"]["cpu"], "2",
+        "deep-merge keeps cpu"
+    );
     assert_eq!(body["status"]["capacity"]["memory"], "8Gi");
     assert_eq!(body["status"]["conditions"][0]["status"], "True");
     // A spec edit smuggled through the status route is dropped.

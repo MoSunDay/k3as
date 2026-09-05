@@ -81,11 +81,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::endpoints::EndpointsResolver;
     use crate::gate::{GateRoute, GatedRouter};
     use crate::route::UpstreamRef;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     /// A resolver snapshot with one live peer for `default/web:80`.
     fn resolver_with_peer(peer: SocketAddr) -> EndpointsResolver {
@@ -106,13 +106,9 @@ mod tests {
         st.services.insert("default/web".into(), svc);
         st.endpoints.insert("default/web".into(), ep);
         let (tx, rx) = tokio::sync::watch::channel(Arc::new(st));
-        let (itx, irx) =
-            tokio::sync::watch::channel(Arc::new(BTreeMap::default()));
+        let (itx, irx) = tokio::sync::watch::channel(Arc::new(BTreeMap::default()));
         drop((tx, itx));
-        EndpointsResolver {
-            rx,
-            ingresses: irx,
-        }
+        EndpointsResolver { rx, ingresses: irx }
     }
 
     /// Full serve-loop regression (Q32): gated openrusty listener + a real
@@ -126,9 +122,13 @@ mod tests {
         let peer = echo.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = echo.accept().await else { break };
+                let Ok((mut s, _)) = echo.accept().await else {
+                    break;
+                };
                 let _ = s
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
                     .await;
             }
         });
@@ -159,7 +159,10 @@ mod tests {
         s.read_to_string(&mut raw).await.unwrap();
         assert!(raw.contains("200"), "expected 200, got: {raw}");
         assert!(
-            raw.split("\r\n\r\n").nth(1).unwrap_or_default().contains("ok"),
+            raw.split("\r\n\r\n")
+                .nth(1)
+                .unwrap_or_default()
+                .contains("ok"),
             "expected the echo backend's body, got: {raw}"
         );
     }

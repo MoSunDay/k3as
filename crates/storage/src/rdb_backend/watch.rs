@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use rocksdb::WriteBatch;
 use rdb::store::ops;
 use rdb::store::Store;
+use rocksdb::WriteBatch;
 use tokio::sync::broadcast;
 
 use super::keys::{self, LogRecord, META_COMPACT};

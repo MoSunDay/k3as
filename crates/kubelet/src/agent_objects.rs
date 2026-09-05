@@ -298,8 +298,7 @@ mod tests {
             Some(("10.0.0.5:2049".into(), "/agent/ag-9".into()))
         );
         // Annotation wins over the configured fallback.
-        a["metadata"]["annotations"] =
-            json!({WORKSPACE_ANNOTATION: "nfs://h:1/agent/ag-9"});
+        a["metadata"]["annotations"] = json!({WORKSPACE_ANNOTATION: "nfs://h:1/agent/ag-9"});
         assert_eq!(
             workspace_source(&a, Some("10.0.0.5:2049")),
             Some(("h:1".into(), "/agent/ag-9".into()))
@@ -308,8 +307,14 @@ mod tests {
 
     #[test]
     fn empty_prompt_is_rejected() {
-        assert_eq!(validate_prompt(&agent_view(&agent("")).unwrap()), Err("EmptyPrompt"));
-        assert_eq!(validate_prompt(&agent_view(&agent("  ")).unwrap()), Err("EmptyPrompt"));
+        assert_eq!(
+            validate_prompt(&agent_view(&agent("")).unwrap()),
+            Err("EmptyPrompt")
+        );
+        assert_eq!(
+            validate_prompt(&agent_view(&agent("  ")).unwrap()),
+            Err("EmptyPrompt")
+        );
         assert!(validate_prompt(&agent_view(&agent("go")).unwrap()).is_ok());
     }
 
@@ -325,13 +330,27 @@ mod tests {
         assert_eq!(
             plan.args,
             vec![
-                "run", "--workdir", "/ws/ag-1", "--model", "openai/o4", "--agent",
-                "build", "--prompt-file", "/ws/ag-1/prompt.md", "create the file"
+                "run",
+                "--workdir",
+                "/ws/ag-1",
+                "--model",
+                "openai/o4",
+                "--agent",
+                "build",
+                "--prompt-file",
+                "/ws/ag-1/prompt.md",
+                "create the file"
             ]
         );
         assert_eq!(plan.envs[0], ("HOME".into(), "/ws/ag-1".into()));
-        assert_eq!(plan.envs[1], ("XDG_DATA_HOME".into(), "/ws/ag-1/mem".into()));
-        assert_eq!(plan.envs[2], ("PATH".into(), "/ws/ag-1/tools:/usr/bin".into()));
+        assert_eq!(
+            plan.envs[1],
+            ("XDG_DATA_HOME".into(), "/ws/ag-1/mem".into())
+        );
+        assert_eq!(
+            plan.envs[2],
+            ("PATH".into(), "/ws/ag-1/tools:/usr/bin".into())
+        );
         // Minimal form: no persona file, no overrides, no inherited PATH.
         let bare = build_spawn_plan(&agent_view(&agent("hi")).unwrap(), ws, None, None);
         assert_eq!(bare.args, vec!["run", "--workdir", "/ws/ag-1", "hi"]);

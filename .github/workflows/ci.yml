@@ -26,14 +26,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # fmt BEFORE bootstrap: `cargo fmt --all` also walks materialized
+      # path-dep trees once link_repos exists (foreign code, formatted by
+      # their own toolchains); with link_repos absent it scopes to this
+      # workspace only.
+      - name: cargo fmt (workspace only)
+        run: cargo fmt --all --check
+
+      - name: Materialize pinned link_repos path deps (T0.2b, Q38)
+        run: scripts/bootstrap-link-repos.sh
+
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt
-        run: cargo fmt --all --check
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -74,9 +81,15 @@ jobs:
       INIT_PRO_EMBED: "1"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Materialize pinned link_repos path deps (T0.2b, Q38)
+        run: scripts/bootstrap-link-repos.sh
+
       - name: Install Rust toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@v2
+      # NOTE: this job needs network twice — the bootstrap clones above and
+      # the EMBED=1 vendor downloads (INIT_PRO_VENDOR=1) during build.rs.
       - name: Build with embedded assets
         run: cargo build -p init-pro --locked
       - name: e2e — stage fresh-dir (T0.2 B6)

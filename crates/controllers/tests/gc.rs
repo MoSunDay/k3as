@@ -546,5 +546,7 @@ async fn namespace_termination_drains_core_workload_kinds_and_empty_ns_finalizes
     )
     .await;
     terminate(&env, empty).await;
-    eventually!(20000, async { drained_and_finalized(&env, empty, &[]).await });
+    eventually!(20000, async {
+        drained_and_finalized(&env, empty, &[]).await
+    });
 }

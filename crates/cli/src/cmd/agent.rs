@@ -78,12 +78,20 @@ pub struct AgentCmd {
     /// Interface (name or IP) flanneld binds the data plane on; defaults
     /// to autodetection (k3s `--flannel-iface` parity).
     /// env `INIT_PRO_FLANNEL_IFACE`.
-    #[arg(long = "flannel-iface", env = "INIT_PRO_FLANNEL_IFACE", value_name = "IFACE")]
+    #[arg(
+        long = "flannel-iface",
+        env = "INIT_PRO_FLANNEL_IFACE",
+        value_name = "IFACE"
+    )]
     pub flannel_iface: Option<String>,
 
     /// Verbatim net-conf.json passthrough — skips the synthesized
     /// `agent/etc/flannel/net-conf.json` (k3s `--flannel-conf` parity).
     /// env `INIT_PRO_FLANNEL_CONF`.
-    #[arg(long = "flannel-conf", env = "INIT_PRO_FLANNEL_CONF", value_name = "FILE")]
+    #[arg(
+        long = "flannel-conf",
+        env = "INIT_PRO_FLANNEL_CONF",
+        value_name = "FILE"
+    )]
     pub flannel_conf: Option<std::path::PathBuf>,
 }

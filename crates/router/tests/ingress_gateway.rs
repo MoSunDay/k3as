@@ -99,9 +99,7 @@ fn ingress_doc(name: &str, host: Option<&str>, backend: &str, default: Option<&s
 /// Raw HTTP/1.1 GET with an explicit Host; returns `(status_line, body)`.
 async fn http_get(addr: SocketAddr, host: &str, path: &str) -> std::io::Result<(String, String)> {
     let mut s = TcpStream::connect(addr).await?;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await?;
     let mut raw = String::new();
     s.read_to_string(&mut raw).await?;
@@ -195,19 +193,31 @@ async fn gateway_routes_hosts_paths_and_default_backend() {
     let p = boot().await;
 
     p.store
-        .create(&Key::new("", "services", "default", "api"), service_doc("api", api.port()))
+        .create(
+            &Key::new("", "services", "default", "api"),
+            service_doc("api", api.port()),
+        )
         .await
         .unwrap();
     p.store
-        .create(&Key::new("", "endpoints", "default", "api"), endpoints_doc("api", api))
+        .create(
+            &Key::new("", "endpoints", "default", "api"),
+            endpoints_doc("api", api),
+        )
         .await
         .unwrap();
     p.store
-        .create(&Key::new("", "services", "default", "edge"), service_doc("edge", edge.port()))
+        .create(
+            &Key::new("", "services", "default", "edge"),
+            service_doc("edge", edge.port()),
+        )
         .await
         .unwrap();
     p.store
-        .create(&Key::new("", "endpoints", "default", "edge"), endpoints_doc("edge", edge))
+        .create(
+            &Key::new("", "endpoints", "default", "edge"),
+            endpoints_doc("edge", edge),
+        )
         .await
         .unwrap();
     p.store
@@ -242,7 +252,10 @@ async fn gateway_503_while_empty_then_recovers_live() {
     let p = boot().await;
 
     p.store
-        .create(&Key::new("", "services", "default", "api"), service_doc("api", api.port()))
+        .create(
+            &Key::new("", "services", "default", "api"),
+            service_doc("api", api.port()),
+        )
         .await
         .unwrap();
     p.store
@@ -261,7 +274,10 @@ async fn gateway_503_while_empty_then_recovers_live() {
 
     // Endpoints arrive -> the hot-applied config serves the backend.
     p.store
-        .create(&Key::new("", "endpoints", "default", "api"), endpoints_doc("api", api))
+        .create(
+            &Key::new("", "endpoints", "default", "api"),
+            endpoints_doc("api", api),
+        )
         .await
         .unwrap();
     let (status, _) = wait_http(addr, "api.example.com", "/v1", |(_, b)| b == "api-live").await;

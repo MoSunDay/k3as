@@ -144,7 +144,21 @@ ensure_repo() { # $1 name, $2 url, $3 sha, $4 path, $5 patch ('-' none), $6 mark
   else
     mkdir -p "$(dirname "$target")"
     log "$name: cloning $url"
-    git clone --quiet "$url" "$target" || die "$name: clone failed ($url)"
+    # HTTP/1.1: some egress proxies mangle HTTP/2 git transfers (GnuTLS
+    # recv error -110); 1.1 is universally compatible. lowSpeed aborts
+    # stalled transfers (<1 KiB/s for 60s) so the retry loop engages
+    # instead of hanging forever.
+    local attempt
+    for attempt in 1 2 3; do
+      if git -c http.version=HTTP/1.1 \
+              -c http.lowSpeedLimit=1024 -c http.lowSpeedTimeout=60 \
+              clone --quiet "$url" "$target"; then
+        break
+      fi
+      rm -rf "$target"
+      [[ $attempt -eq 3 ]] && die "$name: clone failed after 3 attempts ($url)"
+      warn "$name: clone attempt $attempt failed, retrying"
+    done
     git -C "$target" checkout --quiet --detach "$sha" \
       || die "$name: pinned sha $sha not reachable in $url"
     log "$name: materialized at $sha"

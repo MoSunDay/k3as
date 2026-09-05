@@ -152,7 +152,8 @@ impl HttpJson {
         path: &str,
         body: Option<&Value>,
     ) -> Result<(u16, Vec<u8>), HttpError> {
-        self.request_ct(method, path, body, "application/json").await
+        self.request_ct(method, path, body, "application/json")
+            .await
     }
 
     /// [`request`] with an explicit request Content-Type.
@@ -213,13 +214,8 @@ impl HttpJson {
     /// PATCH with an RFC 7386 merge-patch body (agents carry no `/status`
     /// subresource: the runner patches `status` on the main resource, Q37).
     pub async fn patch_json(&self, path: &str, body: &Value) -> Result<(u16, Value), HttpError> {
-        self.json_exchange_ct(
-            "PATCH",
-            path,
-            Some(body),
-            "application/merge-patch+json",
-        )
-        .await
+        self.json_exchange_ct("PATCH", path, Some(body), "application/merge-patch+json")
+            .await
     }
 
     async fn json_exchange_ct(

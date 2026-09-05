@@ -250,7 +250,10 @@ async fn start_listener(
     let state = resolver.snapshot();
     let peers = resolve_with_state(&state, &upstream);
     let cfg = gateway_config::nodeport_config(listen, &upstream, &peers);
-    let app = match or_state::from_config(cfg, std::path::PathBuf::from(format!("init-pro://router/nodeport/{node_port}"))) {
+    let app = match or_state::from_config(
+        cfg,
+        std::path::PathBuf::from(format!("init-pro://router/nodeport/{node_port}")),
+    ) {
         Ok(app) => app,
         Err(e) => {
             tracing::warn!(target: "init-pro", node_port, error = %e, "nodePort runtime bootstrap failed");

@@ -104,10 +104,9 @@ fn upsert_network_unavailable(node: &mut serde_json::Value) {
         None => return,
     };
     match sobj.get_mut("conditions").and_then(|c| c.as_array_mut()) {
-        Some(conds) => match conds
-            .iter_mut()
-            .find(|c| c.get("type").and_then(serde_json::Value::as_str) == Some("NetworkUnavailable"))
-        {
+        Some(conds) => match conds.iter_mut().find(|c| {
+            c.get("type").and_then(serde_json::Value::as_str) == Some("NetworkUnavailable")
+        }) {
             Some(slot) => *slot = cond,
             None => conds.push(cond),
         },
@@ -120,7 +119,6 @@ fn upsert_network_unavailable(node: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn network_unavailable_upsert_preserves_foreign_conditions() {
@@ -140,11 +138,18 @@ mod tests {
         assert!(!condition_reads_false(&node));
         upsert_network_unavailable(&mut node);
 
-        let conds = node.pointer("/status/conditions").unwrap().as_array().unwrap();
+        let conds = node
+            .pointer("/status/conditions")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(conds.len(), 2, "Ready must survive the upsert");
         let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
         assert_eq!(ready["status"], "True", "Ready untouched");
-        let nu = conds.iter().find(|c| c["type"] == "NetworkUnavailable").unwrap();
+        let nu = conds
+            .iter()
+            .find(|c| c["type"] == "NetworkUnavailable")
+            .unwrap();
         assert_eq!(nu["status"], "False");
         assert_eq!(nu["reason"], "FlannelIsUp");
         assert_eq!(
@@ -156,7 +161,11 @@ mod tests {
         // Idempotent: a second upsert replaces in place (still 2 conditions).
         upsert_network_unavailable(&mut node);
         assert_eq!(
-            node.pointer("/status/conditions").unwrap().as_array().unwrap().len(),
+            node.pointer("/status/conditions")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
             2
         );
 

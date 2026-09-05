@@ -55,7 +55,11 @@ fn compile_rule(rule: &IngressRule, origin: &str, table: &mut RouteTable) {
         None => return,
     };
     for path in paths {
-        let raw_path = if path.path.is_empty() { "/" } else { &path.path };
+        let raw_path = if path.path.is_empty() {
+            "/"
+        } else {
+            &path.path
+        };
         let path_matcher = PathMatcher::new(&path.path_type, raw_path);
         let Some(upstream) = backend_upstream(&path.backend) else {
             tracing::warn!(

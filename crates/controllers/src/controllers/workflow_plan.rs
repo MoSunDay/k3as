@@ -357,7 +357,10 @@ mod tests {
                 ],
             },
         });
-        assert_eq!(build_plan(&wf).unwrap().groups[0][0].target, StepTarget::Agent);
+        assert_eq!(
+            build_plan(&wf).unwrap().groups[0][0].target,
+            StepTarget::Agent
+        );
     }
 
     #[test]

@@ -114,7 +114,8 @@ pub(crate) fn nodeport_config(
         return cfg;
     }
     let name = upstream_name(upstream);
-    cfg.upstreams.push(upstream_entry(name.clone(), peers.to_vec()));
+    cfg.upstreams
+        .push(upstream_entry(name.clone(), peers.to_vec()));
     cfg.routes.push(RouteConfig {
         path_prefix: "/".to_string(),
         host: None,
@@ -312,9 +313,21 @@ mod tests {
         let listen: SocketAddr = "127.0.0.1:30080".parse().unwrap();
         let t = table(
             vec![
-                rule(HostMatcher::new(""), PathMatcher::new("Prefix", "/"), "catch"),
-                rule(HostMatcher::new("api.io"), PathMatcher::new("Prefix", "/v1"), "api"),
-                rule(HostMatcher::new("*.io"), PathMatcher::new("Prefix", "/w"), "wild"),
+                rule(
+                    HostMatcher::new(""),
+                    PathMatcher::new("Prefix", "/"),
+                    "catch",
+                ),
+                rule(
+                    HostMatcher::new("api.io"),
+                    PathMatcher::new("Prefix", "/v1"),
+                    "api",
+                ),
+                rule(
+                    HostMatcher::new("*.io"),
+                    PathMatcher::new("Prefix", "/w"),
+                    "wild",
+                ),
             ],
             Some("fallback"),
         );
@@ -336,8 +349,16 @@ mod tests {
         let listen: SocketAddr = "127.0.0.1:30081".parse().unwrap();
         let t = table(
             vec![
-                rule(HostMatcher::new("api.io"), PathMatcher::new("Exact", "/x"), "exact"),
-                rule(HostMatcher::new(""), PathMatcher::new("Prefix", "/x"), "broad"),
+                rule(
+                    HostMatcher::new("api.io"),
+                    PathMatcher::new("Exact", "/x"),
+                    "exact",
+                ),
+                rule(
+                    HostMatcher::new(""),
+                    PathMatcher::new("Prefix", "/x"),
+                    "broad",
+                ),
             ],
             None,
         );
@@ -354,7 +375,11 @@ mod tests {
     fn empty_peer_upstreams_are_omitted() {
         let listen: SocketAddr = "127.0.0.1:30082".parse().unwrap();
         let t = table(
-            vec![rule(HostMatcher::new("api.io"), PathMatcher::new("Prefix", "/v1"), "api")],
+            vec![rule(
+                HostMatcher::new("api.io"),
+                PathMatcher::new("Prefix", "/v1"),
+                "api",
+            )],
             None,
         );
         let cfg = ingress_config(listen, &t, &|_| Vec::new());
@@ -387,15 +412,26 @@ mod tests {
             .expect("body");
         // No live peer at :39999 -> connect failure -> openrusty 502/504,
         // but NEVER 404 (a 404 would mean the route did not match).
-        assert!(!bytes.windows(3).any(|w| w == b"404"), "route did not match");
+        assert!(
+            !bytes.windows(3).any(|w| w == b"404"),
+            "route did not match"
+        );
     }
 
     #[test]
     fn expressible_drops_wildcard_hosts() {
         let t = table(
             vec![
-                rule(HostMatcher::new("*.io"), PathMatcher::new("Prefix", "/"), "wild"),
-                rule(HostMatcher::new("a.io"), PathMatcher::new("Prefix", "/"), "exact"),
+                rule(
+                    HostMatcher::new("*.io"),
+                    PathMatcher::new("Prefix", "/"),
+                    "wild",
+                ),
+                rule(
+                    HostMatcher::new("a.io"),
+                    PathMatcher::new("Prefix", "/"),
+                    "exact",
+                ),
             ],
             None,
         );

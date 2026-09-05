@@ -313,7 +313,11 @@ pub(crate) async fn do_patch(
 ///  - `application/json-patch+json`            -> RFC 6902
 ///
 /// Unknown content-type falls back to strategic merge (kubectl default).
-pub(crate) fn apply_patch(target: &mut Value, content_type: &str, patch: &[u8]) -> Result<(), ApiError> {
+pub(crate) fn apply_patch(
+    target: &mut Value,
+    content_type: &str,
+    patch: &[u8],
+) -> Result<(), ApiError> {
     if content_type.contains("json-patch") {
         let p: api::patch::JsonPatch =
             serde_json::from_slice(patch).map_err(|e| ApiError::BadRequest(e.to_string()))?;

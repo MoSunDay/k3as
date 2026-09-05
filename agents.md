@@ -43,6 +43,12 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 
 ## Build & verify (canonical commands)
 
+- COLD CLONES build deps first: `scripts/bootstrap-link-repos.sh`
+  materializes the 7 pinned path-dep repos from `link_repos.lock` (Q38,
+  T0.2b) — idempotent; verifies (never modifies) existing/symlinked dev
+  checkouts. Run `cargo fmt --all` with link_repos ABSENT or you will
+  reformat foreign pinned trees (CI orders fmt before bootstrap for this
+  reason).
 - `cargo build --workspace --locked` -> single binary at
   `target/debug/init-pro`.
 - `cargo test --workspace --locked` -> all unit + integration tests.

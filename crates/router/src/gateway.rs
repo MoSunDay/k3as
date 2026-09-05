@@ -95,9 +95,10 @@ pub(crate) async fn run(
         }
         let snapshot = state_rx.borrow_and_update().clone();
         let table = compile(&resolver);
-        let cfg = gateway_config::ingress_config(addr, &table, &|up: &crate::route::UpstreamRef| {
-            resolve_with_state(&snapshot, up)
-        });
+        let cfg =
+            gateway_config::ingress_config(addr, &table, &|up: &crate::route::UpstreamRef| {
+                resolve_with_state(&snapshot, up)
+            });
         match openrusty_server::reload::apply_config(&app, &cfg).await {
             Ok(generation) => {
                 let _ = table_tx.send(Arc::new(table));

@@ -49,11 +49,8 @@ impl Snapshot {
         agents: &[Arc<Value>],
     ) -> Self {
         let live: Vec<Arc<Value>> = pods.iter().filter(|p| !is_terminal(p)).cloned().collect();
-        let live_agents: Vec<Arc<Value>> = agents
-            .iter()
-            .filter(|a| !is_terminal(a))
-            .cloned()
-            .collect();
+        let live_agents: Vec<Arc<Value>> =
+            agents.iter().filter(|a| !is_terminal(a)).cloned().collect();
         let nodes = nodes
             .iter()
             .map(|n| NodeInfo {

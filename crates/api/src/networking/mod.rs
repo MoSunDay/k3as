@@ -54,9 +54,9 @@ pub fn register(reg: &mut SchemaRegistry) {
 }
 
 pub use ingress::{
-    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressList, IngressLoadBalancerIngress,
-    IngressLoadBalancerStatus, IngressRule, IngressServiceBackend, IngressSpec, IngressStatus, IngressTLS,
-    ServiceBackendPort, TypedLocalObjectReference,
+    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressList,
+    IngressLoadBalancerIngress, IngressLoadBalancerStatus, IngressRule, IngressServiceBackend,
+    IngressSpec, IngressStatus, IngressTLS, ServiceBackendPort, TypedLocalObjectReference,
 };
 pub use ingress_class::{IngressClass, IngressClassList, IngressClassSpec};
 
@@ -91,10 +91,7 @@ mod tests {
         assert_eq!(ing.types.api_version, API_VERSION);
         assert_eq!(ing.types.kind, "Ingress");
         let spec = ing.spec.as_ref().expect("spec kept");
-        assert_eq!(
-            spec.ingress_class_name.as_deref(),
-            Some("init-pro")
-        );
+        assert_eq!(spec.ingress_class_name.as_deref(), Some("init-pro"));
         let rule = &spec.rules.as_ref().expect("rules kept")[0];
         let path = &rule.http.as_ref().expect("http kept").paths[0];
         assert_eq!(path.path_type, "Prefix");
@@ -104,13 +101,13 @@ mod tests {
         assert_eq!(backend.port.as_ref().unwrap().name, "http");
 
         // Round-trip: only populated fields are serialized (omitempty).
-        let wire: serde_json::Value = serde_json::from_slice(&crate::serde_ext::to_json(&ing).unwrap())
-            .expect("serialize to Value");
+        let wire: serde_json::Value =
+            serde_json::from_slice(&crate::serde_ext::to_json(&ing).unwrap())
+                .expect("serialize to Value");
         assert!(wire.get("spec").is_some());
         assert!(wire.get("status").is_none(), "status is omitempty");
         assert!(wire["spec"].get("tls").is_some());
-        let back: Ingress =
-            from_json(&serde_json::to_vec(&wire).unwrap()).expect("round-trip");
+        let back: Ingress = from_json(&serde_json::to_vec(&wire).unwrap()).expect("round-trip");
         assert_eq!(back, ing);
     }
 
