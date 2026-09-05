@@ -1,7 +1,7 @@
 # init-pro — single multicall binary.
 # Multi-stage: build a stripped release binary, then copy it into a small
 # runtime image. argv[0] selects behavior (server | agent | kubectl | ctr |
-# crictl | containerd | etcd), so one image serves every role.
+# crictl | containerd | etcd | flannel), so one image serves every role.
 #
 # Build:  docker build -t init-pro .
 # Run:    docker run --rm -p 6443:6443 init-pro server
@@ -36,7 +36,7 @@ FROM debian:bookworm-slim AS runtime
 # The binary is a multicall dispatcher; install it under every alias so
 # `docker exec <ctr> kubectl ...` and symlink-style invocation both work.
 COPY --from=builder /src/target/release/init-pro /usr/local/bin/init-pro
-RUN for a in server agent kubectl ctr crictl containerd etcd; do \
+RUN for a in server agent kubectl ctr crictl containerd etcd flannel; do \
         ln -s init-pro /usr/local/bin/$a; \
     done
 # apiserver (6443). The Router data plane and bundled CRI listen on other

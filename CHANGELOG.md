@@ -75,6 +75,12 @@ waiting for TLS (forward adaptation is post-release P2-1).
   `kubectl` alias via `--entrypoint` dispatches the kubectl subset;
   full multicall selftest in-container **10/10 OK** (9 aliases +
   unknown->help).
+- Pre-push release-blocker fixes (review D1/F1): the runtime image now
+  symlinks all 8 multicall aliases — `flannel` was missing from the
+  Dockerfile loop/header (one-image-every-role promise, Q34); and
+  `index.md` Counts corrected to the table's actual 23 done · 10
+  not-started (off-by-one predated this sprint but had propagated
+  into the v0.2.0 tag message — tag re-cut on the fix commit).
 
 **Notes & follow-ups**
 - openrusty live tree still carries the uncommitted TLS refactor
