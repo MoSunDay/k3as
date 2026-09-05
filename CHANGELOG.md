@@ -87,6 +87,13 @@ waiting for TLS (forward adaptation is post-release P2-1).
   (`dynamic` / `UpstreamConfig.tls`). Post-release forward adaptation
   (P2-1): bump the pin, then add `tls: None` at the `UpstreamConfig`
   construction in `gateway_config.rs` (the 00a0483 pattern), rerun gates.
+- Post-tag housekeeping executed on main after `v0.2.0` (review P2-2/P2-3):
+  the Dockerfile apt layer (`clang libclang-dev`) hoisted above every COPY
+  so source/manifest edits stop re-running apt; `agents.md` counts
+  refreshed to 23/35 TODOs, 16 crates, decisions Q1-Q38 (repo-local-memory
+  minimal update). P2-1 stays queued: openrusty origin/main is still
+  `4180ad3` — the TLS refactor remains un-pushed WIP, nothing to bump
+  (verified 2026-09-06 via `git ls-remote`).
 - rdb live-tree WIP corresponds to the rewritten origin/main (`d52ef49`);
   k3as stays on validated `8de5dcc` via `pin/init-pro` (P1-1 closed as
   documented, non-blocking — cold build proves no WIP dependency).

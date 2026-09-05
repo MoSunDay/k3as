@@ -13,16 +13,16 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 works). It has a first-class built-in Router - an openrusty (h2c gateway,
 Q32) programmable HTTP data plane with Ingress networking.k8s.io/v1 as
 the first-class ingress resource - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (15 crates).
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (16 crates).
 
 ## The SSOT (single source of truth)
 
-- `plans/init-pro/index.md` - the TODO status table (33 TODOs across 8
+- `plans/init-pro/index.md` - the TODO status table (35 TODOs across 8
   layers) + the critical-path DAG. Authoritative status of record.
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q35
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q38
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -111,11 +111,13 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - De-risk path (Q5): T0.1 -> T0.3 -> T5.1 -> T5.2 -> T5.4 (the M1 spike).
 - T0.6 (golden conformance) is a merge gate, not a node: every TODO must
   keep `scripts/golden-conformance.sh` green.
-- Done: Layer 0 (T0.1-T0.6), T1.1/T1.2 (api + apiserver), Layer 2
-  (T2.1/T2.2/T2.3 - storage, Q33), T3.1/T3.2 (controllers + scheduler),
-  T4.1 (containerd bundling), T4.2 Scope A+B+C (kubelet + logs/exec, Q31),
-  the Layer 5 M1 slice (T5.1-T5.4, Q32), and T7.3 (Argo Workflows, Q30).
-  Phase 1 (M0 + M1) is complete; 21/33 TODOs done (T7.1 Phase A, Q35).
+- Done: Layer 0 (T0.1-T0.6 + T0.2b pin-clone bootstrap, Q38), T1.1/T1.2
+  (api + apiserver), Layer 2 (T2.1/T2.2/T2.3 - storage, Q33), T3.1/T3.2
+  (controllers + scheduler), T4.1 (containerd bundling), T4.2 Scope A+B+C
+  (kubelet + logs/exec, Q31), the Layer 5 M1 slice (T5.1-T5.4, Q32),
+  T7.1 (`Agent` resource + node-side execution, Q35/Q37), T7.3 (Argo
+  Workflows, Q30), and T7.4 (anyhome, Q36). Phase 1 (M0 + M1) is
+  complete; 23/35 TODOs done.
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -164,4 +166,12 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   annotation; workspace path SSOT lives in `common` (D1: the binary path
   must not link `agent` — duplicate libsql symbols).
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q36).
+- Q37 - T7.1 Phase B: the `agent` subcommand's watch+execute loop runs a
+  bound Agent as ONE opencoder CLI subprocess on its node (credentials
+  only via the child env, Q35 D1) and merge-patches the status back.
+- Q38 - `link_repos.lock` is the pin SSOT; `scripts/bootstrap-link-repos.sh`
+  materializes the 7 path-dep repos before compiling (CI + Dockerfile).
+  Release posture: intranet h2c on openrusty `4180ad3`; TLS later = pin
+  bump + forward adaptation in `gateway_config.rs` (P2-1, queued).
+
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q38).
