@@ -1,0 +1,63 @@
+# link_repos.lock — pinned path-dependency manifest (T0.2b, Q38).
+#
+# `link_repos/` is gitignored BY DESIGN: these are read-only build inputs,
+# materialized reproducibly by `scripts/bootstrap-link-repos.sh`
+# (git clone + `git checkout <sha>`). Never commit materialized trees.
+#
+# Rules:
+#   * Entries materialize IN LISTED ORDER — any-home precedes its nested
+#     link_repos/* children (nfsserve, libsql), and nfsserve's patch
+#     canonical copy lives INSIDE the any-home pin so patch and consumer
+#     always move together.
+#   * `path` is repo-root relative; default `link_repos/<name>`.
+#   * `patch` (optional) is applied on top of the pinned checkout,
+#     idempotently (`patch_marker` file presence = already applied).
+#     nfsserve carries the anyhome AUTH_SYS caller-identity patch (Q37).
+#   * The real directories link_repos/argo-workflows/ and link_repos/flannel/
+#     are REFERENCE CHECKOUTS ONLY (docs / e2e inspiration) — no Cargo.toml
+#     path dependency points at them; bootstrap ignores them.
+#   * Reachability notes: all MoSunDay/* pins except rdb are origin/main
+#     tips. rdb's validated line (8de5dcc) was rewritten out of upstream
+#     main (d52ef49 is a parallel rebase), so the pin is published as the
+#     dedicated branch `pin/init-pro` on MoSunDay/rdb — full clone +
+#     checkout reaches it. libsql/nfsserve pins are ancestors of (resp.
+#     tip of) their public upstreams.
+
+[[repo]]
+name = "openrusty"
+url  = "https://github.com/MoSunDay/openrusty.git"
+sha  = "4180ad39832c911b16297d6083823bde5903d60c"
+
+[[repo]]
+name = "rdb"
+url  = "https://github.com/MoSunDay/rdb.git"
+sha  = "8de5dccd8de5796dde180b2fabf267f91ad455a7"
+
+[[repo]]
+name = "flannel-rust"
+url  = "https://github.com/MoSunDay/flannel-rust.git"
+sha  = "76397b51f51fdb2e6c6082be9797b2cf87e9a288"
+
+[[repo]]
+name = "opencoder"
+url  = "https://github.com/MoSunDay/opencoder.git"
+sha  = "c1a1b2e78e1ccd4a3cc2ac6dc408a76d30bf46e6"
+
+[[repo]]
+name = "any-home"
+url  = "https://github.com/MoSunDay/any-home.git"
+sha  = "a1e2d9c6f4e04bfbebffca4a7d1e9a527472cf55"
+
+[[repo]]
+name = "nfsserve"
+url  = "https://github.com/huggingface/nfsserve.git"
+sha  = "c00c3614184bc79010c0aa3b69c2cdde1c5fca77"
+path = "link_repos/any-home/link_repos/nfsserve"
+patch = "link_repos/any-home/scripts/patches/nfsserve-auth-identity.patch"
+patch_marker = "src/identity.rs"
+
+[[repo]]
+name = "libsql"
+url  = "https://github.com/tursodatabase/libsql.git"
+sha  = "6f451a1fabacbcbc9960b232b4c1605a5021979b"
+path = "link_repos/any-home/link_repos/libsql"
