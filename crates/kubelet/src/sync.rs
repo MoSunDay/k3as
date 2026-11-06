@@ -70,11 +70,15 @@ impl Action {
 /// Diff desired vs observed -> the action list for this cycle. `probes`
 /// carries the Sprint 20 S1 probe outcomes: a liveness failure restarts
 /// the container (restartPolicy permitting) even while it is RUNNING.
+/// `date` (UTC `YYYY-MM-DD`, T4.6/Q39) is INJECTED so `plan` stays pure:
+/// it becomes the `<pod-uid>/<date>/` segment of every sandbox
+/// `log_directory` — pinned at plan time, fixed for the container's life.
 pub fn plan(
     desired: &BTreeMap<String, PodView>,
     snap: &Snapshot,
     sandbox_image: &str,
     log_root: &Path,
+    date: &str,
     probes: &PodProbeState,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
@@ -153,7 +157,7 @@ pub fn plan(
             }
             actions.push(Action::CreateSandbox {
                 pod_key: key.clone(),
-                cfg: sandbox_cfg(view, log_root),
+                cfg: sandbox_cfg(view, log_root, date),
             });
             continue;
         }
@@ -217,7 +221,7 @@ pub fn plan(
                 pod_key: key.clone(),
                 sandbox_id: keep.id.clone(),
                 ccfg: Box::new(container_cfg(view, spec, attempt, log_root)),
-                pcfg: sandbox_cfg(view, log_root),
+                pcfg: sandbox_cfg(view, log_root, date),
             });
         }
     }
@@ -239,7 +243,7 @@ pub fn plan(
     actions
 }
 
-fn sandbox_cfg(view: &PodView, log_root: &Path) -> PodSandboxConfig {
+fn sandbox_cfg(view: &PodView, log_root: &Path, date: &str) -> PodSandboxConfig {
     PodSandboxConfig {
         metadata: SandboxMetadata {
             name: view.name.clone(),
@@ -255,7 +259,13 @@ fn sandbox_cfg(view: &PodView, log_root: &Path) -> PodSandboxConfig {
         // (`spec.hostname`/`spec.subdomain` composition) are deferred to
         // a later sprint.
         hostname: view.name.clone(),
-        log_directory: log_root.join(&view.uid).to_string_lossy().into_owned(),
+        // T4.6 (Q39): date-segmented log directory
+        // `<log_root>/<uid>/<YYYY-MM-DD>/`; `container_cfg`'s `log_path`
+        // stays relative so containerd joins the pair itself. `exec.rs`
+        // mkdirs this before `runp`.
+        log_directory: crate::log_rotate::dated_dir(log_root, &view.uid, date)
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 

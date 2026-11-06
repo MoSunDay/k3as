@@ -124,7 +124,7 @@ async fn resolve_kubelet(
     st: &AppState,
     namespace: &str,
     name: &str,
-) -> Result<KubeletTarget, Response> {
+) -> Result<KubeletTarget, Box<Response>> {
     // Step 1: the pod must exist -> `pods "<name>" not found`.
     let entry = match st
         .store
@@ -133,13 +133,15 @@ async fn resolve_kubelet(
     {
         Ok(Some(entry)) => entry,
         Ok(None) => {
-            return Err(ApiError::NotFound {
-                kind: "pods".into(),
-                name: name.to_string(),
-            }
-            .into_response())
+            return Err(Box::new(
+                ApiError::NotFound {
+                    kind: "pods".into(),
+                    name: name.to_string(),
+                }
+                .into_response(),
+            ))
         }
-        Err(e) => return Err(storage_error(e, "pods", name).into_response()),
+        Err(e) => return Err(Box::new(storage_error(e, "pods", name).into_response())),
     };
 
     // Step 2: unscheduled pods have nowhere to relay to.
@@ -149,40 +151,46 @@ async fn resolve_kubelet(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if node_name.is_empty() {
-        return Err(status_failure(
+        return Err(Box::new(status_failure(
             StatusCode::NOT_FOUND,
             "NotFound",
             "pod not yet scheduled to a node".into(),
-        ));
+        )));
     }
 
     // Step 3: the node object must exist.
     let node = match st.store.get(&cluster_key("", "nodes", node_name)).await {
         Ok(Some(node)) => node.value,
         Ok(None) => {
-            return Err(ApiError::NotFound {
-                kind: "nodes".into(),
-                name: node_name.to_string(),
-            }
-            .into_response())
+            return Err(Box::new(
+                ApiError::NotFound {
+                    kind: "nodes".into(),
+                    name: node_name.to_string(),
+                }
+                .into_response(),
+            ))
         }
-        Err(e) => return Err(storage_error(e, "nodes", node_name).into_response()),
+        Err(e) => {
+            return Err(Box::new(
+                storage_error(e, "nodes", node_name).into_response(),
+            ))
+        }
     };
 
     // Step 4a: no InternalIP means we cannot dial any kubelet.
     let Some(ip) = internal_ip(&node) else {
-        return Err(status_failure(
+        return Err(Box::new(status_failure(
             StatusCode::BAD_GATEWAY,
             "ServiceUnavailable",
             format!("node \"{node_name}\" has no InternalIP address"),
-        ));
+        )));
     };
     let Some(uid) = pod_uid(&entry.value) else {
-        return Err(status_failure(
+        return Err(Box::new(status_failure(
             StatusCode::NOT_FOUND,
             "NotFound",
             "pod has no uid".into(),
-        ));
+        )));
     };
     Ok(KubeletTarget {
         ip,
@@ -203,7 +211,7 @@ async fn relay(
 ) -> Response {
     let target = match resolve_kubelet(st, namespace, name).await {
         Ok(target) => target,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     relay_reply(
         call_kubelet(

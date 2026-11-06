@@ -183,11 +183,7 @@ pub(crate) fn storage_error(err: StorageError, kind: &str, name: &str) -> ApiErr
             kind: kind.to_string(),
             name: name.to_string(),
         },
-        StorageError::Conflict {
-            expected: _,
-            have: _,
-            ..
-        } => ApiError::Conflict {
+        StorageError::Conflict { .. } => ApiError::Conflict {
             kind: kind.to_string(),
             name: name.to_string(),
         },

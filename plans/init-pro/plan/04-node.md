@@ -1,6 +1,6 @@
 # Layer 4 — Node / Agent
 
-Mirrors `index.md` TODO IDs **T4.1–T4.5**. The node side: bundled
+Mirrors `index.md` TODO IDs **T4.1–T4.6**. The node side: bundled
 containerd + CRI, a kubelet equivalent, CNI networking, network policy,
 and node registration.
 
@@ -356,3 +356,62 @@ and node registration.
 - **证据 / Evidence** — —
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.2, T1.2
+
+---
+
+## T4.6 — Pod 日志布局与轮转 (日期目录 + 100MB copytruncate)
+
+- **目标 / Goal**
+  Container log files carry a per-day directory segment and never exceed
+  100 MiB on disk per live file: `<data_dir>/pods/<pod-uid>/<YYYY-MM-DD>/
+  <container>.<attempt>.log`, rotated externally (copytruncate) with N=5
+  retained generations. This is the k8s-kubelet `containerLogManager`
+  shape, sanctioned by Q31's already-accepted external-rotation deviation
+  and locked as **Q39**.
+
+- **核心实现 / Core implementation**
+  - Write side (`kubelet/src/sync.rs`): `plan()` takes an INJECTED UTC
+    date (stays pure) and composes the sandbox `log_directory`
+    `<log_root>/<uid>/<date>/` (`log_rotate::dated_dir`); the container
+    `log_path` stays RELATIVE (`<name>.<attempt>.log`) so containerd
+    joins the pair itself and opens/holds the fd once. The date is pinned
+    at plan time — a container alive across midnight keeps writing into
+    its own (older) date dir. `exec.rs` mkdirs the dated dir before
+    `runp` (unchanged mechanism).
+  - Date source: `common::time::utc_date` (Hinnant civil date, same
+    algorithm family as `now_rfc3339` — no chrono).
+  - Rotator (`kubelet/src/log_rotate.rs`): pure `rotation_plan` +
+    `rotate_one` copytruncate (copy -> `.1`, shift `.N-1` -> `.N`,
+    evict `.N`, truncate the live file in place — writer fds stay
+    valid) + `sweep` over ONLY date-shaped dirs under each pod dir (the
+    `volumes/` sibling can never match). Constants: 100 MiB / 5
+    generations / 60s scan (`LOG_MAX_SIZE`/`LOG_MAX_FILES`/
+    `SCAN_PERIOD`, `LogRotatePolicy::default()`).
+  - Runner (`runner.rs`): 5th task `log_rotate_task` — periodic
+    `spawn_blocking` sweep; per-file failures are logged and retried on
+    the next tick.
+  - Read side (`server.rs::resolve_log_path`): highest attempt across
+    EVERY date dir (a still-running pre-rollover container lives in an
+    older dir while a sibling's restart made a newer one), newest date
+    as tie-break; pre-T4.6 flat layout kept as a fallback so
+    upgraded-node legacy containers stay readable. `kubectl logs -f`
+    already handles file-shrink (truncate) on the client side.
+
+- **验收手段 / Acceptance**
+  - Unit: `log_rotate.rs` (date shape, plan shifts/eviction, copytruncate
+    semantics, sweep scoping to date dirs + volumes/legacy immunity,
+    retention cap, missing-root no-op), `server_tests.rs` (cross-date
+    resolution + legacy fallback + route-L over HTTP on the dated
+    layout), `sync_plan.rs` (dated `log_directory` + relative
+    `log_path` pinned), `common::time::utc_date`.
+  - Integration: `kubelet_http_integration` (5 loops incl. the rotation
+    task; full spawn against FakeCri stays green).
+  - e2e (>100MB in-pod churn driving an actual split): optional follow-up
+    under `scripts/` — not gating.
+
+- **状态 / Status** — done (Sprint 32)
+- **证据 / Evidence** — `crates/kubelet/src/log_rotate.rs`,
+  `crates/kubelet/src/{sync,server,runner}.rs`,
+  `crates/common/src/time.rs`; `cargo test -p kubelet -p common` green.
+- **卡点 / Blockers** — none
+- **依赖 / Depends on** — T4.2

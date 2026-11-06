@@ -50,6 +50,58 @@ fn resolve_container_auto_pick_dash_takes_lexicographically_smallest() {
 }
 
 #[test]
+fn dated_log_layout_resolves_across_date_dirs_ignoring_volumes() {
+    // T4.6/Q39: candidates come from EVERY date dir — a container still
+    // running across a midnight rollover lives in its older dir while a
+    // sibling's restart made a newer one. Highest attempt wins; ties go
+    // to the newer date; `volumes` never contributes.
+    let dir = std::env::temp_dir().join(format!(
+        "kubelet-srv-tests-{}-{}",
+        std::process::id(),
+        ATOMIC_DIR.fetch_add(1, Ordering::SeqCst)
+    ));
+    let pod_dir = dir.join("pod-u1");
+    for d in ["2026-11-05", "2026-11-06"] {
+        std::fs::create_dir_all(pod_dir.join(d)).unwrap();
+    }
+    // Old date: high attempt from yesterday's restarts.
+    std::fs::write(pod_dir.join("2026-11-05").join("c.7.log"), b"x").unwrap();
+    // New date: the current incarnation (lower attempt number) + a tie.
+    std::fs::write(pod_dir.join("2026-11-06").join("c.2.log"), b"x").unwrap();
+    std::fs::write(pod_dir.join("2026-11-06").join("c.7.log"), b"x").unwrap();
+    // Sibling volume tree + a flat legacy file: both ignored once date
+    // dirs exist.
+    std::fs::create_dir_all(pod_dir.join("volumes").join("emptyDir").join("v")).unwrap();
+    std::fs::write(
+        pod_dir
+            .join("volumes")
+            .join("emptyDir")
+            .join("v")
+            .join("c.9.log"),
+        b"x",
+    )
+    .unwrap();
+    std::fs::write(pod_dir.join("c.9.log"), b"x").unwrap();
+
+    let path = resolve_log_path(&dir, "pod-u1", "c").expect("dated log resolves");
+    let date = path
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let file = path.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!((date.as_str(), file.as_str()), ("2026-11-06", "c.7.log"));
+    // Not-dated-yet container in an older dir still resolves there.
+    std::fs::write(pod_dir.join("2026-11-05").join("sidecar.3.log"), b"x").unwrap();
+    let path = resolve_log_path(&dir, "pod-u1", "sidecar").expect("older-dir container resolves");
+    assert_eq!(path.parent().unwrap(), pod_dir.join("2026-11-05"));
+    assert!(resolve_log_path(&dir, "pod-u1", "ghost").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn log_layout_picks_highest_attempt_ignoring_foreign_files() {
     let dir = std::env::temp_dir().join(format!(
         "kubelet-srv-tests-{}-{}",
@@ -69,11 +121,18 @@ fn log_layout_picks_highest_attempt_ignoring_foreign_files() {
     ] {
         std::fs::write(pod_dir.join(name), b"x").unwrap();
     }
+    // No date dirs anywhere -> pre-T4.6 flat-layout fallback still resolves
+    // (logs of containers started before the T4.6 upgrade stay readable).
     let path = resolve_log_path(&dir, "pod-u1", "c").expect("highest attempt log exists");
     assert_eq!(
         path.file_name().unwrap().to_string_lossy(),
         "c.7.log",
         "max attempt wins; foreign files ignored"
+    );
+    assert_eq!(
+        path.parent().unwrap(),
+        pod_dir,
+        "flat fallback scans the pod dir itself"
     );
     // Missing container / missing pod dir both yield None.
     assert!(resolve_log_path(&dir, "pod-u1", "ghost").is_none());
@@ -212,7 +271,8 @@ async fn serve_on(backend: Arc<dyn CriBackend>) -> (u16, std::path::PathBuf) {
 }
 
 fn write_log(data_dir: &std::path::Path, uid: &str, file: &str, body: &[u8]) {
-    let dir = data_dir.join("pods").join(uid);
+    // T4.6 date-segmented layout, matching `sandbox_cfg`'s log_directory.
+    let dir = data_dir.join("pods").join(uid).join("2026-11-06");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(file), body).unwrap();
 }

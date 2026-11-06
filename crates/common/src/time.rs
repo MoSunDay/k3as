@@ -21,6 +21,14 @@ pub fn now_rfc3339(unix_secs: u64) -> String {
     )
 }
 
+/// UTC `"YYYY-MM-DD"` from unix seconds — the date component of
+/// [`now_rfc3339`]. T4.6 pod-log date directories (Q39) derive their names
+/// from this so the two spellings can never diverge.
+pub fn utc_date(unix_secs: u64) -> String {
+    let (y, m, d) = civil_from_days((unix_secs / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Parse the exact fixed-width format emitted by [`now_rfc3339`]. Anything
 /// else (including offset forms) is rejected.
 pub fn parse_rfc3339(s: &str) -> Option<u64> {
@@ -84,6 +92,10 @@ mod tests {
         assert_eq!(now_rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(now_rfc3339(1_000_000_000), "2001-09-09T01:46:40Z");
         assert_eq!(now_rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(now_rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(utc_date(0), "1970-01-01");
+        assert_eq!(utc_date(951_782_400), "2000-02-29");
+        assert_eq!(utc_date(86_399), "1970-01-01");
         for t in [
             0u64,
             1,

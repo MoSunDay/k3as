@@ -17,6 +17,8 @@
 //! - [`status`] — Pod status construction + semantic equality.
 //! - [`server`] — the local log/exec listener (T4.2 Scope C, Q31) the
 //!   apiserver relay dials on `node_ip:kubelet_port`.
+//! - [`log_rotate`] — T4.6/Q39 pod-log date layout helpers + the
+//!   copytruncate rotation sweep (100 MiB / 5 generations).
 //! - [`runner`] — the four loops (watch, sync, node/lease, local API) +
 //!   [`spawn`].
 #![forbid(unsafe_code)]
@@ -28,6 +30,7 @@ pub mod cri_backend;
 pub mod exec;
 pub mod framing;
 pub mod http;
+pub mod log_rotate;
 pub mod nfs_mount;
 pub mod node;
 pub mod objects;

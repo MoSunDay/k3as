@@ -178,8 +178,9 @@ async fn kubelet_runs_pod_via_fake_cri_and_tears_down_on_delete() {
         cri.clone() as Arc<dyn CriBackend>,
         shutdown.clone(),
     );
-    // Four loops since Scope C: watch + sync + node/lease + local log/exec.
-    assert_eq!(handles.len(), 4);
+    // Five loops: watch + sync + node/lease + local log/exec (Scope C)
+    // + the T4.6/Q39 log-rotation sweep.
+    assert_eq!(handles.len(), 5);
 
     // Node registration + lease heartbeat happen before any pod exists.
     wait_for(

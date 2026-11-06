@@ -7,8 +7,9 @@
 //!
 //! - Route L: `GET /pods/{pod_uid}/containers/{container}/log?tailLines=N`
 //!   -> `text/plain; charset=utf-8`, body = raw highest-attempt log file
-//!   (`<data_dir>/pods/<pod-uid>/<container>.<attempt>.log`, the layout
-//!   [`crate::sync`] writes through `runtime::ContainerConfig::log_path`).
+//!   (`<data_dir>/pods/<pod-uid>/<date>/<container>.<attempt>.log`, the
+//!   T4.6/Q39 date-segmented layout [`crate::sync`] writes through
+//!   `runtime::ContainerConfig::log_path`).
 //! - Route X: `POST /pods/{pod_uid}/containers/{container}/exec` with body
 //!   `{"command":["/bin/wfstep","hello"]}` (non-empty argv, NO shell) ->
 //!   200 `{"exitCode": <i32 as i64>, "output": "<merged stdout+stderr>"}`.
@@ -153,18 +154,53 @@ fn attempt_of(file_name: &str, container: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Highest-attempt EXISTING log file for one container under
-/// `<log_root>/<pod_uid>/`; `None` when the pod dir (or every candidate
-/// attempt) is missing. Higher attempt numbers win: restarts bump the
-/// attempt and the latest incarnation owns the freshest output.
+/// Highest-attempt EXISTING log file for one container. T4.6 (Q39): the
+/// write side pins a UTC date directory per sandbox, so candidates come
+/// from EVERY date-shaped subdirectory of `<log_root>/<pod_uid>/` — not
+/// just the newest: a container that keeps running across a midnight
+/// rollover still lives in its own (older) date dir while a sibling
+/// container's restart created a newer one. Ordering: highest attempt
+/// first (restarts bump it monotonically — the latest incarnation owns
+/// the freshest output), newest date as the tie-break. A pod dir without
+/// date directories (pre-T4.6 flat layout) falls back to a flat scan so
+/// still-running legacy containers stay readable. `None` when no
+/// candidate exists anywhere.
 pub(crate) fn resolve_log_path(
     log_root: &std::path::Path,
     pod_uid: &str,
     container: &str,
 ) -> Option<PathBuf> {
-    let dir = log_root.join(pod_uid);
+    let pod_dir = log_root.join(pod_uid);
+    // Dated layout first: max over every date dir by (attempt, date).
+    let mut best: Option<(u32, String, PathBuf)> = None;
+    if let Ok(entries) = std::fs::read_dir(&pod_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().into_owned();
+            // Only real date dirs — the `volumes/` sibling and foreign
+            // files can never contribute.
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir && crate::log_rotate::is_date_dir(&name) {
+                if let Some((attempt, path)) = best_attempt_in(&entry.path(), container) {
+                    let better = best.as_ref().is_none_or(|(hi, hdate, _)| {
+                        (attempt, name.as_str()) > (*hi, hdate.as_str())
+                    });
+                    if better {
+                        best = Some((attempt, name, path));
+                    }
+                }
+            }
+        }
+    }
+    // Legacy pre-T4.6 flat layout fallback (only when no dated candidate).
+    best.map(|(_, _, path)| path)
+        .or_else(|| best_attempt_in(&pod_dir, container).map(|(_, path)| path))
+}
+
+/// Highest-attempt `*.log` for `container` directly inside `dir`.
+fn best_attempt_in(dir: &std::path::Path, container: &str) -> Option<(u32, PathBuf)> {
     let mut best: Option<(u32, PathBuf)> = None;
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if let Some(attempt) = attempt_of(&name, container) {
@@ -173,7 +209,7 @@ pub(crate) fn resolve_log_path(
             }
         }
     }
-    best.map(|(_, path)| path)
+    best
 }
 
 /// Parse the `tailLines=N` query parameter from a raw query string:

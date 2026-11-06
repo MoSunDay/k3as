@@ -14,6 +14,10 @@ use runtime::cri_json::{container_labels, pod_labels, ContainerConfig, PodSandbo
 
 pub const SANDBOX_IMAGE: &str = "registry.k8s.io/pause:3.10";
 
+/// The fixed UTC date every `plan` fixture runs under (T4.6/Q39): log
+/// directories carry a `<date>` segment and `expect_pcfg` pins it.
+pub const TEST_DATE: &str = "2026-11-06";
+
 /// Per-tag log root so parallel test binaries never collide on disk.
 pub fn log_root(tag: &str) -> String {
     format!("/tmp/init-pro-kubelet-{tag}/pods")
@@ -178,6 +182,7 @@ pub fn plan_one(view: &PodView, snap: &Snapshot) -> Vec<Action> {
         snap,
         SANDBOX_IMAGE,
         std::path::Path::new("/tmp/init-pro-kubelet-test/pods"),
+        TEST_DATE,
         &kubelet::PodProbeState::new(),
     )
 }
@@ -216,7 +221,7 @@ pub fn expect_pcfg(root: &str) -> PodSandboxConfig {
         labels: pod_labels("web", "default", "u1"),
         annotations: BTreeMap::new(),
         hostname: "web".into(),
-        log_directory: format!("{root}/u1"),
+        log_directory: format!("{root}/u1/{TEST_DATE}"),
     }
 }
 

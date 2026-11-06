@@ -1,10 +1,12 @@
-//! The kubelet loops (TODO **T4.2**): four tasks spawned by [`spawn`] —
-//! a pod watch (LIST + watch stream -> desired map), the sync cycle
-//! (snapshot -> [`crate::sync::plan`] -> execute -> `/status` writes), node
-//! registration + `kube-node-lease` heartbeat, and since Scope C (Q31) the
-//! local container log/exec HTTP listener ([`crate::server::serve`]). All
-//! errors are logged and retried; nothing panics. Tracing target is
-//! `"init-pro"`.
+//! The kubelet loops (TODO **T4.2** + **T4.6**): five tasks spawned by
+//! [`spawn`] — a pod watch (LIST + watch stream -> desired map), the sync
+//! cycle (snapshot -> [`crate::sync::plan`] -> execute -> `/status`
+//! writes), node registration + `kube-node-lease` heartbeat, since Scope C
+//! (Q31) the local container log/exec HTTP listener
+//! ([`crate::server::serve`]), and since T4.6 (Q39) the periodic
+//! copytruncate log-rotation sweep
+//! ([`crate::log_rotate::sweep`]). All errors are logged and retried;
+//! nothing panics. Tracing target is `"init-pro"`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -104,9 +106,10 @@ pub fn default_node_name() -> String {
 
 /// Spawn the kubelet tasks; join handles drain on shutdown.
 ///
-/// Four loops since T4.2 Scope C: pod watch, sync cycle, node/lease
-/// heartbeat, and the local log/exec HTTP listener ([`crate::server::serve`],
-/// Q31) — the apiserver relay dials it on `cfg.node_ip:cfg.kubelet_port`.
+/// Five loops: pod watch, sync cycle, node/lease heartbeat, the local
+/// log/exec HTTP listener ([`crate::server::serve`], Q31 — the apiserver
+/// relay dials it on `cfg.node_ip:cfg.kubelet_port`), and the T4.6/Q39
+/// log-rotation sweep over `cfg.log_root()`.
 pub fn spawn(
     cfg: KubeletConfig,
     cri: Arc<dyn CriBackend>,
@@ -145,8 +148,36 @@ pub fn spawn(
         // the apiserver relay. Same `CriCtl`-backed seam as the sync loop;
         // a bind failure must not take the whole kubelet down, so the error
         // is logged inside [`server_task`] instead of failing `spawn`.
-        tokio::spawn(server_task(cfg, cri, shutdown)),
+        tokio::spawn(server_task(cfg.clone(), cri, shutdown.clone())),
+        // Task 5 (T4.6/Q39): copytruncate rotation of oversized pod logs
+        // (>= 100 MiB, 5 generations retained). Runs off the async runtime
+        // via spawn_blocking — a 100 MiB copy must not stall the reactor.
+        tokio::spawn(log_rotate_task(cfg, shutdown)),
     ]
+}
+
+/// Task 5: periodic [`crate::log_rotate::sweep`] under the kubelet log
+/// root. Individual file failures are logged inside the sweep and retried
+/// on the next tick; a join failure is logged and the loop continues.
+async fn log_rotate_task(cfg: KubeletConfig, shutdown: infra::Shutdown) {
+    let policy = crate::log_rotate::LogRotatePolicy::default();
+    let mut tick = tokio::time::interval(policy.scan_period);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tick.tick() => {}
+        }
+        let root = cfg.log_root();
+        match tokio::task::spawn_blocking(move || crate::log_rotate::sweep(&root, &policy)).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(target: "init-pro", rotated = n, "kubelet: log rotation pass (T4.6)");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(target: "init-pro", error = %e, "kubelet: log rotation sweep join failed");
+            }
+        }
+    }
 }
 
 /// Adapter around [`crate::server::serve`] so the join set stays
@@ -356,7 +387,19 @@ async fn sync_once(
     if let Err(e) = volumes::ensure_volumes(client, &wanted, &cfg.log_root()).await {
         tracing::warn!(target: "init-pro", error = %e, "kubelet: volume pass failed");
     }
-    let actions = plan(&wanted, &snap, &cfg.sandbox_image, &cfg.log_root(), probes);
+    // T4.6 (Q39): the UTC date pinned into every sandbox log_directory
+    // this cycle. Fixed per plan call: a container created before a
+    // midnight rollover keeps writing into its own (older) date dir via
+    // the fd containerd already holds open.
+    let date = crate::log_rotate::today(SystemTime::now());
+    let actions = plan(
+        &wanted,
+        &snap,
+        &cfg.sandbox_image,
+        &cfg.log_root(),
+        &date,
+        probes,
+    );
     // Deleted pods needing no further teardown drop out of the desired map.
     {
         let mut map = desired.lock().await;

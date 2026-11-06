@@ -146,6 +146,26 @@ fn ready_sandbox_without_containers_creates_and_starts_them() {
 }
 
 #[test]
+fn log_directory_is_date_segmented_and_log_path_stays_relative_t4_6() {
+    // Q39 layout pin: the sandbox log_directory gains the `<YYYY-MM-DD>`
+    // segment (the injected date — `plan` stays pure), while the container
+    // `log_path` stays RELATIVE (`c0.<attempt>.log`) so containerd itself
+    // joins the pair when it opens (and keeps) the log fd.
+    let pod = view("default", "web", "u1", &["img:1"]);
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![container(&pod, "c0", "c-old", "sb1", "CONTAINER_EXITED", 3)],
+    };
+    let actions = plan_one(&pod, &snap);
+    let ccfg = ccfg_of(&actions);
+    let pcfg = pcfg_of(&actions);
+    assert_eq!(pcfg.log_directory, format!("{LOG_ROOT}/u1/{TEST_DATE}"));
+    assert_eq!(ccfg.log_path, "c0.4.log");
+    assert!(!ccfg.log_path.contains('/'), "log_path must stay relative");
+}
+
+#[test]
 fn exited_container_is_recreated_with_attempt_plus_one() {
     // THE kill->restart case: the container died (attempt 0), so plan must
     // remove it and recreate with attempt 1 and a matching log_path.
@@ -252,6 +272,7 @@ fn absent_pod_observed_sandbox_is_orphan_teardown() {
         &snap,
         SANDBOX_IMAGE,
         Path::new(LOG_ROOT),
+        TEST_DATE,
         &kubelet::PodProbeState::new(),
     );
     assert_eq!(
@@ -288,6 +309,7 @@ fn garbage_sandbox_without_identity_is_ignored() {
         &snap,
         SANDBOX_IMAGE,
         Path::new(LOG_ROOT),
+        TEST_DATE,
         &kubelet::PodProbeState::new(),
     );
     assert!(
@@ -310,6 +332,7 @@ fn two_pods_same_name_different_namespace_are_distinct() {
         &snap,
         SANDBOX_IMAGE,
         Path::new(LOG_ROOT),
+        TEST_DATE,
         &kubelet::PodProbeState::new(),
     );
     assert_eq!(
@@ -479,6 +502,7 @@ fn liveness_failure_restarts_running_container() {
         &snap,
         SANDBOX_IMAGE,
         Path::new(LOG_ROOT),
+        TEST_DATE,
         &probes,
     );
     assert_eq!(
