@@ -13,15 +13,20 @@ the spike ADR, Q25 the as-built ADR, Q26 the CRI-client strategy
   containerd TOML v2 from `ContainerdConfigVars::for_data_dir` (CRI
   plugin enabled); `stage.rs` stages the vendored tree (containerd, ctr,
   shims, runc, crictl, `aux/` cni-plugins) idempotently by SHA-256 plus
-  the CNI loopback conflist `10-init-pro.conflist`;
+  the CNI conflist `10-flannel.conflist` (stage.rs; the flannel
+  meta-plugin chain that replaced the pre-T4.3 static bridge/host-local
+  conflist, Q34);
   `supervisor.rs` runs the spawn/health/backoff/drain loop.
 - k3s layout under the data dir: `agent/containerd/`,
   `agent/etc/containerd/config.toml`, `run/containerd/containerd.sock`.
-  `start_agent_runtime` composes stage -> render -> supervise for the
-  agent path (`crates/cli/src/runtime.rs`); the runtime drains FIRST on
-  shutdown (before the API surface and controllers).
-- Server keeps the runtime off by default; single-node UX arrives with
-  T4.5.
+  `start_agent_runtime` (defined in `crates/runtime/src/lib.rs`; called
+  from the agent path in `crates/cli/src/runtime.rs`) composes stage ->
+  render -> supervise. Since Sprint 28 the kubelet drains FIRST on
+  shutdown (sandbox stop+rmp, then a bounded wait for CRI to report
+  zero sandboxes) and only then does containerd go down
+  (`crates/cli/src/runtime.rs`).
+- Server keeps the runtime off by default; the single-node UX shipped
+  in Sprint 24 (`scripts/local-up.sh`, promoted to the official UX).
 
 ## Supervision (Q25)
 
@@ -67,11 +72,11 @@ the spike ADR, Q25 the as-built ADR, Q26 the CRI-client strategy
 
 ## Proof
 
-- 17 unit + 2 integration tests in `crates/runtime/`
-  (`tests/supervisor_integration.rs`: kill -9 rebirth + crictl
-  round-trip over the live CRI socket; SKIP, not fail, when
-  `vendor/bin/containerd` is absent). 15 multicall tests; 29 infra
-  (sticky-shutdown regression).
+- ~50 unit tests in `crates/runtime/` plus integration tests in two
+  files: `tests/supervisor_integration.rs` (kill -9 rebirth + crictl
+  round-trip over the live CRI socket) and `tests/cri_integration.rs`.
+  Both SKIP, not fail, when `vendor/bin/containerd` is absent.
+  15 multicall tests; 29 infra (sticky-shutdown regression).
 - Golden G24 (`scripts/golden-conformance.sh`): agent supervises
   containerd, `crictl version`/`ps` round-trip over CRI; the
   sandbox-pull smoke SKIPs when the registry is unreachable (Q24

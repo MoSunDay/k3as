@@ -12,9 +12,13 @@ on the controllers framework. Q23 is the ADR of record
   controllers informer/workqueue framework: pods/nodes/PVCs caches, ONE
   pending-pod workqueue, Lease+CAS leader election (`init-pro-scheduler`,
   Q18 pattern).
-- Bind through the apiserver binding subresource
-  (`crates/apiserver/src/binding.rs`): 201 / 404 / 409 already-bound /
-  422 unknown node, upstream parity.
+- Bind does NOT round-trip through the apiserver binding subresource:
+  `crates/scheduler/src/bind.rs` writes `spec.nodeName` in-process via a
+  CAS storage write, semantically identical to the apiserver
+  `pods/binding` subresource (`crates/apiserver/src/binding.rs`): 201 /
+  409 already-bound (incl. concurrent-writer conflict), upstream parity.
+  Node existence is NOT checked at bind time (`binding.rs` - the
+  scheduler filters nodes itself before binding).
 
 ## Plugins (pure functions over an immutable `Snapshot`)
 
@@ -31,7 +35,7 @@ Filters (all must pass):
 
 Scores (higher wins):
 - LeastRequested (avg cpu+memory free %), NodeAffinityPreferred,
-  PodAntiAffinityPreferred. See `crates/scheduler/src/score.rs`.
+  PodAntiAffinityPreferred. See `crates/scheduler/src/scores.rs`.
 
 ## Q23 semantics worth remembering
 
@@ -67,9 +71,11 @@ Upstream KubeSchedulerConfiguration `extenders` wire shape, loaded from
 
 ## Proof
 
-- 26 unit + 5 integration tests in `crates/scheduler/` (extender stubs
-  must mount BOTH `/filter` and `/prioritize` — a non-ignorable filter
-  error aborts the attempt).
+- 30 unit + 7 integration tests in `crates/scheduler/` (the +2 since the
+  T3.2 closeout cover T7.1 Agent scheduling through the same cycle;
+  extender stubs must mount BOTH `/filter` and `/prioritize` — a
+  non-ignorable filter error aborts the attempt).
 - Golden G22 (nodeSelector placement + Unschedulable settle) and G23
-  (python3 stub extender steering, second server + `--kube-scheduler-arg`)
-  → 23/23.
+  (python3 stub extender steering, second server + `--kube-scheduler-arg`);
+  suite inventory + PASS-site count live in the SSOT `golden/README.md`
+  (G01-G31, 39 PASS sites).
