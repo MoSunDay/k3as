@@ -4,6 +4,68 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- registry: Sprint 34 (2026-11-06) — T6.3 hardening (**Q40**), no wire
+  contract change: `api/` module split + test split (`v2_http.rs` /
+  `v2_manifest.rs` / `support/`), manifest digest grammar gate (400
+  `MANIFEST_INVALID` before any filesystem probe), streamed blob GET
+  with explicit `Content-Length`, 10 s bounded drain (listener aborted
+  on timeout), backtracking `*` matcher (`x*aa*a` matches `xaaa` —
+  pinned tags can no longer be mis-pruned), delete-unknown -> 404
+  `MANIFEST_UNKNOWN` (202 only when removed). 18 crate tests; e2e
+  7/0/1 default with R7 real `crictl pull` proven separately (8/0/0,
+  image `a19229a77077b`); parity 20/0.
+- registry: Sprint 33 (2026-11-06) — T6.3 (**Q40**) embedded Docker
+  Registry v2 image plane, default-on in `init-pro server`
+  (`--registry-addr` default `127.0.0.1:15000`, `--disable-registry`):
+  global sha256 blob CAS + per-repo manifests/tags under
+  `<data-dir>/registry/`, full V2 push/pull surface (ping, catalog,
+  tags/list, manifests with `Docker-Content-Digest`, blob
+  GET/HEAD/DELETE, monolithic + resumable + mount uploads,
+  referential validation), and per-repository newest-N tag retention
+  (default 10) with `--registry-keep-tag` / hot-reloaded `keep.json`
+  keep-forever patterns excluded from the count; delete-by-tag refused,
+  delete-by-digest drops tags + GCs blobs. 15 crate tests +
+  `scripts/registry-e2e.sh` (7/0/1 skip) + parity 20/0.
+- build-bundling: Sprint 31 (2026-09-05) — T0.2b release closure,
+  pin-clone (**Q38**): `link_repos.lock` TOML pin manifest
+  (name/url/sha + path/patch/marker) for the 7 build path-dep repos —
+  openrusty `4180ad3`, rdb `8de5dcc`, flannel-rust `76397b5`, opencoder
+  `c1a1b2e`, any-home `a1e2d9c` (+ nested nfsserve `c00c361` carrying the
+  AUTH_SYS identity patch via marker file), libsql `6f451a1` (the 7th pin
+  was DISCOVERED: anyhome pulls libsql transitively). New
+  `scripts/bootstrap-link-repos.sh`: clone + `checkout --detach <sha>` when
+  missing, verify-only for dev checkouts, idempotent re-runs; CI and the
+  Dockerfile run bootstrap right after checkout (fmt moved before it —
+  cargo-fmt would walk foreign path-dep trees). Release posture: intranet
+  h2c on openrusty `4180ad3`; TLS later = pin bump + forward adaptation in
+  `gateway_config.rs` (P2-1). Cold-clone gate proven: fresh clone ->
+  bootstrap -> build/test/clippy green, 973 passed / 0 failed.
+- agent / kubelet: native Agent execution — Sprint 26 (2026-08-29, T7.1
+  Phase A, **Q35**) + Sprint 30 (2026-08-31, Phase B, **Q37**): `Agent` is
+  an init-pro.io/v1 first-class resource (`crates/api/src/agent.rs`; short
+  names `agents`/`ag`) bound natively by the same scheduler
+  filter/score/CAS loop as Pods; Workflow `template.agent` creates Agents
+  directly (no Pod materialization). `crates/agent` is the pure
+  `AgentSpec` -> opencoder `Config` seam (opencoder embedded as link_repos
+  path deps; credentials env-resolved only, never in specs). `kubelet::agents`
+  watch+execute loop runs a bound Agent as ONE opencoder CLI subprocess on
+  its node (client-side `spec.nodeName` filtering, workspace via the
+  anyhome plane, DELETE kills the child via `/proc/<pid>`) and merge-patches
+  the status back (Pending -> Running -> Succeeded/Failed state machine);
+  `scripts/agent-exec-e2e.sh` S1/S2+G1-G7 real-NFS e2e on a three-agent
+  topology (executor / runnerless / loop-off).
+- anyhome: Sprint 27 (2026-08-30) — embedded first-class NFS memory
+  service, T7.4 (**Q36**): default-on in `server` (`--disable-anyhome`,
+  `--anyhome-addr` default 127.0.0.1:11111). `crates/cli/src/anyhome.rs`:
+  nfsserve single-port NFSv3 + MOUNT + portmap over an in-memory tree,
+  libsql-persisted at `<data-dir>/anyhome` (`/search` exact-match while
+  the embedder is `DummyEmbedder`); `anyhome_keeper.rs` 15s keeper ensures
+  `/workflow/<name>` per Workflow + `/agent/{id}` per workspace-annotated
+  Agent (deletions ignored — GC needs an owner model);
+  `crates/common/src/workspace.rs` is the path SSOT
+  (`MOUNT_TARGET=/workspace`); workflow step pods get `/workspace`
+  auto-mounted from `/workflow/<name>`. D1: the binary path must not link
+  `agent` (duplicate libsql symbols). anyhome e2e 4/4.
 - router-data-plane / storage-layer / multicall-cli / controllers /
   apiserver: Sprint 25 (2026-08-28) — link_repos wave, three substrates
   swapped to upstream Rust adopted as path deps (Q32/Q33/Q34). Router
@@ -32,6 +94,18 @@ ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
   infra::Shutdown). Workspace 852 passed / 0 failed; golden 39/39; clippy
   -D warnings 0. Debts: `NodePortConfig.ingress_listen` CLI flag unwired;
   flannel_keeper polling (status/conditions merge key).
+- argo-workflows / controllers / api: T7.3 Argo adaptation, Scopes A-C
+  (Sprint 21-23, 2026-08-25/26, **Q30**) — typed 1:1 port of upstream Argo
+  Workflows v4 `v1alpha1` (`crates/api/src/argoproj/`, ~313 Go json tags,
+  SSOT = `link_repos/argo-workflows`): `Workflow`/`CronWorkflow` are
+  first-class built-ins (zero install) on the generic apiserver surface +
+  built-in kubectl verbs. Scope B: in-process Workflow controller
+  reconciles Workflow specs into real pods on the scheduler/kubelet path
+  (+ terminal pod-phase ladder, `kubectl api-resources`/`api-versions`
+  acceptance leg). Scope C: in-process Vixie-cron CronWorkflow controller
+  (`cron_expr.rs` — 5-field, dom/dow either-semantics, `@every`,
+  UTC-naive) submits child Workflows with ownerReference + GC cascade.
+  T7.3 closed done; golden G27-G29.
 - kubelet: T4.2 Scope B landed (Sprint 20, 2026-08-23) — HTTP probe
   engine (startup/readiness/liveness, liveness→restart), volumes
   (emptyDir + configMap/secret projection with FNV-1a fingerprint

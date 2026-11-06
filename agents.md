@@ -13,16 +13,16 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 works). It has a first-class built-in Router - an openrusty (h2c gateway,
 Q32) programmable HTTP data plane with Ingress networking.k8s.io/v1 as
 the first-class ingress resource - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (16 crates).
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (17 crates).
 
 ## The SSOT (single source of truth)
 
-- `plans/init-pro/index.md` - the TODO status table (35 TODOs across 8
+- `plans/init-pro/index.md` - the TODO status table (37 TODOs across 8
   layers) + the critical-path DAG. Authoritative status of record.
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q38
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q40
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -40,6 +40,13 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   the agent) still describes the PRE-SPRINT-25 state (mlua/Lua Router,
   libsql/sqlite T2.3, T4.3 not started); trust index.md + CHANGELOG.md as
   the live source, not that preamble.
+- OPEN (user-owned, do not edit on the agent's own initiative):
+  `README.md:119-130` / `README_zh.md:119-125` still show the pre-Q32
+  "Router VM (single mlua VM)" architecture diagram, and the CLI about
+  string at `crates/cli/src/lib.rs:33` still says "built-in Lua Router" —
+  post-Q32 the Router is a native Rust data plane on openrusty. Awaiting a
+  user-driven README/CLI-about refresh; code and SSOT already tell the
+  truth.
 
 ## Build & verify (canonical commands)
 
@@ -94,15 +101,16 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `common` | Shared primitives: embed descriptor + `version()`; workspace path conventions — `MOUNT_TARGET=/workspace`, `/agent/{id}`, `/workflow/{id}` (T7.4, Q36). |
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
 | `api` | Resource model, schema registry, discovery builders, init-pro.io CRDs (T1.1). |
-| `agent` | Pure seam: `AgentSpec` ↔ opencoder session config bridging (T7.1 Phase A, Q35); no execution (Phase B). |
+| `agent` | Pure seam: `AgentSpec` ↔ opencoder session config bridging (T7.1 Phase A, Q35); no execution in-crate (Phase B executes in cli/src/runtime.rs, done Sprint 30, Q37). |
 | `apiserver` | HTTP discovery + REST CRUD/watch/SSA over the storage trait (T1.2 done). |
 | `controllers` | kube-controller-manager-equivalent loops: informer/workqueue framework, Lease+CAS leader election, ReplicaSet/Deployment/Endpoints reconcilers + node podCIDR reconciler (T3.1; T4.3 Scope A, Q34). |
-| `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q19). |
+| `scheduler` | kube-scheduler-equivalent: filter/score plugin framework, default plugins, HTTP extender seam, in-process (T3.2, Q23). |
 | `runtime` | Agent-side containerd: config templating, idempotent vendor staging (incl. CNI conflists + flannel aux staging/`aux/flannel` symlink), supervisor + CRI plumbing (T4.1, Q24-Q26; T4.3 Scope A). |
 | `kubelet` | Kubelet-equivalent: watch+sync pod lifecycle over the CRI seam, node registration + Lease heartbeat, pods/status writer incl. podIP/podIPs/hostIP emission (T4.2 Scope A+B: probes/volumes/pull-policy/hostname, S20). |
 | `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
 | `router` | Built-in Router riding openrusty (h2c gateway, Q32): Ingress networking.k8s.io/v1 -> route compiler, balancer, reverse proxy, hot reload (T5.1-T5.4 done; TLS = T5.5 not started). |
 | `storage` | `StorageBackend` trait + `EmbeddedStorage` + `RdbStorage` (RocksDB via the rdb crate; durable opt-in `rdb://`) incl. watch replay + compaction (T2.1/T2.2/T2.3, Q33). |
+| `registry` | Embedded Docker Registry HTTP API v2 image plane, default-on in `server`: global blob CAS + per-repo manifests/tags, newest-N tag retention with keep-forever patterns excluded (`--registry-addr` / `--disable-registry` / `--registry-tag-retention` / `--registry-keep-tag`, T6.3, Q40). |
 
 ## Critical path & current state
 
@@ -115,9 +123,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   (api + apiserver), Layer 2 (T2.1/T2.2/T2.3 - storage, Q33), T3.1/T3.2
   (controllers + scheduler), T4.1 (containerd bundling), T4.2 Scope A+B+C
   (kubelet + logs/exec, Q31), the Layer 5 M1 slice (T5.1-T5.4, Q32),
-  T7.1 (`Agent` resource + node-side execution, Q35/Q37), T7.3 (Argo
-  Workflows, Q30), and T7.4 (anyhome, Q36). Phase 1 (M0 + M1) is
-  complete; 23/35 TODOs done.
+  T4.6 (pod-log date dirs + rotation, Q39), T6.3 (embedded registry,
+  Q40), T7.1 (`Agent` resource + node-side execution, Q35/Q37), T7.3
+  (Argo Workflows, Q30), and T7.4 (anyhome, Q36). Phase 1 (M0 + M1) is
+  complete; 25/37 TODOs done.
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -174,4 +183,4 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   Release posture: intranet h2c on openrusty `4180ad3`; TLS later = pin
   bump + forward adaptation in `gateway_config.rs` (P2-1, queued).
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q38).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q40).

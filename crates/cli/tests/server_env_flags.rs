@@ -1,5 +1,6 @@
 //! `INIT_PRO_DISABLE_ANYHOME` env path for `init-pro server --disable-anyhome`
-//! (T-anyhome, Q36).
+//! (T-anyhome, Q36) plus the embedded image-registry env surface
+//! (`INIT_PRO_REGISTRY_*`, T6.3, Q40).
 //!
 //! These tests live in their OWN integration-test binary on purpose: they
 //! mutate the process environment, and the `cli` unit-test binary runs many
@@ -95,4 +96,33 @@ fn explicit_flag_overrides_env_false() {
     let disabled = parse_disable_anyhome(&["server", "--disable-anyhome"]).expect("flag beats env");
     std::env::remove_var(VAR);
     assert!(disabled, "argv --disable-anyhome must override env false");
+}
+
+// ---------------------------------------------------------------------------
+// T6.3 (Q40): the embedded image registry's env surface. One test (not the
+// anyhome per-variant matrix) because these are plain clap env wirings:
+// addr/tag-retention carry `default_value*` + env, keep-tag is repeatable.
+// ---------------------------------------------------------------------------
+const REG_ADDR: &str = "INIT_PRO_REGISTRY_ADDR";
+const REG_RETENTION: &str = "INIT_PRO_REGISTRY_TAG_RETENTION";
+const REG_KEEP: &str = "INIT_PRO_REGISTRY_KEEP_TAG";
+
+#[test]
+fn registry_env_vars_reach_the_server_flags() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var(REG_ADDR, "127.0.0.1:15998");
+    std::env::set_var(REG_RETENTION, "4");
+    std::env::set_var(REG_KEEP, "app:golden*");
+    let parsed = Cli::try_parse_from(["init-pro", "server"]).map_err(|e| e.to_string());
+    std::env::remove_var(REG_ADDR);
+    std::env::remove_var(REG_RETENTION);
+    std::env::remove_var(REG_KEEP);
+    match parsed.expect("registry env parses").command {
+        Some(Command::Server(s)) => {
+            assert_eq!(s.registry_addr, "127.0.0.1:15998");
+            assert_eq!(s.registry_tag_retention, 4);
+            assert_eq!(s.registry_keep_tag, vec!["app:golden*".to_string()]);
+        }
+        other => panic!("expected Server subcommand, got {other:?}"),
+    }
 }

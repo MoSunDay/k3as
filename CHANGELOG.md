@@ -7,6 +7,210 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 34 — T6.3 hardening: B1-B5 close-out + R7 real-pull evidence (Q40) (2026-11-06)
+
+**Goal:** close the five deployment blockers found in the post-Sprint-33
+static review of the embedded registry (T6.3/Q40) without changing its
+wire contract: file-size compliance, manifest digest validation, streaming
+blob GET, bounded shutdown drain, and a correct keep-forever glob matcher.
+
+**Delivered**
+- **B4 split:** `crates/registry/src/api.rs` (561 lines) split by
+  responsibility into `api/mod.rs` (router/dispatch/plumbing/ping/catalog),
+  `api/manifest.rs`, and `api/blob.rs`; the 422-line HTTP test file split
+  into `tests/v2_http.rs`, `tests/v2_manifest.rs`, and
+  `tests/support/mod.rs`. Behaviour unchanged (15 tests before/after the
+  split).
+- **B1 manifest digest grammar gate:** `config.digest`, `layers[].digest`,
+  and index `manifests[].digest` are validated as `sha256:<64 lowercase
+  hex>` BEFORE any `blob_exists` / `manifest_exists` probe; malformed
+  values answer 400 `MANIFEST_INVALID` (was: `../..` reached the
+  filesystem as a path segment; a malformed manifest could be 201-accepted).
+  `store::blob_path` / `manifest_path` carry a debug assertion as defense
+  in depth.
+- **B2 streaming blob GET:** `GET /v2/<name>/blobs/<digest>` opens the CAS
+  file and streams it via `tokio_util::io::ReaderStream` with an explicit
+  `Content-Length` + `Docker-Content-Digest`; a 1 GB layer no longer
+  materializes a 1 GB heap buffer inside the control-plane process. HEAD
+  is unchanged; Range/Accept-Ranges is a documented follow-up.
+- **B3 bounded registry drain:** shutdown waits at most 10 s for the
+  registry listener, then aborts it with a warn — an interrupted blob
+  upload can no longer make SIGTERM hang forever (first-signal-only
+  `infra::signal` remains unchanged).
+- **B5 backtracking glob:** `glob_match` is now the standard two-pointer
+  star-backtracking matcher over `char`s; `x*aa*a` matches `xaaa`, so a
+  pinned tag can no longer be pruned (and its blobs GC'd) by a false
+  negative. All previous glob cases remain green.
+- **C4 delete consistency:** `DELETE` of a digest that matches no stored
+  manifest and no tag now answers 404 `MANIFEST_UNKNOWN` (202 only when
+  something was removed); delete-by-tag stays 400 `DIGEST_INVALID`; e2e R6
+  updated to assert the 404.
+- **C6 actionable bind failure:** the degraded-image-plane warn now hints
+  that another server may own the port and to set `--registry-addr`; Q40
+  records that two servers on one host need distinct registry ports.
+- **C1/C2 SSOT counts:** `index.md` and `agents.md` now say 37 TODOs
+  (Q1-Q40); no new TODO line, counts stay 37 / 25 done.
+
+**Gates**
+- `cargo test -p registry --locked` -> 18 passed / 0 failed (12 unit +
+  3 `v2_http` + 3 `v2_manifest`); `cargo test -p registry -p cli --locked`
+  green (cli 77 + 7).
+- `cargo clippy -p registry -p cli --all-targets --locked -- -D warnings`
+  -> zero; `cargo fmt -p registry -p cli -- --check` -> clean.
+- `bash scripts/cli-flag-parity-test.sh` -> 20 passed / 0 failed.
+- `bash scripts/registry-e2e.sh` -> 7 passed / 0 failed / 1 skipped (R7
+  env-gated), R1-R6 all green.
+- **R7 real-pull evidence (E1 closed):** with a live containerd +
+  `vendor/bin/crictl`, `INIT_PRO_E2E_CONTAINERD=1 PATH=/root/k3as/vendor/bin:$PATH CONTAINER_RUNTIME_ENDPOINT=unix:///run/containerd/containerd.sock bash scripts/registry-e2e.sh`
+  -> 8 passed / 0 failed / 0 skipped; `crictl pull 127.0.0.1:<ephemeral>/e2e/demo:v3`
+  pulled the fabricated docker-v2 image into containerd (image
+  `a19229a77077b`, 718 B).
+- `cargo test --workspace --locked --no-fail-fast` -> 995 passed / 8
+  failed; the 8 failures are the pre-existing router/openrusty environment
+  set (gateway/NodePort/listener), identical to Sprint 32/33 — no new
+  failures (baseline 992/8 + 3 new registry tests).
+
+**Notes & follow-ups**
+- Documented v1 limits (no code change this sprint): multi-arch index
+  children are pushed untagged and therefore never age out (permanent
+  retention); `_catalog` has no pagination; `DELETE blob` removes the
+  global CAS file repo-wide.
+
+## Sprint 33 — T6.3: 内嵌 Docker Registry v2 镜像仓库 + tag 保留策略 (Q40) (2026-11-06)
+
+**Goal:** deliver the deployment-profile requirement "内置镜像仓库 + tag
+管理" — a usable image registry inside k3as with no external install,
+default keep the newest 10 versions per repository, and explicitly
+pinned tags kept forever without counting toward the 10 — as a new
+Layer-6 TODO (**T6.3**), locking the wire/storage/retention semantics as
+**Q40**.
+
+**Delivered**
+- New crate `crates/registry` (axum 0.8; split by responsibility across
+  modules): `validate.rs` (reference name/tag/digest grammar — checked
+  before any fs touch), `store.rs` (global `sha256-<hex>` blob CAS,
+  per-repo manifests, tag records `{digest, mediaType, pushed_at, seq,
+  size}`, stream hashing, recursive repo walk), `policy.rs` (pure `*`
+  glob matcher + `prune_plan`: newest-N by `(pushed_at, seq)`,
+  keep-forever excluded from the count, 0 = unlimited, deterministic
+  ties), `gc.rs` (retention orchestration: tag -> manifest ->
+  unreferenced-blob sweep with a 600s freshness grace so a concurrent
+  blob-upload-then-manifest-push is never collected mid-flight),
+  `api.rs` (ping, `_catalog`, `tags/list`, manifest GET/HEAD/PUT/DELETE
+  with `Docker-Content-Digest`, blob GET/HEAD/DELETE; right-first marker
+  path parsing because axum catch-alls must be the terminal segment),
+  `uploads.rs` (monolithic single-POST pushes, resumable
+  POST/PATCH/PUT/DELETE sessions, cross-repo mount against the global
+  CAS; bodies stream to staging files, never buffered whole).
+- Referential validation on manifest push: config/layer digests must
+  exist in the CAS and index children in the repo
+  (`MANIFEST_BLOB_UNKNOWN` 404); docker-v2 + OCI manifest/list/index
+  media types accepted, others 415. Delete-by-tag refused
+  (`DIGEST_INVALID`); delete-by-digest drops the manifest + every tag
+  pointing at it, then GCs blobs.
+- Server wiring mirroring anyhome (Q36): default-on embedded plane at
+  `--registry-addr` (default `127.0.0.1:15000`; port 5000 collides with
+  macOS AirPlay), `--disable-registry`, `--registry-tag-retention`
+  (default 10), repeatable `--registry-keep-tag` (envs
+  `INIT_PRO_REGISTRY_{ADDR,TAG_RETENTION,KEEP_TAG}` +
+  `INIT_PRO_DISABLE_REGISTRY`), unioned with the hot-reloaded
+  `<data-dir>/registry/keep.json`; spawned after anyhome, drained in the
+  supervised shutdown sequence (`registry drained` before the API
+  surface). `ServerBind.registry: Option<RegistryBind>`; degraded-but-
+  booting on spawn failure (warn, image plane only).
+- `scripts/registry-e2e.sh` (new, 389 lines): R0 flag gate (SKIP-all
+  when the flags are absent), R1 boot + `/v2/` 200 + API-version
+  header, R2 offline fabricated docker-v2 image push (deterministic
+  empty-tar-gzip layer, real digests via `sha256sum`), R3 manifest pull
+  by tag + digest (byte-identical, digest header match), R4 12 pushes
+  => exactly the newest 10 tags survive, R5 `keep.json` pin survives 10
+  rollovers and is not counted, R6 delete semantics (digest 202 / tag
+  400), R7 real `crictl pull` env-gated (`INIT_PRO_E2E_CONTAINERD=1`)
+  with a clean SKIP.
+
+**Tests** — `cargo test --workspace --locked --no-fail-fast` fresh:
+**992 passed / 8 failed**. All 8 failures are the pre-existing
+router/openrusty WASM bootstrap environment issue (`JourneyClient-release
+... unknown import: a::a` in the pinned link_repos checkout; independent
+of this workstream — stash-proven in Sprint 32). New coverage: registry
+crate 15 (12 unit: grammar/glob/prune_plan/query/path targets + 3 HTTP
+integration over a real socket: ping/catalog/uploads/mount, manifest
+round-trip + referential 404 + retention + keep.json pin + delete, blob
+flows incl. wrong-digest 400), cli +2 (flag-survives-noop-strip parse,
+env-var test; lib 77 + server_env_flags 7). `cargo clippy --workspace
+--all-targets --locked -- -D warnings` -> zero.
+`scripts/cli-flag-parity-test.sh` -> **20 passed / 0 failed**
+(`live_help t-registry server --registry-addr --disable-registry
+--registry-tag-retention --registry-keep-tag`).
+`scripts/registry-e2e.sh` -> **7 passed / 0 failed / 1 skipped** (R7
+containerd leg env-gated; `registry.k8s.io` unreachable in CI is
+irrelevant — the whole e2e is offline). Golden conformance is untouched:
+the registry is a separate listener and changes no apiserver wire
+surface (T0.6 gate unchanged).
+
+**SSOT** — `index.md` T6.3 row + counts (37 TODOs / 25 done, Layer6=3) +
+DAG node off T0.3; `plan/06-addons.md` T6.3 card (header T6.1-T6.3);
+`decisions.md` Q40; `features/registry.md` card + README row.
+
+## Sprint 32 — T4.6: pod 日志日期目录 + 100MB copytruncate 轮转 (Q39) (2026-11-06)
+
+**Goal:** deliver the deployment-profile logging requirement — pod logs
+under per-day directories with no live file above 100 MiB — as a new
+Layer-4 TODO (**T4.6**; note `T4.5` was already taken by the node
+tunnel card, so the log work is T4.6), locking the layout and the
+external-rotation semantics as **Q39** (the concrete implementation of
+Q31's previously-documented rotation deviation).
+
+**Delivered**
+- Write side (`crates/kubelet/src/sync.rs`): `plan()` gains an injected
+  UTC `date` (stays pure) and emits the sandbox `log_directory`
+  `<data_dir>/pods/<pod-uid>/<YYYY-MM-DD>/`; the container `log_path`
+  stays relative so containerd joins the pair and opens/holds the fd
+  once. Date pinned at plan time — a container alive across midnight
+  keeps writing into its own (older) dir.
+- `crates/common/src/time.rs`: `utc_date()` (Hinnant civil date — the
+  `now_rfc3339` family; still no chrono).
+- Rotator (`crates/kubelet/src/log_rotate.rs`, new): pure
+  `rotation_plan`/`rotate_one` copytruncate (copy -> `.1`, shift, evict
+  beyond 5, truncate in place — writer fds stay valid) + `sweep` scoped
+  to date-shaped dirs only (`volumes/` structurally immune). 100 MiB /
+  5 generations / 60s scan (`LogRotatePolicy`).
+- Runner: 5th loop `log_rotate_task` (`spawn_blocking` sweep; per-file
+  failures logged + retried next tick).
+- Read side (`server.rs::resolve_log_path`): highest attempt across
+  EVERY date dir, newest date as tie-break (fixes the multi-container
+  cross-midnight case found during implementation), pre-T4.6 flat
+  layout fallback retained.
+
+**Tests** — `cargo test --workspace --no-fail-fast` fresh: 975 passed
+/ 8 failed — all 8 pre-existing in `crates/router` (openrusty WASM
+bootstrap `JourneyClient-release ... unknown import a::a` in the pinned
+link_repos checkout; reproduced with this sprint's diff stashed, i.e.
+environmental, not regression). Kubelet/common/cli/every other crate:
+0 failures. New:
+8 `log_rotate` unit cases (date shape, shift/eviction plan, copytruncate
+semantics, sweep scoping + volumes/legacy immunity, retention cap,
+missing-root no-op), cross-date + legacy resolver cases, route-L over
+HTTP on the dated layout, `sync_plan` dated-layout pin, `utc_date`
+roundtrip cases; `kubelet_http_integration` bumped to 5 loops.
+SSOT: `index.md` (36 TODOs · 24 done · Layer4=6), `plan/04-node.md`
+T4.6 card, `decisions.md` Q39.
+
+**Gate note (golden, this sandbox):** `scripts/golden-conformance.sh` =
+54 passed / 16 failed, ALL 16 environmental in this offline runner and
+reproduced independent of this sprint's diff: (a) `registry.k8s.io`
+unreachable (`crictl pull pause` -> dial i/o timeout) so every
+real-container case (G25/G26/G29/G30/G60/G62/G63/G65/G80) can never
+leave Pending — G24 containerd supervision itself passes; (b) the
+router plane (G70-G72) blocked by the same pinned-openrusty WASM
+bootstrap failure as the unit tests. All wire-level suites my change
+could touch (discovery/CRUD/watch/SSA/controllers/scheduler/storage/
+argoproj API, G01-G23 + G27/G28 etc.) are green. Clippy: two
+pre-existing apiserver lints under clippy 1.98 (`unneeded_wildcard_
+pattern` in `error.rs`, `result_large_err` in `pod_io.rs`) were fixed
+behavior-identically (pattern collapse + `Box<Response>`) so the
+`-D warnings` gate is zero again.
+
 ## Sprint 31 — T0.2b 发版闭环: link_repos 钉定物化 (pin-clone) + 内网 h2c 发版形态 (Q38) (2026-09-05)
 
 **Goal:** make a zero-cache cold clone of this repo buildable and

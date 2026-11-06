@@ -1974,3 +1974,144 @@ single commit). Non-build reference checkouts (argo-workflows, flannel)
 stay unmanaged and are documented as such. Discovered during closure: the
 transitive anyhome->libsql path dep makes libsql a 7th mandatory pin (the
 6-repo assumption was wrong).
+
+---
+
+## Q39 — Pod log layout: date directories + 100 MiB copytruncate rotation (T4.6) (2026-11-06)
+
+**Context** — The deployment profile behind init-pro wants pod logs
+organized "按日期目录，单文件 ≤100MB" (per-day directories, no live log
+file above 100 MiB). As-built pre-T4.6, log files lived flat at
+`<data_dir>/pods/<pod-uid>/<container>.<attempt>.log` (T4.2 Scope C,
+Q31) with zero rotation anywhere: containerd's config template carries no
+log caps, and Q31 explicitly treated rotation as an out-of-scope
+deviation. The files are written and fd-held by the vendored containerd
+via the CRI `log_directory`/`log_path` pair, so whatever rotates them
+must not delete/rename the live inode out from under the writer.
+
+**Options** — (a) rely on containerd's built-in `max_container_log_size`
+(rejected: the vendored config has none, k3s itself does not set it, and
+it would rotate inside a foreign tree we pin rather than own); (b) rename
+rotation a la logrotate without copy (rejected: the writer's open fd
+follows the inode, so post-rotation output would vanish into the renamed
+file); (c) external copytruncate rotation in the kubelet, the same shape
+as upstream kubelet's `containerLogManager` (chosen); layout either
+top-level `logs/<date>/<pod>/` or per-pod `pods/<uid>/<date>/`.
+
+**Decision** — (c) with the per-pod layout: sandbox `log_directory`
+becomes `<data_dir>/pods/<pod-uid>/<YYYY-MM-DD>/` (UTC date pinned at
+plan time, injected into the pure `plan()`; `log_path` stays relative so
+containerd joins the pair itself), and a 5th kubelet task sweeps every
+60s: any live `*.log` >= 100 MiB (`LOG_MAX_SIZE`) is copytruncated —
+copy -> `.1`, shift `.N-1` -> `.N`, evict beyond `LOG_MAX_FILES`=5
+generations, truncate the live file in place. Only date-shaped
+subdirectories are ever considered, so the `volumes/` sibling tree is
+structurally immune. Read side resolves the highest attempt across every
+date dir (newest date as tie-break) so a container alive across midnight
+stays readable, with the pre-T4.6 flat layout as a fallback. 100 MiB
+(vs upstream kubelet's 10 MiB default) is the deliberate deployment
+knob; 5 generations bounds worst-case per-container disk at ~600 MiB.
+
+**Consequences** — Q31's external-rotation deviation now has a concrete,
+owned implementation instead of a documented gap. A truncation window
+inherently loses any bytes written between copy and truncate (same
+trade-off as every copytruncate deployment; a 60s scan bounds
+worst-case overshoot to one scan period). Logs no longer rotate on
+container restart alone (upstream rotates at each container start); the
+date directory provides the per-day segmentation instead. `kubectl logs
+-f` needs no change: its existing file-shrink detection already treats
+truncate as "rewind". Golden conformance (T0.6) is untouched — the wire
+surfaces (`pods/log` relay content) are byte-identical. Future knob
+surfacing (CLI flags for size/generations) is a plain
+`LogRotatePolicy` plumbing change when someone asks for it.
+
+---
+
+## Q40 — Embedded Docker Registry HTTP API v2 image plane + newest-N tag retention (T6.3) (2026-11-06)
+
+**Context** — The deployment profile behind init-pro wants a usable image
+registry "built into k3as, no external install": cluster nodes (and
+operators' docker/containerd/crictl clients) must be able to push and
+pull images from the server itself, offline, without running a separate
+registry (distribution), docker daemon, or cloud endpoint. The profile
+additionally demands tag management: per repository keep only the newest
+N versions (default 10) while explicitly pinned tags are kept forever and
+must not consume the retention budget. The repo already hosts embedded
+first-class planes following the same doctrine — anyhome NFS (Q36),
+flannel CNI (Q34), Router (Q32) — all default-on inside `init-pro server`
+with `--disable-*` opt-outs.
+
+**Options** — (a) re-export upstream distribution as an external process
+(rejected: an extra daemon + TLS/auth config to babysit, contradicts the
+"one multicall binary, no external install" rule, and upstream is Go);
+(b) a filesystem-only "registry-like" store without the V2 protocol
+(rejected: docker/containerd/crictl would not speak it — clients must
+work unmodified); (c) implement the Docker Registry HTTP API v2 subset
+directly in-process on axum behind a content-addressed store, with the
+retention/keep-forever policy as pure functions run on every push
+(chosen).
+
+**Decision** — (c), shipped as new crate `crates/registry` (T6.3) wired
+into `init-pro server` exactly like anyhome: default-on at
+`--registry-addr` = `127.0.0.1:15000` (port 5000 is the docker
+convention but collides with macOS AirPlay; v1 assumes bind == advertise,
+so multi-node setups pass `--registry-addr 0.0.0.0:<port>`, and a second
+server on the same host must pick a distinct port), opt-out
+`--disable-registry`, retention knob `--registry-tag-retention` (default
+10; 0 = unlimited), keep-forever patterns `--registry-keep-tag` unioned
+with a hot-reloaded `<data-dir>/registry/keep.json` (`repo:tag` with `*`
+wildcards; a bare `repo` pins the whole repository; `*` alone is
+rejected as a footgun). Wire surface: ping, `_catalog`, `tags/list`,
+manifest GET/HEAD/PUT/DELETE, blob GET/HEAD/DELETE, resumable uploads
+(POST/PATCH/PUT/DELETE), monolithic single-POST pushes, cross-repo
+mount; `Docker-Content-Digest` on manifest/blob GET/HEAD/PUT responses;
+sha256 digests only; docker-v2 + OCI manifest/list/index media types.
+Blob GET streams the CAS file with an explicit `Content-Length` (layer
+pulls never buffer the whole blob in memory); HEAD is metadata-only, and
+Range/Accept-Ranges remains a follow-up. Storage is
+`<data-dir>/registry/` — a GLOBAL sha256 blob CAS
+(`blobs/sha256-<hex>`) plus per-repo manifests by digest and per-tag
+JSON records `{digest, mediaType, pushed_at (millis), seq, size}`.
+Retention runs synchronously on every manifest push: count non-pinned
+tags, keep the newest `retain` by `(pushed_at, seq)` (tie-break reverse
+tag name for determinism), delete the rest, drop manifests that lost
+their last referencing tag, then sweep blobs referenced by no stored
+manifest with a 600 s freshness grace window (a blob upload and its
+manifest PUT are two client round-trips; the window keeps a concurrent
+push from being collected mid-flight). Deleting by tag is refused
+(`DIGEST_INVALID`, spec-aligned: clients delete by digest); deleting by
+digest removes the manifest + every tag pointing at it and reclaims
+unreferenced blobs. Deleting a digest that matches no stored manifest and
+no tag answers 404 `MANIFEST_UNKNOWN` (202 only when something was
+removed). Referential validation on push: config/layer/index-child
+digests must be well-formed sha256 first (400 `MANIFEST_INVALID`
+otherwise, checked before any filesystem probe) and then exist in the
+CAS/repo (`MANIFEST_BLOB_UNKNOWN` otherwise). The registry's graceful
+drain is bounded (10 s); on timeout the listener is aborted with a warn
+so a stalled upload cannot wedge SIGTERM. No auth in v1 — the listener
+defaults to loopback, matching the intranet h2c posture of the rest of
+the control plane (Q38).
+
+**Consequences** — Images now flow fully offline: `scripts/registry-e2e.sh`
+pushes a fabricated docker-v2 image with curl and asserts retention /
+keep-forever / delete semantics against a real booted server
+(R1–R6; R7 = real `crictl pull` is env-gated and SKIPs cleanly by
+default because `registry.k8s.io` is unreachable in CI — in Sprint 34 it
+passed against a live containerd: `crictl pull` fetched the fabricated
+image, 8 passed / 0 failed / 0 skipped).
+Kubelet/containerd need no changes to pull from it — it is a plain V2
+endpoint (agent-side mirror config is a follow-up, not required for the
+node-local default). The global CAS means same-content blobs are stored
+once across repositories and cross-repo mounts are metadata-free; the
+trade-off is that `DELETE blob` removes the physical file repo-wide —
+acceptable for a single-tenant embedded plane, and blob GC still gates
+on manifest references. Blob GC scans every stored manifest per push,
+which is O(repo manifest count) at v1 scale; a manifest-count trigger or
+background cadence is the obvious next step if repositories grow large.
+Tag retention is deliberately synchronous and failure-tolerant (a GC
+miss never fails the client push — it only delays reclamation). Golden
+conformance (T0.6) is untouched: the registry is a separate listener and
+does not alter any apiserver wire surface. Known v1 limits: multi-arch
+index children are pushed untagged and never age out (permanent
+retention); `_catalog` is unpaginated; and `DELETE blob` removes the
+global CAS file repo-wide (the trade-off noted above).

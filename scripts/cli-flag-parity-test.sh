@@ -134,6 +134,12 @@ live_help "t43-agent" agent --cluster-cidr --flannel-backend --flannel-iface --f
 # ---------------------------------------------------------------------------
 live_help "t-anyhome" server --anyhome-addr --disable-anyhome
 
+# ---------------------------------------------------------------------------
+# T6.3 (Q40) live-help surface: the embedded image-registry flags are wired
+# on `server` (the only subcommand that hosts the V2 registry plane).
+# ---------------------------------------------------------------------------
+live_help "t-registry" server --registry-addr --disable-registry --registry-tag-retention --registry-keep-tag
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

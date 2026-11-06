@@ -22,6 +22,7 @@ members = [
     "crates/scheduler",
     "crates/runtime",
     "crates/router",
+    "crates/registry",
     "crates/storage",
 ]
 
@@ -51,6 +52,7 @@ controllers = { path = "crates/controllers" }
 scheduler = { path = "crates/scheduler" }
 runtime = { path = "crates/runtime" }
 router = { path = "crates/router" }
+registry = { path = "crates/registry" }
 storage = { path = "crates/storage" }
 
 # Embedded upstream Rust components (link_repos/* symlinks; see decisions.md).
@@ -100,6 +102,10 @@ tower = { version = "0.5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "fs", "io-util", "sync", "process", "net"] }
 # Stream wrappers (watch body streaming, T1.2b).
 tokio-stream = "0.1"
+# Byte-stream adapters (registry blob GET streaming, T6.3 B2): ReaderStream
+# turns a `tokio::fs::File` into a `Stream` for `axum::body::Body::from_stream`
+# so layer pulls stream off disk instead of buffering the whole blob.
+tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

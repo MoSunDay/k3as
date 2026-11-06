@@ -48,6 +48,17 @@ pub struct ServerBind {
     /// `Some(addr)` = serve on that address; `None` = disabled
     /// (`--disable-anyhome`).
     pub anyhome: Option<String>,
+    /// Embedded image registry (T6.3, Q40): `Some` = serve the Docker
+    /// Registry HTTP API v2; `None` = disabled (`--disable-registry`).
+    pub registry: Option<RegistryBind>,
+}
+
+/// Embedded image-registry wiring (T6.3, Q40): the listen address plus the
+/// retention/keep-forever policy the push path enforces.
+#[derive(Clone, Debug)]
+pub struct RegistryBind {
+    pub addr: String,
+    pub cfg: registry::RegistryConfig,
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
@@ -86,6 +97,9 @@ pub fn run_agent(
 /// kubelet's teardown (T4.1 follow-up, Sprint 28). Matches the golden
 /// harness's shim grace window so the two bounds agree.
 const SANDBOX_GONE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// T6.3 (Q40): cap the registry's graceful HTTP drain so an interrupted blob upload cannot wedge shutdown.
+const REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Poll the CRI sandbox list until it is empty (bounded by `max`). An empty
 /// list means every shim of this run is gone, so stopping containerd cannot
@@ -186,6 +200,9 @@ fn run_supervised(
         // T-anyhome (Q36): embedded anyhome NFSv3 workspace plane
         // (server-only). Drained after flanneld, before the API surface.
         let mut anyhome_drain: Option<tokio::task::JoinHandle<()>> = None;
+        // T6.3 (Q40): embedded image registry (server-only). Drained right
+        // after anyhome, before the API surface.
+        let mut registry_drain: Option<tokio::task::JoinHandle<()>> = None;
         if bind.is_none() {
             match node_runtime::start_agent_runtime(&cfg.data_dir, runtime_shutdown.clone()) {
                 Ok(task) => {
@@ -402,6 +419,25 @@ fn run_supervised(
                         ),
                     }
                 }
+                // T6.3 (Q40): the image registry is a standalone data plane
+                // (blob CAS + tag retention under `<data_dir>/registry/`).
+                // Degraded-but-booting, same as anyhome: a bind/fs failure
+                // is a warn, the API surface still comes up.
+                if let Some(rb) = &b.registry {
+                    match registry::spawn_registry(
+                        &cfg.data_dir,
+                        &rb.addr,
+                        rb.cfg.clone(),
+                        shutdown.clone(),
+                    ) {
+                        Ok(handle) => registry_drain = Some(handle),
+                        Err(e) => tracing::warn!(
+                            target: "init-pro",
+                            error = %e,
+                            "registry spawn failed (image plane degraded)"
+                        ),
+                    }
+                }
                 // T3.2 (Q23): the scheduler reuses the controllers framework
                 // (informer/workqueue/leader-election) over the same storage
                 // Arc — one more in-process component, no loopback HTTP.
@@ -532,6 +568,21 @@ fn run_supervised(
         if let Some(h) = anyhome_drain {
             let _ = h.await;
             tracing::info!(target: "init-pro", role, "anyhome drained");
+        }
+        // T6.3 (Q40): drain the image registry alongside the NFS data plane
+        // (data plane, before the API surface) so no blob IO survives it.
+        if let Some(mut h) = registry_drain {
+            match tokio::time::timeout(REGISTRY_DRAIN_TIMEOUT, &mut h).await {
+                Ok(_) => tracing::info!(target: "init-pro", role, "registry drained"),
+                Err(_) => {
+                    h.abort();
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "registry drain timed out; listener aborted"
+                    );
+                }
+            }
         }
         // Sprint 18 / S4 (Q28): drain the Router service plane AFTER the
         // agent runtime and BEFORE the API surface — nodePort listeners stop

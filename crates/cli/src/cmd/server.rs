@@ -90,6 +90,47 @@ pub struct ServerCmd {
     #[arg(long = "disable-anyhome", env = "INIT_PRO_DISABLE_ANYHOME")]
     pub disable_anyhome: bool,
 
+    /// Embedded image registry listen address (T6.3, Q40): Docker Registry
+    /// HTTP API v2 (ping/catalog/tags/manifests/blobs) on this ONE port.
+    /// env `INIT_PRO_REGISTRY_ADDR`. Defaults to `registry::DEFAULT_ADDR`
+    /// (port 5000 collides with macOS AirPlay); v1 assumes bind==advertise.
+    #[arg(
+        long = "registry-addr",
+        env = "INIT_PRO_REGISTRY_ADDR",
+        default_value = "127.0.0.1:15000",
+        value_name = "ADDR"
+    )]
+    pub registry_addr: String,
+
+    /// Disable the embedded image registry (T6.3, Q40).
+    /// env `INIT_PRO_DISABLE_REGISTRY`: like `--disable-anyhome`, clap v4
+    /// reads the env value through the bool value parser, so ONLY the exact
+    /// spellings `true`/`false` are accepted; an unset env + no flag leaves
+    /// the registry enabled.
+    #[arg(long = "disable-registry", env = "INIT_PRO_DISABLE_REGISTRY")]
+    pub disable_registry: bool,
+
+    /// Keep newest N tags per repository; 0 = unlimited (T6.3, Q40).
+    /// env `INIT_PRO_REGISTRY_TAG_RETENTION`.
+    #[arg(
+        long = "registry-tag-retention",
+        env = "INIT_PRO_REGISTRY_TAG_RETENTION",
+        default_value_t = 10,
+        value_name = "N"
+    )]
+    pub registry_tag_retention: usize,
+
+    /// Keep-forever repo:tag glob pattern (`*` wildcard), repeatable;
+    /// patterns never count toward retention (T6.3, Q40).
+    /// env `INIT_PRO_REGISTRY_KEEP_TAG` (one pattern per env value; repeat
+    /// the flag for more) — unioned with the on-disk `keep.json` list.
+    #[arg(
+        long = "registry-keep-tag",
+        env = "INIT_PRO_REGISTRY_KEEP_TAG",
+        value_name = "REPO:TAG"
+    )]
+    pub registry_keep_tag: Vec<String>,
+
     /// Disable the network-policy controller.
     #[arg(long = "disable-network-policy")]
     pub disable_network_policy: bool,

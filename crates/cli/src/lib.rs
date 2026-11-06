@@ -151,6 +151,14 @@ where
                             svc.disable_anyhome,
                             &svc.anyhome_addr,
                         ),
+                        // T6.3 (Q40): None = --disable-registry.
+                        registry: (!svc.disable_registry).then(|| runtime::RegistryBind {
+                            addr: svc.registry_addr.clone(),
+                            cfg: registry::RegistryConfig {
+                                retain: svc.registry_tag_retention,
+                                keep_extra: svc.registry_keep_tag.clone(),
+                            },
+                        }),
                     },
                 ),
                 Err(e) => {
@@ -349,6 +357,36 @@ mod tests {
                     crate::anyhome::anyhome_endpoint(s.disable_anyhome, &s.anyhome_addr),
                     None
                 );
+            }
+            _ => panic!("expected Server"),
+        }
+    }
+
+    /// T6.3 (Q40): `--registry-addr`/`--disable-registry`/
+    /// `--registry-tag-retention`/`--registry-keep-tag` are init-pro (not
+    /// k3s) flags, so they must NOT be in the T0.4 noop-strip table -- this
+    /// parse proves they survive `strip_noop` and reach clap end-to-end
+    /// (a registration mistake would silently drop them from argv).
+    #[test]
+    fn registry_flags_survive_noop_strip_and_parse() {
+        let cli = Cli::try_parse_from([
+            "init-pro",
+            "server",
+            "--registry-addr",
+            "127.0.0.1:15999",
+            "--registry-tag-retention",
+            "3",
+            "--registry-keep-tag",
+            "app:stable*",
+            "--disable-registry",
+        ])
+        .expect("registry flags accepted");
+        match cli.command {
+            Some(Command::Server(s)) => {
+                assert_eq!(s.registry_addr, "127.0.0.1:15999");
+                assert_eq!(s.registry_tag_retention, 3);
+                assert_eq!(s.registry_keep_tag, vec!["app:stable*".to_string()]);
+                assert!(s.disable_registry);
             }
             _ => panic!("expected Server"),
         }

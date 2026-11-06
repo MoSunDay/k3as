@@ -116,6 +116,10 @@ mod tests {
             cluster_cidr: "10.42.0.0/16".to_string(),
             anyhome_addr: "127.0.0.1:11111".to_string(),
             disable_anyhome: false,
+            registry_addr: "127.0.0.1:15000".to_string(),
+            disable_registry: false,
+            registry_tag_retention: 10,
+            registry_keep_tag: vec![],
         }
     }
 
