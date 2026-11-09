@@ -39,6 +39,15 @@
 //! (`init-pro.io/v1`, Workflow step children) ride the Workflow queue:
 //! their events enqueue the owning Workflow, which re-aggregates phases on
 //! the 5s resync.
+//!
+//! T4.3 Scope B / T5.6 (decision **Q41**): the embedded ServiceLB
+//! (klipper-lb equivalent) announce controller. LoadBalancer-typed
+//! Service events and Node events fan out into a single-worker
+//! `service_lbs` queue whose reconciler writes
+//! `status.loadBalancer.ingress` (explicit `spec.loadBalancerIP` or the
+//! first node InternalIP). `--disable-servicelb`
+//! ([`ManagerConfig::disable_servicelb`]) keeps the worker AND the
+//! enqueues fully off.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,6 +77,12 @@ pub struct ManagerConfig {
     /// volume auto-mounted from it; `None` (the `spawn` default) leaves
     /// step pods byte-identical to the pre-Q36 builder output.
     pub workspace_nfs: Option<String>,
+    /// `--disable-servicelb` (T4.3 Scope B / T5.6, decision **Q41**):
+    /// when true the embedded ServiceLB announce controller stays fully
+    /// off -- no worker is spawned and nothing is enqueued into its queue
+    /// (an external LB manager owns `status.loadBalancer.ingress`).
+    /// Default `false` (embedded ServiceLB on, k3s parity).
+    pub disable_servicelb: bool,
 }
 
 pub(crate) struct Queues {
@@ -81,6 +96,8 @@ pub(crate) struct Queues {
     pub(crate) workflows: Arc<WorkQueue>,
     /// Node podCIDR allocator (T4.3 Scope A); single worker by design.
     pub(crate) node_cidrs: Arc<WorkQueue>,
+    /// ServiceLB announce (T4.3 Scope B / T5.6, Q41); single worker.
+    pub(crate) service_lbs: Arc<WorkQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +108,9 @@ pub(crate) enum Kind {
     StatefulSet,
     DaemonSet,
     Service,
+    /// ServiceLB announce (T4.3 Scope B / T5.6, Q41): shares the Services
+    /// cache; keys are the same `ns/name` shape as [`Kind::Service`].
+    ServiceLb,
     Namespace,
     Workflow,
     NodeCidr,
@@ -123,6 +143,10 @@ impl ControllerManager {
         // T-anyhome (Q36): the Workflow controller's `/workspace` auto-mount
         // endpoint, threaded to the worker dispatch next to cluster_cidr.
         let workspace_nfs: Arc<Option<String>> = Arc::new(cfg.workspace_nfs.clone());
+        // ServiceLB (T4.3 Scope B / T5.6, Q41): the embedded klipper-lb
+        // announce controller is default-ON; --disable-servicelb keeps both
+        // its worker and its enqueues fully off (Q41).
+        let disable_servicelb = cfg.disable_servicelb;
         let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
         let now: NowFn = Arc::new(|| {
             SystemTime::now()
@@ -152,6 +176,7 @@ impl ControllerManager {
             namespaces: Arc::new(WorkQueue::new()),
             workflows: Arc::new(WorkQueue::new()),
             node_cidrs: Arc::new(WorkQueue::new()),
+            service_lbs: Arc::new(WorkQueue::new()),
         });
 
         let supervisor = tokio::spawn(async move {
@@ -177,6 +202,7 @@ impl ControllerManager {
                     now.clone(),
                     cluster_cidr.clone(),
                     workspace_nfs.clone(),
+                    disable_servicelb,
                 );
                 loop {
                     tokio::select! {

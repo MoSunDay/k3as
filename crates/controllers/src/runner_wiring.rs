@@ -17,6 +17,10 @@
 //! caches drive the fan-out. T7.3/A5: Agent events (init-pro.io/v1
 //! children of Workflows) enqueue only the owning Workflow -- the
 //! scheduler owns Agent binding, so no Agent queue/worker exists.
+//! T4.3 Scope B / T5.6 (Q41): LoadBalancer-typed Service events also
+//! reach the `service_lbs` queue, and Node events re-enqueue every cached
+//! LB Service (a late node InternalIP still gets announced); both enqueues
+//! and the worker are skipped under `disable_servicelb`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +29,7 @@ use storage::{KeyPrefix, WatchEvent};
 use tokio::task::JoinHandle;
 
 use crate::client::Client;
-use crate::controllers::{gc, node_cidr, Caches};
+use crate::controllers::{gc, node_cidr, service_lb, Caches};
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
 use crate::leaderelection::NowFn;
 use crate::object;
@@ -35,6 +39,7 @@ use crate::runner_worker::{
 };
 use crate::stop::Stop;
 
+#[allow(clippy::too_many_arguments)] // 8 = over the lint's ceiling; all live config
 pub(crate) fn spawn_set(
     client: &Arc<dyn Client>,
     caches: &Arc<Caches>,
@@ -43,6 +48,7 @@ pub(crate) fn spawn_set(
     now: NowFn,
     cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
     workspace_nfs: Arc<Option<String>>,
+    disable_servicelb: bool,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -102,12 +108,22 @@ pub(crate) fn spawn_set(
 
     // Service events -> service queue (+ GC handoff: Services own nothing
     // in the sweep universe, but the hook keeps the owner set uniform).
+    // ServiceLB (T4.3 Scope B / T5.6, Q41): LoadBalancer-typed Services
+    // ALSO enqueue the service_lb queue so the announce controller runs;
+    // everything else skips it (the queue stays quiet). When ServiceLB is
+    // disabled (--disable-servicelb, Q41) nothing is enqueued at all.
     let q = queues.services.clone();
+    let q_slb = queues.service_lbs.clone();
+    let slb_enabled = !disable_servicelb;
     let gc_client = client.clone();
     let gc_caches = caches.clone();
     let svc_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
         if let Some(k) = event_object_key(ev) {
-            q.add(k);
+            q.add(k.clone());
+            if slb_enabled && event_object(ev).is_some_and(|svc| service_lb::is_load_balancer(&svc))
+            {
+                q_slb.add(k);
+            }
         }
         spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
@@ -192,13 +208,29 @@ pub(crate) fn spawn_set(
     // DaemonSet placement source of truth, so any node create/delete or
     // label change must re-evaluate each DaemonSet (node -> DS fan-out;
     // the same list-and-enqueue shape as pod -> matching Services).
+    // ServiceLB (T4.3 Scope B / T5.6, Q41) rides the same fan-out: a late
+    // Node (or a late InternalIP report) is often the FIRST time an
+    // announce IP exists, so every cached LoadBalancer Service is
+    // re-enqueued into the service_lb queue (skipped entirely when
+    // ServiceLB is disabled, Q41).
     let q_ds = queues.daemonsets.clone();
+    let q_slb = queues.service_lbs.clone();
+    let slb_enabled = !disable_servicelb;
     let ds_caches = caches.clone();
     let node_handler: EventHandler = Arc::new(move |_ev: &WatchEvent| {
         for ds in ds_caches.daemonsets.list(None) {
             if let Some(name) = object::name(&ds) {
                 let ns = object::namespace(&ds).unwrap_or("default");
                 q_ds.add(format!("{ns}/{name}"));
+            }
+        }
+        if slb_enabled {
+            for svc in ds_caches.services.list(None) {
+                if service_lb::is_load_balancer(&svc) {
+                    if let (Some(ns), Some(name)) = (object::namespace(&svc), object::name(&svc)) {
+                        q_slb.add(format!("{ns}/{name}"));
+                    }
+                }
             }
         }
     });
@@ -342,6 +374,23 @@ pub(crate) fn spawn_set(
             &queue,
             Kind::NodeCidr,
             cluster_cidr,
+            workspace_nfs.clone(),
+            &stop,
+            now.clone(),
+        ));
+    }
+
+    // ServiceLB announce (T4.3 Scope B / T5.6, Q41): ONE worker, spawned
+    // ONLY when enabled -- with --disable-servicelb neither the worker nor
+    // any enqueue exists (the queue would never drain otherwise), so an
+    // external LB manager owns status.loadBalancer.ingress exclusively.
+    if !disable_servicelb {
+        let queue = queues.service_lbs.clone();
+        handles.push(spawn_worker(
+            client,
+            caches,
+            &queue,
+            Kind::ServiceLb,
             workspace_nfs.clone(),
             &stop,
             now.clone(),

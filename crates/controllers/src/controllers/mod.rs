@@ -25,6 +25,10 @@ pub mod node_cidr;
 pub mod ordinal;
 pub mod replicaset;
 pub mod rollout;
+/// ServiceLB announce controller (T4.3 Scope B / T5.6, Q41): the embedded
+/// klipper-lb equivalent -- `status.loadBalancer.ingress = [{ip}]` for
+/// `type=LoadBalancer` Services (explicit IP or first node InternalIP).
+pub mod service_lb;
 pub mod statefulset;
 pub mod workflow;
 /// A5 (T7.3, decision **Q35**): Workflow step -> `init-pro.io/v1 Agent`

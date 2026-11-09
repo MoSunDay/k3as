@@ -278,11 +278,14 @@ async fn start_listener(
 }
 
 /// Desired listener set from a state snapshot: one entry per allocated
-/// `nodePort` of every NodePort-type Service.
+/// `nodePort` of every NodePort-type Service — and, since **Q41**
+/// (T5.6 / T4.3 Scope B), every LoadBalancer-type Service too: an LB
+/// builds on NodePort in k8s, so the nodePort plane serves it the same
+/// way (the VIP byte-pipe lives in [`crate::servicelb`]).
 fn desired_listeners(state: &ResolverState) -> BTreeMap<u16, UpstreamRef> {
     let mut out = BTreeMap::new();
     for (key, svc) in &state.services {
-        if svc.kind_type != "NodePort" {
+        if !matches!(svc.kind_type.as_str(), "NodePort" | "LoadBalancer") {
             continue;
         }
         for p in &svc.ports {
@@ -321,6 +324,7 @@ mod tests {
             name: "web".into(),
             kind_type: kind.into(),
             ports,
+            ingress_ip: None,
         }
     }
 
@@ -364,6 +368,30 @@ mod tests {
         );
         let d = desired_listeners(&st);
         assert_eq!(d.keys().copied().collect::<Vec<_>>(), vec![30080, 30443]);
+    }
+
+    /// Q41 (T5.6 / T4.3 Scope B): LoadBalancer-type Services are admitted
+    /// on the nodePort plane — an LB builds on NodePort in k8s. Services
+    /// without an allocated nodePort still contribute nothing.
+    #[test]
+    fn desired_admits_loadbalancer_services() {
+        let mut st = ResolverState::default();
+        st.services.insert(
+            "default/lb".into(),
+            svc("LoadBalancer", vec![svc_port(80, Some(30090))]),
+        );
+        st.services.insert(
+            "default/lb-bare".into(),
+            svc("LoadBalancer", vec![svc_port(80, None)]),
+        );
+        st.services.insert(
+            "default/cip".into(),
+            svc("ClusterIP", vec![svc_port(80, Some(30091))]),
+        );
+        let d = desired_listeners(&st);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[&30090].service, "default/lb");
+        assert_eq!(d[&30090].port, PortRef::Number(80));
     }
 
     /// NodePortConfig keeps the frozen CLI field and the opt-in gateway.

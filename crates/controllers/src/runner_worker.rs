@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use crate::client::Client;
 use crate::controllers::{
     cronworkflow, daemonset, deployment, endpoints, gc, namespace, node_cidr, replicaset,
-    statefulset, workflow, Caches,
+    service_lb, statefulset, workflow, Caches,
 };
 use crate::error::ControllerError;
 use crate::informer::event_object;
@@ -255,6 +255,17 @@ pub(crate) async fn reconcile_key(
             let ep_key = Key::new("", "endpoints", ns, name);
             let existing = client.get(&ep_key).await?;
             endpoints::reconcile(client, &svc, existing.as_ref()).await
+        }
+        // ServiceLB announce (T4.3 Scope B / T5.6, Q41): the Service is
+        // re-read FRESH through the client (the reconcile owns its CAS
+        // base), so the cache is only the deleted-from-cache no-op gate.
+        // The worker itself is only spawned when ServiceLB is enabled
+        // (ManagerConfig::disable_servicelb, Q41).
+        Kind::ServiceLb => {
+            if caches.services.get(ns, name).is_none() {
+                return Ok(()); // deleted from cache: nothing to announce
+            }
+            service_lb::reconcile(client, ns, name).await
         }
         // Handled by the cluster-scoped early return above; the namespaced
         // split is meaningless for a bare-name key.

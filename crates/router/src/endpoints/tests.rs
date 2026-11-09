@@ -145,3 +145,24 @@ fn ns_name_and_bare_name_lookup() {
     assert_eq!(find_service(&st, "one").unwrap().0, "aaa/one"); // BTreeMap order
     assert_eq!(find_service(&st, "bbb/one").unwrap().0, "bbb/one"); // exact wins
 }
+/// Q41 (T5.6 / T4.3 Scope B): the LB VIP is folded from
+/// `status.loadBalancer.ingress[0].ip`, lenient when absent/empty.
+#[test]
+fn service_view_folds_announced_ingress_ip() {
+    let spec = json!({"type": "LoadBalancer", "ports": [{"port": 80}]});
+    let announced = serde_json::json!({
+        "metadata": {"name": "web", "namespace": "default"}, "spec": spec,
+        "status": {"loadBalancer": {"ingress": [{"ip": "192.0.2.10"}]}}
+    });
+    assert_eq!(
+        parse_service(&announced).unwrap().ingress_ip.as_deref(),
+        Some("192.0.2.10")
+    );
+    let bare = svc("web", "default", spec);
+    assert_eq!(parse_service(&bare).unwrap().ingress_ip, None);
+    let empty = serde_json::json!({
+        "metadata": {"name": "web", "namespace": "default"}, "spec": spec,
+        "status": {"loadBalancer": {"ingress": [{"ip": ""}]}}
+    });
+    assert_eq!(parse_service(&empty).unwrap().ingress_ip, None);
+}

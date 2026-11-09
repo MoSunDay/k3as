@@ -42,6 +42,10 @@ pub struct ServiceView {
     /// `spec.type` (defaulted `ClusterIP` when absent).
     pub kind_type: String,
     pub ports: Vec<SvcPort>,
+    /// `status.loadBalancer.ingress[0].ip` — the announced VIP for
+    /// `LoadBalancer`-type Services (**T5.6 / T4.3 Scope B**, Q41);
+    /// `None` while unannounced.
+    pub ingress_ip: Option<String>,
 }
 
 /// Endpoints port entry; `port` is the resolved container port.
