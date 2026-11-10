@@ -4,6 +4,54 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- anyhome-pod-mounts: Sprint 35 + 36b (2026-11-09/10) — T7.5 Pod-level
+  anyhome annotation mounts (**Q43**): `init-pro.io/anyhome` (rw/ro) +
+  `init-pro.io/anyhome-mounts` (multi-path) on any Pod default to NFS
+  volumes+mounts via `apiserver/src/pod_workspace.rs::prepare` —
+  injected uniformly at create/apply/replace (36b: a stale-manifest PUT
+  replace no longer strips injected volumes); invalid values 422;
+  `--disable-anyhome` stays fully lazy (byte-identical, no validation).
+  36b hardening: `resolve_volume_name` disambiguates sanitize-collision
+  paths (`/A_B` + `/a-b` once silently shared the first volume's server
+  path) — same-nfs-path alias (one volume, several mounts), A4-owned
+  base binds without rename, else deterministic -2/-3 in annotation
+  order; mount dedup per-mountPath only; identity guard fires only when
+  an anyhome annotation is present. Keeper (`cli/src/anyhome_keeper.rs`)
+  pre-creates `/pod/<ns>/<name>` dirs; kubelet unchanged (generic nfs
+  volume + client-enforced readOnly). Tests 984 -> 991 (+5 unit +2
+  wire); `scripts/anyhome-e2e.sh` 7/0 (A1/P2/K1 + P3/P4/P5); golden
+  73/0.
+- workflow-engine-extraction: Sprint 36 (2026-11-10) — Q42
+  reference-style embedding for the last duplicated component: the
+  argoproj.io typed model + workflow engine moved OUT to the pinned
+  `link_repos/arust-workflow` (`workflow-model` + `workflow-engine`,
+  8th link_repos pin @ 687ed325; 79 upstream tests, clippy clean).
+  In-tree residue is thin adapters only: `api/src/argoproj.rs` (39-line
+  re-export shim; Q10 JSON wire + fidelity fixtures byte-identical),
+  `controllers/src/controllers/workflow_bridge.rs` (151-line `Kube`
+  seam over the in-process Client with lossless
+  Conflict/AlreadyExists/NotFound mapping) + 31/23-line
+  workflow/cronworkflow adapters. Same sprint: router hot-reload REAL
+  bug fix (`plugins_noop()` pointed at a missing dir — openrusty reload
+  `discover` hard-fails, so every Ingress recompile on a fresh host
+  404ed forever; dir now created on demand) + Q41 breakage wiring
+  (`parse_service` ingress_ip, `disable_servicelb` -> ManagerConfig);
+  any-home pin bump a1e2d9c -> 42b8d8e. Gates: 984/0, clippy zero,
+  golden 73/0.
+- servicelb: Sprint 35 (2026-11-09) — T4.3 Scope B / T5.6 embedded
+  ServiceLB L4 (**Q41**), klipper-lb equivalent with zero external
+  provider: `controllers/src/controllers/service_lb.rs` announces the
+  VIP (explicit `spec.loadBalancerIP` else first Node InternalIP; a
+  Service with non-empty `status.loadBalancer.ingress` is never
+  rewritten — external MetalLB/cloud stays possible; CAS status write,
+  lost CAS requeues; `--disable servicelb` removes it) +
+  `router/src/servicelb.rs` raw-TCP L4 plane (one listener per
+  vip:servicePort round-robin over ready Endpoints on a dedicated host
+  thread; bind failure = announce-only with ONE warn per key;
+  empty-backend accept = immediate FIN). NodePort plane admits
+  LoadBalancer-type Services (an LB builds on NodePort). +13 tests (9
+  announce reconciler, 3 L4 plane, 1 endpoints fold).
+
 - registry: Sprint 34 (2026-11-06) — T6.3 hardening (**Q40**), no wire
   contract change: `api/` module split + test split (`v2_http.rs` /
   `v2_manifest.rs` / `support/`), manifest digest grammar gate (400

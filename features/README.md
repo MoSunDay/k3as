@@ -16,6 +16,9 @@ status of record lives in `plans/init-pro/index.md`.
 | multicall-cli | done (T0.1, T0.4) | - (see SSOT) | multicall, cli | `crates/multicall/`, `crates/cli/` |
 | build-bundling | done (T0.2) | - (see SSOT) | vendor | `crates/vendor/`, `crates/init-pro/build.rs` |
 | registry | done (T6.3, Q40) | [card](registry.md) | registry, cli | `crates/registry/`, `crates/cli/src/runtime.rs`, `scripts/registry-e2e.sh` |
+| anyhome-pod-mounts | done (T7.5, Q43) | - (see SSOT) | apiserver, cli | `crates/apiserver/src/pod_workspace.rs`, `crates/cli/src/anyhome_keeper.rs`, `scripts/anyhome-e2e.sh` |
+| workflow-engine-extraction | done (T7.3, Q42) | - (see SSOT) | api, controllers | `crates/api/src/argoproj.rs`, `crates/controllers/src/controllers/workflow_bridge.rs` |
+| servicelb | done (T4.3 Scope B / T5.6, Q41) | - (see SSOT) | controllers, router | `crates/controllers/src/controllers/service_lb.rs`, `crates/router/src/servicelb.rs` |
 
 Notes:
 - Cards summarize what an agent needs to orient quickly; they point back to
@@ -24,4 +27,8 @@ Notes:
 - The kubelet card tracks T4.2: Scope A+B+C are all done — T4.2 closed
   at Sprint 24 (Q31; `kubectl logs/exec` over the apiserver relay).
   See `agents.md` and root `CHANGELOG.md` for the close-out.
+- anyhome-pod-mounts / workflow-engine-extraction / servicelb have no
+  dedicated card yet - read their T7.5 / T7.3 / T4.3+T5.6 entries in
+  `plan/07-agent-scheduling.md`, `plan/04-node.md` and
+  `plan/05-ingress-lua.md`.
 - Sprint-level history: `CHANGELOG.md`. Feature-level deltas: [changelog.md](changelog.md).
