@@ -38,6 +38,7 @@ pub async fn serve<F>(
     store: Arc<dyn StorageBackend>,
     addr: SocketAddr,
     server_address: String,
+    workspace_nfs: Option<String>,
     shutdown: F,
 ) -> std::io::Result<()>
 where
@@ -50,6 +51,7 @@ where
         registry: Arc::new(registry),
         store,
         server_address,
+        workspace_nfs,
     });
 
     let (fired_tx, fired_rx) = tokio::sync::oneshot::channel::<()>();

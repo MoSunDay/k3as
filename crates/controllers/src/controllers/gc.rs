@@ -196,11 +196,12 @@ fn owner_in_cache(caches: &Caches, kind: &str, ns: &str, owner_name: &str) -> bo
 mod tests {
     use super::*;
     use crate::client::StorageClient;
-    use crate::controllers::workflow_agent::build_agent;
-    use crate::controllers::workflow_plan::{PlannedStep, StepTarget};
+    // Q42: the workflow builders moved to the arust-workflow engine.
     use serde_json::json;
     use std::sync::Arc;
     use storage::{EmbeddedStorage, StoredEntry, WatchEvent};
+    use workflow_engine::agent::build_agent;
+    use workflow_engine::plan::{PlannedStep, StepTarget};
 
     #[test]
     fn managed_owner_kind_table() {

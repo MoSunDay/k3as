@@ -1,6 +1,6 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 37 TODOs. The
+This file is the **single source of truth** for all 38 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
 grouping for easier editing). **Edit both in lock-step.**
 
@@ -29,7 +29,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T3.4 | 3 | HA 多 server (etcd 集群 + 选举) | not-started | T2.2, T3.3 |
 | T4.1 | 4 | containerd bundling 与 CRI 实现 | done | T0.2 |
 | T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24) | T4.1, T3.2 |
-| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | in-progress (Scope A flannel CNI done, Q34) | T4.2 |
+| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | in-progress (Scope A flannel CNI Q34 + Scope B ServiceLB announce/L4 Q41 done; 剩余 host-gw/multi-node/netpol 面) | T4.2 |
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
 | T4.6 | 4 | Pod 日志布局与轮转 (日期目录 + 100MB copytruncate, Q39) | done (Sprint 32) | T4.2 |
@@ -38,21 +38,23 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
 | T5.4 | 5 | 内置 Router 核心 + Ingress (networking.k8s.io/v1) → 路由编译 (openrusty h2c 网关嵌入, Q32) | done | T5.2, T5.3, T1.1 |
 | T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含 openrusty `apply_config` 请求间 no-restart reload；剩余：live informer / drain / shared-dict 等价 / 动态证书 等价) | not-started | T5.4 |
-| T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane done, openrusty 承载, Q28/Q32) | T5.4, T4.3 |
+| T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane Q28/Q32 + announce/L4 数据面 Q41 done; 剩余 SNI/TLS passthrough, 依赖 T5.5) | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
 | T6.2 | 6 | 标准 addon (CoreDNS/local-storage/metrics-server) | not-started | T6.1 |
 | T6.3 | 6 | 内嵌 Docker Registry v2 镜像仓库（tag 保留策略，默认最近 10 + keep-forever 不计入，Q40） | done (Sprint 33; Sprint 34 hardening) | T0.3 |
 | T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A Sprint 26, Q35 + Phase B 节点执行 Sprint 30, Q37) | T3.2, T1.2 |
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
-| T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置) | done (Scope A+B+C, Sprint 23) | T1.2, T3.1 |
+| T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置; engine+model 抽取为 link_repos/arust-workflow pin, Q42) | done (Scope A+B+C, Sprint 23; Q42 抽取 Sprint 36) | T1.2, T3.1 |
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
+| T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA defaulting + keeper 预建目录, Q43) | done (Sprint 35, Q43) | T7.4, T1.2 |
 
-**Counts:** 37 TODOs · 25 done · 2 in-progress (T5.6 NodePort plane:
-Router service plane + service-traffic e2e, Q28; T4.3 Scope A flannel
-CNI done, Q34 — Scope B/ServiceLB L4 剩余)
+**Counts:** 38 TODOs · 26 done · 2 in-progress (T5.6 剩余 SNI/TLS
+passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
+已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
+与 Scope B ServiceLB Q41 已 done)
 · 10 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
-Layer4=6 · Layer5=7 · Layer6=3 · Layer7=4.
+Layer4=6 · Layer5=7 · Layer6=3 · Layer7=5.
 
 ---
 
@@ -80,6 +82,19 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Sprint 36 — workflow 抽取独立仓库 arust-workflow (link_repos 第 8 pin, Q42) + router 热重载真 bug 修复.**
+  `github.com/MoSunDay/arust-workflow` @ `687ed325`（Q38 bootstrap 收编, 与 openrusty/rdb 同型）: 双 crate —— `workflow-model`
+  (argoproj.io/v1alpha1 全字段类型, 自 k3as `crates/api/src/argoproj/` 17 模块原样平移, 30 fidelity 单测) + `workflow-engine`
+  (plan/dag/phase/status/pod/agent/cron_expr + Workflow/CronWorkflow reconciler, 纯函数 + `Kube` trait 接缝, 49 单测; forbid(unsafe),
+  clippy -D warnings 干净)。k3as 侧: `crates/api/src/argoproj.rs` 收敛为单文件 re-export shim（`register()`/GROUP/VERSION 保留,
+  fidelity fixtures 不变）; `controllers/workflow_bridge.rs`（NEW）以 `EngineClient` 实现 `Kube`（HTTP Client + 双向错误映射 +
+  workspace/time 契约漂移测试）, `workflow.rs`/`cronworkflow.rs` 变薄适配器, runner/informer 接线不动。同 sprint 修复:
+  ① router `plugins_noop()` 指向不存在目录 —— openrusty reload `discover` 对缺失目录返回硬 Io 错误（仅 bootstrap 容忍）,
+  导致全新主机上每次 Ingress 热重编译失败（`ingress_gateway` 2 用例红, 父提交即红）; 改为按需 `create_dir_all` 该专用空目录。
+  ② a9a61db 遗留编译破损接线: `ServiceView.ingress_ip`（`status.loadBalancer.ingress[0].ip`, 空串过滤）+ `disable_servicelb`
+  → `ManagerConfig`。③ link_repos.lock: any-home 上游历史重写旧 pin 不可达 → 重钉可达 main tip `42b8d8e`（rdb 先例）。
+  Tests: workspace **984 passed / 0 failed**; clippy 0; golden 73/73。
+
 - **Sprint 29 — 21 类 served 资源全量 e2e 真实回归 + 2 个真 bug 根因修复 (T0.6 扩容; DRAIN_KINDS/Q20, T3.1b OrderedReady).**
   golden 39 → **73 checks**(评审后 72→73): G32-G46 资源面全类 CRUD/CAS/patch/generateName(含 ControllerRevision 直连 CRUD)+ watch ADDED/DELETED/replay + SSA 组代表(含首个 cluster-scoped
   IngressClass wire 路径); G50-G55 负面面(eviction 404 / deletecollection 405 / labelSelector 无过滤 / Q21 https 拒绝 / Q33 sqlite:// Unsupported /

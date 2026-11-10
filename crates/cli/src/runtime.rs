@@ -48,6 +48,10 @@ pub struct ServerBind {
     /// `Some(addr)` = serve on that address; `None` = disabled
     /// (`--disable-anyhome`).
     pub anyhome: Option<String>,
+    /// `--disable servicelb` (T4.3 Scope B / T5.6, Q41): skips the
+    /// ServiceLB announce controller and its worker (external LB then owns
+    /// `LoadBalancer`-type Services).
+    pub disable_servicelb: bool,
     /// Embedded image registry (T6.3, Q40): `Some` = serve the Docker
     /// Registry HTTP API v2; `None` = disabled (`--disable-registry`).
     pub registry: Option<RegistryBind>,
@@ -395,6 +399,8 @@ fn run_supervised(
                             // children get the /workspace contract from the
                             // anyhome endpoint (None = --disable-anyhome).
                             workspace_nfs: b.anyhome.clone(),
+                            // T4.3 Scope B (Q41): --disable servicelb.
+                            disable_servicelb: b.disable_servicelb,
                         },
                     );
                     tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
@@ -498,10 +504,15 @@ fn run_supervised(
                 }
                 let server_shutdown = shutdown.clone();
                 let addr = b.addr;
+                // T7.5 (Q43): thread the anyhome endpoint into the
+                // apiserver so the per-Pod anyhome defaulting is armed iff
+                // the NFS plane is on (None = --disable-anyhome: inert).
+                let workspace_nfs = b.anyhome.clone();
                 Some(tokio::spawn(async move {
-                    if let Err(e) = apiserver::serve(reg, store, addr, advertised, async move {
-                        server_shutdown.cancelled().await;
-                    })
+                    if let Err(e) =
+                        apiserver::serve(reg, store, addr, advertised, workspace_nfs, async move {
+                            server_shutdown.cancelled().await;
+                        })
                     .await
                     {
                         tracing::error!(target: "init-pro", role, "apiserver exited: {e}");

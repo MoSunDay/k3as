@@ -247,13 +247,16 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
     caller sets it); the empty-backend 503 gate and per-service isolation hold.
 
 - **状态 / Status** — in-progress (NodePort plane done, openrusty 承载,
-    Sprint 18 Q28 + Sprint 25 Q32)
+    Sprint 18 Q28 + Sprint 25 Q32; ServiceLB announce + raw-TCP L4 数据面
+    done, Sprint 35 **Q41** — 剩余 SNI/TLS passthrough, 依赖 T5.5)
 - **证据 / Evidence** — router endpoints reflector/resolver +
   `nodeport_plane` integration; service-traffic e2e ST1–ST6 6/6
-  (re-run green on the openrusty plane, Sprint 25); Q28/Q32 ADRs
-- **卡点 / Blockers** — remaining scope: LB VIP allocate/announce +
-    TCP/SNI stream routing need the T4.3 dataplane (Scope A flannel is
-    in, Q34 — coordinate there); ClusterIP dataplane deferred (Q28).
+  (re-run green on the openrusty plane, Sprint 25); Q28/Q32/Q41 ADRs;
+  Sprint 35 Q41: controllers `service_lb.rs` 9 测 + router `servicelb.rs`
+  3 测 + endpoints fold 1 测（LoadBalancer Service 经 NodePort 面可达）
+- **卡点 / Blockers** — remaining scope: TCP/SNI stream routing（TLS
+    passthrough）依赖 T5.5 TLS（未启动）; ClusterIP dataplane deferred
+    (Q28); LB announce 数据面与 T4.3 的对账已随 Q41 关闭。
 - **依赖 / Depends on** — T5.4, T4.3
 
 ---

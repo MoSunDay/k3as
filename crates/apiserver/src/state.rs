@@ -20,6 +20,10 @@ pub(crate) struct AppState {
     pub registry: Arc<SchemaRegistry>,
     pub store: Arc<dyn StorageBackend>,
     pub server_address: String,
+    /// The anyhome NFS endpoint (`host:port`) behind the per-Pod anyhome
+    /// defaulting (T7.5, Q43); `None` = `--disable-anyhome` -> the
+    /// annotations are inert and Pod bytes are untouched.
+    pub workspace_nfs: Option<String>,
 }
 
 /// A resource resolved from the schema for one REST request.

@@ -7,6 +7,130 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 36 — Q42: workflow 引用式内置收尾 — model/engine 抽取到 arust-workflow (T7.3) (2026-11-10)
+
+**Goal:** apply the one-codebase-one-home rule to the last duplicated
+component: the argoproj.io model (a 1:1 typed port, 17 modules under
+`crates/api/src/argoproj/`) and the workflow controller engine (7 modules
+under `crates/controllers`) both lived in-tree — every other embedded
+plane (openrusty Q32, rdb Q33, flannel Q34, opencoder Q35, anyhome/nfsserve
+Q36) was already a link_repos path-dep reference.
+
+**Delivered**
+- Extraction to the pinned `MoSunDay/arust-workflow` workspace
+  (`workflow-model` + `workflow-engine`, 8th link_repos pin @ 687ed325;
+  79 upstream unit tests, clippy clean): model = pure serde types,
+  engine = plan/dag/phase/status/pod/agent/cron_expr + the Workflow /
+  CronWorkflow reconcilers as pure functions over a small `Kube` seam.
+- `crates/api/src/argoproj.rs` (39 lines) replaces the 17-module tree:
+  `pub use workflow_model::*` + the kept `register()`/`GROUP`/`VERSION` —
+  `api::argoproj::*` consumer paths and the JSON wire (Q10) unchanged;
+  `tests/argoproj_fidelity.rs` fixtures byte-identical.
+- `crates/controllers/src/controllers/workflow_bridge.rs` (151 lines):
+  the engine's `Kube` seam over the in-process `Client` (Q19) with
+  bidirectional lossless error mapping (Conflict/AlreadyExists/NotFound)
+  + contract-drift tests; `workflow.rs` (31) / `cronworkflow.rs` (23)
+  are now thin adapters; runner/informer wiring untouched.
+- `link_repos.lock`: + arust-workflow pin; any-home bumped
+  a1e2d9c → 42b8d8e (upstream e2e/docs tip, zero patch delta).
+- decisions.md Q41/Q42 entries added (the debt the Q43 note recorded);
+  index/plan T4.3, T5.6, T7.3 rows updated in lock-step.
+- Router hot-reload REAL bug fixed (its two `ingress_gateway.rs` tests
+  were red at parent commit `93b704f`, root-caused this sprint):
+  `plugins_noop()` pointed at a NON-EXISTENT dir — openrusty's reload
+  `discover` hard-fails `ReloadError::Io` on a missing dir while only
+  `bootstrap` tolerates it, so every Ingress recompile on a fresh host
+  died ("plugins: io error: No such file or directory") and the gateway
+  404ed forever. Fix: `create_dir_all` the dedicated empty dir on demand
+  (bare `/tmp` stays forbidden — foreign `*.wasm` junk); both red tests
+  green.
+- `a9a61db` (Q41 ServiceLB) breakage wiring completed:
+  `router/endpoints.rs::parse_service` now reads
+  `status.loadBalancer.ingress[0].ip` (`ServiceView.ingress_ip`,
+  empty-string filtered) and `cli/runtime.rs` `ServerBind
+  .disable_servicelb` → `ManagerConfig` (from `--disable servicelb`) —
+  both were referenced-but-unwired at HEAD and broke the build.
+
+**Gates** — same fresh tree as the T7.5 counts below (984 passed / 0
+failed; clippy zero; golden see below; upstream suite green in its repo).
+
+## Sprint 35 — T7.5: anyhome Pod 级注解挂载 (Q43) (2026-11-09)
+
+**Goal:** open the anyhome NFSv3 memory plane to ANY Pod via annotations
+(previously Workflow step pods / Agents only): per-pod `/workspace` with
+rw/ro choice plus arbitrary custom shared paths — zero kubelet changes,
+zero pin (nfsserve/any-home) changes.
+
+**Changes**
+- `crates/common/src/workspace.rs` (SSOT): `init-pro.io/anyhome`
+  (`rw|ro|true|false`) + `init-pro.io/anyhome-mounts`
+  (`<server>:<container>[:ro|:rw],...`) pure parsers, `pod_workspace_path`
+  → `/pod/<ns>/<name>` (the extra `pod/` root keeps a namespace legally
+  named `workflow` from colliding with `/workflow/<id>`), deterministic
+  `anyhome-<path>` volume names; +8 unit tests.
+- `crates/apiserver/src/pod_workspace.rs` (NEW, 400 lines): create-time +
+  every-SSA-apply defaulting (SSA strips manager-owned fields absent from
+  the manager's next config, so created-branch-only injection would lose
+  the volumes); A4 user declarations win (mountPath / volume name / nfs
+  path dedup → idempotent); invalid annotation values → 422; plane off =
+  inert, byte-zero. Seam: `AppState.workspace_nfs`, `serve()` param,
+  `api_app_with_workspace_nfs()` (legacy `api_app` delegates None),
+  `cli/runtime.rs` threads `ServerBind.anyhome`. NEW integration suite
+  `tests/anyhome_pod_mounts.rs` (8 cases incl. SSA double-apply).
+- `crates/cli`: anyhome keeper grows a pods dimension (LIST → mkdir-p
+  `/pod/<ns>/<name>` + custom server paths; deletion still ignored, A5);
+  `prepare_fs_roots` creates the `pod/` root; +4 tests.
+- `scripts/anyhome-e2e.sh`: P3 (rw defaulting + bare-pod byte stability +
+  keeper dir ≤15s), P4 (`ro` → `readOnly: true`), P5 (multi custom mounts
+  + keeper dirs); curl/python3 degrade doctrine mirrors K1.
+
+**Gates**
+- `cargo fmt --all --check` → clean (repo crates; CI runs fmt before
+  bootstrap so the foreign pinned link_repos trees never enter scope)
+- `cargo build --workspace --locked` → ok
+- `cargo test --workspace --locked` → 984 passed / 0 failed (fresh tree;
+  includes +13 ServiceLB Q41 and the Q42-adapter suites)
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` → zero
+  warnings
+- `bash scripts/anyhome-e2e.sh` → 7 passed / 0 failed (A1/P2/K1 + P3/P4/P5)
+- `bash scripts/golden-conformance.sh` → **73 passed / 0 failed, exit 0**
+  (clean single run). Two earlier same-tree runs showed 66/7/1 and 54/16 —
+  root-caused to environment, not the diff: (a) a stale host `cni0` bridge
+  (10.42.1.1/24, leftover from a prior multi-node e2e) made every
+  flannel-CNI sandbox add fail (G25a/G25b/G26a-d); `ip link delete cni0
+  flannel.1` restores them; (b) OOM-kill + multi-run contention pressure
+  on the shared sandbox (G23 extender). Un-annotated pods stay
+  byte-stable (pinned by e2e P3 + the `anyhome_pod_mounts` suite).
+
+## Sprint 35 — Q41: embedded ServiceLB L4 + announce controller (T4.3 Scope B / T5.6) (2026-11-09, commit a9a61db)
+
+**Goal:** k3s-parity `type=LoadBalancer` with zero external provider:
+announce a VIP and forward `vip:servicePort` to ready Endpoints — both
+inside the single binary.
+
+**Delivered** (commit a9a61db, +933/-5 across 9 files)
+- `controllers/src/controllers/service_lb.rs` (353 lines, klipper-lb
+  equivalent): VIP = explicit `spec.loadBalancerIP` else first Node
+  InternalIP; a Service that already carries a NON-EMPTY
+  `status.loadBalancer.ingress` is never rewritten (external
+  MetalLB/cloud stays possible); fresh Service+Node reads then CAS
+  status write, lost CAS → rate-limited requeue; single-worker
+  `service_lbs` queue fed by Service AND Node events; `--disable
+  servicelb` removes it (`ManagerConfig::disable_servicelb`).
+- `router/src/servicelb.rs` (432 lines): raw-TCP L4 plane — one listener
+  per `vip:servicePort` round-roining ready Endpoints, on a dedicated
+  host worker thread re-driven on Services/Endpoints folds; bind failure
+  = announce-only (ONE warn per key — the VIP usually belongs to the
+  provider); empty-backend accepted connection = immediate FIN; drain
+  aborts accept loops, per-connection byte-pipes die with the runtime.
+- `router/src/nodeport.rs`: NodePort plane admits LoadBalancer-type
+  Services too (an LB builds on NodePort in k8s); `endpoints.rs`
+  resolver exposes the Service type + announced ingress IP.
+- +13 tests (9 announce reconciler, 3 L4 plane, 1 endpoints fold).
+
+**Gates** — verified in the same fresh tree (test 984/0, clippy
+zero, golden see the T7.5 entry above); decision recorded as **Q41**.
+
 ## Sprint 34 — T6.3 hardening: B1-B5 close-out + R7 real-pull evidence (Q40) (2026-11-06)
 
 **Goal:** close the five deployment blockers found in the post-Sprint-33

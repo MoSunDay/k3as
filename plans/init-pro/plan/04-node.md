@@ -282,10 +282,16 @@ and node registration.
       `status/conditions` merge key，一次性条件写入尚不可行
       （upstream 式 status subresource merge 待做）。
     - 新 CLI flag：`--flannel-backend`、`--cluster-cidr`。
-  - **剩余 T4.3 范围（not-started）：** ServiceLB L4 / LoadBalancer VIP
-    allocate + announce（与 T5.6 协调，Q28 已记 gating）；上游 flannel
-    conformance 面（host-gw / wireguard backend、multi-node vxlan、
-    netpol）。
+  - **As-built (Sprint 35, Q41)：** ServiceLB L4 / LoadBalancer VIP
+    announce 已落地 —— `controllers/service_lb.rs` announce 控制器
+    （klipper-lb 语义：显式 `spec.loadBalancerIP` 优先，否则首 Node
+    InternalIP；非空 ingress 永不改写；CAS status 写 + 限速重排；
+    `--disable servicelb` 关闭）+ `router/servicelb.rs` raw-TCP L4 面
+    （`vip:servicePort` 监听 round-robin ready Endpoints；bind 失败 =
+    announce-only 单条 warn；空后端连接立即 FIN；NodePort 面同时放行
+    LoadBalancer 型 Service）。
+  - **剩余 T4.3 范围（not-started）：** 上游 flannel conformance 面
+    （host-gw / wireguard backend、multi-node vxlan、netpol）。
 
 - **验收手段 / Acceptance**
   - Golden: pod-to-pod across nodes; ClusterIP reachable; LoadBalancer
@@ -297,7 +303,8 @@ and node registration.
     F5 信息性说明（上游 conformance host-gw/multi-node/netpol 不在
     Scope A 内）。
 
-- **状态 / Status** — in-progress (Scope A flannel CNI done, Sprint 25, Q34)
+- **状态 / Status** — in-progress (Scope A flannel CNI done, Sprint 25, Q34;
+  Scope B ServiceLB announce/L4 done, Sprint 35, Q41)
 - **证据 / Evidence** — Sprint 25: flannel-e2e F1–F5 5/5（F5 信息性）；
   service-traffic ST1–ST6 6/6（NodePort 面, Q28/Q32, 不属本卡）；
   workspace 852 tests green; flannel multicall selftest 9 别名含 flannel。

@@ -8,10 +8,8 @@
 //! GC + namespace termination semantics: decision **Q20**.
 
 pub mod conditions;
-/// Pure cron expression parsing + next-fire math (T7.3 Scope C, Q30).
-pub mod cron_expr;
 /// CronWorkflow controller: schedule-driven child Workflow firing (T7.3
-/// Scope C, Q30).
+/// Scope C, Q30); next-fire math lives in arust-workflow's `cron_expr`.
 pub mod cronworkflow;
 pub mod daemonset;
 pub mod deployment;
@@ -31,18 +29,7 @@ pub mod rollout;
 pub mod service_lb;
 pub mod statefulset;
 pub mod workflow;
-/// A5 (T7.3, decision **Q35**): Workflow step -> `init-pro.io/v1 Agent`
-/// child assembly (the native agent template variant).
-pub mod workflow_agent;
-pub mod workflow_dag;
-/// Pure naming/phase math for Workflows (T7.3 Scope B, Q30).
-pub mod workflow_phase;
-/// Pure Workflow plan compilation (T7.3 Scope B, Q30).
-pub mod workflow_plan;
-/// Workflow step-pod assembly (T7.3 Scope B, Q30).
-pub mod workflow_pod;
-/// Workflow status/node-tree composition (T7.3 Scope B, Q30).
-pub mod workflow_status;
+pub mod workflow_bridge;
 
 use std::sync::Arc;
 

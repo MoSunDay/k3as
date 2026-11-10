@@ -21,7 +21,12 @@
 #     main (d52ef49 is a parallel rebase), so the pin is published as the
 #     dedicated branch `pin/init-pro` on MoSunDay/rdb — full clone +
 #     checkout reaches it. libsql/nfsserve pins are ancestors of (resp.
-#     tip of) their public upstreams.
+#     tip of) their public upstreams. any-home was RE-PINNED to the
+#     reachable main tip 42b8d8e after upstream rewrote history (the old
+#     a1e2d9c line became unreachable; Q42 session, rdb precedent).
+#     arust-workflow (Q42) is the workflow engine+model extraction —
+#     origin/main tip, consumed as workspace path deps by crates/api
+#     and crates/controllers.
 
 [[repo]]
 name = "openrusty"
@@ -46,7 +51,7 @@ sha  = "c1a1b2e78e1ccd4a3cc2ac6dc408a76d30bf46e6"
 [[repo]]
 name = "any-home"
 url  = "https://github.com/MoSunDay/any-home.git"
-sha  = "a1e2d9c6f4e04bfbebffca4a7d1e9a527472cf55"
+sha  = "42b8d8ea9bdab14c55a1a924654b709055dd2ee3"
 
 [[repo]]
 name = "nfsserve"
@@ -61,3 +66,8 @@ name = "libsql"
 url  = "https://github.com/tursodatabase/libsql.git"
 sha  = "6f451a1fabacbcbc9960b232b4c1605a5021979b"
 path = "link_repos/any-home/link_repos/libsql"
+
+[[repo]]
+name = "arust-workflow"
+url  = "https://github.com/MoSunDay/arust-workflow.git"
+sha  = "687ed3257b47240ac3564ebbef0b6181490708b3"

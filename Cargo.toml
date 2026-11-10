@@ -77,6 +77,10 @@ opencoder-session = { path = "link_repos/opencoder/crates/session" }
 #   (T-anyhome, decision Q36). Default features only — the real semantic
 #   embedder (`embed-fastembed`) stays off, like rdb's `store`-only cut.
 anyhome = { path = "link_repos/any-home/crates/anyhome" }
+# - arust-workflow: the Argo Workflows controller core — argoproj.io model +
+#   reconciler engine over the Kube seam (T7.3 extraction, Q42).
+workflow-model = { path = "link_repos/arust-workflow/crates/workflow-model" }
+workflow-engine = { path = "link_repos/arust-workflow/crates/workflow-engine" }
 nfsserve = { path = "link_repos/any-home/link_repos/nfsserve" }
 
 # External

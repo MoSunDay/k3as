@@ -18,6 +18,7 @@ use api::apply::{apply_object, set_managed_fields, ApplyOptions};
 use api::patch::PatchStrategy;
 
 use crate::error::{storage_error, ApiError};
+use crate::pod_workspace;
 use crate::state::{
     item_key, resolve, set_namespace, set_resource_version, set_type_meta, AppState, Loc,
 };
@@ -65,6 +66,22 @@ pub(crate) async fn do_apply(
         set_namespace(&mut body, ns);
     }
     set_type_meta(&mut body, &res.api_version, &res.kind);
+
+    // T7.5 (Q43): per-Pod anyhome defaulting runs on EVERY apply, not just
+    // the created branch — SSA deletes fields a field-manager owns but omits
+    // from its new config, so injecting only at creation would strip the
+    // volumes on that manager's next apply. Pre-merging the injection into
+    // the applied body keeps exactly one owner-consistent copy (the name /
+    // path / mountPath dedup in pod_workspace keeps it idempotent).
+    if res.kind == "Pod" {
+        if let Err(message) = pod_workspace::prepare(st.workspace_nfs.as_deref(), &mut body) {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
+    }
 
     // Read live object.
     let live_entry = match st.store.get(&key).await {

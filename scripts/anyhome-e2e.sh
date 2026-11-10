@@ -17,10 +17,21 @@
 #       DISABLED for this run and that is fine: the keeper reads plain
 #       stored objects (no reconcile needed), so the probe doubles as proof
 #       that the store->keeper seam works without the controller manager.
+#   P3  per-pod rw defaulting (REQUIRED when curl+python3 present, T7.5/Q43):
+#       POST a Pod annotated init-pro.io/anyhome=rw; the stored object must
+#       carry ONE nfs volume {name:anyhome, server=<anyhome-addr>,
+#       path=/pod/<ns>/<name>, readOnly:false} + a /workspace volumeMount;
+#       an un-annotated Pod stays byte-stable (no spec.volumes at all); the
+#       keeper pre-creates <data>/anyhome/fs/pod/<ns>/<name>.
+#   P4  ro mode (same pod shape): the injected volume carries readOnly:true.
+#   P5  init-pro.io/anyhome-mounts "/team/shared:/shared:ro,/cache:/cache"
+#       -> volumes anyhome-team-shared (ro) + anyhome-cache (rw) + mounts at
+#       /shared and /cache; keeper pre-creates /team/shared and /cache.
 #
 # SKIP doctrine: a missing mount capability is a configuration state, not a
 # conformance break -- no mount.nfs, or no root, prints SKIP and exits 0.
-# Missing curl/python3 only degrade the K1 probe (and the port picker).
+# Missing curl/python3 degrade the K1 + P3-P5 probes (and the port picker);
+# P3-P5 then also leave the REQUIRED set (see the summary below).
 #
 # Usage: scripts/anyhome-e2e.sh
 #   INIT_PRO_BIN=...  reuse a specific binary (default target/debug/init-pro)
@@ -202,14 +213,120 @@ else
   warn "K1: curl absent -- probe degraded at preflight (SKIP-grade, not a failure)"
 fi
 
-# --- summary: exit 0 only if the REQUIRED probes (A1+P2) passed; K1 stays WARN-able
+# --- P3/P4/P5: per-Pod anyhome annotation defaulting (T7.5, Q43) -------------
+# REQUIRED when they run, and running needs BOTH curl and python3 (the
+# assertions are python3). Degrade doctrine mirrors K1: either tool missing
+# at preflight -> warn + skip + out of the required set (see summary).
+# Controllers/scheduler off is irrelevant: defaulting is apiserver admission.
+if [[ "$HAVE_CURL" == "1" && "$HAVE_PY" == "1" ]]; then
+  cat > "$TMP/p3.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"anyhome-p3","namespace":"default","annotations":{"init-pro.io/anyhome":"rw"}},"spec":{"containers":[{"name":"c","image":"busybox"}]}}
+JSON
+  cat > "$TMP/p3-bare.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"anyhome-p3-bare","namespace":"default"},"spec":{"containers":[{"name":"c","image":"busybox"}]}}
+JSON
+  cat > "$TMP/p4.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"anyhome-p4","namespace":"default","annotations":{"init-pro.io/anyhome":"ro"}},"spec":{"containers":[{"name":"c","image":"busybox"}]}}
+JSON
+  cat > "$TMP/p5.json" <<'JSON'
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"anyhome-p5","namespace":"default","annotations":{"init-pro.io/anyhome-mounts":"/team/shared:/shared:ro,/cache:/cache"}},"spec":{"containers":[{"name":"c","image":"busybox"}]}}
+JSON
+
+  # post_code FILE -> POST one pod body, echo the HTTP code; get_code NAME
+  # OUT -> GET one stored pod into OUT, echo the code; wait_dir DIR -> poll
+  # <=15s for a keeper-made dir (keeper beat 5s, first sync immediate).
+  post_code() {
+    curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+      --data-binary @"$1" "$BASE/api/v1/namespaces/default/pods" || echo 000
+  }
+  get_code() {
+    curl -s -o "$2" -w '%{http_code}' "$BASE/api/v1/namespaces/default/pods/$1" || echo 000
+  }
+  wait_dir() {
+    local d="$1" _
+    for _ in $(seq 1 30); do [[ -d "$d" ]] && return 0; sleep 0.5; done
+    return 1
+  }
+
+  # P3: `rw` defaults ONE nfs volume (/pod/<ns>/<name>, rw) + /workspace
+  # mount; the un-annotated twin stays byte-stable; keeper pre-creates the dir.
+  CODE="$(post_code "$TMP/p3.json")"; GOT="$(get_code anyhome-p3 "$TMP/p3.get.json")"
+  BCODE="$(post_code "$TMP/p3-bare.json")"; BGOT="$(get_code anyhome-p3-bare "$TMP/p3-bare.get.json")"
+  if [[ "$CODE" == "201" && "$GOT" == "200" && "$BCODE" == "201" && "$BGOT" == "200" ]] \
+    && python3 - "$TMP/p3.get.json" "$TMP/p3-bare.get.json" "$PORT" <<'PY' \
+    && wait_dir "$DATA/anyhome/fs/pod/default/anyhome-p3"; then
+import json, sys
+obj = json.load(open(sys.argv[1]))
+want = {"name": "anyhome", "nfs": {"server": "127.0.0.1:" + sys.argv[3], "path": "/pod/default/anyhome-p3", "readOnly": False}}
+assert want in obj["spec"].get("volumes", []), "volume %r missing" % (want,)
+assert {"name": "anyhome", "mountPath": "/workspace"} in obj["spec"]["containers"][0].get("volumeMounts", []), "mount missing"
+bare = json.load(open(sys.argv[2]))
+assert "volumes" not in bare["spec"], "bare pod gained volumes: %r" % (bare["spec"].get("volumes"),)
+PY
+    ok "P3  rw annotation -> nfs volume /pod/default/anyhome-p3 (rw) + /workspace mount; bare pod byte-stable; keeper dir created"
+    P3=1
+  else
+    bad "P3: defaulting/byte-stability/keeper failed (POST $CODE/$BCODE, GET $GOT/$BGOT) -- see $SRV_LOG"
+  fi
+
+  # P4: `ro` maps to volume readOnly:true (client-enforced, CRI readonly bind).
+  CODE="$(post_code "$TMP/p4.json")"; GOT="$(get_code anyhome-p4 "$TMP/p4.get.json")"
+  if [[ "$CODE" == "201" && "$GOT" == "200" ]] \
+    && python3 - "$TMP/p4.get.json" "$PORT" <<'PY'
+import json, sys
+obj = json.load(open(sys.argv[1]))
+want = {"name": "anyhome", "nfs": {"server": "127.0.0.1:" + sys.argv[2], "path": "/pod/default/anyhome-p4", "readOnly": True}}
+assert want in obj["spec"].get("volumes", []), "volume %r missing" % (want,)
+PY
+  then
+    ok "P4  ro annotation -> anyhome volume readOnly: true"
+    P4=1
+  else
+    bad "P4: anyhome-p4 stored without the ro anyhome volume (POST $CODE, GET $GOT)"
+  fi
+
+  # P5: anyhome-mounts -> one nfs volume + mount per triple; the keeper
+  # pre-creates every custom server path.
+  CODE="$(post_code "$TMP/p5.json")"; GOT="$(get_code anyhome-p5 "$TMP/p5.get.json")"
+  if [[ "$CODE" == "201" && "$GOT" == "200" ]] \
+    && python3 - "$TMP/p5.get.json" "$PORT" <<'PY' \
+    && wait_dir "$DATA/anyhome/fs/team/shared" && wait_dir "$DATA/anyhome/fs/cache"; then
+import json, sys
+obj = json.load(open(sys.argv[1]))
+vols = obj["spec"].get("volumes", [])
+server = "127.0.0.1:" + sys.argv[2]
+for name, path, ro in (("anyhome-shared", "/team/shared", True), ("anyhome-cache", "/cache", False)):
+    assert {"name": name, "nfs": {"server": server, "path": path, "readOnly": ro}} in vols, "%s missing" % name
+mounts = obj["spec"]["containers"][0].get("volumeMounts", [])
+assert any(m.get("name") == "anyhome-shared" and m.get("mountPath") == "/shared" for m in mounts), mounts
+assert any(m.get("name") == "anyhome-cache" and m.get("mountPath") == "/cache" for m in mounts), mounts
+PY
+    ok "P5  anyhome-mounts -> anyhome-shared (ro, /team/shared) + anyhome-cache (rw, /cache) volumes, /shared + /cache mounts, keeper dirs created"
+    P5=1
+  else
+    bad "P5: custom volumes/mounts/keeper-dirs failed (POST $CODE, GET $GOT) -- see $SRV_LOG"
+  fi
+else
+  warn "P3/P4/P5: curl or python3 absent -- probes degraded at preflight (SKIP-grade, not a failure)"
+fi
+
+# --- summary: exit 0 only if the REQUIRED probes passed ----------------------
+# Required set: A1+P2 always; P3+P4+P5 join ONLY when they ran (curl+python3
+# present). K1 stays WARN-able in every mode.
 echo
 echo "anyhome e2e: $PASS passed, $FAIL failed, $WARN warnings"
 REQ_FAILED=""
+REQ_SET="A1+P2; P3-P5 degraded at preflight"
 [[ -n "${A1:-}" ]] || REQ_FAILED="A1"
 [[ -n "${P2:-}" ]] || REQ_FAILED="${REQ_FAILED:+$REQ_FAILED+}P2"
+if [[ "$HAVE_CURL" == "1" && "$HAVE_PY" == "1" ]]; then
+  REQ_SET="A1+P2+P3+P4+P5"
+  [[ -n "${P3:-}" ]] || REQ_FAILED="${REQ_FAILED:+$REQ_FAILED+}P3"
+  [[ -n "${P4:-}" ]] || REQ_FAILED="${REQ_FAILED:+$REQ_FAILED+}P4"
+  [[ -n "${P5:-}" ]] || REQ_FAILED="${REQ_FAILED:+$REQ_FAILED+}P5"
+fi
 if [[ -z "$REQ_FAILED" ]]; then
-  echo "ALL anyhome e2e required checks passed (A1+P2)"
+  echo "ALL anyhome e2e required checks passed ($REQ_SET)"
   exit 0
 fi
 echo "anyhome e2e FAILED (required probe(s) $REQ_FAILED did not pass)" >&2

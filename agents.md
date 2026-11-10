@@ -125,8 +125,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   (kubelet + logs/exec, Q31), the Layer 5 M1 slice (T5.1-T5.4, Q32),
   T4.6 (pod-log date dirs + rotation, Q39), T6.3 (embedded registry,
   Q40), T7.1 (`Agent` resource + node-side execution, Q35/Q37), T7.3
-  (Argo Workflows, Q30), and T7.4 (anyhome, Q36). Phase 1 (M0 + M1) is
-  complete; 25/37 TODOs done.
+  (Argo Workflows, Q30; model/engine since extracted to the
+  link_repos/arust-workflow reference, Q42), T7.4 (anyhome, Q36), and
+  T7.5 (anyhome Pod-level annotation mounts, Q43). Phase 1 (M0 + M1) is
+  complete; 26/38 TODOs done.
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -137,10 +139,11 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   removed and `sqlite://` now answers `Unsupported`). Leader election is
   Lease-object + CAS, not etcd leases (Q18). The real etcd-gRPC client is
   re-scoped to T3.4 (HA multi-server, its only consumer).
-- Next gate on the critical path: T4.2 is closed (Scope A+B+C, Sprint 24)
-  and T4.3 Scope A is done (flannel CNI embedded in the agent, Q34 —
-  F1-F5); remaining on the path: T4.3 Scope B (ServiceLB L4 w/ T5.6,
-  host-gw/multi-node/netpol) and T4.4 (netpol).
+- Next gate on the critical path: T4.2 is closed (Scope A+B+C, Sprint 24),
+  T4.3 Scope A is done (flannel CNI embedded in the agent, Q34 — F1-F5)
+  and Scope B's ServiceLB (announce + raw-TCP L4, Q41) is done; remaining
+  on the path: the flannel conformance face (host-gw/multi-node), T5.6's
+  SNI/TLS remainder (blocked on T5.5), and T4.4 (netpol).
 - The server serves real REST CRUD/watch/SSA (kubectl-compatible); with
   T2.3, zero-restart durability arrived as an explicit opt-in
   (`rdb://` endpoint; `scripts/durability-e2e.sh` D1-D4 gates it),

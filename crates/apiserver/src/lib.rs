@@ -32,11 +32,12 @@ mod pod_io_wire_resolution_tests;
 #[cfg(test)]
 mod pod_io_wire_tests;
 pub(crate) mod pod_status;
+mod pod_workspace;
 mod serve;
 mod service;
 mod state;
 
-pub use app::api_app;
+pub use app::{api_app, api_app_with_workspace_nfs};
 pub use serve::serve;
 
 /// Discovery-only router kept for backward compatibility with the T1.2a tests:

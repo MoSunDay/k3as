@@ -23,15 +23,32 @@ use api::SchemaRegistry;
 use storage::StorageBackend;
 
 /// Build the full API [`Router`] (discovery + CRUD + watch) from its parts.
+///
+/// Anyhome is OFF (`workspace_nfs: None`): the per-Pod anyhome defaulting
+/// (T7.5, Q43) is inert — the historical single-argument behavior every
+/// pre-T7.5 test pins. Production wiring uses [`api_app_with_workspace_nfs`].
 pub fn api_app(
     registry: Arc<SchemaRegistry>,
     store: Arc<dyn StorageBackend>,
     server_address: String,
 ) -> Router {
+    api_app_with_workspace_nfs(registry, store, server_address, None)
+}
+
+/// [`api_app`] with the anyhome NFS endpoint threaded in (T7.5, Q43):
+/// `Some(addr)` turns the `init-pro.io/anyhome(-mounts)` Pod annotations
+/// into injected nfs volumes + mounts at create/apply time.
+pub fn api_app_with_workspace_nfs(
+    registry: Arc<SchemaRegistry>,
+    store: Arc<dyn StorageBackend>,
+    server_address: String,
+    workspace_nfs: Option<String>,
+) -> Router {
     router(AppState {
         registry,
         store,
         server_address,
+        workspace_nfs,
     })
 }
 

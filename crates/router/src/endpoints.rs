@@ -123,11 +123,20 @@ pub fn parse_service(value: &Value) -> Option<ServiceView> {
         .and_then(Value::as_array)
         .map(|ps| ps.iter().filter_map(parse_svc_port).collect())
         .unwrap_or_default();
+    let ingress_ip = value
+        .pointer("/status/loadBalancer/ingress")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|i| i.get("ip"))
+        .and_then(Value::as_str)
+        .filter(|ip| !ip.is_empty())
+        .map(str::to_string);
     Some(ServiceView {
         namespace,
         name,
         kind_type,
         ports,
+        ingress_ip,
     })
 }
 

@@ -13,6 +13,7 @@ publish.workspace = true
 # k8s-openapi's serde types + kube-core's GVK/GVR/ObjectMeta machinery, but
 # never its protobuf codec.
 kube-core = { workspace = true }
+workflow-model = { workspace = true }
 k8s-openapi = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

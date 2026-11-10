@@ -2115,3 +2115,180 @@ does not alter any apiserver wire surface. Known v1 limits: multi-arch
 index children are pushed untagged and never age out (permanent
 retention); `_catalog` is unpaginated; and `DELETE blob` removes the
 global CAS file repo-wide (the trade-off noted above).
+
+## Q41 — ServiceLB announce controller: embedded klipper-lb equivalent for LoadBalancer Services (T4.3 Scope B / T5.6) (2026-11-09)
+
+**Context.** `type=LoadBalancer` Services already got nodePorts allocated
+by the apiserver, but nothing announced `status.loadBalancer.ingress` —
+the Service plane (T5.6) had no address to route to and no k3s-parity LB
+story. k3s ships svclb/klipper-lb as a DaemonSet; init-pro embeds the
+equivalent instead (single-binary doctrine, Q1).
+
+**Options.** (a) **embedded announce controller + nodePort data plane**
+— a controller that CAS-writes `status.loadBalancer.ingress = [{ip}]`
+while the nodePort listeners (already served through the Router/openrusty
+plane, Q28/Q32) act as the L4 backend. (b) a svclb Traefik-style DaemonSet
+addon — rejected: external addon deployment contradicts the
+first-class-embedded posture. (c) external MetalLB only — rejected as the
+default (no CRDs/addon churn), though it must remain POSSIBLE.
+
+**Decision.** `crates/controllers/src/controllers/service_lb.rs` (Q41,
+commit a9a61db): the embedded announce controller. VIP selection is
+k3s/klipper-lb semantics — explicit `spec.loadBalancerIP` wins, else the
+first Node InternalIP is announced (the nodePort plane listens on every
+node, so any node IP reaches the Service). Ownership discipline: a
+Service that already carries a NON-EMPTY `status.loadBalancer.ingress`
+is never rewritten — an external MetalLB/cloud provider may own it
+(MetalLB stays possible; `--disable servicelb` removes the controller
+from `ManagerConfig` so an external LB manager can take over, wired via
+`ServerBind.disable_servicelb`). Pure `desired_ingress()` decision fn;
+the reconciler reads the Service AND Node list fresh through the Client,
+then CAS-writes the status (lost CAS → `Conflict` → rate-limited requeue,
+same shape as `node_cidr::allocate`). The Router's Service plane consumes
+the same field: `router/src/endpoints.rs::parse_service` reads
+`status.loadBalancer.ingress[0].ip` (`ingress_ip`) as the upstream
+address for LB Services (empty-string announcements filtered to `None`).
+
+**Consequences.** (+) LoadBalancer Services become usable end-to-end
+(announce → Router upstream → nodePort traffic) with zero addons.
+(+) `--disable servicelb` hands the plane to any external LB manager
+without code changes. (−) L4 forwarding itself still rides the
+nodePort/Router plane — klipper-lb's per-Service host-port binding is
+NOT reimplemented (T5.6 scope line: "NodePort plane done, openrusty
+承载"); direct host-port binding remains future work.
+
+## Q42 — workflow engine + model extracted to the standalone arust-workflow repo (T7.3, 8th link_repos pin) (2026-11-10)
+
+**Context.** The link_repos wave (Q38) had already absorbed every other
+heavy component as a pinned external Rust repo — openrusty (Q32),
+rdb (Q33), flannel-rust (Q34), opencoder (Q35), any-home/nfsserve (Q36).
+Only the Workflow plane still lived inside k3as: the argoproj.io/v1alpha1
+typed port (`crates/api/src/argoproj/`, 17 modules) plus the engine
+(`crates/controllers/src/controllers/{workflow_plan,dag,phase,status,pod,
+agent,cron_expr}.rs`). That couples model and engine iteration to the
+distro repo and blocks independent reuse/testing.
+
+**Options.** (a) keep in-tree — rejected: the last un-extracted heavy
+component, contradicting the wave's direction. (b) one flat crate with
+model+engine — rejected: model is pure data/serde (no deps beyond
+k8s_openapi/serde) while the engine needs tokio/time plumbing; consumers
+(api crate) want the model WITHOUT the engine's weight. (c) **two-crate
+workspace `arust-workflow`** — `workflow-model` (types) + `workflow-engine`
+(plan/dag/phase/status/pod/agent/cron_expr + workflow & cronworkflow
+reconcilers as pure functions over a small `Kube` seam trait), consumed by
+k3as through thin adapters.
+
+**Decision.** Extract to `github.com/MoSunDay/arust-workflow`
+@ `687ed3257b47240ac3564ebbef0b6181490708b3` — the **8th** link_repos pin
+(Q38 bootstrap, SHA-verified; origin/main tip like the other MoSunDay
+pins). Repo shape: `#![forbid(unsafe_code)]`, 79 unit tests (engine 49 +
+model 30), clippy `-D warnings` clean, biggest file 550 lines (pod.rs).
+k3as side: `crates/api/src/argoproj.rs` is now a one-file re-export shim
+(`pub use workflow_model::*;` + the kept `register()`/`GROUP`/`VERSION`)
+so the api crate's public surface and the `argoproj_fidelity.rs`
+fixtures are byte-identical; `crates/controllers/src/controllers/
+workflow_bridge.rs` (NEW) implements the engine's `Kube` trait over the
+existing HTTP `Client` with bidirectional error mapping
+(`Conflict`/`AlreadyExists`/`NotFound` ↔ engine variants) plus
+contract-drift tests pinning the workspace/time seams; `workflow.rs` /
+`cronworkflow.rs` are thin adapters (`EngineClient(client)` +
+`from_engine`), and `runner.rs`/informer wiring is untouched. Workspace
+deps: `workflow-model`/`workflow-engine` path deps in the root
+`Cargo.toml` (same pattern as openrusty/rdb).
+
+**Consequences.** (+) The engine and the argoproj model iterate in their
+own repo; k3as diff surface shrinks ~6.7k lines for this wave.
+(+) Wire stays JSON-only (Q10) and controller behavior is bit-identical
+(bridge drift tests + the full existing controllers suite).
+(−) Schema registration stays k3s-side via the shim, so model renames
+still need a k3as touch; engine changes need a pin bump (rdb `pin/*`
+precedent, Q38).
+(−) The argoproj fidelity corpus lives on both sides (fixtures in k3as
+`tests/fixtures/argoproj/` exercise the model through the shim) — the
+model crate's own 30 tests are the upstream-truth mirror.
+
+## Q43 — anyhome Pod 级注解挂载：apiserver defaulting 注入 nfs 卷 (T7.5) (2026-11-09)
+
+**Context.** T7.4 (Q36) made anyhome a first-class embedded NFSv3 memory
+plane, but the workspace contract only existed for two controller-owned
+workload shapes: Workflow step pods (the controller hard-injects a rw
+`/workspace` nfs volume) and Agents (the `init-pro.io/workspace`
+annotation). An arbitrary Pod could not opt into the plane at all — no
+per-pod workspace, no ro/rw choice, no custom shared paths. The kubelet
+already supported the generic k8s `nfs` volume type including
+volume-level `readOnly` (Sprint 20, T-anyhome), and the e2e P2 probe had
+proven subpath mounts against the pinned single-port nfsserve — so the
+feature needed zero pin changes and zero kubelet changes. Q-code
+registry note: Q41 (ServiceLB, commit a9a61db) and Q42 (workflow-engine
+extraction, `workflow_bridge.rs`) now have their own decisions.md entries
+(recorded 2026-11-10, after Q43).
+
+**Options.** (a) **apiserver defaulting at create + server-side-apply
+time** — the same pattern as Service `service::prepare` (Sprint 18/S3):
+when the annotation is present and anyhome is on, inject the nfs volumes
++ mounts into the body before persistence; `--disable-anyhome` leaves
+everything inert. (b) **controllers-side reconciler patch** — a
+controller patches pods after creation; rejected as the primary path
+because the container may already be starting (the kubelet could see the
+pre-patch spec and skip the mount — a race by construction). (c)
+**kubelet-side synthesis** — the kubelet reads the annotations and
+synthesizes host mounts itself; rejected because it needs
+`KubeletConfig` to learn the anyhome address and `PodView` to grow
+annotations — a wider seam change, and the injected volumes would never
+appear in the stored spec (invisible to kubectl/diff tooling).
+(d) Server-side per-path read-only enforcement via nfsserve vfs
+capabilities; rejected — requires a pin patch for a v1 feature, and
+native k8s NFS `readOnly` is client-enforced anyway.
+
+**Decision.** Option (a), with these locked specifics:
+- **Annotation schema** (SSOT in `common::workspace`): `init-pro.io/anyhome`
+  = `rw|ro|true|false` (`true`≡`rw`, `false`=opt-out; unknown value →
+  422 at create); `init-pro.io/anyhome-mounts` =
+  `<server-path>:<container-path>[:ro|:rw],...` — both halves must be
+  absolute paths with no `.`, `..` or empty segments; dedup by container
+  path, first wins; every triple becomes its own nfs volume
+  (`anyhome-<sanitized container path>`, deterministic RFC1123 ≤63) +
+  volumeMount into every container lacking that mountPath.
+- **Server layout** `/pod/<namespace>/<pod-name>`: the extra `pod/`
+  segment is load-bearing — a namespace may legally be named `workflow`
+  (or `agent`), so the literal `/<ns>/<name>` layout could collide with
+  the existing `/workflow/<id>` and `/agent/<id>` roots.
+- **Injection runs on EVERY server-side apply, not just the created
+  branch**: SSA deletes fields a field-manager owns but omits from its
+  new config, so created-branch-only injection would silently strip the
+  volumes on that manager's next apply; pre-merging the injection keeps
+  exactly one owner-consistent copy (name/path/mountPath dedup keeps it
+  idempotent — repeated applies and `prepare(prepare(x)) == prepare(x)`).
+- **A4 user priority** (same rule as the Workflow engine's
+  `user_declares_workspace`): a container-declared volumeMount at the
+  same mountPath, or a pod volume with the same name / same nfs path,
+  suppresses injection — which also makes a Workflow step pod carrying
+  both the engine's `workspace` volume and a user annotation collide
+  safely instead of double-mounting.
+- **`ro` is client-enforced** (`readOnly: true` on the volume → CRI
+  readonly bind, OR-ed with the mount-level flag by the kubelet) — the
+  same trust model as native k8s NFS readOnly.
+- **Keeper extension**: the anyhome workspace keeper's 5s beat grows a
+  third page (LIST pods, filter by annotation, `mkdir -p` the pod
+  workspace + every custom server path); deletion stays deliberately
+  ignored (A5 continuity — memory persistence beats GC; an owner model
+  is the prerequisite for any reclamation).
+- **Inert when disabled**: `--disable-anyhome` (or any non-server
+  embedding) passes `workspace_nfs: None` — no validation, no byte
+  changes; un-annotated Pods are byte-identical in every mode, so golden
+  conformance (T0.6) is untouched.
+
+**Consequences.** Any Pod can now carry durable anyhome memory (its own
+`/workspace` plus arbitrary shared paths) with a one-line annotation,
+and the injected volumes are visible, inspectable and diffable in the
+stored spec (unlike kubelet-side synthesis). Known costs, accepted and
+recorded: per-pod directories accumulate with no GC (A5 — high-churn pod
+names leave directories behind until an owner model exists); the keeper
+polls a full pod LIST per beat (fine at v1 cluster sizes, watch is the
+future optimization); read-only is advisory against a malicious client
+(the server trusts the mount flags, exactly like upstream NFS); and the
+apiserver now owns one more admission-time defaulting path, so any new
+Pod-level defaulting should follow the same `prepare` shape rather than
+growing ad-hoc mutation sites. Golden conformance and flag parity are
+unaffected (no new flags; P3-P5 joined `scripts/anyhome-e2e.sh` with the
+existing curl/python3 degrade doctrine).

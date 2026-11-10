@@ -133,6 +133,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "workflow-model",
 ]
 
 [[package]]
@@ -600,6 +601,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "workflow-engine",
 ]
 
 [[package]]
@@ -5068,6 +5070,27 @@ dependencies = [
  "serde_json",
  "unicode-ident",
  "wasmparser 0.254.0",
+]
+
+[[package]]
+name = "workflow-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tracing",
+ "workflow-model",
+]
+
+[[package]]
+name = "workflow-model"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

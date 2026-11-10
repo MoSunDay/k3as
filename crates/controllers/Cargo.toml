@@ -9,6 +9,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+workflow-engine = { workspace = true }
 async-trait = "0.1"
 common = { workspace = true }
 serde = { workspace = true }

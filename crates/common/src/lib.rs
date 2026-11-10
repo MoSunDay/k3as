@@ -15,6 +15,8 @@ pub fn version() -> &'static str {
 
 pub use embed::EmbeddedAsset;
 pub use workspace::{
-    agent_workspace_path, workflow_workspace_path, workspace_nfs_url, MOUNT_TARGET,
-    WORKSPACE_ANNOTATION,
+    agent_workspace_path, anyhome_mount_volume_name, parse_anyhome_mode, parse_anyhome_mounts,
+    pod_workspace_path, workflow_workspace_path, workspace_nfs_url, AnyhomeMode,
+    ANYHOME_ANNOTATION, ANYHOME_MOUNTS_ANNOTATION, ANYHOME_VOLUME, MOUNT_TARGET,
+    POD_WORKSPACE_ROOT, WORKSPACE_ANNOTATION,
 };

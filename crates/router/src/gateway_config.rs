@@ -33,12 +33,20 @@ fn passive_health() -> HealthConfig {
     }
 }
 
-/// Explicit plugin no-op: the wasm engine is never engaged (Q32). The dir
-/// must still *exist* — `apply_config` validates by scanning it — so point
-/// it at the OS temp dir (guaranteed present, contains no `*.wasm`).
+/// Explicit plugin no-op: the wasm engine is never engaged (Q32). Point at
+/// a dedicated empty subdir of the OS temp dir — the bare temp dir itself is
+/// NOT safe: CI/dev junk (`*.wasm` fixtures from other projects) would be
+/// picked up and bootstrap would fail on their imports. The dir is created
+/// on demand because openrusty's hot-reload `discover` treats a *missing*
+/// dir as a hard IO error (only `bootstrap` tolerates it), which would make
+/// every Ingress config apply fail on a fresh host.
 fn plugins_noop() -> PluginsConfig {
+    let dir = std::env::temp_dir().join("init-pro-router-no-plugins");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(dir = %dir.display(), error = %e, "cannot create plugin no-op dir");
+    }
     PluginsConfig {
-        dir: std::env::temp_dir().to_string_lossy().into_owned(),
+        dir: dir.to_string_lossy().into_owned(),
         order: Vec::new(),
         timeout_ms: 50,
         max_memory_mb: 16,
@@ -297,7 +305,12 @@ mod tests {
         assert_eq!(cfg.routes.len(), 1);
         assert_eq!(cfg.routes[0].path_prefix, "/");
         assert!(cfg.routes[0].host.is_none());
-        assert_eq!(cfg.plugins.dir, std::env::temp_dir().to_string_lossy());
+        assert_eq!(
+            cfg.plugins.dir,
+            std::env::temp_dir()
+                .join("init-pro-router-no-plugins")
+                .to_string_lossy()
+        );
     }
 
     #[test]

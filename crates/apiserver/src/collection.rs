@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::{storage_error, ApiError};
+use crate::pod_workspace;
 use crate::service;
 use crate::state::{
     cluster_key, collection_prefix, namespaced_key, resolve, set_namespace, set_resource_version,
@@ -117,6 +118,18 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
         if let Err(service::ServiceError::Invalid(message)) =
             service::prepare(&st.store, &mut body).await
         {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
+    }
+    // T7.5 (Q43): per-Pod anyhome defaulting — init-pro.io/anyhome(-mounts)
+    // become injected nfs volumes + mounts at create time; None = the anyhome
+    // plane is off (--disable-anyhome): annotations inert, bytes untouched.
+    if res.kind == "Pod" {
+        if let Err(message) = pod_workspace::prepare(st.workspace_nfs.as_deref(), &mut body) {
             return ApiError::Invalid {
                 kind: res.kind.clone(),
                 message,

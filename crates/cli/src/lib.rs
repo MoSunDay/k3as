@@ -143,6 +143,8 @@ where
                         disable_controllers: svc.disable_controller_manager,
                         disable_scheduler: svc.disable_scheduler,
                         disable_kube_proxy: svc.disable_kube_proxy,
+                        // Q41: `--disable servicelb` (DisableItems whitelist, A4).
+                        disable_servicelb: svc.disable.iter().any(|d| d == "servicelb"),
                         scheduler_args: svc.kube_scheduler_arg.clone(),
                         datastore_endpoint: svc.datastore_endpoint.clone(),
                         cluster_cidr: svc.cluster_cidr.clone(),

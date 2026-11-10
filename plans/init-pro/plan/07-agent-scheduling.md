@@ -1,6 +1,6 @@
 # Layer 7 — AI Agent & Workflow scheduling (Phase 2)
 
-Mirrors `index.md` TODO IDs **T7.1–T7.4**. Per **Q3**, this layer is gated
+Mirrors `index.md` TODO IDs **T7.1–T7.5**. Per **Q3**, this layer is gated
 behind M5 (Layers 0–6 done). It extends the *generic* cluster with
 AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
 **and** with argo-workflows integrated as a first-class built-in so
@@ -68,6 +68,14 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   - e2e：`scripts/agent-exec-e2e.sh` S1/S2+G1-G7（真实挂载 + 真实子进程，
     teardown umount 不泄漏挂载）。
 
+- **As-built addendum (Sprint 36, Q42):** the engine modules
+  (`workflow_plan/dag/phase/status/pod/agent/cron_expr.rs`) and the
+  typed argoproj port moved OUT of k3as into
+  `link_repos/arust-workflow` (pin `687ed325`, 8th Q38 pin) as
+  `workflow-model` + `workflow-engine`; k3as keeps a one-file re-export
+  shim (`crates/api/src/argoproj.rs`) and a thin `Kube` bridge
+  (`controllers/workflow_bridge.rs`) — behavior and wire format
+  unchanged (JSON-only, Q10). See decisions.md **Q42**.
 - **状态 / Status** — done (Phase A Sprint 26 + Phase B 节点执行 Sprint 30,
   Q35/Q37)；B2 专用 CLI run 动词不再单列（`init-pro agent` 子命令 + kubectl
   apply 已覆盖创建路径，需求再现时并入后续 TODO）
@@ -260,7 +268,8 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     control loop; G28 keeps the CronWorkflow CRUD/SSA lifecycle green
     (verified live this session).
 
-- **状态 / Status** — done (Scope A+B+C, Sprint 21-23)
+- **状态 / Status** — done (Scope A+B+C, Sprint 21-23; engine+model
+  extracted to the standalone arust-workflow repo in Sprint 36, **Q42**)
 - **证据 / Evidence** — Scope A: api fidelity 8 (vs 11 fixtures) /
   apiserver 8. Scope B: controllers 111 (+4 workflow integration) /
   kubelet 90 (+6 terminal-phase unit) / kubectl 60 (+11 discovery);
@@ -366,3 +375,58 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   阻塞）；D1 令 Agent 执行无法进 server 进程 —— Phase B 必须走节点侧
   （B1）/ 新子命令（B2），与 Q35 记录一致
 - **依赖 / Depends on** — T7.3, T4.2
+
+## T7.5 — anyhome Pod 级注解挂载 (init-pro.io/anyhome + anyhome-mounts; Q43)
+
+- **目标 / Goal**
+  把 anyhome 记忆面从 "Workflow step Pod / Agent 专属" 放开为 **任意 Pod 可注解启用**:
+  `init-pro.io/anyhome: rw|ro|true|false` 打开 per-Pod 工作区(服务器路径
+  `/pod/<namespace>/<pod-name>` → 容器内 `/workspace`, `ro` 即卷 `readOnly: true`);
+  `init-pro.io/anyhome-mounts: "<服务器路径>:<容器路径>[:ro|:rw],..."` 每段生成一个
+  独立 nfs 卷 + volumeMount(任意多段)。A4 用户优先: 容器已声明同挂载点、或 Pod 已有
+  同卷名/同 nfs 路径的卷则跳过注入(与 Workflow 注入同型, 天然不打架)。
+
+- **核心实现 / Core implementation**
+  - `crates/common/src/workspace.rs` (SSOT): 注解键常量、`pod_workspace_path(ns,name)`
+    → `/pod/<ns>/<name>`(额外 `pod/` 根隔离——ns 可合法命名 `workflow`, 字面
+    `/<ns>/<name>` 布局会与既有 `/workflow`、`/agent` 根冲突)、`parse_anyhome_mode`、
+    `parse_anyhome_mounts`(绝对路径校验、拒 `.`/`..`/空段、按容器路径去重首段胜)、
+    `anyhome_mount_volume_name`(`anyhome-<净化容器路径>`, RFC1123 ≤63, 确定性)。
+  - `crates/apiserver/src/pod_workspace.rs` (NEW, 400 行): `prepare(workspace_nfs,
+    &mut body)` 纯 JSON 手术, 幂等(卷名/nfs 路径/挂载点名判重)。注入点 =
+    `do_create` + `do_apply` **每次 apply**(SSA 会删除 manager 拥有但新配置缺失的
+    字段, 仅 created 分支注入会在同 manager 下次 apply 时被剥离; pre-merge 保持
+    恰一份 owner 一致副本)。非法注解值 → 422 Invalid。`--disable-anyhome`
+    (`AppState.workspace_nfs == None`) 完全惰性: 不校验、字节零变化。接线:
+    `AppState.workspace_nfs` + `serve()` 加参 + `api_app_with_workspace_nfs()`
+    (旧 `api_app` 保持 3 参委托 None, 存量测试零改动); `cli/runtime.rs` 传
+    `ServerBind.anyhome`。
+  - keeper (`crates/cli/src/anyhome_keeper.rs`): beat 增加第三页 LIST pods, 按
+    注解过滤, `mkdir -p` 预建 `/pod/<ns>/<name>` 与各自定义服务器路径
+    (`anyhome.rs::prepare_fs_roots` 同步建 `pod/` 根); 删除继续忽略 (A5)。
+  - kubelet **零改动**: 通用 `nfs` 卷 + `readOnly`(卷级与挂载级 OR) Sprint 20
+    已就绪; `ro` 语义 = 客户端强制(CRI readonly bind), 与原生 k8s NFS readOnly
+    同信任模型; 引脚(nfsserve/any-home)零 patch。
+
+- **验收手段 / Acceptance**
+  - 单测: common 解析器 8 例(拼写/遍历拒绝/去重/卷名确定性); apiserver
+    `pod_workspace` 10 例(rw/ro/mounts/A4 豁免/双跑幂等/None 字节不变/422)+ 集成
+    `tests/anyhome_pod_mounts.rs` 8 例(201 后 GET 断言卷+挂载形状、ro readOnly、
+    多段、裸 Pod 无 volumes 键、plane-off 惰性、SSA 二次 apply 不重复、A4 用户胜);
+    cli keeper pods 维度 3 例(提取/幂等落盘/删除忽略)。
+  - 真机 e2e `scripts/anyhome-e2e.sh` 新增 **P3**(rw 注入断言 + 裸 Pod 字节稳定 +
+    keeper ≤15s 建目录)、**P4**(ro → readOnly:true)、**P5**(双自定义路径卷+挂载+
+    keeper 目录); curl/python3 缺失时按 K1 同款降级 doctrine 退出必需集。
+  - 无注解 Pod 字节零变化 → golden conformance (T0.6) 不受影响(实测全绿)。
+
+- **状态 / Status** — done (Sprint 35, Q43)
+- **证据 / Evidence** — `cargo test --workspace --locked` **984 passed / 0 failed**
+  (common +8 / apiserver +18 / cli keeper +4); `cargo clippy --workspace
+  --all-targets -- -D warnings` 0; `scripts/anyhome-e2e.sh` **A1/P2/K1 + P3/P4/P5
+  7 passed / 0 failed**; golden 66 过 / 7 失败(失败集 = G23 + G25/G26 containerd
+  探活, Sprint 27/34 已记载的共享沙箱抖动集; 真实栈 G62/G64/G65 全过) —
+  明细见 CHANGELOG Sprint 35。
+- **卡点 / Blockers** — Pod 目录无 GC (A5 延续, 需 owner 模型, 高频重建会累积
+  目录); keeper 全量 LIST pods 的轮询开销(小集群 v1 可接受, 后续可换 watch);
+  readOnly 为客户端强制(服务器端 per-path ro 需 nfsserve vfs 能力, 不做)。
+- **依赖 / Depends on** — T7.4, T1.2

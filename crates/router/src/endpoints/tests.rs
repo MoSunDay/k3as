@@ -151,14 +151,14 @@ fn ns_name_and_bare_name_lookup() {
 fn service_view_folds_announced_ingress_ip() {
     let spec = json!({"type": "LoadBalancer", "ports": [{"port": 80}]});
     let announced = serde_json::json!({
-        "metadata": {"name": "web", "namespace": "default"}, "spec": spec,
+        "metadata": {"name": "web", "namespace": "default"}, "spec": spec.clone(),
         "status": {"loadBalancer": {"ingress": [{"ip": "192.0.2.10"}]}}
     });
     assert_eq!(
         parse_service(&announced).unwrap().ingress_ip.as_deref(),
         Some("192.0.2.10")
     );
-    let bare = svc("web", "default", spec);
+    let bare = svc("web", "default", spec.clone());
     assert_eq!(parse_service(&bare).unwrap().ingress_ip, None);
     let empty = serde_json::json!({
         "metadata": {"name": "web", "namespace": "default"}, "spec": spec,

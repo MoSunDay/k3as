@@ -5,8 +5,8 @@
 //! `link_repos/any-home/crates/anyhome/src/main.rs`: `RealFs` over
 //! `<data-dir>/anyhome/fs`, `MemoryDb` at `<data-dir>/anyhome/anyhome.db`,
 //! `DummyEmbedder` at the upstream `--dim` default, export `/` so a client
-//! mounts `host:/` and walks `/workflow/<id>` + `/agent/<id>` (the paths
-//! pinned by `common::workspace`).
+//! mounts `host:/` and walks `/workflow/<id>` + `/agent/<id>` +, since
+//! T7.5 (Q43), `/pod/<ns>/<name>` (the paths pinned by `common::workspace`).
 //!
 //! v1 assumption (Q36): bind == advertise -- the service binds
 //! `--anyhome-addr` and that SAME address is advertised into pod volume
@@ -33,12 +33,17 @@ use nfsserve::tcp::{NFSTcp, NFSTcpListener};
 use storage::StorageBackend;
 use tokio::task::JoinHandle;
 
-/// The anyhome export subtrees pinned by `common::workspace` (Q36): created
-/// eagerly at startup so `/workflow/...` and `/agent/...` exist even before
-/// the keeper sees the first object.
+/// The anyhome export subtrees pinned by `common::workspace` (Q36; the
+/// pod root T7.5, Q43): created eagerly at startup so `/workflow/...`,
+/// `/agent/...` and `/pod/...` exist even before the keeper sees the first
+/// object.
 const WORKFLOW_ROOT: &str = "workflow";
 /// See [`WORKFLOW_ROOT`].
 const AGENT_ROOT: &str = "agent";
+/// Per-Pod workspace root (T7.5, Q43): the relative-segment spelling of
+/// the SSOT [`common::workspace::POD_WORKSPACE_ROOT`] (`/pod`), kept local
+/// to match the [`WORKFLOW_ROOT`]/[`AGENT_ROOT`] join idiom above.
+const POD_ROOT: &str = "pod";
 
 /// Embedding dimensionality of the embedded embedder (T-anyhome, Q36).
 ///
@@ -72,14 +77,17 @@ pub fn anyhome_endpoint(disabled: bool, addr: &str) -> Option<String> {
     }
 }
 
-/// Create the anyhome fs root plus the `workflow/` and `agent/` export
-/// subtrees (Q36 layout). Idempotent: existing directories are kept, so
-/// both the eager pre-flight in [`spawn_anyhome`] and [`serve_anyhome`]
-/// can call it.
+/// Create the anyhome fs root plus the `workflow/`, `agent/` and `pod/`
+/// export subtrees (Q36 layout; `pod/` added by T7.5, Q43, so
+/// `/pod/<ns>/<name>` workspaces have their parent tree before the keeper
+/// sees the first annotated Pod). Idempotent: existing directories are
+/// kept, so both the eager pre-flight in [`spawn_anyhome`] and
+/// [`serve_anyhome`] can call it.
 pub fn prepare_fs_roots(root: &Path) -> io::Result<()> {
     std::fs::create_dir_all(root)?;
     std::fs::create_dir_all(root.join(WORKFLOW_ROOT))?;
     std::fs::create_dir_all(root.join(AGENT_ROOT))?;
+    std::fs::create_dir_all(root.join(POD_ROOT))?;
     Ok(())
 }
 
@@ -222,17 +230,25 @@ mod tests {
     }
 
     #[test]
-    fn prepare_fs_roots_creates_workflow_and_agent_trees() {
+    fn prepare_fs_roots_creates_workflow_agent_and_pod_trees() {
         let dd = tmp_dir("roots");
         let root = dd.join("anyhome/fs");
         prepare_fs_roots(&root).unwrap();
         assert!(root.is_dir());
         assert!(root.join(WORKFLOW_ROOT).is_dir());
         assert!(root.join(AGENT_ROOT).is_dir());
+        assert!(root.join(POD_ROOT).is_dir());
+        // SSOT drift guard (T7.5, Q43): the eager root is exactly the
+        // `common::workspace::POD_WORKSPACE_ROOT` export root.
+        assert_eq!(
+            POD_ROOT,
+            common::workspace::POD_WORKSPACE_ROOT.trim_start_matches('/')
+        );
         // Idempotent: a second pass over an existing tree succeeds.
         prepare_fs_roots(&root).unwrap();
         assert!(root.join(WORKFLOW_ROOT).is_dir());
         assert!(root.join(AGENT_ROOT).is_dir());
+        assert!(root.join(POD_ROOT).is_dir());
         let _ = std::fs::remove_dir_all(&dd);
     }
 }
