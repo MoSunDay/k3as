@@ -45,6 +45,11 @@ change for un-annotated Pods.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` → zero
 - `bash scripts/anyhome-e2e.sh` → **7 passed / 0 failed** (A1/P2/K1 +
   P3/P4/P5)
+- `bash scripts/golden-conformance.sh` → **73 passed / 0 failed, exit 0**
+  (T0.6 gate; fresh re-run on this tree after the hardening landed — first
+  attempt under a parallel-session compile storm showed 72/1 with only G23
+  [extender 6s boot window] flaking, the documented contention profile,
+  not a regression)
 
 ## Sprint 36 — Q42: workflow 引用式内置收尾 — model/engine 抽取到 arust-workflow (T7.3) (2026-11-10)
 

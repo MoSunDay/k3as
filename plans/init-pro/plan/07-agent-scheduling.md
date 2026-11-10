@@ -432,9 +432,11 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   (Sprint 35: common +8 / apiserver +18 / cli keeper +4; Sprint 36b hardening:
   apiserver +5 单测 +2 集成); `cargo clippy --workspace
   --all-targets -- -D warnings` 0; `scripts/anyhome-e2e.sh` **A1/P2/K1 + P3/P4/P5
-  7 passed / 0 failed**; golden 66 过 / 7 失败(失败集 = G23 + G25/G26 containerd
-  探活, Sprint 27/34 已记载的共享沙箱抖动集; 真实栈 G62/G64/G65 全过) —
-  明细见 CHANGELOG Sprint 35。
+  7 passed / 0 failed**; `scripts/golden-conformance.sh` **73 passed / 0 failed,
+  exit 0**(83486ad 树复跑; 早前同树 66/7 为沙箱环境根因 — 残留宿主 cni0
+  网桥 10.42.1.1/24 令 flannel 沙箱全败(G25/G26), 高载争用令 G23 的 6s
+  二号 server boot 窗口超时, 均非代码回归) — 根因明细见 CHANGELOG
+  Sprint 35 gate note。
 - **卡点 / Blockers** — Pod 目录无 GC (A5 延续, 需 owner 模型, 高频重建会累积
   目录); keeper 全量 LIST pods 的轮询开销(小集群 v1 可接受, 后续可换 watch);
   readOnly 为客户端强制(服务器端 per-path ro 需 nfsserve vfs 能力, 不做)。
