@@ -3,8 +3,9 @@
 //! The Lua era shipped TOML config strings ([`crate::config`], deleted);
 //! openrusty exposes public config structs, so the router builds them in
 //! memory and applies them hot via `openrusty_server::reload::apply_config`.
-//! Everything here is a pure builder + validator call — no I/O, no plugins
-//! (the data plane is wasm-free; `PluginsConfig` is an explicit no-op).
+//! Everything here is a pure builder + validator call — no plugins (the
+//! data plane is wasm-free; `PluginsConfig` is an explicit no-op whose ONE
+//! side effect is creating its empty dir on demand, see [`plugins_noop`]).
 //!
 //! Upstream naming: `svc/<namespace>/<name>:<port>` — unique per
 //! [`UpstreamRef`] (validate() rejects duplicates/empties), stable across
