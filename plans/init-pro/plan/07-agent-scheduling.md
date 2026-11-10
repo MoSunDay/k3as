@@ -404,6 +404,14 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   - keeper (`crates/cli/src/anyhome_keeper.rs`): beat 增加第三页 LIST pods, 按
     注解过滤, `mkdir -p` 预建 `/pod/<ns>/<name>` 与各自定义服务器路径
     (`anyhome.rs::prepare_fs_roots` 同步建 `pod/` 根); 删除继续忽略 (A5)。
+  - **post-review hardening (Sprint 36b, T7.5a/T7.5b)**: `resolve_volume_name`
+    解决净化同名碰撞(`/A_B` 与 `/a-b` 同得 `anyhome-a-b` → 第二卷曾静默丢失、
+    挂载错绑第一卷路径): 同 nfs 路径 → 别名复用既有卷名(一卷多挂载点; 引擎
+    `workspace` 卷绑定真名不再悬空); 基名空闲 → 基名; 基名为传入体所有 → A4
+    绑定不改名; 否则按注解顺序 `-2`/`-3` 确定性消歧。挂载点判重改为仅按
+    mountPath。`do_replace` 接入同一 `prepare` 钩子(整替不再剥卷); 身份守卫仅在
+    注解存在时生效。initContainers 刻意不注入、无 per-path authz —— 信任模型
+    见 decisions.md Q43 post-review 段。
   - kubelet **零改动**: 通用 `nfs` 卷 + `readOnly`(卷级与挂载级 OR) Sprint 20
     已就绪; `ro` 语义 = 客户端强制(CRI readonly bind), 与原生 k8s NFS readOnly
     同信任模型; 引脚(nfsserve/any-home)零 patch。
@@ -419,9 +427,10 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
     keeper 目录); curl/python3 缺失时按 K1 同款降级 doctrine 退出必需集。
   - 无注解 Pod 字节零变化 → golden conformance (T0.6) 不受影响(实测全绿)。
 
-- **状态 / Status** — done (Sprint 35, Q43)
-- **证据 / Evidence** — `cargo test --workspace --locked` **984 passed / 0 failed**
-  (common +8 / apiserver +18 / cli keeper +4); `cargo clippy --workspace
+- **状态 / Status** — done (Sprint 35, Q43; Sprint 36b post-review hardening)
+- **证据 / Evidence** — `cargo test --workspace --locked` **991 passed / 0 failed**
+  (Sprint 35: common +8 / apiserver +18 / cli keeper +4; Sprint 36b hardening:
+  apiserver +5 单测 +2 集成); `cargo clippy --workspace
   --all-targets -- -D warnings` 0; `scripts/anyhome-e2e.sh` **A1/P2/K1 + P3/P4/P5
   7 passed / 0 failed**; golden 66 过 / 7 失败(失败集 = G23 + G25/G26 containerd
   探活, Sprint 27/34 已记载的共享沙箱抖动集; 真实栈 G62/G64/G65 全过) —

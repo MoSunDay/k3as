@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::apply;
 use crate::error::{storage_error, ApiError};
+use crate::pod_workspace;
 use crate::state::{
     item_key, resolve, resource_revision, set_namespace, set_resource_version, set_type_meta,
     AppState, Loc,
@@ -93,6 +94,20 @@ pub(crate) async fn do_replace(st: &AppState, loc: &Loc, name: &str, mut body: V
             return ApiError::BadRequest(format!(
                 "metadata.namespace: Invalid value: {body_ns}: must match the request namespace {ns}"
             ))
+            .into_response();
+        }
+    }
+    // T7.5b (Q43, post-review): PUT replace runs the same Pod anyhome
+    // defaulting as create/apply. A full-body replace (kubectl replace from
+    // a stale manifest) previously bypassed prepare(), silently stripping
+    // the injected volumes; re-defaulting here keeps the contract uniform
+    // across all three write paths (idempotent by construction).
+    if res.kind == "Pod" {
+        if let Err(message) = pod_workspace::prepare(st.workspace_nfs.as_deref(), &mut body) {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
             .into_response();
         }
     }

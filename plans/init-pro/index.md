@@ -47,7 +47,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置; engine+model 抽取为 link_repos/arust-workflow pin, Q42) | done (Scope A+B+C, Sprint 23; Q42 抽取 Sprint 36) | T1.2, T3.1 |
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
-| T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA defaulting + keeper 预建目录, Q43) | done (Sprint 35, Q43) | T7.4, T1.2 |
+| T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 
 **Counts:** 38 TODOs · 26 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41

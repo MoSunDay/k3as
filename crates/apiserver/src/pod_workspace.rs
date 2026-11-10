@@ -18,6 +18,11 @@
 //! `workspace_nfs == None` (`--disable-anyhome`) makes everything inert:
 //! `Ok(())` immediately, no validation, body untouched. Un-annotated Pods
 //! are untouched either way, so the golden surface (T0.6) is unaffected.
+//!
+//! Post-review hardening (T7.5a): sanitization can collide (`/A_B` and
+//! `/a-b` both derive `anyhome-a-b`), so [`resolve_volume_name`] disambiguates
+//! with `-2`/`-3` suffixes in annotation order and aliases same-path
+//! volumes instead of dangling the mount.
 use common::{
     anyhome_mount_volume_name, parse_anyhome_mode, parse_anyhome_mounts, AnyhomeMode,
     ANYHOME_ANNOTATION, ANYHOME_MOUNTS_ANNOTATION, ANYHOME_VOLUME, MOUNT_TARGET,
@@ -31,13 +36,17 @@ const IDENTITY_MSG: &str = "init-pro.io/anyhome: pod requires metadata.namespace
 ///
 /// 1. `workspace_nfs == None` -> `Ok(())` immediately, body untouched, no
 ///    validation (the plane is off; annotations are inert).
-/// 2. `metadata.namespace`/`metadata.name` must be non-empty and `/`-free.
-/// 3. `init-pro.io/anyhome` = `rw|ro|true` -> one `anyhome` nfs volume at
+/// 2. Un-annotated Pods -> `Ok(())` immediately (P2: the identity guard
+///    fires only when an anyhome annotation is present, so a `/`-bearing
+///    name on a plain Pod behaves exactly as before this feature).
+/// 3. `metadata.namespace`/`metadata.name` must be non-empty and `/`-free.
+/// 4. `init-pro.io/anyhome` = `rw|ro|true` -> one `anyhome` nfs volume at
 ///    `/pod/<ns>/<name>` + a `/workspace` mount in every container lacking
 ///    one; `false` -> no workspace injection (the mounts annotation stays
 ///    independently in effect); anything else -> `Err`.
-/// 4. `init-pro.io/anyhome-mounts` -> one derived-name nfs volume + mount
-///    per parsed triple; a malformed value -> `Err`.
+/// 5. `init-pro.io/anyhome-mounts` -> one derived-name nfs volume + mount
+///    per parsed triple (collision-disambiguated, see
+///    [`resolve_volume_name`]); a malformed value -> `Err`.
 ///
 /// Idempotent: a second call over an already-prepared body changes nothing.
 pub(crate) fn prepare(workspace_nfs: Option<&str>, body: &mut Value) -> Result<(), String> {
@@ -45,12 +54,33 @@ pub(crate) fn prepare(workspace_nfs: Option<&str>, body: &mut Value) -> Result<(
     let Some(addr) = workspace_nfs else {
         return Ok(());
     };
-    // 2. Identity guard (pod_workspace_path is Some by construction below).
+    // 2. Un-annotated: nothing to do (and no identity requirement).
+    if annotation(body, ANYHOME_ANNOTATION).is_none()
+        && annotation(body, ANYHOME_MOUNTS_ANNOTATION).is_none()
+    {
+        return Ok(());
+    }
+    // 3. Identity guard (pod_workspace_path is Some by construction below).
     let ns = str_at(body, "/metadata/namespace").to_string();
     let name = str_at(body, "/metadata/name").to_string();
     if ns.is_empty() || name.is_empty() || ns.contains('/') || name.contains('/') {
         return Err(IDENTITY_MSG.to_string());
     }
+    // Names the incoming body already owns (user-declared, or stable from a
+    // previous write). A derived name colliding with one of these keeps A4
+    // semantics — bind the existing volume, never rename it — while a name
+    // claimed by OUR OWN injection earlier in this call is the real T7.5a
+    // collision and gets suffixed (see resolve_volume_name).
+    let owned: Vec<String> = body
+        .pointer("/spec/volumes")
+        .and_then(Value::as_array)
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|v| v.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     // 3. The workspace annotation: one generic volume + /workspace mount.
     if let Some(raw) = annotation(body, ANYHOME_ANNOTATION) {
         match raw.as_str().and_then(parse_anyhome_mode) {
@@ -73,7 +103,8 @@ pub(crate) fn prepare(workspace_nfs: Option<&str>, body: &mut Value) -> Result<(
         match raw.as_str().map(parse_anyhome_mounts) {
             Some(Ok(mounts)) => {
                 for m in mounts {
-                    let volume_name = anyhome_mount_volume_name(&m.container_path);
+                    let base = anyhome_mount_volume_name(&m.container_path);
+                    let volume_name = resolve_volume_name(body, &owned, &base, &m.server_path);
                     ensure_pod_volume(body, &volume_name, addr, &m.server_path, m.read_only);
                     for_each_container(body, |container| {
                         ensure_container_mount(container, &volume_name, &m.container_path)
@@ -97,14 +128,20 @@ pub(crate) fn prepare(workspace_nfs: Option<&str>, body: &mut Value) -> Result<(
 
 /// Inject the pod's own workspace volume + the shared `/workspace` mount.
 fn inject_workspace(body: &mut Value, addr: &str, ns: &str, name: &str, read_only: bool) {
-    // Some() is guaranteed by the step-2 guard; skip rather than guess if
+    // Some() is guaranteed by the step-3 guard; skip rather than guess if
     // that invariant is somehow broken.
     let Some(path) = common::pod_workspace_path(ns, name) else {
         return;
     };
-    ensure_pod_volume(body, ANYHOME_VOLUME, addr, &path, read_only);
+    // Same-path alias first (a user/Workflow-engine volume already serving
+    // the workspace path — the mount binds THAT volume instead of dangling
+    // on a name never injected); otherwise the canonical A4 name: a
+    // user-declared `anyhome` volume keeps it and injection self-skips.
+    let volume_name =
+        same_path_volume_name(body, &path).unwrap_or_else(|| ANYHOME_VOLUME.to_string());
+    ensure_pod_volume(body, &volume_name, addr, &path, read_only);
     for_each_container(body, |container| {
-        ensure_container_mount(container, ANYHOME_VOLUME, MOUNT_TARGET)
+        ensure_container_mount(container, &volume_name, MOUNT_TARGET)
     });
 }
 
@@ -145,18 +182,77 @@ fn volume_taken(existing: &Value, name: &str, path: &str) -> bool {
         || existing.pointer("/nfs/path").and_then(Value::as_str) == Some(path)
 }
 
+/// Name of an existing volume already serving nfs `path`, if any — the
+/// idempotent re-preparation AND the A4 alias case (a user / the Workflow
+/// engine declared this path under another name, so the mount must bind to
+/// THAT volume instead of dangling on a name never injected).
+fn same_path_volume_name(body: &Value, path: &str) -> Option<String> {
+    body.pointer("/spec/volumes")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|v| v.pointer("/nfs/path").and_then(Value::as_str) == Some(path))
+        .and_then(|v| v.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Resolve the volume name for an extra-mount injection (T7.5a fix).
+///
+/// `owned` are the names the incoming body already owned BEFORE this
+/// prepare() call began; four cases, checked in order:
+/// 1. an existing volume already serves this nfs `path` -> reuse its name
+///    (alias / idempotent re-preparation);
+/// 2. `base` unclaimed -> `base`;
+/// 3. `base` owned by the incoming body -> A4: keep it — the user's volume
+///    with the derived name wins, injection self-skips, the mount binds it
+///    (documented contract in `common::workspace::anyhome_mount_volume_name`);
+/// 4. `base` claimed by our OWN earlier injection in this call -> the real
+///    sanitization collision (`/A_B` and `/a-b` both derive `anyhome-a-b`):
+///    append `-2`, `-3`, ... deterministically in annotation order until
+///    free. Previously this case silently skipped the second volume while
+///    its mount still bound to the FIRST volume's server path.
+fn resolve_volume_name(body: &Value, owned: &[String], base: &str, path: &str) -> String {
+    if let Some(name) = same_path_volume_name(body, path) {
+        return name;
+    }
+    let claimed = |candidate: &str| {
+        body.pointer("/spec/volumes")
+            .and_then(Value::as_array)
+            .is_some_and(|vs| {
+                vs.iter()
+                    .any(|v| v.get("name").and_then(Value::as_str) == Some(candidate))
+            })
+    };
+    if !claimed(base) {
+        return base.to_string();
+    }
+    if owned.iter().any(|n| n == base) {
+        return base.to_string();
+    }
+    // Deterministic suffix disambiguation (name stays a <=63-char DNS_LABEL).
+    let trimmed = &base[..base.len().min(61)];
+    let mut n = 2;
+    loop {
+        let candidate = format!("{trimmed}-{n}");
+        if !claimed(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// Append `{"name": N, "mountPath": P}` to the container's `volumeMounts`
-/// (array created when absent) unless an existing entry already claims the
-/// same `mountPath` or the same `name` (A4: user declarations win).
+/// (array created when absent) unless an entry already claims `mountPath`
+/// (A4: user declarations win). Dedup is per-mountPath, not per-name: the
+/// T7.5a same-path alias legitimately mounts ONE volume at several paths.
 fn ensure_container_mount(container: &mut Value, name: &str, mount_path: &str) {
     let taken = container
         .get("volumeMounts")
         .and_then(Value::as_array)
         .is_some_and(|mounts| {
-            mounts.iter().any(|m| {
-                m.get("mountPath").and_then(Value::as_str) == Some(mount_path)
-                    || m.get("name").and_then(Value::as_str) == Some(name)
-            })
+            mounts
+                .iter()
+                .any(|m| m.get("mountPath").and_then(Value::as_str) == Some(mount_path))
         });
     if taken {
         return;
@@ -302,10 +398,18 @@ mod tests {
     fn a4_existing_volume_suppresses_volume_injection() {
         // A pod-level volume literally named `anyhome` (user-declared) or an
         // nfs volume with the same server path (Workflow-engine collision)
-        // both suppress the volume append; the mount still lands.
-        for existing in [
-            json!({ "name": "anyhome", "emptyDir": {} }),
-            json!({ "name": "workspace", "nfs": { "server": "other:2049", "path": "/pod/default/web" } }),
+        // both suppress the volume append. The mount binds the user's
+        // `anyhome` volume, or — same-path alias (T7.5a) — the engine's
+        // REAL `workspace` volume instead of dangling on an uninjected name.
+        for (existing, mount_name) in [
+            (
+                json!({ "name": "anyhome", "emptyDir": {} }),
+                json!("anyhome"),
+            ),
+            (
+                json!({ "name": "workspace", "nfs": { "server": "other:2049", "path": "/pod/default/web" } }),
+                json!("workspace"),
+            ),
         ] {
             let mut body = pod(json!({ "init-pro.io/anyhome": "rw" }), Value::Null);
             body["spec"]["volumes"] = json!([existing]);
@@ -313,7 +417,7 @@ mod tests {
             assert_eq!(body["spec"]["volumes"].as_array().map(Vec::len), Some(1));
             assert_eq!(
                 body["spec"]["containers"][0]["volumeMounts"],
-                json!([{ "name": "anyhome", "mountPath": "/workspace" }])
+                json!([{ "name": mount_name, "mountPath": "/workspace" }])
             );
         }
     }
@@ -395,6 +499,105 @@ mod tests {
         assert_eq!(
             prepare(Some(ADDR), &mut body),
             Err(IDENTITY_MSG.to_string())
+        );
+    }
+
+    /// P2: no annotation -> no identity requirement either; bytes untouched.
+    #[test]
+    fn unannotated_pod_without_identity_is_untouched() {
+        let mut body = pod(Value::Null, Value::Null);
+        let meta = body["metadata"].as_object_mut().unwrap();
+        meta.remove("namespace");
+        meta.remove("name");
+        let before = serde_json::to_string(&body).unwrap();
+        assert_eq!(prepare(Some(ADDR), &mut body), Ok(()));
+        assert_eq!(serde_json::to_string(&body).unwrap(), before);
+    }
+
+    /// T7.5a: `/A_B` and `/a-b` sanitize to the same base; the second
+    /// mount must get its OWN volume (`-2`) bound to ITS server path, not
+    /// silently skip and bind the first volume's path.
+    #[test]
+    fn sanitization_collision_gets_suffixed_volumes() {
+        let mut body = pod(
+            json!({ "init-pro.io/anyhome-mounts": "/srv/a:/A_B:rw,/srv/b:/a-b:ro" }),
+            Value::Null,
+        );
+        prepare(Some(ADDR), &mut body).unwrap();
+        let volumes = body["spec"]["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0]["name"], "anyhome-a-b");
+        assert_eq!(volumes[0]["nfs"]["path"], "/srv/a");
+        assert_eq!(volumes[0]["nfs"]["readOnly"], false);
+        assert_eq!(volumes[1]["name"], "anyhome-a-b-2");
+        assert_eq!(volumes[1]["nfs"]["path"], "/srv/b");
+        assert_eq!(volumes[1]["nfs"]["readOnly"], true);
+        let mounts = body["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            mounts[0],
+            json!({ "name": "anyhome-a-b", "mountPath": "/A_B" })
+        );
+        assert_eq!(
+            mounts[1],
+            json!({ "name": "anyhome-a-b-2", "mountPath": "/a-b" })
+        );
+    }
+
+    /// T7.5a: the suffixed layout is stable across re-preparation.
+    #[test]
+    fn collision_disambiguation_is_idempotent() {
+        let mut body = pod(
+            json!({ "init-pro.io/anyhome-mounts": "/srv/a:/A_B:rw,/srv/b:/a-b:rw" }),
+            Value::Null,
+        );
+        prepare(Some(ADDR), &mut body).unwrap();
+        let after_first = serde_json::to_string(&body).unwrap();
+        prepare(Some(ADDR), &mut body).unwrap();
+        assert_eq!(serde_json::to_string(&body).unwrap(), after_first);
+    }
+
+    /// T7.5a alias rule: one server path mounted at two container paths
+    /// reuses the existing volume instead of dangling a second mount on a
+    /// never-injected name.
+    #[test]
+    fn same_server_path_alias_reuses_volume_name() {
+        let mut body = pod(
+            json!({ "init-pro.io/anyhome-mounts": "/shared:/m1:rw,/shared:/m2:ro" }),
+            Value::Null,
+        );
+        prepare(Some(ADDR), &mut body).unwrap();
+        let volumes = body["spec"]["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0]["name"], "anyhome-m1");
+        let mounts = body["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            mounts,
+            &vec![
+                json!({ "name": "anyhome-m1", "mountPath": "/m1" }),
+                json!({ "name": "anyhome-m1", "mountPath": "/m2" }),
+            ]
+        );
+    }
+
+    /// T7.5a alias rule vs. a user-declared volume: the user's own volume
+    /// for the same path wins (A4) and the injected mount binds to it.
+    #[test]
+    fn user_volume_with_same_path_is_aliased() {
+        let mut body = pod(json!({ "init-pro.io/anyhome": "rw" }), Value::Null);
+        body["spec"]["volumes"] = json!([
+            { "name": "mine", "nfs": { "server": ADDR, "path": "/pod/default/web" } }
+        ]);
+        prepare(Some(ADDR), &mut body).unwrap();
+        let volumes = body["spec"]["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 1); // no duplicate volume injected
+        assert_eq!(volumes[0]["name"], "mine");
+        assert_eq!(
+            body["spec"]["containers"][0]["volumeMounts"],
+            json!([{ "name": "mine", "mountPath": "/workspace" }])
         );
     }
 }

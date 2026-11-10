@@ -7,6 +7,45 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 36b — T7.5 static-review close-out: 卷名碰撞消歧 + PUT replace 注入 (Q43 post-review) (2026-11-10)
+
+**Goal:** land the two P1 conditions (and the P2 items) from the T7.5
+static review (GO WITH CONDITIONS) — same-day hardening, no behavior
+change for un-annotated Pods.
+
+**Changes**
+- **T7.5a — derived-name collision disambiguation**
+  (`crates/apiserver/src/pod_workspace.rs`): two container paths that
+  sanitize identically (`/A_B` + `/a-b` → `anyhome-a-b`) used to drop the
+  second volume while its mount bound the FIRST volume's server path.
+  New `resolve_volume_name` resolves, in order: same-nfs-path alias
+  (reuses the existing volume's name — one server path at several
+  container paths now yields ONE volume + several mounts; also binds the
+  Workflow engine's `workspace` volume instead of dangling on an
+  uninjected name), unclaimed base, A4-owned base (user volume with the
+  derived name still wins — bind, never rename), then deterministic
+  `-2`/`-3` suffix in annotation order. `ensure_container_mount` dedups
+  per-mountPath only. Ownership is told apart by snapshotting incoming
+  volume names before any injection.
+- **T7.5b — PUT replace joins defaulting** (`item.rs::do_replace`):
+  replace previously bypassed `prepare`, so a stale-manifest replace
+  silently stripped injected volumes; create/apply/replace now uniform.
+- **P2**: identity guard fires only when an anyhome annotation is
+  present (a `/`-bearing name on an un-annotated Pod is no longer a new
+  422); `decisions.md` Q43 gains a post-review section (initContainers
+  deliberately not injected; no per-path authz in v1 — client-trust
+  model like native k8s NFS).
+- Tests: +5 unit (collision suffixing + idempotency, same-path alias ×2,
+  un-annotated identity exemption) +2 wire (`anyhome_pod_mounts.rs`:
+  replace re-defaults a stripped body; collision on the wire).
+
+**Gates**
+- `cargo build --workspace --locked` → ok
+- `cargo test --workspace --locked` → **991 passed / 0 failed** (fresh)
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` → zero
+- `bash scripts/anyhome-e2e.sh` → **7 passed / 0 failed** (A1/P2/K1 +
+  P3/P4/P5)
+
 ## Sprint 36 — Q42: workflow 引用式内置收尾 — model/engine 抽取到 arust-workflow (T7.3) (2026-11-10)
 
 **Goal:** apply the one-codebase-one-home rule to the last duplicated

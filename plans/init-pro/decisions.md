@@ -2292,3 +2292,40 @@ Pod-level defaulting should follow the same `prepare` shape rather than
 growing ad-hoc mutation sites. Golden conformance and flag parity are
 unaffected (no new flags; P3-P5 joined `scripts/anyhome-e2e.sh` with the
 existing curl/python3 degrade doctrine).
+
+**Post-review hardening (2026-11-10, GO WITH CONDITIONS closed).** A
+static review of the first cut surfaced two P1 defects and two P2 gaps,
+all landed the same day:
+
+- **T7.5a — derived-name collision disambiguation.** Two container paths
+  that sanitize identically (`/A_B` and `/a-b` both → `anyhome-a-b`)
+  used to make the second volume silently vanish while its mount still
+  bound to the FIRST volume's server path (wrong content, wrong
+  readOnly). `pod_workspace::resolve_volume_name` now resolves, in
+  order: same-nfs-path alias (reuse the existing volume's name — this
+  also fixes mounting one server path at several container paths, and
+  binds the Workflow engine's `workspace` volume instead of dangling on
+  an uninjected name); unclaimed base name; A4-owned base name (a
+  user-declared volume with the derived name still WINS — bind, never
+  rename); and only then a deterministic `-2`/`-3` suffix in annotation
+  order. `ensure_container_mount` dedups per-mountPath (not per-name),
+  which the alias case requires. Ownership is distinguished by
+  snapshotting the incoming volume names BEFORE any injection: a name we
+  injected earlier in the same call is a collision; a name the body
+  arrived with is A4.
+- **T7.5b — PUT replace joins the defaulting.** `item::do_replace`
+  previously bypassed `prepare`, so `kubectl replace` from a stale
+  manifest silently stripped the injected volumes. Replace now runs the
+  same prepare hook as create/apply (idempotent by construction); the
+  create/apply/replace write triple is uniform.
+- **P2 — identity guard scoped to annotated Pods.** The
+  namespace/name guard now fires only when an anyhome annotation is
+  present; an un-annotated Pod with a `/`-bearing name behaves exactly
+  as before the feature (no new 422 class on the golden surface).
+- **Trust-model clarifications (no code change, by design):**
+  `initContainers` are deliberately NOT injected (matching the Workflow
+  engine's step-pod shape — init containers are setup, not workspace
+  consumers; a user can still declare the mount manually), and any Pod
+  can rw-mount any server path the annotation names — there is no
+  per-path authz in v1, the same client-trust model as native k8s NFS;
+  per-path ACLs would be a follow-up decision.

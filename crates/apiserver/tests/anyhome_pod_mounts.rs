@@ -293,3 +293,71 @@ async fn user_declared_mount_wins_over_injection() {
     );
     assert_eq!(mounts[0]["name"], json!("user-vol"));
 }
+
+/// T7.5b: PUT replace re-defaults instead of stripping — a stale manifest
+/// (no spec.volumes) still ends up with the injected anyhome volume.
+#[tokio::test]
+async fn replace_redefaults_stripped_volumes() {
+    let r = anyhome_app();
+    let (s1, _) = send(
+        r.clone(),
+        "POST",
+        "/api/v1/namespaces/default/pods",
+        json_body(&pod(
+            "p-rep",
+            json!({ "init-pro.io/anyhome": "rw" }),
+            Value::Null,
+        )),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::CREATED);
+
+    // Replace with a body carrying the annotation but NO volumes/mounts.
+    let stripped = pod("p-rep", json!({ "init-pro.io/anyhome": "rw" }), Value::Null);
+    let (s2, resp) = send(
+        r.clone(),
+        "PUT",
+        "/api/v1/namespaces/default/pods/p-rep",
+        json_body(&stripped),
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+    let volumes = resp["spec"]["volumes"].as_array().expect("volumes");
+    assert_eq!(
+        volumes
+            .iter()
+            .filter(|v| v["name"] == "anyhome" && v["nfs"]["path"] == "/pod/default/p-rep")
+            .count(),
+        1
+    );
+    assert_eq!(
+        resp["spec"]["containers"][0]["volumeMounts"],
+        json!([{ "name": "anyhome", "mountPath": "/workspace" }])
+    );
+}
+
+/// T7.5a on the wire: sanitization collision -> suffixed second volume, each
+/// mount bound to its own server path.
+#[tokio::test]
+async fn replace_and_create_collision_mounts_get_suffixed_volumes() {
+    let r = anyhome_app();
+    let (st, got) = send(
+        r,
+        "POST",
+        "/api/v1/namespaces/default/pods",
+        json_body(&pod(
+            "p-col",
+            json!({ "init-pro.io/anyhome-mounts": "/srv/a:/A_B:rw,/srv/b:/a-b:ro" }),
+            Value::Null,
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let volumes = got["spec"]["volumes"].as_array().unwrap();
+    assert_eq!(volumes.len(), 2);
+    assert_eq!(volumes[0]["name"], json!("anyhome-a-b"));
+    assert_eq!(volumes[0]["nfs"]["path"], json!("/srv/a"));
+    assert_eq!(volumes[1]["name"], json!("anyhome-a-b-2"));
+    assert_eq!(volumes[1]["nfs"]["path"], json!("/srv/b"));
+    assert_eq!(volumes[1]["nfs"]["readOnly"], json!(true));
+}
