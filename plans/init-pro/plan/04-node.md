@@ -237,7 +237,19 @@ and node registration.
   TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
   exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN
   （随 T1.3 安全工作面）。
+- **顺延 / Deferred (future enhancements, 非 TODO 阻塞)** — probes
+  TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
+  exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN
+  （随 T1.3 安全工作面）。
 - **依赖 / Depends on** — T4.1, T3.2
+- **As-built (Sprint 37c, 2026-11-15, 双节点实机)** — heartbeat 的
+  GET-modify-PUT 顺带 reconcile Node 注解 `init-pro.io/kubelet-port`
+  (纯函数 `reconciled_kubelet_port_annotation`, 已正确则跳写; commit
+  `1242c5f`, 3 单测)。修复前: 改 `--kubelet-port` 重启后 relay 拨旧端口。
+  实测: 10250→10260 注解 6 s 收敛、中继跟随, 回退同理。验收沉淀:
+  `scripts/acceptance-2node-e2e.sh` (A14) + `scripts/build-netpod-image.sh`;
+  遗留发现见仓库根 `验收报告.md` (同名 Agent 重建不 re-reconcile = F4、
+  agent 重启 ~12 s 中继竞态 = F3、sandbox 不收养 = F2)。
 
 ---
 

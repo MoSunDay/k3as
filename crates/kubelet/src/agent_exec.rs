@@ -234,11 +234,61 @@ fn workspace_dir(data_dir: &Path, name: &str) -> PathBuf {
 /// root, so the first try normally wins).
 const MOUNT_WAIT: Duration = Duration::from_secs(20);
 
+/// How long the liveness probe on an already-mounted root waits before
+/// declaring it stale. A live NFS reply is sub-second; a stale NFSv3
+/// `hard` mount never errors on its own (the RPC retries forever), so
+/// the timeout is what converts "hung" into "recover".
+const PROBE_WAIT: Duration = Duration::from_secs(3);
+
 /// Node-side mount target for one anyhome ADDRESS: `<data>/agent-ws/nfs-<addr>`
 /// (the addr's `:` becomes `_`; distinct addrs get distinct roots).
 fn mount_root_dir(data_dir: &Path, addr: &str) -> PathBuf {
     let safe = addr.replace([':', '/'], "_");
     data_dir.join(WS_ROOT).join(format!("nfs-{safe}"))
+}
+
+/// What to do with the per-address root mount point.
+#[derive(Debug, PartialEq, Eq)]
+enum RootPlan {
+    /// No mount there yet: mount (retrying) and pin.
+    Mount,
+    /// Mounted and live: reuse the pinned mount (deliberate, Q37).
+    Reuse,
+    /// Mounted but stale (the anyhome server restarted under it):
+    /// lazy-unmount, then mount fresh.
+    Recover,
+}
+
+/// Pure decision for the root mount point: unmounted -> [`RootPlan::Mount`];
+/// mounted and the bounded liveness probe answered -> [`RootPlan::Reuse`];
+/// mounted but the probe errored or timed out -> [`RootPlan::Recover`]
+/// (a stale NFSv3 hard mount never errors on its own, so recovery must
+/// be explicit; without it the pinned mount bricks every later Agent).
+fn plan_root(mounts_text: &str, root: &Path, probe_live: bool) -> RootPlan {
+    if !nfs_mount::is_mountpoint(mounts_text, root) {
+        RootPlan::Mount
+    } else if probe_live {
+        RootPlan::Reuse
+    } else {
+        RootPlan::Recover
+    }
+}
+
+/// Retry `mount.nfs` until `MOUNT_WAIT` (anyhome's port is up at boot;
+/// transient EIO on the very first mount is the known F6 race).
+async fn mount_with_retry(addr: &str, parent: &str, root: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + MOUNT_WAIT;
+    loop {
+        match nfs_mount::mount_nfs(Path::new("mount.nfs"), addr, parent, root).await {
+            Ok(()) => return Ok(()),
+            Err(e) if std::time::Instant::now() < deadline => {
+                tracing::debug!(target: "init-pro", dir = %root.display(), error = %e,
+                    "workspace root mount retrying");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Mount the agent's anyhome workspace and return its per-Agent directory.
@@ -277,26 +327,68 @@ async fn mount_workspace(
         _ => (export.to_string(), name.to_string()),
     };
     let root = mount_root_dir(data_dir, addr);
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|e| format!("create {}: {e}", root.display()))?;
+    // The pinned per-address root outlives agent restarts, and after an
+    // anyhome server restart the NFSv3 hard mount is STALE: stat() on it
+    // never completes, so create_dir_all surfaces the raw mkdir EEXIST
+    // instead of recognizing the directory (F10). An existing root is
+    // therefore not fatal here; liveness is decided by plan_root below.
+    if let Err(e) = tokio::fs::create_dir_all(&root).await {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!("create {}: {e}", root.display()));
+        }
+    }
     let mounts = std::fs::read_to_string("/proc/self/mounts")
         .map_err(|e| format!("read /proc/self/mounts: {e}"))?;
-    if !nfs_mount::is_mountpoint(&mounts, &root) {
-        let deadline = std::time::Instant::now() + MOUNT_WAIT;
-        loop {
-            match nfs_mount::mount_nfs(Path::new("mount.nfs"), addr, &parent, &root).await {
-                Ok(()) => break,
-                Err(e) if std::time::Instant::now() < deadline => {
-                    tracing::debug!(target: "init-pro", dir = %root.display(), error = %e,
-                        "workspace root mount retrying");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(e) => return Err(e),
-            }
+    // Bounded liveness probe: a read through a live mount answers fast;
+    // through a stale one it errors (ESTALE once the server is back) or
+    // hangs until the timeout converts it into a Recover decision.
+    let probe_live = matches!(
+        tokio::time::timeout(PROBE_WAIT, tokio::fs::read_dir(&root)).await,
+        Ok(Ok(_))
+    );
+    match plan_root(&mounts, &root, probe_live) {
+        RootPlan::Reuse => {
+            tracing::debug!(target: "init-pro", dir = %root.display(),
+                "reusing pinned workspace root");
+        }
+        RootPlan::Recover => {
+            // Lazy unmount detaches the dead filehandles without a server
+            // round-trip (a plain umount could block on the stale RPC);
+            // mount_with_retry then rebuilds a live mount in its place.
+            tracing::warn!(target: "init-pro", dir = %root.display(),
+                "workspace root stale (anyhome restarted?); lazy-unmounting and remounting");
+            let _ = tokio::process::Command::new("umount")
+                .arg("-l")
+                .arg(&root)
+                .output()
+                .await;
+            mount_with_retry(addr, &parent, &root).await?;
+        }
+        RootPlan::Mount => {
+            mount_with_retry(addr, &parent, &root).await?;
         }
     }
     Ok(root.join(leaf))
+}
+
+/// Bounded mkdir retry for writes THROUGH a just-established NFS mount:
+/// the first RPC round after `mount.nfs` returns can transiently fail
+/// with EIO while anyhome's freshly restarted plane settles (F6 family);
+/// three attempts half a second apart close it. `AlreadyExists`-like
+/// outcomes are already Ok by create_dir_all semantics.
+async fn create_dir_retry(dir: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..3u32 {
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            last = format!("create {}: {e}", dir.display());
+            tracing::debug!(target: "init-pro", attempt, dir = %dir.display(), error = %e,
+                "workspace prepare retrying (F6 first-write race)");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        return Ok(());
+    }
+    Err(last)
 }
 
 /// Idempotent local scaffold mirroring the server-side keeper layout
@@ -305,9 +397,7 @@ async fn mount_workspace(
 /// shared export (A2).
 async fn prepare_workspace(dir: &Path) -> Result<(), String> {
     for sub in ["skills", "tools", "mem", ".opencoder"] {
-        tokio::fs::create_dir_all(dir.join(sub))
-            .await
-            .map_err(|e| format!("create {sub}: {e}"))?;
+        create_dir_retry(&dir.join(sub)).await?;
     }
     let bridge = dir.join(".opencoder/skills");
     if let Err(e) = tokio::fs::symlink("../skills", &bridge).await {
@@ -333,6 +423,22 @@ mod tests {
             workspace_dir(data, "a/b"),
             PathBuf::from("/d/agent-ws/invalid")
         );
+    }
+
+    #[test]
+    fn plan_root_mounts_when_absent_and_reuses_live() {
+        let root = Path::new("/d/agent-ws/nfs-a_1");
+        let text = "tmpfs / tmpfs rw 0 0\n";
+        assert_eq!(plan_root(text, root, false), RootPlan::Mount);
+        let text = "a:/agent /d/agent-ws/nfs-a_1 nfs rw,vers=3 0 0\n";
+        assert_eq!(plan_root(text, root, true), RootPlan::Reuse);
+    }
+
+    #[test]
+    fn plan_root_recovers_stale_pinned_mount() {
+        let root = Path::new("/d/agent-ws/nfs-a_1");
+        let text = "a:/agent /d/agent-ws/nfs-a_1 nfs rw,vers=3 0 0\n";
+        assert_eq!(plan_root(text, root, false), RootPlan::Recover);
     }
 
     #[test]

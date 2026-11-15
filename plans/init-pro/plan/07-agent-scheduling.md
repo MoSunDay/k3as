@@ -76,6 +76,15 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   shim (`crates/api/src/argoproj.rs`) and a thin `Kube` bridge
   (`controllers/workflow_bridge.rs`) — behavior and wire format
   unchanged (JSON-only, Q10). See decisions.md **Q42**.
+- **As-built addendum (Sprint 37c, 双节点实机验收 hardening):**
+  `agent_exec.rs` 挂载韧性 — (a) pinned per-address NFS 根挂载在 anyhome
+  server 重启后 stale（NFSv3 hard 不自报错, stat 挂死 → `create_dir_all`
+  冒 EEXIST → 后续 Agent 全 `WorkspaceMountFailed`, F10）: 修复 =
+  EEXIST 容忍 + 有界 `read_dir` 活性探针 + 纯函数 `plan_root`
+  (Mount/Reuse/Recover; Recover = `umount -l` + remount) + 3 单测;
+  (b) F6 首挂/重挂后 prepare 偶发 EIO → `create_dir_retry` 有界重试。
+  实机: run4 复现 → run5 `ACCEPTANCE_RESTART=1` 15/15 全绿。详见
+  CHANGELOG Sprint 37c + `验收报告.md` F6/F10。
 - **状态 / Status** — done (Phase A Sprint 26 + Phase B 节点执行 Sprint 30,
   Q35/Q37)；B2 专用 CLI run 动词不再单列（`init-pro agent` 子命令 + kubectl
   apply 已覆盖创建路径，需求再现时并入后续 TODO）

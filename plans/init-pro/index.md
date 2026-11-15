@@ -28,7 +28,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T3.3 | 3 | bootstrap / 证书 / token 轮转 | not-started | T1.3, T2.2 |
 | T3.4 | 3 | HA 多 server (etcd 集群 + 选举) | not-started | T2.2, T3.3 |
 | T4.1 | 4 | containerd bundling 与 CRI 实现 | done | T0.2 |
-| T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24) | T4.1, T3.2 |
+| T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24; 心跳顺带收敛 kubelet-port 注解 1242c5f, 双节点实测 Sprint 37c) | T4.1, T3.2 |
 | T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | in-progress (Scope A flannel CNI Q34 + Scope B ServiceLB announce/L4 Q41 done; 剩余 host-gw/multi-node/netpol 面；Scope C ClusterIP 分配 + L4 承载排期 S42 (Q44 草案)) | T4.2 |
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |

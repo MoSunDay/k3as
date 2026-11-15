@@ -170,8 +170,8 @@ pub(crate) fn now_str() -> String {
 /// does the stored Node need a new `metadata.annotations`, and if so what
 /// should the corrected map be?
 ///
-/// Returns `Some(annotations)` — every pre-existing annotation preserved,
-/// [`KUBELET_PORT_ANNOTATION`] set to `kubelet_port` — when the stored
+/// Returns `Some(annotations)`: every pre-existing annotation preserved and
+/// [`KUBELET_PORT_ANNOTATION`] set to `kubelet_port`, for when the stored
 /// annotation is missing, non-string or stale. Returns `None` when it
 /// already matches, so the heartbeat skips the write and causes no extra
 /// CAS/resourceVersion churn on the happy path.
