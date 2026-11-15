@@ -1,6 +1,6 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 38 TODOs. The
+This file is the **single source of truth** for all 42 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
 grouping for easier editing). **Edit both in lock-step.**
 
@@ -19,7 +19,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | done | T0.1 |
 | T1.1 | 1 | 资源模型与 API group schema | done | T0.3 |
 | T1.2 | 1 | APIServer 核心 (REST + kubectl 真实交互) | done | T1.1, T2.2 |
-| T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) | not-started | T1.1 |
+| T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) (T1.3a TLS+静态 token S46/Q47 + T1.3b RBAC S47) | not-started | T1.1 |
 | T2.1 | 2 | etcd 语义数据面（纯 Rust 实现，Q17） | done | T0.2 |
 | T2.2 | 2 | etcd v3 数据面 = APIServer storage backend | done | T2.1, T1.1 |
 | T2.3 | 2 | rdb/RocksDB 持久化后端 (kine 语义, Q33) | done | T2.2 |
@@ -29,19 +29,23 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T3.4 | 3 | HA 多 server (etcd 集群 + 选举) | not-started | T2.2, T3.3 |
 | T4.1 | 4 | containerd bundling 与 CRI 实现 | done | T0.2 |
 | T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24) | T4.1, T3.2 |
-| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | in-progress (Scope A flannel CNI Q34 + Scope B ServiceLB announce/L4 Q41 done; 剩余 host-gw/multi-node/netpol 面) | T4.2 |
+| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | in-progress (Scope A flannel CNI Q34 + Scope B ServiceLB announce/L4 Q41 done; 剩余 host-gw/multi-node/netpol 面；Scope C ClusterIP 分配 + L4 承载排期 S42 (Q44 草案)) | T4.2 |
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
 | T4.6 | 4 | Pod 日志布局与轮转 (日期目录 + 100MB copytruncate, Q39) | done (Sprint 32) | T4.2 |
+| T4.7 | 4 | 容器 env/envFrom 投射 (literal + ConfigMap/Secret ref, optional 语义; S38) | not-started (S38 排期) | T4.2 |
+| T4.8 | 4 | 探针补全: tcpSocket + exec (httpGet 已有; S39) | not-started (S39 排期) | T4.2 |
+| T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | not-started (S40 排期) | T4.2 |
+| T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
 | T5.4 | 5 | 内置 Router 核心 + Ingress (networking.k8s.io/v1) → 路由编译 (openrusty h2c 网关嵌入, Q32) | done | T5.2, T5.3, T1.1 |
-| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含 openrusty `apply_config` 请求间 no-restart reload；剩余：live informer / drain / shared-dict 等价 / 动态证书 等价) | not-started | T5.4 |
+| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含 openrusty `apply_config` 请求间 no-restart reload；剩余：live informer / drain / shared-dict 等价 / 动态证书 等价；S41 slice: ingress_listen CLI 接线（快赢）) | not-started | T5.4 |
 | T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane Q28/Q32 + announce/L4 数据面 Q41 done; 剩余 SNI/TLS passthrough, 依赖 T5.5) | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
-| T6.2 | 6 | 标准 addon (CoreDNS/local-storage/metrics-server) | not-started | T6.1 |
+| T6.2 | 6 | 标准 addon (T6.2a 内嵌 Cluster DNS S43/Q45 + T6.2b local-path S44/Q46; metrics-server → S48 backlog) | not-started | T6.1, T4.3 |
 | T6.3 | 6 | 内嵌 Docker Registry v2 镜像仓库（tag 保留策略，默认最近 10 + keep-forever 不计入，Q40） | done (Sprint 33; Sprint 34 hardening) | T0.3 |
 | T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A Sprint 26, Q35 + Phase B 节点执行 Sprint 30, Q37) | T3.2, T1.2 |
 | T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
@@ -49,12 +53,12 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 
-**Counts:** 38 TODOs · 26 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 42 TODOs · 26 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
-· 10 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
-Layer4=6 · Layer5=7 · Layer6=3 · Layer7=5.
+· 14 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+Layer4=10 · Layer5=7 · Layer6=3 · Layer7=5.
 
 ---
 
@@ -82,6 +86,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档)。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
 - **Sprint 36 — workflow 抽取独立仓库 arust-workflow (link_repos 第 8 pin, Q42) + router 热重载真 bug 修复.**
   `github.com/MoSunDay/arust-workflow` @ `687ed325`（Q38 bootstrap 收编, 与 openrusty/rdb 同型）: 双 crate —— `workflow-model`
   (argoproj.io/v1alpha1 全字段类型, 自 k3as `crates/api/src/argoproj/` 17 模块原样平移, 30 fidelity 单测) + `workflow-engine`

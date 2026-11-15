@@ -7,6 +7,27 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
+
+**规划落库** — `plans/init-pro/index.md` 状态表 +4 卡 (T4.7/T4.8/
+T4.9/T4.10, 38→42 TODO) + 既有卡 Scope 注记 (T4.3 Scope C S42、T5.5
+S41 slice、T6.2a/b S43–S44、T1.3a/b S46–S47)；`plan/*.md` 同步 7 字段
+卡/段落；`decisions.md` 增 Q44–Q47 **草案** (均标注 "S3x 开工前定稿",
+Q44/Q46/Q47 分别修订 Q28/Q22/Q11, 定稿时原文加 Superseded 注记)。
+
+**基建** — `scripts/all-gates.sh`: 按 Sprint DoD 顺序一键跑 8 门
+(fmt→build→test(计数提取)→clippy→golden→9 项领域 e2e 电池(Q25
+SKIP-not-fail)→flag-parity→SSOT 人工行)，✓/✗ 汇总表，任一 FAIL 即
+非零退出；排除 local-up(常驻)/t41-spike(历史)/stage-fresh-dir(需特殊
+构建)。
+
+**闭环纪律**: 每 sprint DoD 全绿才翻状态；差距清单 C 类每项归宿只有
+TODO 卡或 won't-do Q 码, S48 审计验证零无主项；golden 重基线仅发生在
+S41 (唯一行为面翻转点)。
+
+No code change; `cargo build --workspace --locked` green on the tree
+(all-gates full battery 首跑记录在 S38 条目)。
+
 ## Sprint 37 — nfsserve 顶层直 pin + also_link 兼容链接 + 补丁正本入库 (Q38 布局迁移) (2026-11-15)
 
 **Goal:** move the nfsserve pin OUT of the any-home tree (the legacy

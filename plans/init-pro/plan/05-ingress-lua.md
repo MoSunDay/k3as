@@ -200,6 +200,14 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
     TLS reload equivalent.
   - Wire the `NodePortConfig.ingress_listen` CLI flag (currently
     default-`None` and unwired — T5.4 debt).
+  - **S41 slice — ingress_listen CLI 接线（快赢）**: infra config 增
+    字段 + `--ingress-listen <addr:port>` 从 noop 表转 wired (parity
+    快照 +1) + `runtime.rs` 透传（现状 `NodePortConfig::default()`
+    断链）。golden 处置: `realtraffic.sh` G70–G72 从 "钉死无监听" 翻转
+    为 "带旗标正向断言 + 不带旗标保留一个负面变体"，verdict 台账与
+    `golden/README.md` 行同 sprint 更新（G70 双向钉死纪律）。T5.5
+    整体状态不因 slice 翻转（informer 级数据源/drain 仍在卡内），仅
+    As-built 记此 slice。
 
 - **验收手段 / Acceptance**
   - In-flight request completes with old route while new requests use the

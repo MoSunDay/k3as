@@ -292,6 +292,15 @@ and node registration.
     LoadBalancer 型 Service）。
   - **剩余 T4.3 范围（not-started）：** 上游 flannel conformance 面
     （host-gw / wireguard backend、multi-node vxlan、netpol）。
+  - **Scope C (S42 排期, Q44 草案)：** 分配面 —— `--service-cidr` 从
+    noop 表转 wired，`service.rs` noop 分支改为从 CIDR 池分配 ClusterIP +
+    冲突 CAS 自愈（复用 NodePort 现有分配模式）；承载面 —— 仿
+    `servicelb.rs` 新 listener 类型（bind clusterIP:port，RR 就绪
+    Endpoints，`copy_bidirectional`；bind 依赖 IP_FREEBIND 或本机回环
+    别名，取舍由 Q44 定夺）；headless（`clusterIP: None`）不分 IP 不监听
+    （为 T6.2a DNS 留数据源）。明确 out: sessionAffinity/UDP/
+    externalTrafficPolicy（Q28 原文保留）。验收: 分配/冲突单测 +
+    service-traffic-e2e ST7–ST10。
 
 - **验收手段 / Acceptance**
   - Golden: pod-to-pod across nodes; ClusterIP reachable; LoadBalancer
@@ -422,3 +431,97 @@ and node registration.
   `crates/common/src/time.rs`; `cargo test -p kubelet -p common` green.
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.2
+
+---
+
+## T4.7 — 容器 env/envFrom 投射
+
+- **目标 / Goal**
+  Pod spec 的 env (literal + fieldRef-free) 与 envFrom (ConfigMap/Secret)
+  在容器创建时投射进 CRI `envs`。
+
+- **核心实现 / Core implementation**
+  - `crates/kubelet/src/objects.rs` ContainerSpec 增 `env`/`env_from`
+    解析 (literal + ConfigMap/Secret ref)；`optional` 语义: 缺 required
+    ref → 容器创建失败事件。
+  - `sync.rs` 的 `envs: Vec::new()` 改为 create 时解析填充（对齐 k8s:
+    env 不热更新，无 watch 联动）。
+  - CRI 层 `cri_json.rs` envs 字段已存在，零改动。
+  - 明确 out: Downward API、projected env。
+
+- **验收手段 / Acceptance**
+  - 解析/解析失败单测 + 新 `scripts/pod-env-e2e.sh` E1–E4（容器
+    printenv 经 logs 断言；vendor bundle 缺席则 SKIP，Q25 教义）。
+
+- **状态 / Status** — not-started (S38 排期)
+- **证据 / Evidence** — —
+- **卡点 / Blockers** — none
+- **依赖 / Depends on** — T4.2
+
+---
+
+## T4.8 — 探针补全 (tcpSocket + exec)
+
+- **目标 / Goal**
+  httpGet 之外补 tcpSocket/exec 两类探针。
+
+- **核心实现 / Core implementation**
+  - `probes.rs` 扩 tcpSocket（tokio connect，数字端口）与 exec
+    （复用 `CriCtl::exec_container`，rc==0 即健康，无 shell 语义照抄
+    k8s）；`runner.rs` 分派。
+  - 明确 out: 命名端口（IntOrString 顺延，Deferred 注记）。
+
+- **验收手段 / Acceptance**
+  - 本地 listener 单测 + e2e 探针成功/失败双路径（失败路径驱动重启
+    可见）。
+
+- **状态 / Status** — not-started (S39 排期)
+- **证据 / Evidence** — —
+- **卡点 / Blockers** — none
+- **依赖 / Depends on** — T4.2
+
+---
+
+## T4.9 — 资源限制 → CRI linux.resources + QoS 分级
+
+- **目标 / Goal**
+  Pod resources.limits/requests 运行时强制进容器 cgroup。
+
+- **核心实现 / Core implementation**
+  - `cri_json.rs` 新增 `linux.resources` 结构（沿用 crictl proto
+    字段名惯例）。
+  - `objects.rs` 解析 `resources.limits/requests`（调度侧已消费
+    requests，本卡补运行时强制）。
+  - `sync.rs` 映射 cpu shares/quota/period + memory limit；新增纯函数
+    QoS 分级（Guaranteed/Burstable/BestEffort）。
+  - 明确 out: 节点真实 capacity 探测、eviction。
+
+- **验收手段 / Acceptance**
+  - 映射/QoS 单测 + e2e（容器内 `cat /sys/fs/cgroup/memory.max`
+    断言）。
+
+- **状态 / Status** — not-started (S40 排期)
+- **证据 / Evidence** — —
+- **卡点 / Blockers** — none
+- **依赖 / Depends on** — T4.2
+
+---
+
+## T4.10 — kubelet 卷消费扩展 (hostPath + PVC)
+
+- **目标 / Goal**
+  kubelet 能消费 HostPath 与 PVC 卷（经 bound PV 解析真实路径）。
+
+- **核心实现 / Core implementation**
+  - `objects.rs` VolumeKind 增 `HostPath` + `Pvc`。
+  - `sync.rs` mounts 组装（PVC → bound PV → hostPath 路径解析）。
+
+- **验收手段 / Acceptance**
+  - `scripts/storage-e2e.sh` V4–V6 —— STS 的 PVC 真实 Bound 并可写，
+    pod 重建后数据仍在（Q22 的 "Pending forever" 就此 Superseded，
+    Q46）。
+
+- **状态 / Status** — not-started (S45 排期)
+- **证据 / Evidence** — —
+- **卡点 / Blockers** — 依赖 T6.2b provisioner 先落地 (S44)
+- **依赖 / Depends on** — T4.2, T6.2

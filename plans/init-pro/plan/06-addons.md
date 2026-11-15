@@ -30,28 +30,39 @@ k3s `pkg/deploy/` auto-deploy machinery.
 
 ---
 
-## T6.2 — 标准 addon (CoreDNS/local-storage/metrics-server)
+## T6.2 — 标准 addon (T6.2a 内嵌 Cluster DNS + T6.2b local-path; metrics-server backlog)
 
 - **目标 / Goal**
   The k3s default addon stack, toggle-able via `--disable` (T0.4):
-  `coredns`, `local-storage`, `metrics-server` (and `servicelb`/`traefik`
-  superseded by Layers 5/4.3).
+  内嵌 Cluster DNS + local-path 供给（`servicelb`/`traefik` 已由
+  Layers 5/4.3 取代; metrics-server → S48 backlog 归档）。
 
 - **核心实现 / Core implementation**
-  - Bundled manifests pinned to upstream versions.
-  - CoreDNS: standard Deployment + ConfigMap.
-  - local-storage: a `StorageClass` + provisioner for node-local dirs.
-  - metrics-server: upstream manifest; resource policy to run on control
-    plane nodes.
+  - **T6.2a — 内嵌 Cluster DNS (S43 排期, Q45 草案)**:
+    `--cluster-dns`/`--cluster-domain` 从 noop 转 wired；CRI
+    `PodSandboxConfig` 增 `dns_config` 字段下发 pod resolv.conf；DNS
+    服务端纯 Rust 内嵌（service.namespace.svc.cluster.local A 记录 ←
+    Service/Endpoints watch；headless 答 endpoint IP 集；其余上游
+    forward 至宿主 resolv.conf）。宿主进程仿 Q34 "flannel 内嵌 agent"
+    先例定夺（倾向 kubelet 内嵌模块，Q45 定）。明确 out: SRV/PTR/pod
+    DNS。
+  - **T6.2b — local-path 供给 (S44 排期, Q46 草案, 修订 Q22)**:
+    `schema.rs` 一行式注册 PersistentVolume、StorageClass
+    （k8s_openapi 原生类型，注册即得全套 generic CRUD/watch/SSA）；
+    provisioner+binder 控制器（PVC Pending → 在 data-dir 下造
+    hostPath PV → Bound；默认 StorageClass 注解）。明确 out: 多节点
+    亲和调度、VolumeBindingMode 延迟绑定。
+  - metrics-server: 不在本迭代，S48 backlog 归档。
 
 - **验收手段 / Acceptance**
-  - Golden: with defaults, DNS resolves, a PVC binds on `local-storage`,
-    `kubectl top nodes` returns metrics; each `--disable` removes its piece.
+  - T6.2a: wire 格式/压缩单测 + 新 `scripts/dns-e2e.sh` D1–D5（pod 内
+    getent 服务名解析并连通 ClusterIP，依赖 T4.3 Scope C）。
+  - T6.2b: reconcile 状态机单测 + 新 `scripts/storage-e2e.sh` V1–V3。
 
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
-- **卡点 / Blockers** — none
-- **依赖 / Depends on** — T6.1
+- **卡点 / Blockers** — T6.2a 依赖 T4.3 Scope C ClusterIP 承载 (S42)
+- **依赖 / Depends on** — T6.1, T4.3
 
 ---
 

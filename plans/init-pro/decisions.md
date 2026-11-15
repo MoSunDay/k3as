@@ -2348,3 +2348,98 @@ all landed the same day:
   can rw-mount any server path the annotation names — there is no
   per-path authz in v1, the same client-trust model as native k8s NFS;
   per-path ACLs would be a follow-up decision.
+
+## Q44 — T4.3 Scope C: ClusterIP 分配面 + L4 承载数据面 (T4.3 Scope C / S42) (DRAFT 2026-11-15, S42 开工前定稿)
+
+**Context.** Q28 locked the Service plane as NodePort-only in the Router
+with the ClusterIP dataplane explicitly deferred. The S38–S48 semantic-
+backfill iteration now schedules it (S42): without a ClusterIP plane the
+Cluster DNS story (T6.2a, S43) has nothing stable to resolve to. This is
+a DRAFT — nothing in it may touch code before finalization.
+
+**Options.** (a) **bind 取舍** — `IP_FREEBIND` socket option vs 本机回环
+别名 (`ip addr add`, the klipper/k3s precedent). The key difference is
+route correctness for LOCALLY-ORIGINATED connections: FREEBIND only
+solves bind (an agent connecting to its own ClusterIP still needs a
+route), while a loopback alias solves bind AND the local route at once.
+草案倾向回环别名. (b) **分配面** — a standalone allocator state machine
+vs 复用 NodePort 现有 CAS 自愈分配模式 (apiserver `service.rs` 的
+noop 分支改为从 `--service-cidr` 池分配 + 冲突 CAS 自愈). 草案选后者.
+
+**Decision (草案).** 分配面复用 NodePort CAS 自愈模式 (`--service-cidr`
+wired)；承载面仿 `router/servicelb.rs` 新 listener 类型 (bind
+clusterIP:port, RR ready Endpoints, `copy_bidirectional`)，bind 机制取
+回环别名（待定稿确认）。headless (`clusterIP: None`) 不分 IP 不监听
+(留给 T6.2a DNS 消费)。必须在 S42 开工前定稿；定稿时在 Q28 原文加
+`Superseded (Sprint N)` 注记 (Q44 修订 Q28 的 ClusterIP-deferred 语义).
+
+**Consequences.** (+) ClusterIP 可达 → T6.2a DNS 有数据源。
+(−) out 明确保留: sessionAffinity/UDP/externalTrafficPolicy (Q28 原文
+其余部分继续有效)；回环别名触碰节点网络状态 (需幂等 + 清理纪律，
+定稿时核对)。
+
+## Q45 — T6.2a 内嵌 Cluster DNS: 宿主形态 (T6.2a / S43) (DRAFT 2026-11-15, S43 开工前定稿)
+
+**Context.** T6.2a (S43) embeds a Cluster DNS server (纯 Rust):
+`service.namespace.svc.cluster.local` A records from a Service/Endpoints
+watch, headless answered with the endpoint IP set, everything else
+forwarded to the host resolv.conf. Where the server LIVES is undecided.
+This is a DRAFT — 定稿前不动代码.
+
+**Options.** (a) 独立宿主进程 (a supervised peer binary). (b) kubelet
+内嵌模块 — the Q34 precedent: flannel-rust runs INSIDE the agent process
+via `crates/cli/src/flannel.rs`, no extra supervision surface. 草案倾向
+kubelet 内嵌.
+
+**Decision (草案).** kubelet 内嵌模块 (仿 Q34 flannel 内嵌先例)，pod 侧
+经 CRI `PodSandboxConfig.dns_config` 下发 resolv.conf。必须在 S43
+开工前定稿 (含 wire 格式/压缩细节与 D1–D5 验收面)。Q45 是新决策
+(无被修订对象).
+
+**Consequences.** (+) 单二进制教义 (Q1) 延续，无新增进程监督面。
+(−) out: SRV/PTR/pod DNS (顺延)；DNS 服务端与 kubelet 生命周期耦合
+(drain 顺序定稿时核对)。
+
+## Q46 — T6.2b local-path 供给: 自写 provisioner+binder (T6.2b / S44) (DRAFT 2026-11-15, S44 开工前定稿)
+
+**Context.** Q22 locked StatefulSet PVC semantics as "lazy binding until
+T6.2" — in practice PVCs sat `Pending` forever because no storage plane
+existed. The S44 slice (T6.2b) closes that hole. This is a DRAFT —
+定稿前不动代码.
+
+**Options.** (a) 真 upstream local-path-provisioner 移植 (Go 上游
+behavior-faithful port). (b) 自写极简 provisioner+binder 控制器 — PVC
+Pending → 在 data-dir 下造 hostPath PV → Bound；默认 StorageClass 注解；
+schema 一行式注册 PersistentVolume/StorageClass (k8s_openapi 原生类型,
+注册即得全套 generic CRUD/watch/SSA). 草案选自写.
+
+**Decision (草案).** 自写极简 provisioner+binder 控制器。必须在 S44
+开工前定稿；定稿时 Q22 原文加 `Superseded (Sprint N)` 注记 (Q46 修订
+Q22: 原 "PVC Pending forever" 语义废弃，Bound 生命周期落地)。
+
+**Consequences.** (+) STS 有状态负载获得真实可写存储 (T4.10 卷消费的
+前置)。(−) out: 多节点亲和调度、VolumeBindingMode 延迟绑定 (upstream
+parity 顺延)；自写面需 V1–V3 e2e 钉住生命周期语义。
+
+## Q47 — T1.3a TLS serving + 静态 token 认证 (T1.3a / S46) (DRAFT 2026-11-15, S46 开工前定稿)
+
+**Context.** Q11 locked the API server as h2c/cleartext-only for v1
+(intranet posture, Q38). The S46 slice (T1.3a) adds opt-in TLS serving +
+static bearer-token authn, revising that posture. This is a DRAFT —
+定稿前不动代码.
+
+**Options.** (a) TLS 客户端: rustls 直接依赖 vs 复用 openrusty TLS 面
+(其 pin 前置了 forward adaptation 点 `gateway_config.rs`, Q38 P2-1)。
+(b) serving 侧: axum-rustls vs openrusty listener 复用. 草案倾向
+server 侧 rustls (axum 生态直接)；客户端选型定稿时拍板.
+
+**Decision (草案).** server 侧自签 CA + serving cert (`--tls-san`) +
+axum authn 中间件 (Bearer 静态 token, `--token-file` 转 wired)；
+客户端选型 (rustls vs openrusty 复用) 在 S46 开工前定稿时拍板。必须
+在 S46 开工前定稿；定稿时 Q11 原文加修订注记 (Q47 修订 Q11: h2c 明文
+仅为默认，TLS opt-in；golden h2c 基线不动)。
+
+**Consequences.** (+) TLS 面 + token 认证独立闭环 (`scripts/auth-e2e.sh`
+A1–A6)，T1.3b RBAC (S47) 有 authn 地基。(−) golden 保持 h2c 明文基线
+(TLS opt-in 旗标, 避免全量重基线)；kubeconfig 读取起步仅
+server/CA/token 三字段 (完整 parity 顺延)。

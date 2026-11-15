@@ -80,7 +80,7 @@ be wire-compatible with upstream kubectl/kube-rs.
 
 ---
 
-## T1.3 — 认证授权 (kubeconfig/token/RBAC)
+## T1.3 — 认证授权 (kubeconfig/token/RBAC) (T1.3a TLS+静态 token + T1.3b RBAC)
 
 - **目标 / Goal**
   Authn/Authz compatible with kubeconfig, bootstrap tokens, bearer tokens,
@@ -92,13 +92,28 @@ be wire-compatible with upstream kubectl/kube-rs.
   - RBAC authorizer with the upstream attribute builder
     (`verb/resource/group/namespace/name`) and `system:` built-in roles.
   - webhook authn/authz seam (no-op default).
+  - **T1.3a — TLS serving + 静态 token 认证 (S46 排期, Q47 草案, 修订
+    Q11)**: server 自签 CA + serving cert（`--tls-san`）；axum `app.rs`
+    插 authn 中间件（Bearer 静态 token，`--token-file` 从 noop 转
+    wired）；kubectl 侧补 https 传输（现为裸 TcpStream，`http.rs` 直接
+    拒 https；TLS 客户端选型 rustls vs 复用 openrusty 由 Q47 定夺）+
+    kubeconfig 读取（server/CA/token 三字段起步）。golden 保持 h2c 明文
+    基线不动（TLS 是 opt-in 旗标，避免全量重基线）；TLS 面由新
+    `scripts/auth-e2e.sh` A1–A6 独立闭环（自签链、token 拒绝 401、
+    kubeconfig 连通）。
+  - **T1.3b — RBAC 授权 (S47 排期)**: Role/RoleBinding/ClusterRole/
+    ClusterRoleBinding 注册 + authz 中间件（verbs×resources 匹配）；
+    ServiceAccount 最小面（default SA + token）。
 
 - **验收手段 / Acceptance**
   - Golden: a `kube-rs` client with a service-account token can/cannot
     perform operations per a test ClusterRole.
   - `kubectl auth can-i` parity cases.
+  - T1.3a/b: 新 `scripts/auth-e2e.sh` —— A1–A6 (TLS/token) + A7–A10
+    (RBAC allow/deny 矩阵)。
 
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **卡点 / Blockers** — none（TLS 客户端选型 rustls vs openrusty 复用
+  留给 Q47 定稿）
 - **依赖 / Depends on** — T1.1
