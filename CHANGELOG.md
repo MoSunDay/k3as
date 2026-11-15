@@ -7,50 +7,6 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
-## Sprint 37c — 双节点实机闭环验收: G4 修复 + A0–A14 全门禁 (2026-11-15)
-
-**代码** — `1242c5f` fix(kubelet): 心跳 GET-modify-PUT 顺带 reconcile
-Node 注解 `init-pro.io/kubelet-port` (纯函数
-`reconciled_kubelet_port_annotation` + 3 单测; 修复改端口重启后 relay
-拨旧端口)。部署实测: 10250→10260 注解 6 s 收敛、logs/exec relay 跟随,
-回退同理。T4.2 状态注记同步 (index.md + plan/04-node.md)。
-
-**实机验收 (node02 控制面+边车 agent + node04 agent, host-gw)** —
-`验收报告.md` 落档。全门禁绿: A0 基线/rdb 冷备; A1 双 Pod Running
-(podIP∈10.244.0.0/24); A2/A3 logs/exec 中继真实回传 (exit-code 透传);
-A4 双 Ready 各持 /24; A5 host-gw 双向路由 + netpod pod↔pod TCP 双向;
-A6 Endpoints 收敛; A7 NodePort LAN 10×200 + 5/5 round-robin 跨节点回程;
-A8 Ingress v1 语义 (REST 读回 + host-plane 404 钉死 = T5.6 缺口);
-A9/A10 server/agent 重启自愈 (rdb 零丢失); A12 Agent 执行闭环
-(Succeeded + merge-patch 回写 + anyhome LAN NFS marker); A13 Workflow
-template.agent → Agent 调度执行; G4 注解收敛。**A11 双机 reboot 留人工
-窗口**。
-
-**新脚本** — `scripts/acceptance-2node-e2e.sh` (367 行, 幂等 13+2 门
-PASS/FAIL 汇总; A9/A10 需 `ACCEPTANCE_RESTART=1`, A11 永远人工) +
-`scripts/build-netpod-image.sh` (116 行, netpod 离线镜像独立构建器,
-原配方内嵌于 flannel-e2e)。
-
-**实机发现 (验收报告 §3)** — F1 k3s 残留 cni0/flannel.1 阻断首建
-sandbox (已清理); F2 agent 重启不收养 sandbox (podIP 变/restartCount
-归零, v1 预期); F3 重启后 ~12 s relay 500 (containerd 竞态, 候选工单);
-**F4 Agent 执行循环按 name 去重 → 同名重建永不 re-reconcile (代码缺陷,
-待工单)**; F5 anyhome 默认 loopback 不适配多节点 (部署已改 LAN 绑定);
-F6 anyhome NFS 首挂/重挂后 prepare 偶发 EIO (**已修复**: `create_dir_retry`
-有界重试); F7 kubectl 无核心资源 get (S4x 已排期); F8 双节点
-kube-router/KUBE-* iptables 残留待清理。
-
-**F10 修复 (同 sprint)** — `agent_exec.rs`: anyhome server 重启后节点侧
-pinned NFS 根挂载变 stale (NFSv3 hard 不自报错, stat 挂死 →
-`create_dir_all` 冒 EEXIST → 之后所有 Agent `WorkspaceMountFailed`,
-server-restart→A12 序列 100% 复现)。修复 = EEXIST 容忍 + 有界 `read_dir`
-活性探针 + 纯函数 `plan_root` 三分支 (Mount/Reuse/Recover=lazy umount +
-remount) + `create_dir_retry` (F6) + 3 新单测。实测 run4 复现 → run5
-同根挂载自动恢复。终局: run5 重启门全开 **15/15 全绿**, run6 复跑 13/0;
-node04 单元二进制改钉 `/root/k3as-d/bin/init-pro` (sha `e7414e90…`,
-双节点一致), 与 dev target/ 解耦; 验收脚本 A4/A10 轮询化 + 瞬态 JSON
-噪声静默 (389 行)。
-
 ## Sprint 38 — T4.7 容器 env/envFrom 投射 (done) + all-gates 首跑与 golden 环境冲突定性 (2026-11-15)
 
 **Goal:** Pod spec 的 env (literal + 单键 valueFrom) 与 envFrom (ConfigMap/Secret
@@ -105,6 +61,50 @@ real-stack 套件自选空闲 kubelet-port (workloads.sh 等, G30 已示范) +
 (multicall/discovery-parity/graceful-shutdown/durability/registry/agent-exec/
 anyhome/pod-env), service-traffic+flannel 因网络面被验收集群占用本轮缓跑
 (21:40 同机全绿在案)。
+
+## Sprint 37c — 双节点实机闭环验收: G4 修复 + A0–A14 全门禁 (2026-11-15)
+
+**代码** — `1242c5f` fix(kubelet): 心跳 GET-modify-PUT 顺带 reconcile
+Node 注解 `init-pro.io/kubelet-port` (纯函数
+`reconciled_kubelet_port_annotation` + 3 单测; 修复改端口重启后 relay
+拨旧端口)。部署实测: 10250→10260 注解 6 s 收敛、logs/exec relay 跟随,
+回退同理。T4.2 状态注记同步 (index.md + plan/04-node.md)。
+
+**实机验收 (node02 控制面+边车 agent + node04 agent, host-gw)** —
+`验收报告.md` 落档。全门禁绿: A0 基线/rdb 冷备; A1 双 Pod Running
+(podIP∈10.244.0.0/24); A2/A3 logs/exec 中继真实回传 (exit-code 透传);
+A4 双 Ready 各持 /24; A5 host-gw 双向路由 + netpod pod↔pod TCP 双向;
+A6 Endpoints 收敛; A7 NodePort LAN 10×200 + 5/5 round-robin 跨节点回程;
+A8 Ingress v1 语义 (REST 读回 + host-plane 404 钉死 = T5.6 缺口);
+A9/A10 server/agent 重启自愈 (rdb 零丢失); A12 Agent 执行闭环
+(Succeeded + merge-patch 回写 + anyhome LAN NFS marker); A13 Workflow
+template.agent → Agent 调度执行; G4 注解收敛。**A11 双机 reboot 留人工
+窗口**。
+
+**新脚本** — `scripts/acceptance-2node-e2e.sh` (367 行, 幂等 13+2 门
+PASS/FAIL 汇总; A9/A10 需 `ACCEPTANCE_RESTART=1`, A11 永远人工) +
+`scripts/build-netpod-image.sh` (116 行, netpod 离线镜像独立构建器,
+原配方内嵌于 flannel-e2e)。
+
+**实机发现 (验收报告 §3)** — F1 k3s 残留 cni0/flannel.1 阻断首建
+sandbox (已清理); F2 agent 重启不收养 sandbox (podIP 变/restartCount
+归零, v1 预期); F3 重启后 ~12 s relay 500 (containerd 竞态, 候选工单);
+**F4 Agent 执行循环按 name 去重 → 同名重建永不 re-reconcile (代码缺陷,
+待工单)**; F5 anyhome 默认 loopback 不适配多节点 (部署已改 LAN 绑定);
+F6 anyhome NFS 首挂/重挂后 prepare 偶发 EIO (**已修复**: `create_dir_retry`
+有界重试); F7 kubectl 无核心资源 get (S4x 已排期); F8 双节点
+kube-router/KUBE-* iptables 残留待清理。
+
+**F10 修复 (同 sprint)** — `agent_exec.rs`: anyhome server 重启后节点侧
+pinned NFS 根挂载变 stale (NFSv3 hard 不自报错, stat 挂死 →
+`create_dir_all` 冒 EEXIST → 之后所有 Agent `WorkspaceMountFailed`,
+server-restart→A12 序列 100% 复现)。修复 = EEXIST 容忍 + 有界 `read_dir`
+活性探针 + 纯函数 `plan_root` 三分支 (Mount/Reuse/Recover=lazy umount +
+remount) + `create_dir_retry` (F6) + 3 新单测。实测 run4 复现 → run5
+同根挂载自动恢复。终局: run5 重启门全开 **15/15 全绿**, run6 复跑 13/0;
+node04 单元二进制改钉 `/root/k3as-d/bin/init-pro` (sha `e7414e90…`,
+双节点一致), 与 dev target/ 解耦; 验收脚本 A4/A10 轮询化 + 瞬态 JSON
+噪声静默 (389 行)。
 
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
