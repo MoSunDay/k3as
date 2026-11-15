@@ -7,6 +7,66 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 37 — nfsserve 顶层直 pin + also_link 兼容链接 + 补丁正本入库 (Q38 布局迁移) (2026-11-15)
+
+**Goal:** move the nfsserve pin OUT of the any-home tree (the legacy
+layout materialized the repo at `link_repos/any-home/link_repos/nfsserve`
+with the patch canonical copy riding the any-home pin) to a TOP-LEVEL pin
+— without forking nfsserve into two packages in the dependency graph and
+without losing the AUTH_SYS patch.
+
+**Changes**
+- `scripts/patches/nfsserve-auth-identity.patch` (new): the patch
+  canonical copy now lives in THIS repo, byte-identical to the former
+  in-pin copy at `link_repos/any-home/scripts/patches/` — the patch
+  advances with its consumer commit-by-commit instead of moving with the
+  any-home pin.
+- `link_repos.lock`: the nfsserve entry drops its explicit `path`
+  (default `link_repos/nfsserve`), `patch` now points at the repo-local
+  copy, and gains `also_link = ["link_repos/any-home/link_repos/nfsserve"]`
+  — a new optional manifest field naming extra paths that must exist as
+  RELATIVE symlinks to the repo's main target. Header rules updated:
+  only libsql remains pinned inside the any-home tree.
+- `scripts/bootstrap-link-repos.sh`: parses `also_link` (flattened into
+  one `;`-joined TSV column by the awk lock parser); after
+  materializing/verifying the main target it creates missing links
+  (relative path computed by a new `relpath` helper), verifies existing
+  ones resolve to the main target, and MIGRATES a legacy real directory
+  at an also_link path to the symlink when it provably reproduces from
+  the pin (git repo at the pinned sha whose only dirt is the patch
+  marker — link_repos trees are materialized artifacts). Dirty / non-git
+  / wrong-sha trees die; `--force` downgrades to a warning and leaves
+  them alone. Idempotent: a second run only verifies.
+- Root `Cargo.toml`: the nfsserve entry KEEPS the nested path
+  `link_repos/any-home/link_repos/nfsserve` — deliberately. any-home's
+  own workspace resolves nfsserve at `link_repos/nfsserve` relative to
+  the any-home root, and cargo keys path deps by LEXICAL path (symlinks
+  are never canonicalized — proven with a minimal reproducer on cargo
+  1.100): pointing the root manifest at `link_repos/nfsserve` instead
+  forks nfsserve into two same-named path packages and the build dies
+  with a lockfile collision. With also_link, the nested path IS the
+  top-level checkout (symlink), so the lexical reference is a pure alias.
+- SSOT: decisions.md Q38 (top-level pin + in-repo patch + also_link +
+  the cargo lexical-path constraint), plan/00-foundation.md T0.2b, lock
+  header rules.
+- No Rust source changes; opencoder's crates.io nfsserve 0.11 untouched;
+  link_repos/ is still a gitignored reproducible artifact (migration
+  performed by bootstrap itself, not by hand).
+
+**Gates**
+- `bash scripts/bootstrap-link-repos.sh --force` run 1 → exit 0,
+  migrated the legacy nested real dir to the symlink
+  (`link_repos/any-home/link_repos/nfsserve -> ../../nfsserve`); run 2 →
+  exit 0, verify-only (`also_link ... verified`). Plain (no `--force`)
+  runs stop at the PRE-EXISTING sandbox-only flannel-rust dev-symlink
+  drift (local /root/flannel-rust WIP at 47833e9 vs pin 76397b5 —
+  reproduced identically on the pre-change baseline via `git stash`).
+- `git -C link_repos/nfsserve rev-parse HEAD` == pin
+  c00c3614184bc79010c0aa3b69c2cdde1c5fca77; patch marker `src/identity.rs`
+  present.
+- `cargo build -p cli --locked` → ok; `Cargo.lock` byte-unchanged (not in
+  `git status`).
+
 ## Sprint 36b — T7.5 static-review close-out: 卷名碰撞消歧 + PUT replace 注入 (Q43 post-review) (2026-11-10)
 
 **Goal:** land the two P1 conditions (and the P2 items) from the T7.5

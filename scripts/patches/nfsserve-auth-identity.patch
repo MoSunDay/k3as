@@ -1,0 +1,177 @@
+diff --git a/src/identity.rs b/src/identity.rs
+new file mode 100644
+index 0000000..e7f6f44
+--- /dev/null
++++ b/src/identity.rs
+@@ -0,0 +1,75 @@
++//! Caller identity surfaced from the RPC layer to [`NFSFileSystem`]
++//! implementations.
++//!
++//! NFSv3's `NFSFileSystem` trait methods receive only file ids and names —
++//! they never see the RPC credential. This module closes that gap by stashing
++//! the AUTH_SYS credential (uid/gid/machine name) of the *current* request into
++//! a tokio task-local, which [`crate::rpcwire`] populates per RPC. A VFS can
++//! then call [`current_identity`] to learn who is making the call.
++//!
++//! When no RPC is in flight — e.g. a unit test driving a VFS directly —
++//! [`current_identity`] returns the [`Default`] (all-zero, empty) identity,
++//! which represents an "unauthenticated" caller.
++
++use tokio::task_local;
++
++/// Identity of the caller of the current NFS RPC, captured from the AUTH_SYS
++/// credential plus the TCP source address. Fields default to zero / empty for
++/// an unauthenticated caller (AUTH_NULL, or running outside the server).
++#[derive(Clone, Debug, Default)]
++pub struct CallerIdentity {
++    /// AUTH_SYS effective user id. `0` when no AUTH_SYS credential was supplied.
++    pub uid: u32,
++    /// AUTH_SYS effective group id. `0` when no AUTH_SYS credential was supplied.
++    pub gid: u32,
++    /// AUTH_SYS caller machine name (raw bytes). Empty when unauthenticated.
++    pub machinename: Vec<u8>,
++    /// TCP source address of the caller (`"ip:port"`). Empty outside the server.
++    pub client_addr: String,
++}
++
++impl CallerIdentity {
++    /// `true` when no AUTH_SYS credential was supplied for this call.
++    pub fn is_anonymous(&self) -> bool {
++        self.uid == 0 && self.gid == 0 && self.machinename.is_empty()
++    }
++}
++
++task_local! {
++    /// The task-local slot holding the caller identity for the current RPC.
++    /// Populated by [`crate::rpcwire::handle_rpc`]; read via [`current_identity`].
++    pub static CALLER: CallerIdentity;
++}
++
++/// Returns the identity of the caller of the current RPC, or the
++/// [`Default`] (unauthenticated) identity when called outside the server
++/// (no RPC in flight, e.g. unit tests).
++pub fn current_identity() -> CallerIdentity {
++    CALLER.try_with(|c| c.clone()).unwrap_or_default()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn defaults_outside_server() {
++        let id = current_identity();
++        assert!(id.is_anonymous());
++        assert_eq!(id.uid, 0);
++    }
++
++    #[tokio::test]
++    async fn scoped_identity_visible() {
++        let me = CallerIdentity {
++            uid: 1001,
++            gid: 1001,
++            machinename: b"hostA".to_vec(),
++            client_addr: "127.0.0.1:9000".to_string(),
++        };
++        let seen = CALLER.scope(me.clone(), async { current_identity() }).await;
++        assert_eq!(seen.uid, 1001);
++        assert_eq!(seen.machinename, b"hostA");
++        assert!(!seen.is_anonymous());
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index a5e1dcb..b71e1e6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,7 @@
+ #![cfg_attr(feature = "strict", deny(warnings))]
+ 
+ mod context;
++pub mod identity;
+ mod rpc;
+ mod rpcwire;
+ mod write_counter;
+diff --git a/src/rpc.rs b/src/rpc.rs
+index 2e2ead6..8104726 100644
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -102,11 +102,11 @@ xdr_enum_serde!(auth_flavor);
+ #[allow(non_camel_case_types)]
+ #[derive(Clone, Debug, Default)]
+ pub struct auth_unix {
+-    stamp: u32,
+-    machinename: Vec<u8>,
+-    uid: u32,
+-    gid: u32,
+-    gids: Vec<u32>,
++    pub stamp: u32,
++    pub machinename: Vec<u8>,
++    pub uid: u32,
++    pub gid: u32,
++    pub gids: Vec<u32>,
+ }
+ xdr_struct!(auth_unix, stamp, machinename, uid, gid, gids);
+ 
+diff --git a/src/rpcwire.rs b/src/rpcwire.rs
+index 33200c6..c783cab 100644
+--- a/src/rpcwire.rs
++++ b/src/rpcwire.rs
+@@ -44,27 +44,37 @@ async fn handle_rpc(
+             return Ok(false);
+         }
+ 
+-        let res = {
+-            if call.prog == nfs::PROGRAM {
+-                nfs_handlers::handle_nfs(xid, call, input, output, &context).await
+-            } else if call.prog == portmap::PROGRAM {
+-                portmap_handlers::handle_portmap(xid, call, input, output, &context)
+-            } else if call.prog == mount::PROGRAM {
+-                mount_handlers::handle_mount(xid, call, input, output, &context).await
+-            } else if call.prog == NFS_ACL_PROGRAM
+-                || call.prog == NFS_ID_MAP_PROGRAM
+-                || call.prog == NFS_METADATA_PROGRAM
+-            {
+-                trace!("ignoring NFS_ACL packet");
+-                prog_unavail_reply_message(xid).serialize(output)?;
+-                Ok(())
+-            } else {
+-                warn!("Unknown RPC Program number {} != {}", call.prog, nfs::PROGRAM);
+-                prog_unavail_reply_message(xid).serialize(output)?;
+-                Ok(())
+-            }
+-        }
+-        .map(|_| true);
++        // Snapshot the caller identity for this request and stash it in the
++        // task-local so NFSFileSystem implementations can authorize the call.
++        let identity = crate::identity::CallerIdentity {
++            uid: context.auth.uid,
++            gid: context.auth.gid,
++            machinename: context.auth.machinename.clone(),
++            client_addr: context.client_addr.clone(),
++        };
++        let res = crate::identity::CALLER
++            .scope(identity, async {
++                if call.prog == nfs::PROGRAM {
++                    nfs_handlers::handle_nfs(xid, call, input, output, &context).await
++                } else if call.prog == portmap::PROGRAM {
++                    portmap_handlers::handle_portmap(xid, call, input, output, &context)
++                } else if call.prog == mount::PROGRAM {
++                    mount_handlers::handle_mount(xid, call, input, output, &context).await
++                } else if call.prog == NFS_ACL_PROGRAM
++                    || call.prog == NFS_ID_MAP_PROGRAM
++                    || call.prog == NFS_METADATA_PROGRAM
++                {
++                    trace!("ignoring NFS_ACL packet");
++                    prog_unavail_reply_message(xid).serialize(output)?;
++                    Ok(())
++                } else {
++                    warn!("Unknown RPC Program number {} != {}", call.prog, nfs::PROGRAM);
++                    prog_unavail_reply_message(xid).serialize(output)?;
++                    Ok(())
++                }
++            })
++            .await
++            .map(|_| true);
+         context.transaction_tracker.mark_processed(xid, &context.client_addr);
+         res
+     } else {

@@ -15,6 +15,19 @@
 # Optional per-repo `patch` is applied after checkout (idempotent via
 # patch_marker; hard-fails on upstream drift so silent breakage cannot pass).
 #
+# Optional per-repo `also_link` (TOML string array, ';'-joined into one TSV
+# column) names EXTRA paths that must exist as RELATIVE symlinks to the
+# repo's MAIN target. Used when an upstream workspace references a pin
+# through its OWN internal relative path (any-home's Cargo.toml resolves
+# nfsserve at link_repos/nfsserve relative to the any-home root): without
+# the symlink that path would either not resolve or hold a SECOND,
+# divergent copy of the repo. Bootstrap creates missing links, verifies
+# existing ones resolve to the main target, and migrates a legacy REAL
+# directory at an also_link path to the symlink — only when it is a git
+# repo at the pinned sha whose only dirt is the patch marker (link_repos
+# trees are reproducible artifacts, so replacing them is safe); dirty or
+# non-git trees die (--force downgrades to a warning, leaving them alone).
+#
 # Idempotent: a second run only verifies. Any failure exits non-zero.
 # `--force` downgrades verify failures to warnings (escape hatch for live
 # WIP trees); it never discards or resets anything.
@@ -40,10 +53,11 @@ die()  { echo "[bootstrap] ERROR: $*" >&2; exit 1; }
 [[ -f "$LOCK" ]] || die "lock manifest not found: $LOCK"
 
 # ---------------------------------------------------------------------------
-# Parse link_repos.lock into TSV records: name,url,sha,path,patch,marker.
+# Parse link_repos.lock into TSV records: name,url,sha,path,patch,marker,also.
 # Empty patch/marker fields are emitted as "-" (IFS=$'\t' read drops empty
-# fields); path defaults to link_repos/<name>. mawk-compatible (no gawk
-# match() array capture).
+# fields); path defaults to link_repos/<name>. `also_link` (TOML string
+# array) is flattened into ONE column with ';' separators. mawk-compatible
+# (no gawk match() array capture).
 # ---------------------------------------------------------------------------
 parse_lock() {
   awk '
@@ -53,8 +67,9 @@ parse_lock() {
       if (path == "") path = "link_repos/" name
       if (patch == "") patch = "-"
       if (marker == "") marker = "-"
-      printf "%s\t%s\t%s\t%s\t%s\t%s\n", name, url, sha, path, patch, marker
-      name = ""; url = ""; sha = ""; path = ""; patch = ""; marker = ""
+      if (also == "") also = "-"
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", name, url, sha, path, patch, marker, also
+      name = ""; url = ""; sha = ""; path = ""; patch = ""; marker = ""; also = ""
     }
     /^\[\[repo\]\]/ { flush(); next }
     {
@@ -72,6 +87,19 @@ parse_lock() {
       else if (k == "path")          path = v
       else if (k == "patch")         patch = v
       else if (k == "patch_marker")  marker = v
+      else if (k == "also_link") {
+        # TOML string array: ["a", "b"] -> "a;b" (empty -> "").
+        sub(/^\[/, "", v); sub(/\]$/, "", v)
+        also = ""
+        n = split(v, arr, ",")
+        for (i = 1; i <= n; i++) {
+          t = arr[i]
+          sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+          sub(/^"/, "", t); sub(/"$/, "", t)
+          if (t == "") continue
+          also = (also == "" ? t : also ";" t)
+        }
+      }
     }
     END { flush() }
   ' "$LOCK"
@@ -85,6 +113,23 @@ repo_head() { git -C "$1" rev-parse HEAD 2>/dev/null || echo ""; }
 # Tracked modifications only (-uno): untracked artifacts (target/,
 # node_modules/) do not signal dependency drift.
 repo_dirty() { [[ -n "$(git -C "$1" status --porcelain -uno 2>/dev/null)" ]]; }
+
+# Relative path from directory $1 to path $2 (both absolute, normalized,
+# no trailing slash). Component-boundary aware ("a/bc" never matches
+# "a/b/..."); when no prefix is shared, falls back to the absolute $2.
+relpath() { # $1 from-dir, $2 to-path
+  local from="${1%/}" to="${2%/}" up=""
+  local common="$from"
+  while [[ "$to" != "$common" && "$to" != "$common/"* ]]; do
+    common="$(dirname "$common")"
+    up="../$up"
+    [[ "$common" == "/" ]] && break
+  done
+  if   [[ "$to" == "$common" ]];   then printf '%s\n' "${up%/}"
+  elif [[ "$to" == "$common/"* ]]; then printf '%s\n' "$up${to#"$common"/}"
+  else                                  printf '%s\n' "$to"
+  fi
+}
 
 fail_or_warn() { # $1 message
   if [[ $FORCE -eq 1 ]]; then warn "$1 (continuing: --force)"; else die "$1"; fi
@@ -103,8 +148,56 @@ apply_patch() { # $1 repo dir, $2 patch (repo-root relative), $3 marker (repo-re
   fi
 }
 
-ensure_repo() { # $1 name, $2 url, $3 sha, $4 path, $5 patch ('-' none), $6 marker
-  local name="$1" url="$2" sha="$3" target="$ROOT/$4" patch="$5" marker="$6"
+# Extra alias paths (also_link) that must be RELATIVE symlinks to the main
+# target, so an upstream workspace's internal relative path deps resolve to
+# the SAME repo instead of a second copy (see lock header).
+ensure_also_links() { # $1 name, $2 main target (abs), $3 sha, $4 marker ('-' none), $5 also (';'-joined, '-' none)
+  local name="$1" main="$2" sha="$3" marker="$4" also="$5"
+  [[ "$also" == "-" || -z "$also" ]] && return 0
+  local resolved_main; resolved_main="$(readlink -f "$main")"
+  local link abs rel
+  while IFS= read -r link; do
+    [[ -z "$link" ]] && continue
+    [[ "$link" != /* ]] || die "$name: also_link entry must be repo-root relative, got '$link'"
+    abs="$ROOT/$link"
+    if [[ "$abs" == "$main" ]]; then continue; fi
+    rel="$(relpath "$(dirname "$abs")" "$main")"
+    if [[ -L "$abs" ]]; then
+      local resolved; resolved="$(readlink -f "$abs")"
+      if [[ "$resolved" == "$resolved_main" ]]; then
+        log "$name: also_link $link -> $(readlink "$abs") verified"
+      else
+        fail_or_warn "$name: also_link $link resolves to $resolved, expected $resolved_main"
+      fi
+    elif [[ -d "$abs" ]]; then
+      # Legacy nested layout: migrate the real dir to a symlink, but only
+      # when it provably reproduces from the pin (git repo at the pinned
+      # sha whose only dirt is the patch marker) — link_repos trees are
+      # materialized artifacts, safe to replace under that guarantee.
+      local lhead; lhead="$(repo_head "$abs")"
+      if [[ ! -d "$abs/.git" ]]; then
+        fail_or_warn "$name: also_link $link is a real non-git directory; refusing to replace"
+      elif [[ "$lhead" != "$sha" ]]; then
+        fail_or_warn "$name: also_link $link is a git repo at $lhead (pin $sha); refusing to replace"
+      elif repo_dirty "$abs" && [[ "$marker" == "-" || ! -e "$abs/$marker" ]]; then
+        fail_or_warn "$name: also_link $link is dirty beyond the patch marker; refusing to replace"
+      else
+        rm -rf "$abs"
+        ln -s "$rel" "$abs"
+        log "$name: migrated legacy layout: $link real dir -> symlink $rel"
+      fi
+    elif [[ -e "$abs" ]]; then
+      fail_or_warn "$name: also_link $link exists and is not a directory"
+    else
+      mkdir -p "$(dirname "$abs")"
+      ln -s "$rel" "$abs"
+      log "$name: linked $link -> $rel"
+    fi
+  done < <(tr ';' '\n' <<< "$also")
+}
+
+ensure_repo() { # $1 name, $2 url, $3 sha, $4 path, $5 patch ('-' none), $6 marker, $7 also ('-' none)
+  local name="$1" url="$2" sha="$3" target="$ROOT/$4" patch="$5" marker="$6" also="$7"
   [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "$name: malformed sha '$sha' in lock"
 
   if [[ -L "$target" ]]; then
@@ -168,6 +261,8 @@ ensure_repo() { # $1 name, $2 url, $3 sha, $4 path, $5 patch ('-' none), $6 mark
 
   local head; head="$(repo_head "$target")"
   [[ "$head" == "$sha" ]] || die "$name: final HEAD $head != pinned $sha"
+
+  ensure_also_links "$name" "$target" "$sha" "$marker" "$also"
 }
 
 # ---------------------------------------------------------------------------
@@ -177,8 +272,8 @@ mapfile -t RECORDS < <(parse_lock)
 [[ ${#RECORDS[@]} -gt 0 ]] || die "no [[repo]] records parsed from $LOCK"
 
 for rec in "${RECORDS[@]}"; do
-  IFS=$'\t' read -r name url sha path patch marker <<< "$rec"
-  ensure_repo "$name" "$url" "$sha" "$path" "$patch" "$marker"
+  IFS=$'\t' read -r name url sha path patch marker also <<< "$rec"
+  ensure_repo "$name" "$url" "$sha" "$path" "$patch" "$marker" "$also"
 done
 
 log "all ${#RECORDS[@]} pinned repos verified. build with: cargo build --workspace --locked"

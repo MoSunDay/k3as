@@ -115,22 +115,37 @@ that every later TODO must keep green.
 
 - **目标 / Goal**
   A zero-cache cold clone of this repo must build: `link_repos/` is
-  gitignored by design (read-only path deps), so the 7 pinned repos
-  (openrusty, rdb, flannel-rust, opencoder, any-home + nested nfsserve,
-  libsql) must be materialized reproducibly from a checked-in manifest.
+  gitignored by design (read-only path deps), so the pinned repos
+  (openrusty, rdb, flannel-rust, opencoder, any-home, nfsserve, libsql;
+  + arust-workflow since Q42) must be materialized reproducibly from a
+  checked-in manifest.
 
 - **核心实现 / Core implementation**
   - `link_repos.lock` (repo root): TOML pin manifest — name / https url /
-    sha (+ optional path / patch / patch_marker). Entries materialize in
-    listed order; any-home precedes its nested link_repos children.
+    sha (+ optional path / patch / patch_marker / also_link). Entries
+    materialize in listed order; any-home precedes libsql, the one repo
+    still pinned INSIDE the any-home tree (nfsserve moved top-level
+    2026-11-15, see below).
   - `scripts/bootstrap-link-repos.sh`: missing target -> full clone +
     `git checkout --detach <sha>`; existing git dir -> verify HEAD==sha
     (auto-re-pin when clean, refuse when dirty); symlink target (local
     dev layout `link_repos/<name> -> /root/<name>`) -> verify-only,
     never modify, dirty refusal escaped via `--force`.
-  - nfsserve carries the anyhome AUTH_SYS identity patch (Q37); its
-    canonical copy is pinned INSIDE any-home (`scripts/patches/`), applied
-    idempotently via marker file after checkout.
+  - nfsserve carries the anyhome AUTH_SYS identity patch (Q37); since the
+    top-level re-pin its canonical copy is versioned in THIS repo
+    (`scripts/patches/nfsserve-auth-identity.patch`), applied idempotently
+    via marker file after checkout — the patch advances with its consumer
+    commit-by-commit instead of riding the any-home pin.
+  - nfsserve is pinned TOP-LEVEL (default path `link_repos/nfsserve`);
+    the lock's `also_link` keeps the legacy in-any-home path
+    (`link_repos/any-home/link_repos/nfsserve`) a RELATIVE symlink to it.
+    Two reasons: any-home's workspace resolves nfsserve at
+    `link_repos/nfsserve` relative to its own root, AND cargo keys path
+    deps by LEXICAL path (symlinks are never canonicalized) — so the root
+    `Cargo.toml` deliberately references the same nested path, keeping
+    nfsserve ONE lockfile package. Bootstrap creates/verifies the link
+    and migrates a legacy real dir there when it provably reproduces from
+    the pin (HEAD==sha, dirt limited to the patch marker).
   - Reachability: MoSunDay pins are origin/main tips except rdb — its
     validated line was rewritten out of upstream main, so it is published
     as branch `pin/init-pro` on MoSunDay/rdb. All pins https (public);

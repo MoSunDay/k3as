@@ -1934,7 +1934,9 @@ binding-filter regression), `crates/runtime/src/opencoder.rs` unit tests.
 
 **Context** — Release was blocked by two P0s. (1) Cold clones could not
 build: `link_repos/` (7 path-dep repos: openrusty, rdb, flannel-rust,
-opencoder, any-home, plus any-home's nested nfsserve/libsql) is gitignored
+opencoder, any-home, plus nfsserve/libsql, then both nested inside the
+any-home pin — nfsserve moved top-level 2026-11-15, see Decision) is
+gitignored
 and materialized only via local `/root/*` checkouts + symlinks — zero-cache
 checkouts (CI, Docker, new machines) failed at path-dep resolution, and
 local green relied on manually pinned /tmp snapshots because the openrusty
@@ -1953,12 +1955,29 @@ openrusty TLS vs ship intranet h2c on the pinned `4180ad3` — chosen: ship
 h2c now, pin `4180ad3`, treat TLS as post-release forward adaptation.
 
 **Decision** — (c) + h2c now. `link_repos.lock` (TOML: name/url/sha +
-path/patch/marker) is the SSOT for pins; `scripts/bootstrap-link-repos.sh`
+path/patch/marker/also_link) is the SSOT for pins;
+`scripts/bootstrap-link-repos.sh`
 materializes it: clone+`checkout --detach <sha>` when missing, verify-only
 for existing/symlinked dev checkouts (HEAD==sha; tracked-dirty refusal with
 `--force` escape; untracked artifacts ignored). nfsserve's AUTH_SYS patch
-(Q37) is applied on top, canonical copy pinned inside any-home so patch and
-consumer move together. Both CI jobs and the Dockerfile builder run the
+(Q37) is applied on top; the canonical copy is versioned in THIS repo at
+`scripts/patches/nfsserve-auth-identity.patch` (amended 2026-11-15: the
+patch originally rode INSIDE the any-home pin; when nfsserve was re-pinned
+top-level the copy moved to the consumer repo, so patch and consumer
+advance commit-by-commit instead of the patch moving with any-home).
+nfsserve materializes TOP-LEVEL at the default path `link_repos/nfsserve`;
+any-home's own workspace resolves nfsserve at `link_repos/nfsserve`
+RELATIVE TO THE ANY-HOME ROOT, so the lock's `also_link` keeps
+`link_repos/any-home/link_repos/nfsserve` a relative symlink to the
+top-level checkout. Cargo keys path deps by LEXICAL path and never
+canonicalizes symlinks, so the root `Cargo.toml` deliberately references
+that same nested path — one lexical identity, ONE nfsserve lockfile
+package (a top-level path there forks the graph into two same-named
+packages and the build dies with a lockfile collision). Bootstrap
+migrates a legacy REAL dir at an also_link path to the symlink only when
+it provably reproduces from the pin (git repo at the pinned sha whose
+only dirt is the patch marker); dirty or non-git trees die, `--force`
+downgrades. Both CI jobs and the Dockerfile builder run the
 bootstrap before compiling. rdb's pin is published as branch `pin/init-pro`
 on MoSunDay/rdb (upstream main is a parallel rewrite, d52ef49). The Router
 ships intranet h2c at openrusty `4180ad3`; when the TLS work lands, bump
