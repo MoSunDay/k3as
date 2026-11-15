@@ -19,6 +19,10 @@
 //!   apiserver relay dials on `node_ip:kubelet_port`.
 //! - [`log_rotate`] — T4.6/Q39 pod-log date layout helpers + the
 //!   copytruncate rotation sweep (100 MiB / 5 generations).
+//! - [`volumes`] — pod volume materialization (emptyDir dirs +
+//!   fingerprint-refreshed configMap/secret key files, T4.2 Scope B).
+//! - [`env`] + [`env_fetch`] — container env/envFrom projection
+//!   (T4.7): pure parse/resolve + the create-time fetch/event side.
 //! - [`runner`] — the four loops (watch, sync, node/lease, local API) +
 //!   [`spawn`].
 #![forbid(unsafe_code)]
@@ -27,6 +31,8 @@ pub mod agent_exec;
 pub mod agent_objects;
 pub mod agents;
 pub mod cri_backend;
+pub mod env;
+pub mod env_fetch;
 pub mod exec;
 pub mod framing;
 pub mod http;
@@ -47,6 +53,11 @@ pub mod watch;
 pub use agents::spawn_agent_runner;
 pub use agents::AgentRunnerConfig;
 pub use cri_backend::{ContainerView, CriBackend, CriCtlBackend, SandboxView};
+pub use env::{
+    config_error_event, parse_env, parse_env_from, resolve_env, EnvFromSource, EnvSources,
+    EnvValue, EnvVar, RefKind,
+};
+pub use env_fetch::{resolve_table, EnvOutcome, EnvTable};
 pub use exec::{execute, snapshot};
 pub use http::{HttpError, HttpJson};
 pub use objects::{

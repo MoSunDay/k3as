@@ -465,8 +465,11 @@ and node registration.
   - 解析/解析失败单测 + 新 `scripts/pod-env-e2e.sh` E1–E4（容器
     printenv 经 logs 断言；vendor bundle 缺席则 SKIP，Q25 教义）。
 
-- **状态 / Status** — not-started (S38 排期)
-- **证据 / Evidence** — —
+- **状态 / Status** — done (Sprint 38)
+- **证据 / Evidence** — `crates/kubelet/src/env.rs` (357) + `env_fetch.rs`
+  (212) + `env_tests.rs` (274, 10 例) + `tests/sync_plan.rs` (+2); e2e
+  `scripts/pod-env-e2e.sh` E1-E4b 5/5 绿 (printenv 经 log subresource 断言,
+  CRI 帧剥离); workspace **998 passed / 0 failed**; clippy 0; parity 20/20。
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.2
 

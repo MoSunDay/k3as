@@ -51,6 +51,61 @@ node04 单元二进制改钉 `/root/k3as-d/bin/init-pro` (sha `e7414e90…`,
 双节点一致), 与 dev target/ 解耦; 验收脚本 A4/A10 轮询化 + 瞬态 JSON
 噪声静默 (389 行)。
 
+## Sprint 38 — T4.7 容器 env/envFrom 投射 (done) + all-gates 首跑与 golden 环境冲突定性 (2026-11-15)
+
+**Goal:** Pod spec 的 env (literal + 单键 valueFrom) 与 envFrom (ConfigMap/Secret
+整对象引用) 在容器 CREATE 时投射进 CRI `envs`, k8s 语义对齐 (env 不热更新、
+optional 语义、显式 env 覆盖同名 envFrom 键)。
+
+**Changes**
+- `crates/kubelet/src/env.rs` (NEW 357): 纯函数 spec 模型/解析/解析器 +
+  `config_error_event` 构造。语义按上游 kubelet `makeEnvironmentVariables`
+  编码: envFrom 先 (源内键排序, 确定性), 显式 env 后, 同名 last-write-wins;
+  `optional:true` 缺对象静默贡献空; required 缺对象 → 解析错误;
+  非 404 取回错误一律失败 (上游对未知状态不承诺 optional)。
+  数据约定与 configMap/secret 卷投射一致 (`/data`, 仅字符串值)。
+  附带单键 `valueFrom.configMapKeyRef/secretKeyRef` (共享同一取回+解析机制);
+  Deferred: Downward API、projected、`envFrom[].prefix`。
+- `crates/kubelet/src/env_fetch.rs` (NEW 212): 经 kubelet→apiserver
+  `HttpJson` (与卷投射同一面) 取回引用对象; 无引用的 pod 零往返;
+  `emit_config_error_events` POST 上游对齐的 `CreateContainerConfigError`
+  Warning 事件 (pod/container+reason 去重, 容器已存在则不再发——env 冻结于
+  创建时刻)。`sync.rs` plan() 保持纯函数 (EnvTable 参数注入), 解析错误只挡
+  该容器的 create, 下个 cycle 自动重试; `runner.rs` 持事件去重表。
+- CRI 层零改动 (`cri_json.rs` envs 字段既有)。
+- `scripts/pod-env-e2e.sh` (NEW 321): E1 literal / E2 envFrom ConfigMap +
+  显式覆盖 / E3 envFrom Secret / E4 required-missing 挡创建+事件 &
+  optional:true 照常运行。离线 `envpod` 静态 C 镜像 (flannel-e2e netpod
+  配方), 断言走真实 log subresource (CRI 帧剥离修正: 容器化日志为
+  `<ts> <stream> <F|P> <text>` 三段帧)。本机与在跑双节点验收集群共存:
+  自选空闲 kubelet-port + 复用既有 cni0 的 /16 (见下 FINDING)。
+- 同 sprint 落库的 `node.rs` kubelet-port 注解漂移收敛 (T4.2 hardening,
+  中断会话遗留完成品): 心跳 GET-modify-PUT 顺带 reconcile, 3 单测。
+
+**Gates** (all-gates.sh 首跑 21:38, S38 代码落地前树): fmt(members)/build/
+test 984/0/clippy 0/golden **72/73 (仅 G61 时敏红)**/parity 20/20/e2e 电池
+9/9 (flannel F1-F5、service-traffic ST1-ST6 均绿) —— G61 于复跑转绿,
+归档为 Sprint 29 已知压负载时敏类。
+**golden 环境冲突定性 (FINDING, P2 → S48 backlog)**: 22:39 复跑 (S38 二进制,
+用户双节点验收集群在跑) real-stack 13 红 —— 机理实证: golden 内嵌 agent 默认
+占用 `--kubelet-port 10250` (被在跑 agent 抢先, EADDRINUSE) + 默认
+cluster-cidr 10.42 的 CNI 桥 `cni0` 与在线 cni0@10.244 冲突 (sandbox 创建
+全灭, sandboxes=0)。经 env 适配 (`INIT_PRO_KUBELET_PORT=<free>` +
+`INIT_PRO_CLUSTER_CIDR=10.244.0.0/16` 对齐在线桥, 脚本零改动) 后 **71/73**:
+仅 G30a/b2 红 —— G30 的噪声生成依赖 curl podIP:8080, 两集群共享 cni0 时
+pod IP 空间重叠, 探测流量可达性不保证 (exec G30b、log 中继本身、STS/DS/
+CronWorkflow G60-G66、G25/G26、G80-G82 全绿)。S38 不触碰网络面, wire 面
+golden 全绿 → 判定非产品回归; **独占主机的权威 73/73 全量复跑待验收集群
+下线后补录** (all-gates.sh 全电池同批补跑)。P2 建议 (S48 审计归档):
+real-stack 套件自选空闲 kubelet-port (workloads.sh 等, G30 已示范) +
+网络面被占时自适应 cidr 或 Q25 式自 SKIP。
+
+**Tests:** workspace **998 passed / 0 failed** (fresh; 984 → 998, kubelet
+142 → 154); clippy 0; fmt (members) 0; parity 20/20; e2e 非侵入电池 8/8 绿
+(multicall/discovery-parity/graceful-shutdown/durability/registry/agent-exec/
+anyhome/pod-env), service-traffic+flannel 因网络面被验收集群占用本轮缓跑
+(21:40 同机全绿在案)。
+
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
 **规划落库** — `plans/init-pro/index.md` 状态表 +4 卡 (T4.7/T4.8/

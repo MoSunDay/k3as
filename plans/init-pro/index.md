@@ -33,7 +33,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.4 | 4 | 网络策略 (netpol 等价) | not-started | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | not-started | T4.2, T1.2 |
 | T4.6 | 4 | Pod 日志布局与轮转 (日期目录 + 100MB copytruncate, Q39) | done (Sprint 32) | T4.2 |
-| T4.7 | 4 | 容器 env/envFrom 投射 (literal + ConfigMap/Secret ref, optional 语义; S38) | not-started (S38 排期) | T4.2 |
+| T4.7 | 4 | 容器 env/envFrom 投射 (literal + ConfigMap/Secret ref, optional 语义; S38) | done (Sprint 38) | T4.2 |
 | T4.8 | 4 | 探针补全: tcpSocket + exec (httpGet 已有; S39) | not-started (S39 排期) | T4.2 |
 | T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | not-started (S40 排期) | T4.2 |
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
@@ -53,11 +53,11 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 
-**Counts:** 42 TODOs · 26 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 42 TODOs · 27 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
-· 14 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 13 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=10 · Layer5=7 · Layer6=3 · Layer7=5.
 
 ---

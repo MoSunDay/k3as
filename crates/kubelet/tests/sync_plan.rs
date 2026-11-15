@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use kubelet::cri_backend::{ContainerView, SandboxView};
-use kubelet::{plan, Action, Snapshot};
+use kubelet::{plan, pod_view, Action, Snapshot};
 use runtime::cri_json::container_labels;
 use support::*;
 
@@ -274,6 +274,7 @@ fn absent_pod_observed_sandbox_is_orphan_teardown() {
         Path::new(LOG_ROOT),
         TEST_DATE,
         &kubelet::PodProbeState::new(),
+        &kubelet::EnvTable::new(),
     );
     assert_eq!(
         actions,
@@ -311,6 +312,7 @@ fn garbage_sandbox_without_identity_is_ignored() {
         Path::new(LOG_ROOT),
         TEST_DATE,
         &kubelet::PodProbeState::new(),
+        &kubelet::EnvTable::new(),
     );
     assert!(
         actions.is_empty(),
@@ -334,6 +336,7 @@ fn two_pods_same_name_different_namespace_are_distinct() {
         Path::new(LOG_ROOT),
         TEST_DATE,
         &kubelet::PodProbeState::new(),
+        &kubelet::EnvTable::new(),
     );
     assert_eq!(
         actions.len(),
@@ -504,6 +507,7 @@ fn liveness_failure_restarts_running_container() {
         Path::new(LOG_ROOT),
         TEST_DATE,
         &probes,
+        &kubelet::EnvTable::new(),
     );
     assert_eq!(
         actions,
@@ -634,4 +638,152 @@ fn volume_mounts_are_resolved_into_ccfg() {
         unreachable!("got {actions:?}");
     };
     assert!(ccfg.mounts.is_empty());
+}
+
+#[test]
+fn env_table_feeds_ccfg_envs_verbatim() {
+    // T4.7: plan() passes the resolved table through to the CRI config
+    // verbatim (ordering + duplicate precedence are env.rs's tested job);
+    // containers without table entries create with empty envs.
+    let pod = pod_view(&serde_json::json!({
+        "metadata": {"name": "web", "namespace": "default", "uid": "u1", "resourceVersion": "1"},
+        "spec": {
+            "nodeName": "n1",
+            "containers": [{
+                "name": "c0", "image": "img:1",
+                "env": [{"name": "K", "value": "explicit"}],
+                "envFrom": [{"configMapRef": {"name": "cm1"}}],
+            }],
+        },
+    }))
+    .unwrap();
+    assert_eq!(pod.containers[0].env.len(), 1);
+    assert_eq!(pod.containers[0].env_from.len(), 1);
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![],
+    };
+    let mut table = kubelet::EnvTable::new();
+    table.insert(
+        "default/web".into(),
+        std::iter::once((
+            "c0".into(),
+            kubelet::EnvOutcome {
+                envs: vec![
+                    ("K".to_string(), "from-cm".to_string()),
+                    ("ONLY".to_string(), "cm".to_string()),
+                    ("E".to_string(), "e".to_string()),
+                ],
+                error: None,
+            },
+        ))
+        .collect(),
+    );
+    let actions = plan(
+        &desired_of(std::slice::from_ref(&pod)),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        TEST_DATE,
+        &kubelet::PodProbeState::new(),
+        &table,
+    );
+    let Action::CreateStartContainer { ccfg, .. } = &actions[0] else {
+        unreachable!("got {actions:?}");
+    };
+    assert_eq!(
+        ccfg.envs,
+        vec![
+            runtime::cri_json::KeyValue {
+                key: "K".into(),
+                value: "from-cm".into()
+            },
+            runtime::cri_json::KeyValue {
+                key: "ONLY".into(),
+                value: "cm".into()
+            },
+            runtime::cri_json::KeyValue {
+                key: "E".into(),
+                value: "e".into()
+            },
+        ]
+    );
+    // No table entry (no env refs): create proceeds with empty envs.
+    let actions = plan(
+        &desired_of(std::slice::from_ref(&pod)),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        TEST_DATE,
+        &kubelet::PodProbeState::new(),
+        &kubelet::EnvTable::new(),
+    );
+    let Action::CreateStartContainer { ccfg, .. } = &actions[0] else {
+        unreachable!("got {actions:?}");
+    };
+    assert!(ccfg.envs.is_empty());
+}
+
+#[test]
+fn env_resolution_error_blocks_the_container_create() {
+    // T4.7 / upstream CreateContainerConfigError parity: a resolution
+    // error skips BOTH the image pull and the create for that container;
+    // the sandbox lifecycle is untouched and the next cycle retries.
+    let pod = view("default", "web", "u1", &["img:1"]);
+    let snap = Snapshot {
+        images: vec![SANDBOX_IMAGE.into(), "img:1".into()],
+        sandboxes: vec![sandbox("default", "web", "u1", "sb1", "SANDBOX_READY")],
+        containers: vec![],
+    };
+    let mut table = kubelet::EnvTable::new();
+    table.insert(
+        "default/web".into(),
+        std::iter::once((
+            "c0".into(),
+            kubelet::EnvOutcome {
+                envs: Vec::new(),
+                error: Some("configmap \"cm1\" not found".into()),
+            },
+        ))
+        .collect(),
+    );
+    let actions = plan(
+        &desired_of(std::slice::from_ref(&pod)),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        TEST_DATE,
+        &kubelet::PodProbeState::new(),
+        &table,
+    );
+    assert!(
+        actions.is_empty(),
+        "blocked create must not pull nor create: {actions:?}"
+    );
+    // A resolved-but-empty outcome (e.g. optional missing ref) creates.
+    table.insert(
+        "default/web".into(),
+        std::iter::once((
+            "c0".into(),
+            kubelet::EnvOutcome {
+                envs: Vec::new(),
+                error: None,
+            },
+        ))
+        .collect(),
+    );
+    let actions = plan(
+        &desired_of(std::slice::from_ref(&pod)),
+        &snap,
+        SANDBOX_IMAGE,
+        Path::new(LOG_ROOT),
+        TEST_DATE,
+        &kubelet::PodProbeState::new(),
+        &table,
+    );
+    assert!(
+        matches!(actions[0], Action::CreateStartContainer { .. }),
+        "resolved outcome must create: {actions:?}"
+    );
 }

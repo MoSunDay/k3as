@@ -13,6 +13,9 @@ use crate::probes::ProbeSpec;
 /// `image_pull_policy` is Sprint 20 S3: the RESOLVED value ("Always" /
 /// "IfNotPresent" / "Never") — absent fields are defaulted at parse time
 /// following upstream defaulting (see [`resolve_image_pull_policy`]).
+/// `env`/`env_from` are T4.7 (create-time env/envFrom projection; the
+/// resolver lives in [`crate::env`], the fetch side in
+/// [`crate::env_fetch`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSpec {
     pub name: String,
@@ -24,6 +27,8 @@ pub struct ContainerSpec {
     pub liveness_probe: Option<ProbeSpec>,
     pub volume_mounts: Vec<VolumeMount>,
     pub image_pull_policy: String,
+    pub env: Vec<crate::env::EnvVar>,
+    pub env_from: Vec<crate::env::EnvFromSource>,
 }
 
 /// One `spec.containers[].volumeMounts[]` entry (Sprint 20 S2). `mountPath`
@@ -193,6 +198,8 @@ pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
                 liveness_probe: probe("/livenessProbe"),
                 volume_mounts: container_volume_mounts(c),
                 image_pull_policy,
+                env: crate::env::parse_env(c),
+                env_from: crate::env::parse_env_from(c),
             })
         })
         .collect()

@@ -184,6 +184,7 @@ pub fn plan_one(view: &PodView, snap: &Snapshot) -> Vec<Action> {
         std::path::Path::new("/tmp/init-pro-kubelet-test/pods"),
         TEST_DATE,
         &kubelet::PodProbeState::new(),
+        &kubelet::EnvTable::new(),
     )
 }
 

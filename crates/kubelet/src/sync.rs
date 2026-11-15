@@ -9,8 +9,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use runtime::cri_json::{
-    container_labels, pod_labels, ContainerMetadata, ImageSpec, SandboxMetadata, LABEL_POD_NAME,
-    LABEL_POD_NAMESPACE,
+    container_labels, pod_labels, ContainerMetadata, ImageSpec, KeyValue, SandboxMetadata,
+    LABEL_POD_NAME, LABEL_POD_NAMESPACE,
 };
 use runtime::{ContainerConfig, PodSandboxConfig};
 
@@ -73,6 +73,11 @@ impl Action {
 /// `date` (UTC `YYYY-MM-DD`, T4.6/Q39) is INJECTED so `plan` stays pure:
 /// it becomes the `<pod-uid>/<date>/` segment of every sandbox
 /// `log_directory` — pinned at plan time, fixed for the container's life.
+/// `envs` (T4.7) is the create-time env resolution table (fetched by
+/// [`crate::env_fetch::resolve_table`] BEFORE plan): containers carry
+/// their resolved pairs, and a resolution ERROR blocks that container's
+/// create this cycle (upstream `CreateContainerConfigError` — the runner
+/// posts the event; the next cycle retries once the object appears).
 pub fn plan(
     desired: &BTreeMap<String, PodView>,
     snap: &Snapshot,
@@ -80,6 +85,7 @@ pub fn plan(
     log_root: &Path,
     date: &str,
     probes: &PodProbeState,
+    envs: &crate::env_fetch::EnvTable,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     // Index observations: sandboxes by "ns/name" (garbage labels skipped),
@@ -200,6 +206,18 @@ pub fn plan(
             if !recreate {
                 continue;
             }
+            // T4.7: a create-time env resolution error (missing required
+            // ConfigMap/Secret) blocks THIS container's create — upstream
+            // CreateContainerConfigError. No image pull, no removal: the
+            // runner posts the event and the next cycle retries.
+            if let Some(err) = env_block(envs, key, &spec.name) {
+                tracing::warn!(
+                    target: "init-pro",
+                    pod = %key, container = %spec.name, error = %err,
+                    "kubelet: env resolution blocked the container create (cycle retries)"
+                );
+                continue;
+            }
             let attempt = observed
                 .iter()
                 .map(|c| c.attempt)
@@ -220,7 +238,13 @@ pub fn plan(
             actions.push(Action::CreateStartContainer {
                 pod_key: key.clone(),
                 sandbox_id: keep.id.clone(),
-                ccfg: Box::new(container_cfg(view, spec, attempt, log_root)),
+                ccfg: Box::new(container_cfg(
+                    view,
+                    spec,
+                    attempt,
+                    log_root,
+                    resolved_env(envs, key, &spec.name),
+                )),
                 pcfg: sandbox_cfg(view, log_root, date),
             });
         }
@@ -269,11 +293,31 @@ fn sandbox_cfg(view: &PodView, log_root: &Path, date: &str) -> PodSandboxConfig 
     }
 }
 
+/// The env resolution error blocking one container's create, if any
+/// (T4.7). Absent table entries mean "no env refs" — never a block.
+fn env_block(envs: &crate::env_fetch::EnvTable, key: &str, container: &str) -> Option<String> {
+    envs.get(key)?.get(container)?.error.clone()
+}
+
+/// The resolved env pairs for one container (empty when it declares no
+/// refs — no table entry).
+fn resolved_env(
+    envs: &crate::env_fetch::EnvTable,
+    key: &str,
+    container: &str,
+) -> Vec<(String, String)> {
+    envs.get(key)
+        .and_then(|m| m.get(container))
+        .map(|o| o.envs.clone())
+        .unwrap_or_default()
+}
+
 fn container_cfg(
     view: &PodView,
     spec: &ContainerSpec,
     attempt: u32,
     log_root: &Path,
+    envs: Vec<(String, String)>,
 ) -> ContainerConfig {
     ContainerConfig {
         metadata: ContainerMetadata {
@@ -285,7 +329,12 @@ fn container_cfg(
         },
         command: spec.command.clone(),
         args: spec.args.clone(),
-        envs: Vec::new(),
+        // T4.7: create-time env/envFrom projection (never hot-updated —
+        // k8s parity; the resolution table was fetched before `plan`).
+        envs: envs
+            .into_iter()
+            .map(|(key, value)| KeyValue { key, value })
+            .collect(),
         labels: container_labels(&view.name, &view.namespace, &view.uid, &spec.name),
         log_path: format!("{}.{attempt}.log", spec.name),
         // Sprint 20 S2 (T4.2 Scope B): pod volumes become CRI host mounts
@@ -353,7 +402,7 @@ fn ensure_image(actions: &mut Vec<Action>, present: &[String], image: &str, poli
 
 /// Pod key of a container: `io.kubernetes.*` labels first, else inherit the
 /// identity of its sandbox (garbage containers without either -> None).
-fn container_pod_key(c: &ContainerView, sandboxes: &[SandboxView]) -> Option<String> {
+pub(crate) fn container_pod_key(c: &ContainerView, sandboxes: &[SandboxView]) -> Option<String> {
     let ns = c.labels.get(LABEL_POD_NAMESPACE).map(String::as_str);
     let name = c.labels.get(LABEL_POD_NAME).map(String::as_str);
     if let (Some(ns), Some(name)) = (ns, name) {

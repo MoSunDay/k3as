@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::cri_backend::CriBackend;
+use crate::env_fetch;
 use crate::exec::{execute, snapshot};
 use crate::http::HttpJson;
 use crate::node::{node_task, now_str};
@@ -320,6 +321,9 @@ async fn sync_task(
     let mut tick = tokio::time::interval(cfg.sync_period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_status: BTreeMap<String, Value> = BTreeMap::new();
+    // T4.7: dedup state for CreateContainerConfigError events —
+    // "pod-key/container" -> last posted reason (one event per failure).
+    let mut last_env_events: BTreeMap<String, String> = BTreeMap::new();
     let mut probes = PodProbeState::new();
     loop {
         tokio::select! {
@@ -350,6 +354,7 @@ async fn sync_task(
             &desired,
             &mut probes,
             &mut last_status,
+            &mut last_env_events,
         )
         .await;
     }
@@ -362,6 +367,7 @@ async fn sync_once(
     desired: &Desired,
     probes: &mut PodProbeState,
     last_status: &mut BTreeMap<String, Value>,
+    last_env_events: &mut BTreeMap<String, String>,
 ) {
     let snap = match snapshot(cri).await {
         Ok(s) => s,
@@ -387,6 +393,11 @@ async fn sync_once(
     if let Err(e) = volumes::ensure_volumes(client, &wanted, &cfg.log_root()).await {
         tracing::warn!(target: "init-pro", error = %e, "kubelet: volume pass failed");
     }
+    // Env pass (T4.7): resolve env/envFrom at CREATE time — fetched here
+    // so `plan` (pure) sees the same objects the CRI config will carry.
+    // A resolution error blocks the create; `plan` skips it and the
+    // event pass below reports why. Env is never hot-updated (k8s parity).
+    let env_table = env_fetch::resolve_table(client, &wanted).await;
     // T4.6 (Q39): the UTC date pinned into every sandbox log_directory
     // this cycle. Fixed per plan call: a container created before a
     // midnight rollover keeps writing into its own (older) date dir via
@@ -399,6 +410,7 @@ async fn sync_once(
         &cfg.log_root(),
         &date,
         probes,
+        &env_table,
     );
     // Deleted pods needing no further teardown drop out of the desired map.
     {
@@ -410,6 +422,19 @@ async fn sync_once(
             tracing::warn!(target: "init-pro", action = ?action, error = %e, "kubelet: CRI action failed");
         }
     }
+    // Env event pass (T4.7): POST upstream-parity CreateContainerConfigError
+    // events for creates blocked by missing required ConfigMap/Secret refs
+    // (deduped by pod/container+reason — one event per failure, not per cycle).
+    env_fetch::emit_config_error_events(
+        client,
+        &cfg.node_name,
+        &wanted,
+        &snap,
+        &env_table,
+        last_env_events,
+        &now_str(),
+    )
+    .await;
     // Volume cleanup (S2): pods whose sandbox is already gone release
     // their volume root. The PRE-execute snap is used deliberately: a pod
     // torn down this cycle still shows its sandbox there, so cleanup lands
