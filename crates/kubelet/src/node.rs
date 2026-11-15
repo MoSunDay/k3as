@@ -5,13 +5,29 @@
 //! period renew the `kube-node-lease` Lease and refresh the node's Ready
 //! status via a full PUT (resourceVersion preserved, so CAS; a 409 just
 //! retries on the next tick). All failures are logged and retried.
+//!
+//! T4.2 hardening: the annotation `init-pro.io/kubelet-port` (the relay
+//! discovery key, T4.2 Scope C / Q31) is only set at Node creation, so an
+//! operator changing `--kubelet-port` and restarting the agent would leave
+//! a stale port behind. The heartbeat therefore also reconciles that
+//! annotation on every refresh via
+//! [`reconciled_kubelet_port_annotation`] (no extra request: the corrected
+//! map rides the same GET-modify-PUT as the status refresh, and the write
+//! is skipped entirely when the annotation already matches).
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
+
 use crate::http::HttpJson;
 use crate::objects;
 use crate::runner::KubeletConfig;
+
+/// Annotation key on the Node object carrying the local log/exec listener
+/// port (frozen contract with `apiserver::pod_io`; NOTE: the key contains
+/// '/', so never address it through a JSON pointer).
+const KUBELET_PORT_ANNOTATION: &str = "init-pro.io/kubelet-port";
 
 /// Task 3: ensure the Node object exists, then heartbeat the lease and the
 /// node Ready status every heartbeat period.
@@ -106,7 +122,8 @@ async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig) {
 }
 
 /// GET the node, replace `.status` with fresh Ready/capacity, full PUT back
-/// (resourceVersion preserved -> CAS; a 409 just retries next tick).
+/// (resourceVersion preserved -> CAS; a 409 just retries next tick). The
+/// same PUT also converges a stale kubelet-port annotation (T4.2 hardening).
 async fn refresh_node_status(client: &HttpJson, cfg: &KubeletConfig, now: &str) {
     let name = cfg.node_name.as_str();
     let path = format!("/api/v1/nodes/{name}");
@@ -119,6 +136,15 @@ async fn refresh_node_status(client: &HttpJson, cfg: &KubeletConfig, now: &str) 
     else {
         return;
     };
+    if let Some(annotations) = reconciled_kubelet_port_annotation(&node, cfg.kubelet_port) {
+        tracing::info!(
+            target: "init-pro",
+            node = name,
+            port = cfg.kubelet_port,
+            "kubelet: node kubelet-port annotation stale; reconciling"
+        );
+        node["metadata"]["annotations"] = annotations;
+    }
     node["status"] = status;
     match client.put_json(&path, &node).await {
         Ok((200, _)) => {}
@@ -138,4 +164,99 @@ fn unix_now() -> u64 {
 
 pub(crate) fn now_str() -> String {
     common::time::now_rfc3339(unix_now())
+}
+
+/// Pure decision for kubelet-port annotation convergence (T4.2 hardening):
+/// does the stored Node need a new `metadata.annotations`, and if so what
+/// should the corrected map be?
+///
+/// Returns `Some(annotations)` — every pre-existing annotation preserved,
+/// [`KUBELET_PORT_ANNOTATION`] set to `kubelet_port` — when the stored
+/// annotation is missing, non-string or stale. Returns `None` when it
+/// already matches, so the heartbeat skips the write and causes no extra
+/// CAS/resourceVersion churn on the happy path.
+pub(crate) fn reconciled_kubelet_port_annotation(node: &Value, kubelet_port: u16) -> Option<Value> {
+    // `get` chains, not a pointer: the annotation key contains '/'.
+    let stored = node
+        .get("metadata")
+        .and_then(|m| m.get("annotations"))
+        .and_then(|a| a.get(KUBELET_PORT_ANNOTATION))
+        .and_then(Value::as_str);
+    let wanted = kubelet_port.to_string();
+    if stored == Some(wanted.as_str()) {
+        return None;
+    }
+    let mut annotations = node
+        .get("metadata")
+        .and_then(|m| m.get("annotations"))
+        .filter(|a| a.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    annotations[KUBELET_PORT_ANNOTATION] = Value::String(wanted);
+    Some(annotations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn node_with_annotations(annotations: Value) -> Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {"name": "n1", "resourceVersion": "9", "annotations": annotations},
+            "spec": {},
+            "status": {},
+        })
+    }
+
+    #[test]
+    fn kubelet_port_annotation_already_correct_no_update() {
+        let node = node_with_annotations(json!({"init-pro.io/kubelet-port": "10250"}));
+        assert_eq!(reconciled_kubelet_port_annotation(&node, 10250), None);
+    }
+
+    #[test]
+    fn kubelet_port_annotation_stale_or_missing_produces_update() {
+        // Stale port (operator changed --kubelet-port, agent restarted).
+        let node = node_with_annotations(json!({"init-pro.io/kubelet-port": "10250"}));
+        assert_eq!(
+            reconciled_kubelet_port_annotation(&node, 10255),
+            Some(json!({"init-pro.io/kubelet-port": "10255"}))
+        );
+        // Annotation missing entirely (hand-written Node fixture).
+        let node = json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {"name": "n1"},
+        });
+        assert_eq!(
+            reconciled_kubelet_port_annotation(&node, 10250),
+            Some(json!({"init-pro.io/kubelet-port": "10250"}))
+        );
+        // Non-string value counts as stale, not as a match.
+        let node = node_with_annotations(json!({"init-pro.io/kubelet-port": 10250}));
+        assert_eq!(
+            reconciled_kubelet_port_annotation(&node, 10250),
+            Some(json!({"init-pro.io/kubelet-port": "10250"}))
+        );
+    }
+
+    #[test]
+    fn kubelet_port_annotation_preserves_other_annotations() {
+        let node = node_with_annotations(json!({
+            "init-pro.io/kubelet-port": "10250",
+            "flannel.alpha/coreos.com/public-ip": "10.0.0.7",
+            "another/example": "keep-me",
+        }));
+        assert_eq!(
+            reconciled_kubelet_port_annotation(&node, 10255),
+            Some(json!({
+                "init-pro.io/kubelet-port": "10255",
+                "flannel.alpha/coreos.com/public-ip": "10.0.0.7",
+                "another/example": "keep-me",
+            }))
+        );
+    }
 }
