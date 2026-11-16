@@ -1,8 +1,8 @@
 # Layer 4 — Node / Agent
 
-Mirrors `index.md` TODO IDs **T4.1–T4.6**. The node side: bundled
+Mirrors `index.md` TODO IDs **T4.1–T4.13**. The node side: bundled
 containerd + CRI, a kubelet equivalent, CNI networking, network policy,
-and node registration.
+node registration, and the built-in container engine (T4.11–T4.13).
 
 ---
 
@@ -545,3 +545,163 @@ and node registration.
 - **证据 / Evidence** — —
 - **卡点 / Blockers** — 依赖 T6.2b provisioner 先落地 (S44)
 - **依赖 / Depends on** — T4.2, T6.2
+
+---
+
+## T4.11 — 内置容器引擎内核 P1 (clone3/namespace, 无 runc/containerd)
+
+- **目标 / Goal**
+  自研容器引擎的 P1：用 Linux 原语直接 clone/隔离/exec 容器，提供单线程
+  engine 进程与内部帧协议；不依赖 runc/containerd 也能跑起一个进程。
+  决策 Q48；来源 kiri `crates/kiri-init/src/linux/` @ `7846fe0`
+  (Apache-2.0)。
+
+- **核心实现 / Core implementation**
+  - `crates/nsrun` (NEW；**唯一允许 unsafe 的 crate**，Q48):
+    `clone3(child_stack = 0)` 进 `CLONE_NEWNS|NEWPID|NEWUTS|NEWIPC|
+    NEWCGROUP|NEWNET` + `CLONE_INTO_CGROUP`；child 顺序
+    `MS_PRIVATE` → bind rootfs → enter → `/proc`/`/sys`/`/dev` → masked/ro
+    `/proc/sys` → `pivot_root` + `umount2(MNT_DETACH)` → hostname →
+    cap-bounding drop → optional `no_new_privs` → `setgid`/`setuid` →
+    `execve`；parent start gate + `waitpid`，`128+WTERMSIG`，
+    exec 失败 `126/127/255`。ro bind 用 `mount_setattr(2)`
+    (`AT_EMPTY_PATH|AT_RECURSIVE`, `RDONLY|NOSUID|NODEV|NOEXEC`)，
+    `mount_setattr` 支持纳入 preflight；cgroup v2 `init-pro/<id>` +
+    退出清理；preflight 要求真 root + Linux 5.12+；`spawn` 前检查
+    `/proc/self/status` 的 `Threads: 1`。
+  - `crates/engine-proto` (NEW): `ContainerSpec` + `Request`/`Event` +
+    `u32 LE len | u8 kind | payload` 帧 (kind 1 JSON, 2/3/4 raw stdio；
+    `MAX_FRAME` 16 MiB)。
+  - `crates/engine` (NEW): 单线程 `engine-run` 一次性冒烟动词 +
+    `engine serve --socket` accept loop (无 tokio/threads)；preflight
+    失败显式报错供上层回退 containerd。
+  - `crates/engine-client` (NEW): daemon 侧 tokio Unix socket 客户端 +
+    事件泵 (P2 kubelet 接线用)。
+  - `crates/init-pro/src/main.rs`: clap 之前拦截 `engine`/`engine-run`
+    (剥掉前导 `engine` token)；`crates/multicall` 增 `Action::Engine`
+    别名。
+  - `--container-engine=containerd|builtin` (env
+    `INIT_PRO_CONTAINER_ENGINE`, 默认 `containerd`) 落 CLI；P1 仅接受 +
+    告警，不改变运行时选择。
+
+- **验收手段 / Acceptance**
+  - `scripts/unsafe-audit.sh`: unsafe 只在 nsrun；其余 crate 根
+    `#![forbid(unsafe_code)]`；nsrun unsafe 均带 `SAFETY:`；lint 门已开。
+  - `scripts/engine-singlethread-check.sh`: engine 依赖闭包无 async/
+    thread/spawn；engine 依赖仅 engine-proto+nsrun；pre-clap 派发在位。
+  - `scripts/engine-selftest.sh` E1–E8 (22 断言, 真 root)：退出码、
+    126/127、uid/gid/env/hostname、PID 1 + cap 边界 + no_new_privs、
+    ro/rw bind、cgroup 限制与清理、`--new-net`。
+  - `scripts/builtin-runtime-e2e.sh` B1–B7: ping/pong、run 事件序 +
+    stdout/stderr + code 7、exec 失败 127、协议层 cgroup、非 UTF-8
+    原始字节、坏请求 error+close、shutdown bye + 进程 0。
+  - `cargo test -p nsrun -p engine-proto -p engine -p engine-client` 绿；
+    clippy `-D warnings` 0。
+
+- **状态 / Status** — done (P1; P2 拆分到 T4.12，P3 到 T4.13)
+- **证据 / Evidence** — `crates/nsrun/src/{lib,sys,child,mount,inroot,caps,cgroup,spec}.rs`,
+  `crates/engine-proto/src/lib.rs`, `crates/engine/src/{lib,cli,convert,server}.rs`,
+  `crates/engine-client/src/lib.rs`, `scripts/{unsafe-audit.sh,engine-singlethread-check.sh,engine-selftest.sh,builtin-runtime-e2e.sh}`,
+  `NOTICE`, `LICENSES/Apache-2.0.txt`。
+  - **测试 (S38c 收尾复跑)** — engine 栈
+    `cargo test -p nsrun -p engine -p engine-proto -p engine-client`
+    **41 passed / 0 failed** (nsrun 22 / engine 12 / engine-proto 5 /
+    engine-client 2)；`cargo test --workspace --locked` **1050 / 0**；
+    `engine-selftest.sh` E1–E8 **22 断言 / 22 PASS**；
+    `builtin-runtime-e2e.sh` B1–B7 全 PASS。
+  - **已验证的运行语义 (S38c)** — 单连接 / 一次只跑一个容器 (单线程、
+    无 tokio、无 `std::thread`)，运行期间第二个客户端收到
+    `Event::Error("engine busy: one container at a time")`；握手读超时
+    30 s + 写超时 30 s；SIGTERM/SIGINT/SIGHUP 均被捕 → 杀容器 + 回收 +
+    删 cgroup (容器运行中实测 205–215 ms，空闲 11–14 ms)，退出码 0；
+    child 侧 `PR_SET_PDEATHSIG = SIGKILL` (凭据切换后重新 arm)，engine
+    被 SIGKILL 时容器 ~5 ms 随之倒下 (该路径 cgroup 目录泄漏——已无进程
+    可清理)；活 engine 的 socket 从不 unlink (同路径第二个
+    `engine serve` exit 1，陈旧 socket 才被替换)。`engine-run` 侧:
+    `--help` exit 0；`--cgroup` 未配 `--memory-max`/`--cpu-max`/
+    `--pids-max` 任一即硬错误；过 start gate 之后的容器侧失败以
+    **125** + fd 2 消息上报 (127 = exec 目标不存在，126 = EACCES/EISDIR)。
+- **卡点 / Blockers** — none
+- **依赖 / Depends on** — T4.1 (CRI 形状), T0.1 (multicall 派发)
+
+---
+
+## T4.12 — 内置引擎 kubelet 接线 P2 (`CriBackend` + exec + 真实选择)
+
+- **目标 / Goal**
+  kubelet 能把 Pod 生命周期跑在 builtin engine 上，并由
+  `--container-engine=builtin` 真实选择；不经过 containerd/crictl。
+
+- **核心实现 / Core implementation**
+  - `crates/kubelet/src/engine_backend.rs` (NEW): `EngineBackend`
+    实现 `crates/kubelet/src/cri_backend.rs` 的 `CriBackend` 11 个方法；
+    用 `engine-client` 维持单连接，事件泵把 stdout/stderr/exited 映射回
+    现有 runner。
+  - `crates/cli/src/runtime.rs::CriCtl::for_paths` 选择面：builtin 分支
+    跳过 vendor containerd/crictl staging，改起
+    `init-pro engine serve --socket`；preflight 失败回退 containerd 并
+    发 Warning。
+  - `CriBackend::exec_container`：协议扩展 attach/stdin/close-stdin
+    (kind 4 已有) + 退出帧；kubelet 日志走既有 log path 落盘。
+  - Pod sandbox：每 Pod 一个 netns；容器不再各自 `CLONE_NEWNET`，
+    而是在 nsrun child 里 `setns` 到 sandbox netns (为 T4.13 CNI 留
+    接缝)；非网络 namespace 语义不变。
+  - 移除 `--container-engine=builtin` 的 "not wired" 告警；P1 的
+    `engine-run`/`engine serve` 保持调试入口。
+
+- **验收手段 / Acceptance**
+  - Fake engine 单测：11 个 `CriBackend` 方法 + 事件映射 + 回退分支。
+  - 集成：kubelet 跑 `engine serve`，创建/启动/停止/删除容器；
+    `kubectl logs`/`exec` 经 apiserver 真实往返。
+  - `scripts/builtin-runtime-e2e.sh` 扩 B8+：kubelet 选 builtin 后
+    Pod 达到 Running，日志/exec 可见；containerd 不在进程树。
+  - `scripts/all-gates.sh` 全绿。
+
+- **P1 → P2 遗留 / Carry-over (S38c 显式记账)** — 以下三项是 P1 **刻意**
+  不做、留给本卡 (T4.12) 的:
+  1. 过 start gate 之后的容器侧 stderr 仍只是 "fd 2 消息 + 退出码"，尚未
+     升格为类型化的 `Output::Error` / `Event::Error` (P1 只保证 125/126/
+     127 三档退出码可读，错误分类留给 backend 映射)。
+  2. 真并发：P1 单线程一次只跑一个容器 (第二个客户端得到 `engine busy`
+     回复)，容器级并发需在本卡的 `EngineBackend` 里用连接池/队列解决，
+     而不是给 engine 加线程。
+  3. `crates/engine-client` 现有 tokio 事件泵尚未接进 kubelet —— 它正是
+     本卡 `EngineBackend` 的接线对象。
+
+- **状态 / Status** — not-started (P2)
+- **证据 / Evidence** — —
+- **卡点 / Blockers** — T4.13 的镜像/CNI 未落地前只能跑 host-rootfs
+  测试 Pod
+- **依赖 / Depends on** — T4.11, T4.2
+
+---
+
+## T4.13 — 内置引擎镜像存储 + CNI 沙箱 P3
+
+- **目标 / Goal**
+  builtin engine 能拉取并运行真实镜像 (内嵌 registry / Docker Registry
+  v2)，并按 flannel CNI 给 Pod 分配网络，形成 containerd-free 闭环。
+
+- **核心实现 / Core implementation**
+  - 镜像存储：Registry v2 pull (manifest list 平台选择、config + layer
+    digest 校验)、content-addressed blob CAS、overlayfs 层解包/合并、
+    image config 的 env/entrypoint/cmd/user 合并；GC/磁盘配额。
+  - Rootfs 组装：每容器一个 merged 视图 (或只读 lower + 可写 upper)，
+    传给 nsrun `RunSpec.rootfs`；镜像不存在/层损坏的错误面。
+  - CNI：创建 sandbox netns → 调内嵌 flannel CNI (Q34) ADD/DEL，
+    podCIDR 来自 Node；Pod IP 写入 kubelet status (podIP/podIPs)。
+  - 与 T6.3 内嵌 registry 对接 (默认 `--registry-addr`)；镜像拉取凭证
+    只走环境/Secret，不落代码。
+  - 明确 out: 镜像构建、跨节点镜像分发协议、Windows 镜像。
+
+- **验收手段 / Acceptance**
+  - 单测：digest 校验、平台选择、层合并顺序、CNI result 解析。
+  - e2e: 只跑 builtin engine 的集群 (无 containerd 二进制) 起一个真实
+    镜像 Pod，`kubectl logs/exec` + Pod IP 可达 + Service NodePort
+    流量；`scripts/builtin-runtime-e2e.sh` 扩镜像/CNI 用例。
+  - `scripts/all-gates.sh` (golden + battery) 全绿。
+
+- **状态 / Status** — not-started (P3)
+- **证据 / Evidence** — —
+- **卡点 / Blockers** — none (T4.12/T4.3/T6.3 前置)
+- **依赖 / Depends on** — T4.12, T4.3, T6.3

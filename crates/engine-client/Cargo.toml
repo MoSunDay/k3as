@@ -1,0 +1,13 @@
+[package]
+name = "engine-client"
+description = "Async client for the built-in engine socket (T4.11, Q48)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine-proto = { workspace = true }
+tokio = { workspace = true }

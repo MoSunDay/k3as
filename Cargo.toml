@@ -24,6 +24,10 @@ members = [
     "crates/router",
     "crates/registry",
     "crates/storage",
+    "crates/nsrun",
+    "crates/engine-proto",
+    "crates/engine",
+    "crates/engine-client",
 ]
 
 [workspace.package]
@@ -54,6 +58,9 @@ runtime = { path = "crates/runtime" }
 router = { path = "crates/router" }
 registry = { path = "crates/registry" }
 storage = { path = "crates/storage" }
+nsrun = { path = "crates/nsrun" }
+engine-proto = { path = "crates/engine-proto" }
+engine = { path = "crates/engine" }
 
 # Embedded upstream Rust components (link_repos/* symlinks; see decisions.md).
 # - openrusty: the h2c gateway engine behind the Router data plane (T5.x rewrite).

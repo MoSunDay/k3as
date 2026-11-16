@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# T4.11 / Q48: `init-pro engine-run` smoke matrix on a REAL root host.
+#
+# The built-in engine is not run in CI containers: it needs real root (no
+# user namespace), mount_setattr(2) (Linux 5.12+), and a static busybox to
+# populate the deliberately empty rootfs. Everything else is self-contained.
+#
+# Cases:
+#   E1 exit-code passthrough (42)        E5 PID 1 + cap-bounding drop
+#   E2 missing executable -> 127         E6 read-only vs read-write bind mounts
+#   E3 exec a directory  -> 126          E7 cgroup v2 limits visible + cleaned
+#   E4 uid/gid/env/hostname              E8 --new-net gives a fresh netns
+#
+# SKIP semantics (Q25): no root, no static busybox, or a kernel without
+# mount_setattr => one "SKIP engine-selftest:" line and exit 0. Any other
+# failure is a real FAIL.
+#
+# Usage: scripts/engine-selftest.sh
+#   INIT_PRO_BIN=...      reuse a specific binary (default target/debug/init-pro)
+#   INIT_PRO_BUSYBOX=...  override the static busybox (default /usr/bin/busybox)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+BIN="${INIT_PRO_BIN:-$TARGET_DIR/debug/init-pro}"
+BUSYBOX="${INIT_PRO_BUSYBOX:-/usr/bin/busybox}"
+
+skip() { echo "SKIP engine-selftest: $*"; exit 0; }
+
+[[ -x "$BIN" ]] || { echo "error: $BIN not found. Run 'cargo build'." >&2; exit 1; }
+[[ "$(id -u)" -eq 0 ]] || skip "requires real root (no user namespaces)"
+[[ -x "$BUSYBOX" ]] || skip "no static busybox at $BUSYBOX"
+if ldd "$BUSYBOX" >/dev/null 2>&1; then
+  skip "$BUSYBOX is dynamically linked; the empty rootfs has no libs"
+fi
+
+TMP="$(mktemp -d /tmp/init-pro-engine-selftest.XXXXXX)"
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT
+
+PASS=0
+FAIL=0
+RC=0
+
+ok()   { echo "OK   $*"; PASS=$((PASS + 1)); }
+bad()  { echo "FAIL $*"; FAIL=$((FAIL + 1)); }
+
+check_rc() { # check_rc <label> <want> <got>
+  if [[ "$2" -eq "$3" ]]; then ok "$1 (exit $3)"; else bad "$1 (want exit $2, got $3)"; fi
+}
+check_has() { # check_has <label> <needle> <file>
+  if grep -qF -- "$2" "$3"; then ok "$1"; else
+    bad "$1 (missing [$2] in $(basename "$3"))"
+    sed 's/^/      /' "$3" | head -5
+  fi
+}
+
+# new_rootfs <tag>: an empty image with just the mount targets the test
+# needs. `chmod 755` matters for --uid cases: the container user must be
+# able to traverse `/` and `/bin`.
+new_rootfs() {
+  local d="$TMP/rootfs-$1"
+  mkdir -p "$d"/{bin,proc,sys,dev,tmp,etc}
+  chmod 755 "$d" "$d"/bin "$d"/etc "$d"/tmp
+  : >"$d/bin/busybox"
+  chmod 644 "$d/bin/busybox"
+  printf '%s\n' "$d"
+}
+
+run_engine() { # run_engine <out> <err> <engine-run args...>
+  local out="$1" err="$2"; shift 2
+  set +e
+  "$BIN" engine-run "$@" >"$out" 2>"$err"
+  RC=$?
+  set -e
+}
+
+# --- E1: exit code passthrough; also the preflight/SKIP probe ---------------
+R="$(new_rootfs e1)"
+run_engine "$TMP/e1.out" "$TMP/e1.err" \
+  --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" -- /bin/busybox sh -c 'exit 42'
+# `engine-run` reports a failed preflight as exit 125 with an
+# "engine-run: ..." stderr line (the "preflight failed" wording only exists
+# on the long-lived `engine serve` path). The three environment-precondition
+# messages come from nsrun::preflight (real root / mount_setattr(2) / /proc):
+# none of them is a conformance break, so SKIP instead of FAIL.
+if [[ "$RC" -eq 125 ]] && \
+   grep -qE 'mount_setattr\(2\)|requires real root|/proc is required' "$TMP/e1.err"; then
+  skip "$(head -1 "$TMP/e1.err")"
+fi
+check_rc "E1 exit 42" 42 "$RC"
+
+# --- E2: exec failure is 127, and the child error text reaches the parent ----
+R="$(new_rootfs e2)"
+run_engine "$TMP/e2.out" "$TMP/e2.err" \
+  --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" -- /bin/nope
+check_rc "E2 missing binary" 127 "$RC"
+check_has "E2 exec error surfaced" "No such file" "$TMP/e2.err"
+
+# --- E3: exec a directory is 126 -------------------------------------------
+R="$(new_rootfs e3)"
+run_engine "$TMP/e3.out" "$TMP/e3.err" \
+  --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" -- /
+check_rc "E3 exec directory" 126 "$RC"
+
+# --- E4: uid/gid/env/hostname are applied before exec ----------------------
+R="$(new_rootfs e4)"
+run_engine "$TMP/e4.out" "$TMP/e4.err" \
+  --rootfs "$R" --hostname engine-e4 --uid 1234 --gid 2345 --env FOO=bar \
+  --mount "$BUSYBOX:/bin/busybox" -- \
+  /bin/busybox sh -c 'echo "uid=$(busybox id -u) gid=$(busybox id -g) foo=$FOO host=$(busybox hostname)"'
+check_rc "E4 identity run" 0 "$RC"
+check_has "E4 uid/gid/env/hostname" "uid=1234 gid=2345 foo=bar host=engine-e4" "$TMP/e4.out"
+
+# --- E5: the exec'd process is PID 1, caps are bounded, no_new_privs ------
+R="$(new_rootfs e5)"
+run_engine "$TMP/e5.out" "$TMP/e5.err" \
+  --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" -- /bin/busybox cat /proc/self/status
+check_rc "E5 status read" 0 "$RC"
+if awk '$1 == "NSpid:" && $2 == "1" { found = 1 } END { exit !found }' "$TMP/e5.out"; then
+  ok "E5 PID namespace (NSpid: 1)"
+else
+  bad "E5 PID namespace (NSpid is not 1)"
+fi
+check_has "E5 cap bounding set dropped" "CapBnd:	00000000a80425fb" "$TMP/e5.out"
+check_has "E5 no_new_privs" "NoNewPrivs:	1" "$TMP/e5.out"
+
+# --- E6: :ro bind mounts are read-only; rw dirs write through -------------
+R="$(new_rootfs e6)"
+mkdir -p "$R/ro"
+printf 'ro-secret\n' >"$R/ro/secret"
+printf 'etc-secret\n' >"$R/etc/rofile"
+RW_SRC="$TMP/rw-src"
+mkdir -p "$RW_SRC"
+run_engine "$TMP/e6-ro.out" "$TMP/e6-ro.err" \
+  --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" \
+  --mount "$R/etc/rofile:/etc/rofile:ro" --mount "$R/ro:/ro:ro" -- \
+  /bin/busybox sh -c 'cat /etc/rofile /ro/secret; echo x >> /ro/secret'
+check_rc "E6 read-only bind rejects writes" 1 "$RC"
+check_has "E6 read-only bind still readable" "ro-secret" "$TMP/e6-ro.out"
+check_has "E6 read-only file bind readable" "etc-secret" "$TMP/e6-ro.out"
+run_engine "$TMP/e6-rw.out" "$TMP/e6-rw.err" \
+  --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" --mount "$RW_SRC:/rw" -- \
+  /bin/busybox sh -c 'echo data > /rw/out'
+check_rc "E6 read-write bind accepts writes" 0 "$RC"
+if [[ -f "$RW_SRC/out" ]] && [[ "$(cat "$RW_SRC/out")" == "data" ]]; then
+  ok "E6 read-write bind writes through to the host"
+else
+  bad "E6 read-write bind did not reach the host"
+fi
+
+# --- E7: cgroup v2 limits are applied and the cgroup is removed -----------
+if [[ -f /sys/fs/cgroup/cgroup.controllers ]]; then
+  R="$(new_rootfs e7)"
+  CG="selftest-$$-$RANDOM"
+  run_engine "$TMP/e7.out" "$TMP/e7.err" \
+    --rootfs "$R" --mount "$BUSYBOX:/bin/busybox" --cgroup "$CG" \
+    --pids-max 16 --memory-max 33554432 --cpu-max 50000/100000 -- \
+    /bin/busybox sh -c 'cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max'
+  check_rc "E7 cgroup run" 0 "$RC"
+  check_has "E7 pids.max" "16" "$TMP/e7.out"
+  check_has "E7 memory.max" "33554432" "$TMP/e7.out"
+  check_has "E7 cpu.max" "50000 100000" "$TMP/e7.out"
+  if [[ ! -d "/sys/fs/cgroup/init-pro/$CG" ]]; then
+    ok "E7 cgroup removed after exit"
+  else
+    bad "E7 cgroup leaked at /sys/fs/cgroup/init-pro/$CG"
+    rmdir "/sys/fs/cgroup/init-pro/$CG" 2>/dev/null || true
+  fi
+else
+  echo "SKIP E7 (cgroup v2 is not mounted)"
+fi
+
+# --- E8: --new-net is a fresh network namespace ---------------------------
+R="$(new_rootfs e8)"
+HOST_NET="$(readlink /proc/self/ns/net)"
+run_engine "$TMP/e8.out" "$TMP/e8.err" \
+  --rootfs "$R" --new-net --mount "$BUSYBOX:/bin/busybox" -- \
+  /bin/busybox readlink /proc/self/ns/net
+check_rc "E8 new-net run" 0 "$RC"
+CHILD_NET="$(tr -d '[:space:]' <"$TMP/e8.out")"
+if [[ -n "$CHILD_NET" && "$CHILD_NET" != "$HOST_NET" && "$CHILD_NET" == net:* ]]; then
+  ok "E8 --new-net ($HOST_NET -> $CHILD_NET)"
+else
+  bad "E8 --new-net (host [$HOST_NET] child [$CHILD_NET])"
+fi
+
+echo
+echo "engine-selftest: ${PASS} passed / ${FAIL} failed"
+[[ "$FAIL" -eq 0 ]]

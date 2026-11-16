@@ -2443,3 +2443,57 @@ axum authn 中间件 (Bearer 静态 token, `--token-file` 转 wired)；
 A1–A6)，T1.3b RBAC (S47) 有 authn 地基。(−) golden 保持 h2c 明文基线
 (TLS opt-in 旗标, 避免全量重基线)；kubeconfig 读取起步仅
 server/CA/token 三字段 (完整 parity 顺延)。
+
+## Q48 — 内置容器引擎: kiri 内核移植 + 单线程外部引擎进程 (T4.11–T4.13, 2026-11-16, LOCKED)
+
+**Context.** T4.1 捆绑 containerd/runc 让 M1 按时闭环，但违反 Q1 的单二进制
+教义：init-pro 仍要监督一棵 Go 运行时进程树，CRI 之外再套一层 shim。
+P0/P1 spike 验证 Linux 原语已够用 —— `clone3` + 六个 namespace +
+`CLONE_INTO_CGROUP` + `mount_setattr(2)` 在本机 (Linux 6.8, cgroup v2,
+overlayfs, 真 root) 全绿，且 kiri 的 `kiri-init` 已用同一模型跑通。
+本决策锁定自研引擎的形态，替代 "containerd 唯一后端" 的隐含前提。
+
+**Options.** (a) 保持 containerd 唯一后端：零风险、但单二进制教义永远
+打折。(b) 内嵌 runc：仍是 Go/CGO 进程模型，cgroup/namespace 语义没有
+变简单。(c) 自研 kernel 层 + 自有 daemon/protocol，内核部分移植 kiri
+`crates/kiri-init/src/linux/` (Apache-2.0)。选 (c)。
+
+**Decision (LOCKED).**
+- **进程形态.** 引擎是 `init-pro engine serve --socket PATH` 的**单线程**
+  外部进程：无 tokio、无 `std::thread`、无 per-container 线程，因此
+  `clone3(child_stack = 0)` 的 fork-like 语义安全。daemon 侧 (kubelet)
+  用 tokio 客户端 (`crates/engine-client`) 走 Unix socket。
+- **安全边界.** 全部 `unsafe` 只允许出现在 `crates/nsrun`；其余 crate 保持
+  `#![forbid(unsafe_code)]`，nsrun 内每个 unsafe block 带 `SAFETY:` 注记，
+  `#![deny(unsafe_op_in_unsafe_fn)]` + `#![deny(clippy::undocumented_unsafe_blocks)]`。
+  `scripts/unsafe-audit.sh` 是门。
+- **内核模型.** 照 kiri 的顺序：`clone3` 进
+  `CLONE_NEWNS|NEWPID|NEWUTS|NEWIPC|NEWCGROUP|NEWNET` (+
+  `CLONE_INTO_CGROUP`)；child 侧 `MS_PRIVATE` → bind rootfs → enter →
+  `/proc` `/sys` `/dev` → masked/ro `/proc/sys` → `pivot_root` +
+  `umount2(MNT_DETACH)` → hostname → cap-bounding drop → no_new_privs →
+  setgid/setuid → execve；parent 用 start gate 放行 + `waitpid`，
+  退出码 `128+WTERMSIG`，exec 失败 `126/127/255`。`clone3` 不可用或内核
+  不接受 cgroup 时走已落地的回退阶梯：`clone3` + `CLONE_INTO_CGROUP` →
+  无 cgroup 的 `clone3` → legacy `clone`（legacy 路径下 child 由
+  `cgroup.procs` 迁入，且迁移仍在 start gate 放行之前完成）。
+- **控制协议.** 内部帧 `u32 LE len | u8 kind | payload`（kind 1 JSON,
+  2/3/4 raw stdout/stderr/stdin），`MAX_FRAME` 16 MiB。这是 daemon↔engine
+  字节通道，不是 apiserver wire format；Q10 (JSON-only) 只约束 API 面。
+- **默认与灰度.** 默认后端仍是 `containerd`；`--container-engine=builtin`
+  在 P1 只做接受 + 告警，真实 kubelet 接线是 T4.12，镜像存储 + CNI 是
+  T4.13。preflight 失败 (非 root / 无 `mount_setattr` / 无 cgroup v2)
+  在 P1 是**硬错误**：`engine serve` 直接 exit 1，不做静默降级；
+  "preflight 失败退回 containerd" 是 T4.12 选择路径 (kubelet 侧看到
+  引擎起不来再选 containerd) 的责任，不是引擎进程自身的行为。
+- **来源与许可.** kiri @ `7846fe0`，Apache-2.0；只移植 kiri-init 用户态
+  Linux child 代码，`guest/kernel` (GPL-2.0-only) 永不触碰。归因见
+  `NOTICE`，全量许可证文本见 `LICENSES/Apache-2.0.txt`。
+
+**Consequences.** (+) Q1 单二进制教义落地：无 runc/containerd 依赖也能
+起容器；内核面可单测 + E/B 门禁；unsafe 边界可审计；引擎崩溃模型是
+显式进程，而不是嵌在 async runtime 里的线程。 (−) 仅 Linux cgroup v2
+(5.12+) 且必须真 root (不承诺 user namespace)；P2/P3 仍需镜像层解包、
+CNI 沙箱、exec/attach、日志落盘等工程；containerd 与 builtin 双后端
+并存会扩大测试矩阵。明确 out: Windows、CRI gRPC server、pod 级
+user namespace。

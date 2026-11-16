@@ -36,4 +36,18 @@ pub struct WiredShared {
     /// Flip child PATH ordering: `bin/aux` ahead of host PATH (Q6 stage).
     #[arg(long = "prefer-bundled-bin")]
     pub prefer_bundled_bin: bool,
+
+    /// Container engine backend (T4.11/T4.12, Q48): `containerd` (the
+    /// staged bundle, default) or `builtin` (a separate single-threaded
+    /// `init-pro engine serve` process reached over the frame protocol; the
+    /// runtime wiring lands with T4.12, so `builtin` is accepted and warned
+    /// until then). env `INIT_PRO_CONTAINER_ENGINE`.
+    #[arg(
+        long = "container-engine",
+        env = "INIT_PRO_CONTAINER_ENGINE",
+        default_value = "containerd",
+        value_name = "ENGINE",
+        value_parser = ["containerd", "builtin"]
+    )]
+    pub container_engine: String,
 }

@@ -68,6 +68,23 @@ fn main() -> ExitCode {
         return run_flannel_cni(&extra[1..]);
     }
 
+    // T4.11 (Q48): the built-in engine process and its smoke verb.
+    // Intercepted pre-clap and pre-tokio so clone3(child_stack=0) runs in
+    // a single-threaded process.
+    if matches!(
+        extra.first().map(String::as_str),
+        Some("engine" | "engine-run")
+    ) {
+        // `init-pro engine serve ...` keeps "serve" as the first argument;
+        // the argv[0]="engine" symlink already arrives that way.
+        let args = if extra.first().map(String::as_str) == Some("engine") {
+            &extra[1..]
+        } else {
+            &extra[..]
+        };
+        return ExitCode::from(engine::run(args) as u8);
+    }
+
     match resolve(&argv0) {
         // init-pro itself (or an unknown name) -> drive the CLI; clap will
         // print help/version as appropriate.
@@ -81,6 +98,9 @@ fn main() -> ExitCode {
         // The flannel CNI meta-plugin, whether invoked through the staged
         // `<runtime>/aux/flannel` symlink (argv[0]) or as a subcommand.
         Some(Action::Flannel) => run_flannel_cni(&extra),
+        // Internal engine process (T4.11, Q48): `init-pro engine serve ...`.
+        // Must not reach the tokio CLI: the engine is strictly single-threaded.
+        Some(Action::Engine) => ExitCode::from(engine::run(&extra) as u8),
         // Bundled-peer aliases: Phase 1 stubs.
         Some(external) => multicall::external_stub(external, &extra),
     }

@@ -1,0 +1,25 @@
+init-pro third-party notices
+============================
+
+init-pro is licensed under the Apache License, Version 2.0
+(`Cargo.toml` -> `[workspace.package] license = "Apache-2.0"`).
+The full license text is in `LICENSES/Apache-2.0.txt`.
+
+Adapted source
+--------------
+
+kiri — https://github.com/libracoder/kiri
+Pinned reference: 7846fe05c9b79c00cbc2f5a18d87bb1f74bf9191
+Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
+Licensed under the Apache License, Version 2.0.
+
+`crates/nsrun/src/*.rs` is adapted from kiri's
+`crates/kiri-init/src/linux/*.rs` (child namespace/mount/capability
+recipe). The adaptation is documented in each module header as
+"adapted from kiri @ 7846fe0". Only the Apache-2.0 kiri-init user-space
+code is used; kiri's GPL-2.0-only `guest/kernel` tree is NOT copied,
+linked, or modified.
+
+Other bundled upstream artifacts (containerd, runc, cni-plugins,
+crictl) keep their own licenses and are recorded by the generated
+SPDX-2.3 SBOM in `LICENSES/spdx-2.3.json`.

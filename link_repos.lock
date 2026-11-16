@@ -24,9 +24,13 @@
 #     references that same nested path on purpose: cargo keys path deps by
 #     LEXICAL path (symlinks are never canonicalized), so keeping one
 #     lexical identity is what holds nfsserve to a single lockfile entry.
-#   * The real directories link_repos/argo-workflows/ and link_repos/flannel/
-#     are REFERENCE CHECKOUTS ONLY (docs / e2e inspiration) — no Cargo.toml
-#     path dependency points at them; bootstrap ignores them.
+#   * The real directories link_repos/argo-workflows/, link_repos/flannel/
+#     and link_repos/kiri/ are REFERENCE CHECKOUTS ONLY (docs / e2e
+#     inspiration) — no Cargo.toml path dependency points at them;
+#     bootstrap ignores them. kiri @ 7846fe0 is the Apache-2.0 source of
+#     the nsrun clone3/namespace port (T4.11, Q48); only
+#     crates/kiri-init/src/linux/ is referenced — the GPL-2.0 guest/kernel
+#     tree is never touched (see NOTICE).
 #   * Reachability notes: all MoSunDay/* pins except rdb are origin/main
 #     tips. rdb's validated line (8de5dcc) was rewritten out of upstream
 #     main (d52ef49 is a parallel rebase), so the pin is published as the

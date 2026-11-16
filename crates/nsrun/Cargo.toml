@@ -1,0 +1,12 @@
+[package]
+name = "nsrun"
+description = "Namespace runner for the built-in engine (T4.11, Q48): clone3 + child isolation, the only unsafe crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = "0.2"

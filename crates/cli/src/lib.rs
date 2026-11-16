@@ -132,6 +132,7 @@ where
     match cli.command {
         Some(Command::Server(svc)) => {
             tracing::debug!(target: "init-pro", "server flags captured: {:?}", svc);
+            warn_builtin_engine(&svc.shared.container_engine, "server");
             match format!("{}:{}", svc.bind_address, svc.https_listen_port)
                 .parse::<std::net::SocketAddr>()
             {
@@ -174,6 +175,7 @@ where
         }
         Some(Command::Agent(ag)) => {
             tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);
+            warn_builtin_engine(&ag.shared.container_engine, "agent");
             runtime::run_agent(
                 cfg,
                 ag.shared.server.clone(),
@@ -202,6 +204,20 @@ where
             println!();
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// T4.11/T4.12 (Q48): `--container-engine=builtin` is accepted now but the
+/// runtime wiring (EngineBackend, CNI/image store) lands with T4.12; avoid
+/// silently pretending the node runs on the built-in engine.
+fn warn_builtin_engine(engine: &str, role: &str) {
+    if engine == "builtin" {
+        tracing::warn!(
+            target: "init-pro",
+            role,
+            "--container-engine=builtin is not wired yet (T4.12); \
+             the node keeps using the staged containerd"
+        );
     }
 }
 

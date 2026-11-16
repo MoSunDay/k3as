@@ -1,6 +1,6 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 42 TODOs. The
+This file is the **single source of truth** for all 45 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
 grouping for easier editing). **Edit both in lock-step.**
 
@@ -37,6 +37,9 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.8 | 4 | 探针补全: tcpSocket + exec (httpGet 已有; S39) | done (Sprint 39; tcpSocket connect-then-close 数字端口 + exec argv verbatim rc==0; 命名端口 IntOrString Deferred) | T4.2 |
 | T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | not-started (S40 排期) | T4.2 |
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
+| T4.11 | 4 | 内置容器引擎内核 P1: clone3/namespace + 单线程 engine + 帧协议 (无 runc/containerd, Q48) | done (P1 kernel+protocol; `engine-run`/`engine serve`) | T4.1 |
+| T4.12 | 4 | 内置引擎 kubelet 接线 P2: `CriBackend`/exec + `--container-engine=builtin` 真实选择 | not-started (P2) | T4.11, T4.2 |
+| T4.13 | 4 | 内置引擎镜像存储 + CNI 沙箱 P3 (overlayfs 层解包 + flannel netns) | not-started (P3) | T4.12, T4.3, T6.3 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
@@ -53,12 +56,12 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 
-**Counts:** 42 TODOs · 28 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 45 TODOs · 29 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
-· 12 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
-Layer4=10 · Layer5=7 · Layer6=3 · Layer7=5.
+· 14 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+Layer4=13 · Layer5=7 · Layer6=3 · Layer7=5.
 
 ---
 
@@ -73,6 +76,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
       ├─> T7.3 <─ T3.1 <─ T1.2      │   (argo-workflows first-class)
       └─> T4.6 (off T4.2: log date dirs + 100MB copytruncate, Q39)
       └─> T6.3 (off T0.3: embedded registry v2 image plane, Q40)
+      └─> T4.11 (off T4.1: built-in engine P1, Q48) ─> T4.12 ─> T4.13
       └─> T0.6 (golden gate,        │
                 every TODO must     T1.1 ─┬─> T1.3
                 keep it green)      T2.3 <─┘
@@ -87,6 +91,8 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
 - **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档)。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
+- **Sprint 38b — T4.11 内置容器引擎 P1: kiri clone3/namespace 内核移植 + 单线程 engine + 帧协议 (Q48).**
+  4 个新 crate: `nsrun` (唯一 unsafe island；clone3 六 namespace + CLONE_INTO_CGROUP、child 挂载/pivot_root/cap-bounding/no_new_privs/setuid、parent start gate + waitpid、`128+WTERMSIG` + 126/127/255)、`engine-proto` (u32 LE len|kind|payload 帧 + ContainerSpec)、`engine` (`engine-run` 单发 + `engine serve` 单线程 accept loop)、`engine-client` (tokio 事件泵)。`init-pro engine`/`engine-run` pre-clap 派发 + multicall 别名；`--container-engine` 仅接受+告警 (P2/T4.12 接线)。两处根因修复: ① `pivot_root(".", ".")` EBUSY → 先绝对路径 bind 再 chdir；② ro bind 的 `<proc-fd>` remount EINVAL → `mount_setattr(2)` (AT_EMPTY_PATH|AT_RECURSIVE, RDONLY|NOSUID|NODEV|NOEXEC)，并把 mount_setattr 支持纳入 preflight。门禁: `scripts/unsafe-audit.sh` + `scripts/engine-singlethread-check.sh` + `scripts/engine-selftest.sh` E1–E8 (22 断言) + `scripts/builtin-runtime-e2e.sh` B1–B7。S38c 收尾复跑: engine 栈 tests 41/0 (nsrun 22 / engine 12 / engine-proto 5 / engine-client 2)，workspace 1050/0。来源 kiri @ 7846fe0 Apache-2.0，`guest/kernel` GPL 不触碰；`NOTICE` + `LICENSES/Apache-2.0.txt` 落档。
 - **Sprint 36 — workflow 抽取独立仓库 arust-workflow (link_repos 第 8 pin, Q42) + router 热重载真 bug 修复.**
   `github.com/MoSunDay/arust-workflow` @ `687ed325`（Q38 bootstrap 收编, 与 openrusty/rdb 同型）: 双 crate —— `workflow-model`
   (argoproj.io/v1alpha1 全字段类型, 自 k3as `crates/api/src/argoproj/` 17 模块原样平移, 30 fidelity 单测) + `workflow-engine`

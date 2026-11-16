@@ -92,6 +92,7 @@ mod tests {
             token: None,
             server: None,
             prefer_bundled_bin: false,
+            container_engine: "containerd".to_string(),
         }
     }
 

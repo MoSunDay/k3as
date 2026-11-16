@@ -24,6 +24,10 @@ pub enum Action {
     /// containerd through the `<runtime>/aux/flannel` symlink; NOT a
     /// bundled-peer stub, it has a real in-repo implementation.
     Flannel,
+    /// Internal built-in container engine (T4.11, Q48). The daemon re-execs
+    /// this alias as a strictly single-threaded process; deliberately not a
+    /// documented user verb and not a bundled-peer stub.
+    Engine,
 }
 
 impl Action {
@@ -39,6 +43,7 @@ impl Action {
             Action::Containerd => "containerd",
             Action::Etcd => "etcd",
             Action::Flannel => "flannel",
+            Action::Engine => "engine",
         }
     }
 
@@ -73,6 +78,9 @@ pub const ALIASES: &[(&str, Action)] = &[
     // T4.3 Scope A (Q34): the flannel CNI meta-plugin ships as an alias of
     // this same binary (Q1); runtime::stage symlinks <runtime>/aux/flannel.
     ("flannel", Action::Flannel),
+    // T4.11 (Q48): internal engine process, re-exec'd by the daemon. Not a
+    // peer stub: it has a real in-repo implementation behind this alias.
+    ("engine", Action::Engine),
 ];
 
 /// Lowercased, extension-less basename of an `argv[0]`.
@@ -321,6 +329,7 @@ mod tests {
             Action::Containerd,
             Action::Etcd,
             Action::Flannel,
+            Action::Engine,
         ];
         for a in all {
             assert!(covered.contains(&a), "{a:?} missing from ALIASES");
@@ -345,6 +354,7 @@ mod tests {
         // to external_stub would print a "not yet vendored" banner instead
         // of running the CNI ADD/DEL machinery.
         assert!(!Action::Flannel.is_external());
+        assert!(!Action::Engine.is_external());
     }
 
     #[test]
@@ -360,6 +370,7 @@ mod tests {
         assert_eq!(Action::Containerd.as_str(), "containerd");
         assert_eq!(Action::Etcd.as_str(), "etcd");
         assert_eq!(Action::Flannel.as_str(), "flannel");
+        assert_eq!(Action::Engine.as_str(), "engine");
     }
 
     #[test]
@@ -379,6 +390,7 @@ mod tests {
         assert_eq!(resolve("containerd"), Some(Action::Containerd));
         assert_eq!(resolve("etcd"), Some(Action::Etcd));
         assert_eq!(resolve("flannel"), Some(Action::Flannel));
+        assert_eq!(resolve("engine"), Some(Action::Engine));
     }
 }
 
