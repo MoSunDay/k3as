@@ -102,9 +102,20 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   语义**加固**处理：写回缓存判重键由 name 改为 `name#uid`
   (`crates/kubelet/src/agent_exec.rs` `dedupe_id`；`AgentView` 增
   `uid`)，同名重建不被前代 last-body 去重，另有单测 + 集成回归
-  (`recreated_same_name_agent_reconciles_again`)。实机复验：删除→同名
-  重建（新 uid）重新 reconcile 并写回自有 status（session `run2-s`）。
-  验收脚本仍以时间戳名保幂等 (A12/A13)。见 `验收报告.md` F4。
+  (`recreated_same_name_agent_reconciles_again`)。收尾（S37c 追加二，
+  commit `6d0ef7d`）：可达机制 = 早期失败分支（EmptyPrompt/
+  WorkspaceMountFailed/WorkspacePrepareFailed）终态体先于 Running 写回
+  且跨化身恒等 → name 键压制同名重建重写；成功路径因 Running 体中转
+  自愈（解释原复现失败）。补两个可判别集成测试
+  （`early_failure_same_name_recreate_rewrites`/
+  `runner_missing_same_name_recreate_reports_again`）+ 负向检查（name
+  键下两测均 20 s 超时；uid 键 9/9，kubelet lib 6/6）；
+  `report_missing_runner` 判重键 uid 化（`dedupe_id` 共享）。实机
+  （node04 `7845e459…`）空 prompt 同名重建双化身 `Failed/EmptyPrompt`；
+  验收 run9 **13/0**。残余候选工单（勿标已修）：`killers` name 键删→建
+  竞态可致重复 spawn（Q37 at-least-once 容忍，但浪费进程/争用
+  workspace）；`patch_if_changed` 先记后发 — 早期失败路径一次 patch 失败
+  即永久压制；写回缓存无淘汰，DELETED 不清理。见 `验收报告.md` F4。
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---

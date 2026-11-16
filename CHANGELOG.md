@@ -90,7 +90,8 @@ PASS/FAIL 汇总; A9/A10 需 `ACCEPTANCE_RESTART=1`, A11 永远人工) +
 sandbox (已清理); F2 agent 重启不收养 sandbox (podIP 变/restartCount
 归零, v1 预期); F3 重启后 ~12 s relay 500 (containerd 竞态, 候选工单);
 **F4 Agent 执行循环按 name 去重 → 同名重建永不 re-reconcile (代码缺陷,
-待工单)**; F5 anyhome 默认 loopback 不适配多节点 (部署已改 LAN 绑定);
+待工单)** (后证伪, 见下「F4 加固 / F4 收尾」段); F5 anyhome 默认
+loopback 不适配多节点 (部署已改 LAN 绑定);
 F6 anyhome NFS 首挂/重挂后 prepare 偶发 EIO (**已修复**: `create_dir_retry`
 有界重试); F7 kubectl 无核心资源 get (S4x 已排期); F8 双节点
 kube-router/KUBE-* iptables 残留待清理。
@@ -130,6 +131,32 @@ name → `name#uid` (`crates/kubelet/src/agent_exec.rs::dedupe_id`), 同名
 reconcile 并写回自有 status (session `run2-s`); 复跑验收 **13/0**
 (A0–A8/G4/A12/A13, run8)。验收脚本 A12 注记同步更新 (390 行)。node02
 二进制仍为 `e7414e90…` (与 node04 暂差一版, 并入 A11 人工窗口刷新)。
+
+**F4 收尾 (S37c 追加二, 2026-11-16)** — 可达机制定位: 早期失败分支
+(EmptyPrompt :89 / WorkspaceMountFailed :101 / WorkspacePrepareFailed
+:112, `agent_exec.rs`) 返回终态 Failed 体且无前置 Running 写回, 且该终态
+体跨化身恒等 (`status_patch` 无时间戳) → name 判重键压制同名重建的
+重写 → 对象卡 Pending 无 status; 成功路径因 Running 体中途覆写缓存条目
+自愈 — 正是原成功路径复现不出的原因。新增两个可判别集成测试
+(`crates/kubelet/tests/agents_runner_integration.rs`):
+`early_failure_same_name_recreate_rewrites` (空 prompt → Failed/
+EmptyPrompt → 删除 → 同名重建 → 再次 Failed/EmptyPrompt, uid 不同) 与
+`runner_missing_same_name_recreate_reports_again`; 负向检查: 两键临时
+退回 name-only 时两测均于 20 s wait_for 截止时超时, uid 键下 9/9 通过
+(原 7), kubelet lib 6/6。`report_missing_runner` 判重集键 `view.key` →
+`dedupe_id` (name#uid, pub(crate) 共享): runner 缺失期间同名重建获得
+独立 RunnerMissing condition。commit `6d0ef7d`。部署: node04 重建
+二进制 `7845e459…` 上线 `/root/k3as-d/bin/init-pro` (前代 `e0b903bd…`
+备份于 `/root/k3as-d/backups/init-pro.e0b903bd.20261116`), 重启
+`k3as-agent`, 双节点 Ready, 4/4 Pod Running, 验收 run9 **13/0**
+(A0–A8/G4/A12/A13); 实机复验: 空 prompt 同名 Agent 删除→重建双化身
+均 `Failed/EmptyPrompt` (修复前第二化身卡 Pending)。node02 server/agent
+二进制仍为 `e7414e90…` (并入 A11 人工窗口刷新)。残余同类候选工单
+(勿标已修): (a) `killers` 槽仍按 name 键 — 快速删除→同名重建竞态令旧
+尝试清理误删新尝试槽位 → 重复 spawn (Q37 at-least-once 容忍, 但浪费
+进程/争用 workspace); (b) `patch_if_changed` 先记缓存后发 PATCH —
+早期失败路径一次瞬时 patch 失败即永久压制该对象重写 (成功路径自愈);
+(c) 写回缓存无淘汰 — DELETED 对象 `name#uid` 项随进程生命周期累积。
 
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
