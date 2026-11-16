@@ -26,11 +26,12 @@ const WS_ROOT: &str = "agent-ws";
 /// run loop and the execution attempts).
 pub type Written = Arc<Mutex<BTreeMap<String, Value>>>;
 
-/// Write-if-changed cache identity: `namespace/name` PLUS the object
-/// uid, so a recreated same-name Agent (new uid, e.g. the F4 repro) is
-/// never deduped against its predecessor's last body and silently left
-/// Pending without status.
-fn dedupe_id(view: &objs::AgentView) -> String {
+/// Object-identity helper shared by the write-if-changed cache and the
+/// `RunnerMissing` reported-set: `namespace/name` PLUS the object uid,
+/// so a recreated same-name Agent (new uid, e.g. the F4 repro) is never
+/// deduped against its predecessor's last body (or reported condition)
+/// and silently left Pending without status.
+pub(crate) fn dedupe_id(view: &objs::AgentView) -> String {
     format!("{}#{}", view.key, view.uid)
 }
 

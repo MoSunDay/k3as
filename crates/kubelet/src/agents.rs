@@ -22,7 +22,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::{watch, Mutex};
 
-use crate::agent_exec::{fail_cond, patch_if_changed, run_attempt, Written};
+use crate::agent_exec::{dedupe_id, fail_cond, patch_if_changed, run_attempt, Written};
 use crate::agent_objects as objs;
 use crate::http::HttpJson;
 
@@ -322,14 +322,15 @@ async fn reset_orphan(
     patch_if_changed(client, written, view, &body).await;
 }
 
-/// `RunnerMissing` degradation: stay Pending, say why ONCE per key per boot.
+/// `RunnerMissing` degradation: stay Pending, say why ONCE per object
+/// instance (`name#uid`, see [`crate::agent_exec::dedupe_id`]) per boot.
 async fn report_missing_runner(
     client: &HttpJson,
     written: &Written,
     reported: &Mutex<BTreeSet<String>>,
     view: &objs::AgentView,
 ) {
-    if !reported.lock().await.insert(view.key.clone()) {
+    if !reported.lock().await.insert(dedupe_id(view)) {
         return;
     }
     let body = objs::status_patch(

@@ -215,6 +215,80 @@ async fn recreated_same_name_agent_reconciles_again() {
     shutdown.trigger();
 }
 
+/// F4 regression, DISCRIMINATING variant of the test above: the
+/// early-failure paths (`EmptyPrompt`, `WorkspaceMountFailed`,
+/// `WorkspacePrepareFailed`) return a terminal Failed body with NO
+/// Running patch before it, and that body is constant (no timestamps) —
+/// so a NAME-ONLY write-cache key suppresses the recreated incarnation's
+/// rewrite (identical body already cached) and this test times out. The
+/// uid-scoped key (`name#uid`) fixes it.
+#[tokio::test]
+async fn early_failure_same_name_recreate_rewrites() {
+    let data = data_dir();
+    // Runner staged but never started: the empty prompt fails validation
+    // before any spawn (agent_exec.rs validate_prompt).
+    let runner = write_runner(&data, "exit 0");
+    let url = spawn_server().await;
+    let client = HttpJson::parse_url(&url).unwrap();
+    let shutdown = infra::Shutdown::new();
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, Some(runner), Duration::from_secs(60)),
+        shutdown.clone(),
+    );
+    let path = "/apis/init-pro.io/v1/namespaces/default/agents/early-fail";
+    let failed = |v: &Value| v["status"]["phase"] == "Failed" && condition_of(v, "EmptyPrompt");
+
+    post_agent(&client, "early-fail", "").await;
+    let first = wait_for(&client, path, "first EmptyPrompt Failed", &failed).await;
+    let first_uid = first["metadata"]["uid"].as_str().unwrap().to_string();
+
+    let (code, _) = client.delete_json(path).await.unwrap();
+    assert!((200..300).contains(&code), "DELETE rejected: {code}");
+
+    post_agent(&client, "early-fail", "").await;
+    let second = wait_for(&client, path, "recreated EmptyPrompt Failed", &failed).await;
+    let second_uid = second["metadata"]["uid"].as_str().unwrap().to_string();
+    assert_ne!(first_uid, second_uid, "recreate must mint a new uid");
+
+    shutdown.trigger();
+}
+
+/// F4 regression for the `RunnerMissing` reported-set AND the write
+/// cache: a recreated same-name Agent while the node has NO runner must
+/// get a FRESH RunnerMissing condition. The set (and the cache — the
+/// Pending/RunnerMissing body is identical) is keyed `name#uid`; a
+/// name-only key swallows the second incarnation's condition entirely
+/// and this test times out.
+#[tokio::test]
+async fn runner_missing_same_name_recreate_reports_again() {
+    let data = data_dir();
+    let url = spawn_server().await;
+    let client = HttpJson::parse_url(&url).unwrap();
+    let shutdown = infra::Shutdown::new();
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, None, Duration::from_secs(60)),
+        shutdown.clone(),
+    );
+    let path = "/apis/init-pro.io/v1/namespaces/default/agents/missing-re";
+    let pending = |v: &Value| {
+        v["status"]["phase"] == "Pending" && condition_of(v, "RunnerMissing")
+    };
+
+    post_agent(&client, "missing-re", "task").await;
+    let first = wait_for(&client, path, "first RunnerMissing", &pending).await;
+    let first_uid = first["metadata"]["uid"].as_str().unwrap().to_string();
+
+    let (code, _) = client.delete_json(path).await.unwrap();
+    assert!((200..300).contains(&code), "DELETE rejected: {code}");
+
+    post_agent(&client, "missing-re", "task").await;
+    let second = wait_for(&client, path, "recreated RunnerMissing", &pending).await;
+    let second_uid = second["metadata"]["uid"].as_str().unwrap().to_string();
+    assert_ne!(first_uid, second_uid, "recreate must mint a new uid");
+
+    shutdown.trigger();
+}
+
 #[tokio::test]
 async fn missing_runner_stays_pending_with_runnermissing_condition() {
     let data = data_dir();
