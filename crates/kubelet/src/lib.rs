@@ -63,7 +63,7 @@ pub use http::{HttpError, HttpJson};
 pub use objects::{
     node_object, pod_view, ContainerSpec, PodView, VolumeKind, VolumeMount, VolumeSpec,
 };
-pub use probes::{HttpGetSpec, PodProbeState, ProbeSpec};
+pub use probes::{HttpGetSpec, PodProbeState, ProbeHandler, ProbeSpec};
 pub use runner::{default_node_name, spawn, KubeletConfig};
 pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};

@@ -469,7 +469,7 @@ fn container_inherits_pod_identity_from_its_sandbox() {
 #[test]
 fn liveness_failure_restarts_running_container() {
     use kubelet::probes::ProbeKind;
-    use kubelet::{HttpGetSpec, PodProbeState, ProbeSpec};
+    use kubelet::{HttpGetSpec, PodProbeState, ProbeHandler, ProbeSpec};
     let pod = view_full(
         "default",
         "web",
@@ -485,10 +485,10 @@ fn liveness_failure_restarts_running_container() {
     // Liveness tracker folded to Failure (as the runner's probe pass does).
     let mut probes = PodProbeState::new();
     let spec = ProbeSpec {
-        http_get: HttpGetSpec {
+        handler: ProbeHandler::HttpGet(HttpGetSpec {
             path: "/".into(),
             port: 80,
-        },
+        }),
         initial_delay_seconds: 0,
         period_seconds: 1,
         timeout_seconds: 1,

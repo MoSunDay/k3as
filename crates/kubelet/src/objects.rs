@@ -408,6 +408,7 @@ pub fn renew_lease(lease: &Value, now: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probes::ProbeHandler;
 
     fn pod(ns: &str, name: &str, node: &str) -> Value {
         json!({
@@ -673,21 +674,35 @@ mod tests {
         assert_eq!(v.restart_policy, "OnFailure");
         let c = &v.containers[0];
         let s = c.startup_probe.as_ref().unwrap();
-        assert_eq!(s.http_get.path, "/s");
-        assert_eq!(s.http_get.port, 8080);
+        match &s.handler {
+            ProbeHandler::HttpGet(g) => {
+                assert_eq!(g.path, "/s");
+                assert_eq!(g.port, 8080);
+            }
+            other => panic!("expected httpGet startup handler, got {other:?}"),
+        }
         assert_eq!(s.failure_threshold, 5);
-        assert_eq!(c.readiness_probe.as_ref().unwrap().http_get.port, 80);
+        match &c.readiness_probe.as_ref().unwrap().handler {
+            ProbeHandler::HttpGet(g) => assert_eq!(g.port, 80),
+            other => panic!("expected httpGet readiness handler, got {other:?}"),
+        }
         assert_eq!(c.liveness_probe.as_ref().unwrap().period_seconds, 3);
         // Unknown restartPolicy values fall back to Always.
         let bad = json!({"metadata": {"name": "x"}, "spec": {"restartPolicy": "Maybe"}});
         assert_eq!(pod_view(&bad).unwrap().restart_policy, "Always");
-        // A probe without httpGet is not applicable in S1 -> None.
+        // T4.8: tcpSocket/exec handlers parse through pod_view too.
         let tcp = json!({"metadata": {"name": "x"}, "spec": {"containers": [
             {"name": "c", "image": "i", "livenessProbe": {"tcpSocket": {"port": 1}}}
         ]}});
-        assert!(pod_view(&tcp).unwrap().containers[0]
+        match &pod_view(&tcp).unwrap().containers[0]
             .liveness_probe
-            .is_none());
+            .as_ref()
+            .unwrap()
+            .handler
+        {
+            ProbeHandler::TcpSocket(t) => assert_eq!(t.port, 1),
+            other => panic!("expected tcpSocket handler, got {other:?}"),
+        }
     }
 
     #[test]

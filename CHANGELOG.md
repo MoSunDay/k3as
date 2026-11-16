@@ -7,6 +7,52 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 39 — T4.8 探针补全 tcpSocket + exec (done) (2026-11-16)
+
+**Goal:** 补全 kubelet 探针 handler 集 (T4.8): httpGet (Sprint 20) 之外
+新增 `tcpSocket` (connect-then-close, 数字端口) 与 `exec` (argv verbatim,
+rc==0 即健康, 无 shell 包裹) —— upstream `pkg/kubelet/prober` 对齐;
+命名端口 (IntOrString) 明确 Deferred。
+
+**Changes**
+- `crates/kubelet/src/probes.rs`: `ProbeHandler` 枚举化
+  (HttpGet/TcpSocket/Exec) + 解析 (tcpSocket 命名端口→不识别=Deferred;
+  exec 要求非空纯字符串 argv; httpGet 优先); `run_tcp_probe`
+  (tokio connect 受 timeoutSeconds 约束, 连接即健康随即关闭);
+  `exec_probe_healthy` (rc==0 纯函数裁决缝)。
+- `crates/kubelet/src/runner.rs`: `probe_pass` 三路分派; exec 探针复用
+  staged-crictl 缝 (`CriCtl::exec_container`, 与本地 exec 路由同源, Q31),
+  无 crictl/超时/IO 错误一律按探针失败计, 绝不 crash 探针通道。
+- `status.rs`/`objects.rs`/`lib.rs`/`tests/sync_plan.rs`: 适配 handler
+  形态; `ProbeHandler` 入 crate 根 re-export。
+- `scripts/probe-e2e.sh` (NEW): P1-P4 四象限 (tcpSocket 开/闭端口 ×
+  readiness/liveness + exec rc0/rc1 × readiness/liveness), echo 镜像
+  (8080 HTTP + wfstep), 紧凑探针参数, restartCount >= 1 数值断言,
+  pod-env-e2e 共存配方 (自由端口 + cni0 对齐 + --node-ip 127.0.0.1)。
+- flake 加固: `tcp_probe_fails_on_closed_port` 由单次 bind-drop-connect
+  改为 8-新鲜端口重试 (并行 tokio 测试可能恰好抢走刚释放的临时端口,
+  使 refused-connect 假成功 —— 隔离 worktree 全量测试抓出, 主树 3/3 绿)。
+
+**Gates (DoD)**
+- fmt (成员范围) / `cargo build --workspace --locked` ✅
+- test: **隔离 worktree (HEAD + 本卡 7 文件) `cargo test --workspace`
+  1005 passed / 0 failed / 75 binaries** (基线 998 + 净增 7)。主树因并行
+  T4.11 在途改动 (cli `container_engine` E0063) 无法整树测试, 故取隔离
+  口径; 本卡提交自包含 (在 HEAD 上独立编译测试通过)。
+- clippy: worktree 整树 0 error ✅ (主树 cli 红 = 并行 WIP, 非本卡)。
+- golden: **73/73 权威全电池补录 (P0 闭环)** —— 用户双节点验收集群
+  下线 (cni0 回 10.42.0.0/16), G30 共享桥跨集群 pod-IP 噪声消失;
+  此前一轮 44OK/10FAIL 定性为并发全量重编译抢 CPU 的时序噪声
+  (G25/G26/G29/G60 全部空闲复跑转绿)。
+- 领域 e2e: `scripts/probe-e2e.sh` 4/4 ✅; parity 22/22 (含并行 T4.11
+  新增 t-engine 2 例) ✅。
+- SSOT lock-step: index.md T4.8 → done + Counts (42 卡口径 28 done/
+  12 not-started; 并行 45 卡口径由 T4.11 提交携带), 04-node.md 卡收口。
+
+**并行协作注记:** Sprint 38b (T4.11 内置引擎, Q48) 与本卡同日并行,
+engine/nsrun 等 4 crate + cli 旗标为其在途 WIP; 本卡提交定向暂存 7 个
+代码文件 + 3 个 SSOT 文件的分 hunks, 不含任何并行改动。
+
 ## Sprint 38 — T4.7 容器 env/envFrom 投射 (done) + all-gates 首跑与 golden 环境冲突定性 (2026-11-15)
 
 **Goal:** Pod spec 的 env (literal + 单键 valueFrom) 与 envFrom (ConfigMap/Secret

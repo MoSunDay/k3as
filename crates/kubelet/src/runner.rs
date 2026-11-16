@@ -23,7 +23,9 @@ use crate::exec::{execute, snapshot};
 use crate::http::HttpJson;
 use crate::node::{node_task, now_str};
 use crate::objects::{self, PodView};
-use crate::probes::{run_http_probe, PodProbeState, ProbeKind};
+use crate::probes::{
+    exec_probe_healthy, run_http_probe, run_tcp_probe, PodProbeState, ProbeHandler, ProbeKind,
+};
 use crate::status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 use crate::sync::{plan, Snapshot};
 use crate::volumes;
@@ -377,13 +379,20 @@ async fn sync_once(
         }
     };
     let wanted = desired.lock().await.clone();
-    // Probe pass (Sprint 20 S1, T4.2 Scope B): drive due HTTP probes for
-    // RUNNING containers inside READY sandboxes that have an IP. The
-    // outcomes feed both the plan (liveness restarts) and the status
-    // writer (readiness gate). Sandboxes without an IP are skipped and
-    // their probe status stays Unknown.
+    // Probe pass (Sprint 20 S1, T4.2 Scope B; handlers completed T4.8):
+    // drive due probes — httpGet / tcpSocket / exec — for RUNNING
+    // containers inside READY sandboxes that have an IP. The outcomes
+    // feed both the plan (liveness restarts) and the status writer
+    // (readiness gate). Sandboxes without an IP are skipped and their
+    // probe status stays Unknown.
     let now = unix_now();
-    probe_pass(&wanted, &snap, probes, now).await;
+    // Exec probes ride the SAME staged-crictl seam the kubelet's local
+    // exec route uses (server.rs, Q31) — `for_paths` is a pure path
+    // lookup, cheap to redo per cycle; None without a staged crictl
+    // (then exec probes simply fail, never crash the pass).
+    let exec_ctl =
+        runtime::CriCtl::for_paths(&runtime::AgentRuntimePaths::for_data_dir(&cfg.data_dir));
+    probe_pass(&wanted, &snap, probes, now, exec_ctl.as_ref()).await;
     let keep: BTreeSet<String> = wanted.keys().cloned().collect();
     probes.prune(&keep);
     // Volume pass (Sprint 20 S2, T4.2 Scope B): materialize emptyDir dirs
@@ -474,17 +483,21 @@ async fn sync_once(
     last_status.retain(|k, _| wanted.contains_key(k));
 }
 
-/// Drive due HTTP probes for RUNNING containers of READY sandboxes that
-/// have an IP (Sprint 20 S1, T4.2 Scope B). Trackers arm from the first
-/// RUNNING observation — CRI reports no container start time in S1, so
-/// that observation time is the start proxy (initialDelaySeconds counts
-/// from it). Pods without an IP are skipped entirely; their probe status
-/// stays Unknown until a probe actually runs.
+/// Drive due probes (httpGet / tcpSocket / exec — T4.8) for RUNNING
+/// containers of READY sandboxes that have an IP (Sprint 20 S1, T4.2
+/// Scope B). Trackers arm from the first RUNNING observation — CRI
+/// reports no container start time in S1, so that observation time is
+/// the start proxy (initialDelaySeconds counts from it). Pods without
+/// an IP are skipped entirely; their probe status stays Unknown until
+/// a probe actually runs. `exec_ctl` is the staged-crictl driver exec
+/// probes run through (`CriCtl::exec_container`, Q31 seam); `None`
+/// turns every exec probe into a plain failure.
 async fn probe_pass(
     wanted: &BTreeMap<String, PodView>,
     snap: &Snapshot,
     probes: &mut PodProbeState,
     now: u64,
+    exec_ctl: Option<&runtime::CriCtl>,
 ) {
     for view in wanted.values() {
         if view.deleted {
@@ -531,8 +544,16 @@ async fn probe_pass(
                 tracker.arm(now, pspec);
                 if tracker.due(now) {
                     let timeout = Duration::from_secs(u64::from(pspec.timeout_seconds));
-                    let res =
-                        run_http_probe(&pspec.http_get, &host, pspec.http_get.port, timeout).await;
+                    // Handler dispatch (T4.8): httpGet and tcpSocket go
+                    // over the pod network (pod IP as `host`); exec runs
+                    // in the live container incarnation via crictl.
+                    let res = match &pspec.handler {
+                        ProbeHandler::HttpGet(g) => run_http_probe(g, &host, g.port, timeout).await,
+                        ProbeHandler::TcpSocket(t) => run_tcp_probe(&host, t.port, timeout).await,
+                        ProbeHandler::Exec(e) => {
+                            run_exec_probe(exec_ctl, &cv.id, &e.command, timeout).await
+                        }
+                    };
                     match res {
                         Ok(()) => tracker.observe(true, now, pspec),
                         Err(e) => {
@@ -549,6 +570,35 @@ async fn probe_pass(
                 }
             }
         }
+    }
+}
+
+/// One exec probe (T4.8): run `command` in the LIVE container
+/// incarnation (`cv.id` from the snapshot the probe pass already holds)
+/// via the staged-crictl seam — the same `CriCtl::exec_container`
+/// primitive behind the kubelet's local exec route (Q31). The argv is
+/// passed VERBATIM, no shell wrapping (k8s parity, upstream
+/// `pkg/kubelet/prober` exec); healthy iff the exit code is 0
+/// ([`exec_probe_healthy`]). A missing crictl or any spawn/io/timeout
+/// error is a plain probe failure (observed `false`), never a crash.
+async fn run_exec_probe(
+    ctl: Option<&runtime::CriCtl>,
+    container_id: &str,
+    command: &[String],
+    timeout: Duration,
+) -> Result<(), String> {
+    let ctl = ctl.ok_or_else(|| "exec probe: no staged crictl binary (T4.1)".to_string())?;
+    let (rc, out) = ctl
+        .exec_container(container_id, command, timeout)
+        .await
+        .map_err(|e| format!("exec probe in {container_id} failed: {e}"))?;
+    if exec_probe_healthy(rc) {
+        Ok(())
+    } else {
+        Err(format!(
+            "exec probe in {container_id} exited {rc}: {}",
+            out.trim()
+        ))
     }
 }
 

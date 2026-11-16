@@ -489,8 +489,14 @@ and node registration.
   - 本地 listener 单测 + e2e 探针成功/失败双路径（失败路径驱动重启
     可见）。
 
-- **状态 / Status** — not-started (S39 排期)
-- **证据 / Evidence** — —
+- **状态 / Status** — done (Sprint 39)
+- **证据 / Evidence** — `cargo test -p kubelet` 167/0 连续 3 轮
+  (closed-port 用例加 8-新鲜端口重试加固, 消除并行 bind 抢端口竞态);
+  隔离 worktree(HEAD + 本卡 7 文件) `cargo test --workspace` 1005/0/75
+  (基线 998 + 净增 7); `scripts/probe-e2e.sh` P1-P4 全绿 (tcpSocket
+  开/闭端口 × readiness/liveness + exec rc0/rc1 × readiness/liveness,
+  echo 镜像 8080 + wfstep, 紧凑探针参数, restartCount 数值断言);
+  golden 73/73 (用户双节点集群下线后的权威全电池补录); parity 22/22
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.2
 

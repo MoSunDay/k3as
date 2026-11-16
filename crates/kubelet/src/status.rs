@@ -527,10 +527,10 @@ mod tests {
         {
             let state = probes.entry(&pod().key, "c0");
             let pspec = crate::probes::ProbeSpec {
-                http_get: crate::probes::HttpGetSpec {
+                handler: crate::probes::ProbeHandler::HttpGet(crate::probes::HttpGetSpec {
                     path: "/z".into(),
                     port: 80,
-                },
+                }),
                 initial_delay_seconds: 0,
                 period_seconds: 1,
                 timeout_seconds: 1,
@@ -551,10 +551,10 @@ mod tests {
         {
             let state = probes.entry(&pod().key, "c0");
             let pspec = crate::probes::ProbeSpec {
-                http_get: crate::probes::HttpGetSpec {
+                handler: crate::probes::ProbeHandler::HttpGet(crate::probes::HttpGetSpec {
                     path: "/z".into(),
                     port: 80,
-                },
+                }),
                 initial_delay_seconds: 0,
                 period_seconds: 1,
                 timeout_seconds: 1,
