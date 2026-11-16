@@ -96,7 +96,11 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   `scripts/cli-flag-parity-test.sh` 19/19；`scripts/anyhome-e2e.sh` 4/4；
   clippy `--workspace --all-targets -- -D warnings` 清零
 - **债务 / Debts** — 状态回写走 merge-patch（status 子资源合并语义为 Q34
-  已记同款债务）
+  已记同款债务）；**S37c 实机跟进 (代码缺陷, 候选工单)**: F4 — 执行循环
+  按 **name** 去重 (`crates/kubelet/src/agents.rs` 的 already-handled
+  判定)，同名 Agent 删除重建后永不重新 reconcile；应按 uid/
+  resourceVersion 判重。验收脚本以时间戳名绕过 (A12/A13)。见
+  `验收报告.md` F4。
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---

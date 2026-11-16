@@ -232,11 +232,10 @@ and node registration.
   golden **38/38** ×(G25/G26/G30 vendor+cc); flag parity 16/16;
   discovery parity ALL; clippy -D warnings 0. 前序: golden G25 27/27,
   G26 31/31 ×2, ST1–ST6 6/6, D1–D4 4/4 (Sprint 17/20 evidence 保留)。
-- **卡点 / Blockers** — 无 (A+B+C 全部交付)。
-- **顺延 / Deferred (future enhancements, 非 TODO 阻塞)** — probes
-  TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
-  exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN
-  （随 T1.3 安全工作面）。
+- **卡点 / Blockers** — 无 (A+B+C 全部交付)。**S37c 实机跟进
+  (候选工单)**: F3 — agent 重启后 ~12 s 内 logs/exec 中继 500 (embedded
+  containerd socket 未就绪; 验收脚本已用轮询吸收, 建议 relay 侧短重试
+  或就绪门)。见 `验收报告.md` F3。
 - **顺延 / Deferred (future enhancements, 非 TODO 阻塞)** — probes
   TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
   exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN

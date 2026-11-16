@@ -321,5 +321,9 @@ that every later TODO must keep green.
   on real containerd), G70-G72 served-router-plane pinning, G80-G82 live namespace-cascade
   proof.
 - **卡点 / Blockers** — Licensing/attribution of upstream e2e fixtures;
-    pick the smallest meaningful subset first.
+    pick the smallest meaningful subset first. **S37c 实机跟进 (候选工单)**:
+    F11 — golden 与 live 簇同宿主机双向污染 (live `cni0`/`:10250` 令
+    沙箱全败; golden teardown 留下的 `cni0` 10.42.0.1 反令 live Pod
+    Pending)。teardown 应增补 `cni0`/`flannel.1` 归属感知清理; 操作规约
+    已记 `验收报告.md` F11 (跑前停 agent + 删 bridge, 跑后复删再启动)。
 - **依赖 / Depends on** — T0.1

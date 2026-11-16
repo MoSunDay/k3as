@@ -113,6 +113,11 @@ node04 单元二进制改钉 `/root/k3as-d/bin/init-pro` (sha `e7414e90…`,
 `stop k3as-agent` + 删 `cni0`/`flannel.1`, 跑后重复一次再启动 agent
 (本次已按此恢复, 终态 4/4 Pod Running + 验收 13/0 复绿)。
 
+**收尾** — 候选工单 F3/F4/F11 正式落库至 SSOT (plan/04 T4.2 卡点、
+plan/07 T7.1 债务、plan/00 T0.6 卡点); 报告新增 §5 A11 双机 reboot
+Runbook (命令级步骤 + F10 自愈注记); 修复 b0ac84d 引入的
+plan/04-node.md「顺延/Deferred」段重复 (文档缺陷, 无逻辑影响)。
+
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
 **规划落库** — `plans/init-pro/index.md` 状态表 +4 卡 (T4.7/T4.8/
