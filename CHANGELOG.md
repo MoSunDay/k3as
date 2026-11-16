@@ -106,6 +106,13 @@ node04 单元二进制改钉 `/root/k3as-d/bin/init-pro` (sha `e7414e90…`,
 双节点一致), 与 dev target/ 解耦; 验收脚本 A4/A10 轮询化 + 瞬态 JSON
 噪声静默 (389 行)。
 
+**golden 复核 (同树, 含 F10 修复)** — **73/0 全绿, exit 0**。live 簇
+与 golden 同宿主机双向污染 (F11, 报告 §3): live `cni0`/`:10250` 令沙箱
+全败 (非代码回归, 与 Sprint 35 环境注记同根因), golden teardown 又留下
+`cni0`(10.42.0.1) 反令 live Pod Pending。规约: 跑 golden 前
+`stop k3as-agent` + 删 `cni0`/`flannel.1`, 跑后重复一次再启动 agent
+(本次已按此恢复, 终态 4/4 Pod Running + 验收 13/0 复绿)。
+
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
 **规划落库** — `plans/init-pro/index.md` 状态表 +4 卡 (T4.7/T4.8/
