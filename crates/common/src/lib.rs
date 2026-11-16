@@ -4,6 +4,7 @@
 //! layers can depend on it without pulling the world.
 
 pub mod embed;
+pub mod quantity;
 pub mod time;
 pub mod workspace;
 
@@ -14,6 +15,7 @@ pub fn version() -> &'static str {
 }
 
 pub use embed::EmbeddedAsset;
+pub use quantity::parse_quantity;
 pub use workspace::{
     agent_workspace_path, anyhome_mount_volume_name, parse_anyhome_mode, parse_anyhome_mounts,
     pod_workspace_path, workflow_workspace_path, workspace_nfs_url, AnyhomeMode,

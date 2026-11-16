@@ -242,6 +242,10 @@ pub fn expect_ccfg(pod: &PodView, attempt: u32) -> ContainerConfig {
         mounts: Vec::new(),
         labels: container_labels(&pod.name, &pod.namespace, &pod.uid, "c0"),
         log_path: format!("c0.{attempt}.log"),
+        // T4.9: exactly what `plan` derives from the spec's resources.
+        linux: runtime::cri_json::LinuxContainerConfig {
+            resources: kubelet::resources::linux_resources(&pod.containers[0].resources),
+        },
     }
 }
 

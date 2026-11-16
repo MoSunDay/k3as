@@ -77,6 +77,7 @@ BATTERY=(
   registry-e2e.sh
   anyhome-e2e.sh
   agent-exec-e2e.sh
+  resources-e2e.sh
   service-traffic-e2e.sh
   flannel-e2e.sh
 )

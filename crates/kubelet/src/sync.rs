@@ -12,7 +12,7 @@ use runtime::cri_json::{
     container_labels, pod_labels, ContainerMetadata, ImageSpec, KeyValue, SandboxMetadata,
     LABEL_POD_NAME, LABEL_POD_NAMESPACE,
 };
-use runtime::{ContainerConfig, PodSandboxConfig};
+use runtime::{ContainerConfig, LinuxContainerConfig, PodSandboxConfig};
 
 use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
 use crate::objects::{ContainerSpec, PodView};
@@ -342,6 +342,12 @@ fn container_cfg(
         // so the CRI create fails and the cycle retries after the volume
         // pass converges.
         mounts: crate::volumes::resolve_mounts(spec, &view.volumes, &view.uid, log_root),
+        // T4.9: cpu shares/quota/period + memory limit from the spec's
+        // requests/limits (upstream milliCPUToShares/milliCPUToQuota
+        // conventions; the mapping lives in crate::resources).
+        linux: LinuxContainerConfig {
+            resources: crate::resources::linux_resources(&spec.resources),
+        },
     }
 }
 

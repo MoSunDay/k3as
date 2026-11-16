@@ -1,5 +1,5 @@
-//! Resource quantity math for `ResourceFit` (T3.2): Kubernetes quantity
-//! parsing (decimal SI + binary SI + milli/micro/nano), pod request sums,
+//! Resource quantity math for `ResourceFit` (T3.2): quantity parsing (in
+//! `common` since T4.9, shared with the kubelet), pod request sums,
 //! node allocatable, and the **logical-node default** — a Node without
 //! `status.allocatable`/`capacity` is treated as unbounded (logged once per
 //! node name, decision **Q23**): v1 headless/test nodes report no status.
@@ -11,41 +11,10 @@ use serde_json::Value;
 
 use crate::plugin::NodeInfo;
 
-/// Parse one Kubernetes quantity (`"100m"`, `"1.5"`, `"128Mi"`, `"1e3"`,
-/// `"2Ki"`) into base units (cores for cpu, bytes for memory). Returns `None`
-/// for malformed values; a missing field is handled by callers, not here.
-pub fn parse_quantity(s: &str) -> Option<f64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // Find the split between mantissa and suffix (last char boundary where
-    // the remainder is a known unit).
-    const SUFFIXES: &[(&str, f64)] = &[
-        ("n", 1e-9),
-        ("u", 1e-6),
-        ("m", 1e-3),
-        ("k", 1e3),
-        ("M", 1e6),
-        ("G", 1e9),
-        ("T", 1e12),
-        ("P", 1e15),
-        ("E", 1e18),
-        ("Ki", 1024.0),
-        ("Mi", 1_048_576.0),
-        ("Gi", 1_073_741_824.0),
-        ("Ti", 1_099_511_627_776.0),
-        ("Pi", 1_125_899_906_842_624.0),
-        ("Ei", 1_152_921_504_606_846_976.0),
-    ];
-    for (suffix, mult) in SUFFIXES {
-        if let Some(num) = s.strip_suffix(suffix) {
-            let v: f64 = num.parse().ok()?;
-            return Some(v * mult);
-        }
-    }
-    s.parse::<f64>().ok()
-}
+/// Quantity parsing is re-exported from `common` since T4.9 — one SSOT
+/// shared with the kubelet's runtime-side mapping (the doc and tests below
+/// stay as the scheduler-side contract).
+pub use common::parse_quantity;
 
 /// Total request of one resource across a pod's containers (+ init
 /// containers — v1 approximation: upstream sums max(running, init); init

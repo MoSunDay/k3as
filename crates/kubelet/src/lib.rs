@@ -23,6 +23,9 @@
 //!   fingerprint-refreshed configMap/secret key files, T4.2 Scope B).
 //! - [`env`] + [`env_fetch`] — container env/envFrom projection
 //!   (T4.7): pure parse/resolve + the create-time fetch/event side.
+//! - [`resources`] — container resources → CRI cgroup knobs + pod QoS
+//!   classification (T4.9; upstream milliCPUToShares/milliCPUToQuota +
+//!   GetPodQOS, quantities parsed via `common`).
 //! - [`runner`] — the four loops (watch, sync, node/lease, local API) +
 //!   [`spawn`].
 #![forbid(unsafe_code)]
@@ -41,6 +44,7 @@ pub mod nfs_mount;
 pub mod node;
 pub mod objects;
 pub mod probes;
+pub mod resources;
 pub mod runner;
 pub mod server;
 #[cfg(test)] // pure-helper cases split out of server.rs (file size limit)
@@ -64,6 +68,7 @@ pub use objects::{
     node_object, pod_view, ContainerSpec, PodView, VolumeKind, VolumeMount, VolumeSpec,
 };
 pub use probes::{HttpGetSpec, PodProbeState, ProbeHandler, ProbeSpec};
+pub use resources::{linux_resources, parse_requirements, qos_class, QoS, ResourceRequirements};
 pub use runner::{default_node_name, spawn, KubeletConfig};
 pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};

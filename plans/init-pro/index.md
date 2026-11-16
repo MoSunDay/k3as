@@ -35,7 +35,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.6 | 4 | Pod 日志布局与轮转 (日期目录 + 100MB copytruncate, Q39) | done (Sprint 32) | T4.2 |
 | T4.7 | 4 | 容器 env/envFrom 投射 (literal + ConfigMap/Secret ref, optional 语义; S38) | done (Sprint 38) | T4.2 |
 | T4.8 | 4 | 探针补全: tcpSocket + exec (httpGet 已有; S39) | done (Sprint 39; tcpSocket connect-then-close 数字端口 + exec argv verbatim rc==0; 命名端口 IntOrString Deferred) | T4.2 |
-| T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | not-started (S40 排期) | T4.2 |
+| T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | done (Sprint 40; cpu shares/quota(-1)/period=100000 + mem limit 经 kubelet::resources 纯函数映射 upstream 惯例; status.qosClass 三级; quantity 解析 SSOT 移 common; e2e resources-e2e.sh R1-R3 容器内 cgroup 断言; capacity/eviction Deferred) | T4.2 |
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |

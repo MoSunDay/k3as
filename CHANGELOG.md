@@ -7,6 +7,61 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 40 — T4.9 资源限制 → CRI linux.resources + QoS 分级 (done) (2026-11-16)
+
+**Goal:** Pod `resources.limits/requests` 运行时强制进容器 cgroup
+(T4.9): cpu shares/quota/period + memory limit 经 CRI `linux.resources`
+下发, 纯函数 QoS 分级 (Guaranteed/Burstable/BestEffort) 写入
+`status.qosClass`; 调度侧已消费 requests (T3.2), 本卡补运行时强制。
+capacity/eviction 明确 Deferred。T4.9 无新 Q 码 (纯 upstream 对齐)。
+
+**Changes**
+- `crates/common/src/quantity.rs` (NEW): quantity 解析 SSOT —— 自
+  scheduler/resources.rs 原样迁入 (T3.2 语法集: decimal/binary SI +
+  milli/micro/nano), scheduler 侧 `pub use` 回引, kubelet 侧同源消费。
+- `crates/runtime/src/cri_json.rs`: `LinuxResources` +
+  `LinuxContainerConfig` (CRI proto 字段名, 零值省略, quota -1 例外) +
+  `ContainerConfig.linux`; `runtime` 根 re-export。
+- `crates/kubelet/src/resources.rs` (NEW): `ResourceRequirements`
+  (quantity 串 verbatim) + `parse_requirements` (tolerant) +
+  `linux_resources` (upstream `MilliCPUToShares` floor 2 /
+  `MilliCPUToQuota` 无 limit → -1 显式禁用, period 恒 100000) +
+  `qos_class` (upstream `GetPodQOS`: regular containers、cpu/memory、
+  解析后等值比较) —— 全纯函数。
+- `objects.rs`: `ContainerSpec.resources` 解析; `sync.rs`:
+  `container_cfg` 映射 `linux.resources`; `status.rs`:
+  `status.qosClass` + 语义等值键扩展; `lib.rs` re-export。
+- `scripts/build-echo-image.sh`: `/bin/wfcat` (cat 单文件, 静态 C) ——
+  镜像无 shell/cat, T4.9 e2e 的容器内 cgroup 读取器。
+- `scripts/resources-e2e.sh` (NEW): R1 limits 强制 (cpu.max
+  "25000 100000" + memory.max 67108864 + Guaranteed) / R2 BestEffort
+  (max + max) / R3 Burstable (request-only 不设 cap); cgroup v2 only
+  (v1 SKIP), SKIP 语义同 probe-e2e; 入 all-gates battery。
+- 顺带: `agents_runner_integration.rs` 一处 HEAD fmt 漂移收敛
+  (rustfmt 机械单行折叠, fmt gate 必需)。
+
+**Tests**
+- 单测: `kubelet::resources` (映射惯例/默认值/三类 QoS + 解析等值) +
+  `cri_json::linux_resources_wire_shape` + `common::quantity` +
+  scheduler 原解析用例经 re-export 保持。
+- e2e: `scripts/resources-e2e.sh` R1a-R3c **10/10** (真 containerd, 容器内
+  wfcat 断言); `scripts/all-gates.sh` 终跑 **18 门 0 fail 0 skip
+  RESULT: PASS** (golden **74/0**、flannel-e2e **5/5**、parity 20/0、
+  battery 10 脚本全绿、test 1015/0)。
+- 门禁环境纪要 (F11 规约执行): 首两跑 golden 57/13 — 全部真实栈门
+  (G25/G26/G29/G30/G60/G62/G63/G65/G80), 根因为在跑 node04 live 簇
+  的 `cni0@10.244` 与 golden 默认 10.42 冲突 (flannel bridge 拒配,
+  sandbox=0), **非代码回归** (对齐 `INIT_PRO_CLUSTER_CIDR=10.244.0.0/16`
+  复跑即 73/0+1SKIP)。终跑按 F11 规约开窗: 停 node04 agent (argv 留
+  `/root/k3as-d/.s40-argv.txt`) + 删 cni0/flannel.1/10.244 路由 + 沉降
+  ~2min → 18 门全绿; 跑后删 10.42 链 + 重启 agent (token 经
+  token.env), 双节点 Ready + **4/4 Pod Running** 复原。附带清理: S39
+  golden 中途死亡残留 3 进程 (g25-node 等) 已清。另注: 后台
+  nohup 长跑会被会话回收 (S39 "golden 中途死亡" 同因), 门禁长跑需走
+  前台超时转后台通道。
+- 隔离规约: 本卡在 `.wt-s40` worktree (HEAD f27c652 + 本卡文件) 完成,
+  主工作树 T4.11/T4.13 在途 WIP (27 文件) 未触碰、未夹带。
+
 ## Sprint 39 — T4.8 探针补全 tcpSocket + exec (done) (2026-11-16)
 
 **Goal:** 补全 kubelet 探针 handler 集 (T4.8): httpGet (Sprint 20) 之外
