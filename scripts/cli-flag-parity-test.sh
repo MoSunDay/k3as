@@ -140,6 +140,13 @@ live_help "t-anyhome" server --anyhome-addr --disable-anyhome
 # ---------------------------------------------------------------------------
 live_help "t-registry" server --registry-addr --disable-registry --registry-tag-retention --registry-keep-tag
 
+# ---------------------------------------------------------------------------
+# T4.11 (Q48) live-help surface: the container-engine backend selector is
+# wired on both node roles (server embeds an agent; agent joins).
+# ---------------------------------------------------------------------------
+live_help "t-engine-server" server --container-engine
+live_help "t-engine-agent" agent --container-engine
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

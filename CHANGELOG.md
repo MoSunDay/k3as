@@ -53,6 +53,119 @@ rc==0 即健康, 无 shell 包裹) —— upstream `pkg/kubelet/prober` 对齐;
 engine/nsrun 等 4 crate + cli 旗标为其在途 WIP; 本卡提交定向暂存 7 个
 代码文件 + 3 个 SSOT 文件的分 hunks, 不含任何并行改动。
 
+## Sprint 38c — T4.11 收尾: 生命周期/安全/门禁修复 (Q48) (2026-11-16)
+
+**Goal:** 把 S38b 的 P1 从 "能跑" 收到 "能站住": nsrun 生命周期 (就绪失败/
+Drop/退出宽限/回滚/EINTR)、engine 进程语义 (单容器、超时、信号、socket
+所有权、退出码), 以及门禁脚本自身的假绿 (SKIP 误判、门号错位、探针缺口)。
+不改任何契约, 只补 P1 本就该有的边界。
+
+**Changes**
+- `crates/nsrun` 生命周期修复:
+  - 就绪失败 (report 读超时 / 子进程在 exec 前关闭 report) → kill + reap
+    + 删 cgroup, 不再泄漏已建的 cgroup 目录; `pipe2`/`open` 失败同样回滚
+    已建目录。
+  - `Child::Drop` 不再对已回收的 pid 发信号 (避免 pid 复用误杀)。
+  - 退出宽限: 直接子进程已回收但孙进程仍握着 stdout/stderr 管道时, `wait`
+    不再无界等待 —— `EXIT_GRACE_SLICES = 3` 个空闲切片后照常报 `Exited`。
+  - 首块 stderr 字节不再被丢弃 (`drain_text` 先存首块再续读, 补
+    `drain_text_keeps_the_first_byte` 回归)。
+  - `read`/`waitpid`/`poll` 补 EINTR 重试 (信号只置标志位, 不再打断系统调用)。
+  - cgroup: 只给 limits 不给 name 现在是硬错误 (`cgroup limits require a
+    cgroup_name`); `memory.swap.max` 只容忍 ENOENT (未开 swap 记账),
+    其余错误上抛。
+  - 过 start gate 之后的容器侧失败改为 fd 2 消息 + **退出码 125**
+    (127 = exec 目标不存在, 126 = EACCES/EISDIR)。
+- `crates/engine` 进程语义:
+  - `engine-run --help` = **exit 0** (帮助是请求, 不是用法错误);
+    `--cgroup NAME` / `--cgroup=NAME` 未配 `--memory-max`/`--cpu-max`/
+    `--pids-max` 任一 = 硬错误 (无 limits 时 nsrun 根本不建 cgroup)。
+  - 活 engine 的 socket 永不 unlink: 同路径第二个 `engine serve` 直接
+    exit 1; 只有 `connect` 失败的陈旧 socket 才被替换。
+  - 握手读超时 30 s + 写超时 30 s (单线程循环不会被哑客户端钉死)。
+  - SIGTERM/SIGINT/SIGHUP 只置标志位, 循环轮询 → 杀容器 + 回收 + 删 cgroup,
+    exit 0 (实测容器中 205–215 ms、空闲 11–14 ms); child 侧
+    `PR_SET_PDEATHSIG = SIGKILL` (凭据切换后重新 arm), engine 被 SIGKILL
+    时容器 ~5 ms 随之倒下。
+  - 单连接同时只跑一个容器; 运行期间到达的第二个客户端收到
+    `Event::Error("engine busy: one container at a time")` 后断开。
+- 门禁脚本:
+  - `engine-selftest.sh`: preflight/SKIP 探针按 **RC 125** 判定 (非 root /
+    无 busybox / 无 `mount_setattr` → SKIP 而非 FAIL)。
+  - `all-gates.sh`: 门号修正到 10 门 (7 golden · 8 领域电池 · 9 parity ·
+    10 SSOT 人工行), 汇总表 "#" 列改用门号 (电池子项 8.1–8.11, 不再是
+    裸行号), `ROOT_GATED` 收窄到只剩 `service-traffic-e2e.sh` (其余脚本
+    自带 root 自 SKIP)。
+  - `unsafe-audit.sh`: SAFETY 注记按 "unsafe 项 + 其上 8 行" 窗口检查
+    (`# Safety` 亦接受), 告警措辞与真实判定面对齐。
+  - `multicall-selftest.sh`: 补 `engine` 别名探针 + `engine-run --help`
+    探针。
+
+**Gates**
+- `cargo test -p nsrun -p engine -p engine-proto -p engine-client` →
+  **41/0** (nsrun 22 / engine 12 / engine-proto 5 / engine-client 2);
+  workspace `--locked` **1050/0**; clippy `-D warnings` 0。
+- `scripts/engine-selftest.sh` E1–E8 **22/22** PASS;
+  `scripts/builtin-runtime-e2e.sh` B1–B7 全 PASS;
+  `scripts/unsafe-audit.sh` + `scripts/engine-singlethread-check.sh` PASS。
+- `all-gates.sh` 门序: 1 fmt · 2 build · 3 test · 4 clippy · 5 unsafe-audit
+  · 6 engine-singlethread-check · 7 golden-conformance · 8 领域 e2e 电池
+  (8.1–8.11) · 9 cli-flag-parity · 10 SSOT lock-step (人工)。
+
+**Tests:** `cargo test --workspace --locked` → **1050 passed; 0 failed**。
+engine 栈 (nsrun + engine + engine-proto + engine-client) 合计
+**41 passed; 0 failed**; E1–E8 22/22、B1–B7 全 PASS。
+
+## Sprint 38b — T4.11 内置容器引擎 P1 (done) + 全门禁复盘 (2026-11-16)
+
+**Goal:** 不依赖 runc/containerd 的内置容器引擎内核 (Q48): kiri `kiri-init`
+@ `7846fe0` 的 `clone3`/namespace 模型移植为 4 个新 crate, 单线程 engine
+进程 + 帧协议, 并为 P2 (`CriBackend` 接线) / P3 (registry+overlayfs+CNI)
+留好接缝。
+
+**Changes**
+- `crates/nsrun` (新): 唯一 `unsafe` island (Q48)。`clone3(child_stack=0)`
+  六 namespace + `CLONE_INTO_CGROUP`; 子侧 `MS_PRIVATE` → rootfs → proc/sys/dev
+  → pivot_root → hostname → cap-bounding → no_new_privs → setuid → execve;
+  父侧 start gate + waitpid; 退出码 `128+WTERMSIG`, exec 失败 126/127/255;
+  `clone3` 无 cgroup → legacy `clone` 三级回退。按职责拆分 `sys/{mod,mount,fs,
+  process}.rs` + `handle.rs` (Parent `Child`/`Output`), 全部文件 ≤333 行。
+- `crates/engine-proto` (新 243): `u32 LE len | u8 kind | payload` 帧
+  (kind 1 JSON / 2/3/4 stdio, `MAX_FRAME` 16 MiB) + `Request`/`Event`。
+- `crates/engine` (新): `engine run` 单发 + `engine serve` 单线程 accept loop
+  (无 tokio/线程池), `--new-net`/cgroup 限值/ro-rw bind。
+- `crates/engine-client` (新 292): tokio 事件泵 (Ping/Run/Shutdown ↔ 事件流)。
+- 接线: `init-pro engine|engine-run` pre-clap 派发 + multicall `Action::Engine`;
+  `--container-engine` (`INIT_PRO_CONTAINER_ENGINE`) 接受 `containerd`(默认)/
+  `builtin`, P1 仅告警不接线 (T4.12)。
+- 归属: `NOTICE` + `LICENSES/Apache-2.0.txt` (kiri Apache-2.0; 仅用
+  `kiri-init`, `guest/kernel` GPL 未触碰); SSOT: Q48 + T4.11/T4.12/T4.13
+  + `features/builtin-engine.md`。
+
+**Gates**
+- `cargo test -p nsrun -p engine-proto -p engine -p engine-client` → **27/0**;
+  workspace **1036/0**; clippy `-D warnings` 0。
+- `scripts/unsafe-audit.sh` + `scripts/engine-singlethread-check.sh` PASS
+  (Q48 边界/单线程不变量)。
+- `scripts/engine-selftest.sh` E1–E8 **22 断言** 全 PASS (exit/uid/gid/env/
+  hostname/PID1/CapBnd/ro-rw bind/cgroup pids+mem+cpu/netns)。
+- `scripts/builtin-runtime-e2e.sh` B1–B7 全 PASS (帧协议、流、退出码、
+  cgroup over wire、非 UTF-8、malformed、shutdown)。
+- `all-gates.sh` 21 行: 19 PASS / 1 FAIL (golden) / 1 N/A。首跑 gate 3/4 红:
+  test-only `WiredShared` 初始化缺 `container_engine` 字段 —— 修
+  `crates/cli/src/flags/conflicts.rs` 后 `cargo test/clippy --workspace`
+  复跑转绿。gate 8 电池全绿 (含 engine-selftest/builtin-runtime-e2e)。
+- **FINDING (golden, 非 T4.11):** golden 13 FAIL 全在 containerd real-stack
+  leg (G25/G26/G29/G30/G60/G62/G63/G65/G80)。两个环境因素: ① 共享工作树中
+  并行会话未提交的 kubelet probe 改动 (~330 行); ② 本机残留的 node04 agent
+  留下的 host-wide `flannel.1` (local 192.168.31.159) + `10.244.1.0/24` 路由,
+  使新 sandbox 的 CNI 网络建立失败。engine/nsrun 不在该路径; 待 host 清理 +
+  工作树稳定后复跑归档。
+
+**Tests:** `cargo test --workspace --locked` → **1036 passed; 0 failed**
+(83 result lines incl. doctests)。新 crate 单测覆盖 spec/caps/cgroup/帧
+编解码/客户端事件泵。
+
 ## Sprint 38 — T4.7 容器 env/envFrom 投射 (done) + all-gates 首跑与 golden 环境冲突定性 (2026-11-15)
 
 **Goal:** Pod spec 的 env (literal + 单键 valueFrom) 与 envFrom (ConfigMap/Secret

@@ -10,10 +10,12 @@
 #   2. cargo build --workspace --locked
 #   3. cargo test --workspace --locked   (pass/fail totals parsed + printed)
 #   4. cargo clippy --workspace --all-targets -- -D warnings
-#   5. scripts/golden-conformance.sh     (T0.6 merge gate, Q2)
-#   6. domain e2e battery                (Q25 SKIP-not-fail doctrine)
-#   7. scripts/cli-flag-parity-test.sh   (T0.4, Q9)
-#   8. SSOT lock-step row                (manual; never fails the run)
+#   5. scripts/unsafe-audit.sh            (Q48: unsafe only in nsrun)
+#   6. scripts/engine-singlethread-check.sh (Q48: engine stays fork-safe)
+#   7. scripts/golden-conformance.sh     (T0.6 merge gate, Q2)
+#   8. domain e2e battery                (Q25 SKIP-not-fail doctrine)
+#   9. scripts/cli-flag-parity-test.sh   (T0.4, Q9)
+#  10. SSOT lock-step row                (manual; never fails the run)
 #
 # Notes:
 # - CI orders `cargo fmt --all --check` BEFORE scripts/bootstrap-link-repos.sh
@@ -37,7 +39,7 @@
 #   kept when any gate FAILs (or KEEP_LOGS=1), removed otherwise.
 #
 # Usage: scripts/all-gates.sh [--no-e2e] [--list]
-#   --no-e2e   skip gate 6 (the domain e2e battery)
+#   --no-e2e   skip gate 8 (the domain e2e battery)
 #   --list     print the gate list without running anything
 set -euo pipefail
 
@@ -61,7 +63,7 @@ for arg in "$@"; do
   esac
 done
 
-# The domain e2e battery (gate 6). Order: cheap server-only acceptance
+# The domain e2e battery (gate 8). Order: cheap server-only acceptance
 # probes first, heavier full-stack suites last. Every entry is a genuine
 # gate with self-SKIP semantics (see the per-script headers); interactive
 # dev-loop helpers (local-up.sh), the historical t41-containerd-spike.sh
@@ -73,6 +75,8 @@ BATTERY=(
   multicall-selftest.sh
   apiserver-discovery-parity-test.sh
   graceful-shutdown-test.sh
+  engine-selftest.sh
+  builtin-runtime-e2e.sh
   durability-e2e.sh
   registry-e2e.sh
   anyhome-e2e.sh
@@ -81,16 +85,25 @@ BATTERY=(
   flannel-e2e.sh
 )
 # Scripts that would FAIL (not SKIP) without root -> pre-gated here.
+# Keep this list minimal: engine-selftest.sh and builtin-runtime-e2e.sh already
+# self-SKIP on `id -u != 0` (their own SKIP line is the honest verdict), so
+# only a script with NO root self-SKIP belongs here.
 ROOT_GATED="service-traffic-e2e.sh"
 
 GATE_NO=0
+E2E_IDX=0
 FAILS=0
 SKIPS=0
+ROW_NO=()
 ROW_NAME=()
 ROW_STATUS=()
 ROW_TIME=()
 
-record() { # record <name> <status> <time>
+# record <name> <status> <time> [row-no]: row-no defaults to the current gate
+# number; battery children pass "<gate>.<n>" so the summary's "#" column always
+# names the gate the row belongs to (never a bare row index).
+record() {
+  ROW_NO+=("${4:-$GATE_NO}")
   ROW_NAME+=("$1"); ROW_STATUS+=("$2"); ROW_TIME+=("$3")
 }
 
@@ -122,22 +135,25 @@ gate() {
 
 # e2e_row <script-name>: one battery entry. Exit 0 + leading "SKIP " line in
 # the output => SKIP row (counts as pass, Q25); exit 0 otherwise => PASS.
+# Every row is tagged "<battery-gate>.<n>" for the summary's "#" column.
 e2e_row() {
   local s="$1"
-  local label="  $s"
+  local label="$s"
   local log="$LOGDIR/e2e-$s.log" t0="$SECONDS"
+  E2E_IDX=$((E2E_IDX + 1))
+  local no="${GATE_NO}.${E2E_IDX}"
   echo
   echo "-- e2e: $s"
   if [[ " $ROOT_GATED " == *" $s "* && "$(id -u)" != "0" ]]; then
-    echo "SKIP $s (needs root; the script has no root self-SKIP, pre-gated here)"
-    record "$label" "SKIP (needs root)" "0s"
+    echo "SKIP $s (needs root; this script has no root self-SKIP, pre-gated here)"
+    record "$label" "SKIP (needs root)" "0s" "$no"
     SKIPS=$((SKIPS + 1))
     return 0
   fi
   stream "$log" "$SCRIPT_DIR/$s"
   local dt=$((SECONDS - t0))
   if [[ "$RC" -ne 0 ]]; then
-    record "$label" "FAIL (exit $RC)" "${dt}s"
+    record "$label" "FAIL (exit $RC)" "${dt}s" "$no"
     FAILS=$((FAILS + 1))
     return 0
   fi
@@ -151,10 +167,10 @@ e2e_row() {
     why="${why%%;*}"
     why="${why% }"
     if [[ "${#why}" -gt 21 ]]; then why="${why:0:18}..."; fi
-    record "$label" "SKIP (${why})" "${dt}s"
+    record "$label" "SKIP (${why})" "${dt}s" "$no"
     SKIPS=$((SKIPS + 1))
   else
-    record "$label" "PASS" "${dt}s"
+    record "$label" "PASS" "${dt}s" "$no"
   fi
 }
 
@@ -187,10 +203,10 @@ gate_test() {
   fi
 }
 
-# gate_battery: gate 6, the domain e2e battery (skippable via --no-e2e).
+# gate_battery: gate 8, the domain e2e battery (skippable via --no-e2e).
 gate_battery() {
   GATE_NO=$((GATE_NO + 1))
-  local label="  domain e2e battery (total)"
+  local label="domain e2e battery (total)"
   echo
   echo "== gate ${GATE_NO}: domain e2e battery =="
   if [[ "$RUN_E2E" -eq 0 ]]; then
@@ -200,6 +216,7 @@ gate_battery() {
     return 0
   fi
   local t0="$SECONDS" s f0="$FAILS"
+  E2E_IDX=0
   for s in "${BATTERY[@]}"; do
     e2e_row "$s"
   done
@@ -214,18 +231,19 @@ summary() {
   local i
   echo
   echo "=========================== gate summary ==========================="
-  printf '%-3s %-50s %-28s %s\n' "#" "gate" "status" "time"
-  printf '%-3s %-50s %-28s %s\n' "---" "----" "----" "----"
+  printf '%-5s %-50s %-28s %s\n' "#" "gate" "status" "time"
+  printf '%-5s %-50s %-28s %s\n' "---" "----" "----" "----"
   for i in "${!ROW_NAME[@]}"; do
-    printf '%-3s %-50s %-28s %s\n' "$((i + 1))" "${ROW_NAME[$i]}" \
+    printf '%-5s %-50s %-28s %s\n' "${ROW_NO[$i]}" "${ROW_NAME[$i]}" \
       "${ROW_STATUS[$i]}" "${ROW_TIME[$i]}"
   done
-  echo "-------------------------------------------------------------------"
+  echo "---------------------------------------------------------------------"
+  echo "note: the # column is the gate number (8.1..8.N = battery children)."
   echo "legend: PASS = gate green | FAIL = gate red (fails the run) |"
   echo "        SKIP = pass-with-skip (Q25: missing precondition is a"
   echo "        configuration state, not a conformance break) |"
   echo "        N/A (manual) = human checklist row, never fails the run."
-  echo "totals: gates=${#ROW_NAME[@]} fails=${FAILS} skips=${SKIPS}"
+  echo "totals: gates=${GATE_NO} rows=${#ROW_NAME[@]} fails=${FAILS} skips=${SKIPS}"
 }
 
 # --- --list: print the gate list without running anything -------------------
@@ -237,16 +255,18 @@ gate 1: cargo fmt --check (workspace members)
 gate 2: cargo build --workspace --locked
 gate 3: cargo test --workspace --locked   (prints pass/fail totals)
 gate 4: cargo clippy --workspace --all-targets --locked -- -D warnings
-gate 5: scripts/golden-conformance.sh
-gate 6: domain e2e battery${e2e_note}:
+gate 5: scripts/unsafe-audit.sh (Q48 unsafe boundary)
+gate 6: scripts/engine-singlethread-check.sh (Q48 fork-safe engine)
+gate 7: scripts/golden-conformance.sh
+gate 8: domain e2e battery${e2e_note}:
 LIST
   for s in "${BATTERY[@]}"; do
     extra=""
     if [[ " $ROOT_GATED " == *" $s "* ]]; then extra="  (root-gated here)"; fi
     echo "  - scripts/$s$extra"
   done
-  echo "gate 7: scripts/cli-flag-parity-test.sh"
-  echo "gate 8: SSOT lock-step row (index.md + plan/*.md + decisions.md) [manual]"
+  echo "gate 9: scripts/cli-flag-parity-test.sh"
+  echo "gate 10: SSOT lock-step row (index.md + plan/*.md + decisions.md) [manual]"
   exit 0
 fi
 
@@ -271,7 +291,7 @@ trap 'exit 143' TERM
 echo "init-pro all-gates (Sprint DoD runner)"
 echo "gate log dir: $LOGDIR (kept on FAIL or KEEP_LOGS=1)"
 if [[ "$RUN_E2E" -eq 0 ]]; then
-  echo "note: --no-e2e given, gate 6 will be SKIPped"
+  echo "note: --no-e2e given, gate 8 will be SKIPped"
 fi
 
 FMT_MEMBER_ARGS="$(cargo metadata --no-deps --format-version 1 \
@@ -282,11 +302,13 @@ gate "cargo build --workspace --locked" "02-cargo-build" cargo build --workspace
 gate_test
 gate "cargo clippy --workspace --all-targets -D warnings" \
   "04-cargo-clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
-gate "golden-conformance (T0.6)" "05-golden-conformance" "$SCRIPT_DIR/golden-conformance.sh"
+gate "unsafe-audit (Q48)" "05-unsafe-audit" "$SCRIPT_DIR/unsafe-audit.sh"
+gate "engine-singlethread (Q48)" "06-engine-singlethread" "$SCRIPT_DIR/engine-singlethread-check.sh"
+gate "golden-conformance (T0.6)" "07-golden-conformance" "$SCRIPT_DIR/golden-conformance.sh"
 gate_battery
-gate "cli-flag-parity (T0.4)" "07-cli-flag-parity" "$SCRIPT_DIR/cli-flag-parity-test.sh"
+gate "cli-flag-parity (T0.4)" "09-cli-flag-parity" "$SCRIPT_DIR/cli-flag-parity-test.sh"
 
-# Gate 8: SSOT lock-step (plans/init-pro/index.md + plan/*.md + decisions.md
+# Gate 10: SSOT lock-step (plans/init-pro/index.md + plan/*.md + decisions.md
 # + CHANGELOG.md must move together). Not automatable: a MANUAL row.
 GATE_NO=$((GATE_NO + 1))
 echo

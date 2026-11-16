@@ -28,8 +28,10 @@ that every later TODO must keep green.
 
 - **验收手段 / Acceptance**
   - `cargo build` → exactly one binary at `target/release/init-pro`.
-  - Script: `for a in init-pro kubectl ctr crictl containerd server agent etcd;
-    do ln -sf init-pro $a; ./$a --help >/dev/null && echo OK $a; done` — all OK.
+  - Script: `for a in init-pro kubectl ctr crictl containerd server agent etcd
+    flannel engine init-pro-server init-pro-agent;
+    do ln -sf init-pro $a; ./$a --help >/dev/null && echo OK $a; done` — all OK
+    (plus `init-pro engine-run --help`: an argv[1] verb, not an alias).
   - Unit test asserting dispatch table is exhaustive over the alias set.
 
 - **状态 / Status** — done

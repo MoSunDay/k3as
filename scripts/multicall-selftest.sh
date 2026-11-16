@@ -18,7 +18,8 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-aliases=(init-pro kubectl ctr crictl containerd server agent etcd flannel)
+aliases=(init-pro kubectl ctr crictl containerd server agent etcd flannel
+         engine init-pro-server init-pro-agent)
 fail=0
 for a in "${aliases[@]}"; do
   ln -sf "$BIN" "$WORK/$a"
@@ -29,6 +30,10 @@ for a in "${aliases[@]}"; do
     fail=1
   fi
 done
+
+# `engine-run` is an argv[1] verb, NOT an alias: a symlink of that name would
+# resolve to Action::InitPro and test nothing, so assert it via the real verb.
+if "$BIN" engine-run --help >/dev/null 2>&1; then echo "OK   engine-run --help"; else echo "FAIL engine-run --help (exit $?)"; fail=1; fi
 
 # Unknown name should NOT crash; it prints help (clap) and exits 0.
 ln -sf "$BIN" "$WORK/definitely-not-an-alias"
