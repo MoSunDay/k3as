@@ -204,6 +204,32 @@ EmptyPrompt → 删除 → 同名重建 → 再次 Failed/EmptyPrompt, uid 不�
 早期失败路径一次瞬时 patch 失败即永久压制该对象重写 (成功路径自愈);
 (c) 写回缓存无淘汰 — DELETED 对象 `name#uid` 项随进程生命周期累积。
 
+**除重启外收尾 (S37c 追加三, 2026-11-16)** — 门禁电池 (树 = `6ff1d3d`
++ 并行 WIP, 二进制 `7845e459…`): fmt `--check` 全 42 workspace 成员绿
+(仅 `agents_runner_integration.rs` 一处自测断言换行由 rustfmt 归一);
+`cargo build --workspace --locked` 绿; `cargo test --workspace --locked
+--exclude cli` **949 通过 / 0 失败** — cli 自身 lib-test 目标不编译系
+并行在途 WIP E0063 (`missing field container_engine in initializer of
+WiredShared` @ `crates/cli/src/flags/conflicts.rs:90`) 所致, 非本轮
+改动; cli 作为依赖编译无恙。`cargo clippy --workspace --all-targets
+--locked --exclude cli` **0 警告** (同排除同因);
+`scripts/cli-flag-parity-test.sh` **22/0** (含新 `--container-engine`
+旗标门)。golden (按 F11 规约先停 live agent + 删 `cni0`/`flannel.1`):
+停后数分钟内首跑 **69/4 FAIL** (G60/G62/G63/G65 真实栈门: pods
+Pending, sandboxes=0), 定性为**沉降时序假阴性**而非代码回归 — 沉降
+数分钟后同树同二进制原样复跑 **73/0, exit 0** (诊断日志留
+`/tmp/gdiag/run.log`); 规约增补: 停 agent + 删链后**等 1–2 min 沉降**
+(确认 containerd/shim/端口排空) 再跑 golden, 跑后按协议恢复 live 簇
+(双节点 Ready, 4/4 Pod Running)。node02 二进制预置 (未重启):
+`7845e459…` 原子 mv 至 `/root/k3as-d/bin/init-pro` (旧 `e7414e90…`
+备份于 `/root/k3as-d/backups/init-pro.e7414e90.20261116`);
+`k3as-server` + `k3as-node-agent` 仍持旧 inode (rename 安全), A11
+窗口重启即取新件, 回滚 = mv 回备份。golden F11 周期后终验复跑
+**run10 13/0** (A0–A8/G4/A12/A13)。A11 窗口剩余 (用户执行): 按
+`验收报告.md` §5 Runbook 双机 reboot + `ACCEPTANCE_RESTART=1
+./scripts/acceptance-2node-e2e.sh` (目标 15/15); A11 前置 = 全量
+`scripts/all-gates.sh` 复跑 (含 e2e 电池与 cli 门, 待并行 WIP 落定)。
+
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
 **规划落库** — `plans/init-pro/index.md` 状态表 +4 卡 (T4.7/T4.8/

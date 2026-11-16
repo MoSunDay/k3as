@@ -326,4 +326,5 @@ that every later TODO must keep green.
     沙箱全败; golden teardown 留下的 `cni0` 10.42.0.1 反令 live Pod
     Pending)。teardown 应增补 `cni0`/`flannel.1` 归属感知清理; 操作规约
     已记 `验收报告.md` F11 (跑前停 agent + 删 bridge, 跑后复删再启动)。
+    2026-11-16 复核: 停后未沉降首跑 69/4 假阴性, 沉降 1–2 min 后同树同二进制 73/0 — 规约补「停后等沉降」一条 (验收报告 F11)。
 - **依赖 / Depends on** — T0.1
