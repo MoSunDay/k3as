@@ -36,6 +36,9 @@ pub const COND_READY: &str = "Ready";
 pub struct AgentView {
     /// `"namespace/name"`.
     pub key: String,
+    /// `metadata.uid`: the object IDENTITY across delete/recreate (F4);
+    /// empty when the server omits it (plain-name dedupe fallback).
+    pub uid: String,
     pub name: String,
     pub namespace: String,
     /// Node binding (`spec.nodeName`); `None` = not yet scheduled.
@@ -74,6 +77,11 @@ pub fn agent_view(v: &Value) -> Option<AgentView> {
         .to_string();
     Some(AgentView {
         key: format!("{namespace}/{name}"),
+        uid: v
+            .pointer("/metadata/uid")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         node_name: agent_node(v),
         phase: v
             .pointer("/status/phase")

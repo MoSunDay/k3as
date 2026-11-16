@@ -118,6 +118,19 @@ plan/07 T7.1 债务、plan/00 T0.6 卡点); 报告新增 §5 A11 双机 reboot
 Runbook (命令级步骤 + F10 自愈注记); 修复 b0ac84d 引入的
 plan/04-node.md「顺延/Deferred」段重复 (文档缺陷, 无逻辑影响)。
 
+**F4 加固 (S37c 追加, 2026-11-16)** — F4 初判为代码缺陷 (执行循环按
+name 去重), 后续**证伪**: 修复前二进制上删除→同名 Agent 重建仍正常
+Succeeded, 去掉 uid 的负向单测变体亦通过 → 写回缓存并非唯一/真实机制。
+按对象身份语义**加固**闭环: `AgentView` 增 `uid`, 写回缓存判重键
+name → `name#uid` (`crates/kubelet/src/agent_exec.rs::dedupe_id`), 同名
+重建不被前代 last-body 去重; 新增单测
+`dedupe_id_is_uid_scoped_so_recreated_names_rewrite` + 集成回归
+`recreated_same_name_agent_reconciles_again` (kubelet lib 6/6, 集成
+7/7)。实机复验 (node04, `e0b903bd…`): 删除→同名重建 (新 uid) 重新
+reconcile 并写回自有 status (session `run2-s`); 复跑验收 **13/0**
+(A0–A8/G4/A12/A13, run8)。验收脚本 A12 注记同步更新 (390 行)。node02
+二进制仍为 `e7414e90…` (与 node04 暂差一版, 并入 A11 人工窗口刷新)。
+
 ## Sprint 37b — 语义补齐迭代规划落库 (S38–S48) + all-gates 基建 (2026-11-15)
 
 **规划落库** — `plans/init-pro/index.md` 状态表 +4 卡 (T4.7/T4.8/

@@ -175,6 +175,46 @@ async fn pending_running_succeeded_with_session_and_local_workspace() {
     shutdown.trigger();
 }
 
+/// F4 regression: a deleted-then-recreated Agent with the SAME name (new
+/// uid) must be reconciled again and carry its own status. The
+/// write-if-changed cache is uid-scoped so object identity never collapses
+/// to name alone (K8s semantics); the test pins the observable outcome.
+#[tokio::test]
+async fn recreated_same_name_agent_reconciles_again() {
+    let data = data_dir();
+    let runner = write_runner(&data, "echo \"[session s-re]\" >&2; exit 0");
+    let url = spawn_server().await;
+    let client = HttpJson::parse_url(&url).unwrap();
+    let shutdown = infra::Shutdown::new();
+    let _handles = spawn_agent_runner(
+        cfg_of(&url, &data, Some(runner), Duration::from_secs(60)),
+        shutdown.clone(),
+    );
+    let path = "/apis/init-pro.io/v1/namespaces/default/agents/same-name";
+    let succeeded = |v: &Value| v["status"]["phase"] == "Succeeded";
+
+    post_agent(&client, "same-name", "first run").await;
+    let first = wait_for(&client, path, "first Succeeded", succeeded).await;
+    let first_uid = first["metadata"]["uid"].as_str().unwrap().to_string();
+
+    let (code, _) = client.delete_json(path).await.unwrap();
+    assert!((200..300).contains(&code), "DELETE rejected: {code}");
+
+    post_agent(&client, "same-name", "second run").await;
+    let second = wait_for(&client, path, "recreated Succeeded", succeeded).await;
+    let second_uid = second["metadata"]["uid"].as_str().unwrap().to_string();
+    assert_ne!(first_uid, second_uid, "recreate must mint a new uid");
+    assert!(
+        second["status"]["conditions"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("session s-re"),
+        "recreated incarnation must carry its own merge-patched status"
+    );
+
+    shutdown.trigger();
+}
+
 #[tokio::test]
 async fn missing_runner_stays_pending_with_runnermissing_condition() {
     let data = data_dir();

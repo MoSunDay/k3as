@@ -96,11 +96,15 @@ AI-agent-aware scheduling via the standard scheduler-extender seam (T3.2),
   `scripts/cli-flag-parity-test.sh` 19/19；`scripts/anyhome-e2e.sh` 4/4；
   clippy `--workspace --all-targets -- -D warnings` 清零
 - **债务 / Debts** — 状态回写走 merge-patch（status 子资源合并语义为 Q34
-  已记同款债务）；**S37c 实机跟进 (代码缺陷, 候选工单)**: F4 — 执行循环
-  按 **name** 去重 (`crates/kubelet/src/agents.rs` 的 already-handled
-  判定)，同名 Agent 删除重建后永不重新 reconcile；应按 uid/
-  resourceVersion 判重。验收脚本以时间戳名绕过 (A12/A13)。见
-  `验收报告.md` F4。
+  已记同款债务）；**F4 (S37c 兜底加固, 已闭环)**: 初判「执行循环按 name
+  去重 → 同名重建永不 re-reconcile」为代码缺陷，后续证伪（修复前二进制
+  上删除→同名重建仍 Succeeded；去掉 uid 的单测变体亦通过）。按对象身份
+  语义**加固**处理：写回缓存判重键由 name 改为 `name#uid`
+  (`crates/kubelet/src/agent_exec.rs` `dedupe_id`；`AgentView` 增
+  `uid`)，同名重建不被前代 last-body 去重，另有单测 + 集成回归
+  (`recreated_same_name_agent_reconciles_again`)。实机复验：删除→同名
+  重建（新 uid）重新 reconcile 并写回自有 status（session `run2-s`）。
+  验收脚本仍以时间戳名保幂等 (A12/A13)。见 `验收报告.md` F4。
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---

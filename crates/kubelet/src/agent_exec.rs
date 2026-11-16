@@ -26,6 +26,14 @@ const WS_ROOT: &str = "agent-ws";
 /// run loop and the execution attempts).
 pub type Written = Arc<Mutex<BTreeMap<String, Value>>>;
 
+/// Write-if-changed cache identity: `namespace/name` PLUS the object
+/// uid, so a recreated same-name Agent (new uid, e.g. the F4 repro) is
+/// never deduped against its predecessor's last body and silently left
+/// Pending without status.
+fn dedupe_id(view: &objs::AgentView) -> String {
+    format!("{}#{}", view.key, view.uid)
+}
+
 /// merge-patch the Agent status, write-if-changed. 404 (object deleted)
 /// and other rejections are logged at debug and NOT retried here (the
 /// watch re-list drives state); returns the response when applied.
@@ -36,11 +44,12 @@ pub async fn patch_if_changed(
     body: &Value,
 ) -> Option<Value> {
     {
+        let id = dedupe_id(view);
         let mut w = written.lock().await;
-        if w.get(&view.key) == Some(body) {
+        if w.get(&id) == Some(body) {
             return None;
         }
-        w.insert(view.key.clone(), body.clone());
+        w.insert(id, body.clone());
     }
     let path = format!(
         "/apis/init-pro.io/v1/namespaces/{ns}/agents/{name}",
@@ -439,6 +448,29 @@ mod tests {
         let root = Path::new("/d/agent-ws/nfs-a_1");
         let text = "a:/agent /d/agent-ws/nfs-a_1 nfs rw,vers=3 0 0\n";
         assert_eq!(plan_root(text, root, false), RootPlan::Recover);
+    }
+
+    fn view_with(key: &str, uid: &str) -> objs::AgentView {
+        objs::AgentView {
+            key: key.to_string(),
+            uid: uid.to_string(),
+            name: "n".to_string(),
+            namespace: "d".to_string(),
+            node_name: None,
+            phase: "Pending".to_string(),
+            prompt: String::new(),
+            model: None,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn dedupe_id_is_uid_scoped_so_recreated_names_rewrite() {
+        let a = view_with("d/n", "uid-1");
+        let same = view_with("d/n", "uid-1");
+        let recreated = view_with("d/n", "uid-2");
+        assert_eq!(dedupe_id(&a), dedupe_id(&same));
+        assert_ne!(dedupe_id(&a), dedupe_id(&recreated));
     }
 
     #[test]

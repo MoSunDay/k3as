@@ -290,9 +290,10 @@ ANN="$(curl -s --max-time 5 "$BASE/api/v1/nodes/$NODE04_NAME" \
   || bad "G4  annotation '$ANN' != unit port '$UNIT_PORT'"
 
 # ------------------------------------------------------------------- A12 ----
-# The node runner de-dupes executed Agents by NAME (verified 2026-11-15:
-# a deleted+recreated same-name Agent never re-reconciles), so each run
-# mints a unique object name and matches on the stable PROMPT marker.
+# Each run mints a unique Agent name and matches on the stable PROMPT
+# marker, keeping the gate idempotent. (F4 hardened 2026-11-16: the runner
+# dedupe is uid-scoped, so a recreated same-name object would also
+# re-reconcile; unique names remain for run isolation.)
 A12_NAME="acc-a12-$(date +%s)"
 C="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --max-time 5 \
   -d '{"apiVersion":"init-pro.io/v1","kind":"Agent","metadata":{"name":"'"$A12_NAME"'","namespace":"default"},"spec":{"prompt":"acc-a12-run","nodeName":"'$NODE04_NAME'"}}' \
