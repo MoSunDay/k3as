@@ -59,6 +59,7 @@ router = { path = "crates/router" }
 registry = { path = "crates/registry" }
 storage = { path = "crates/storage" }
 nsrun = { path = "crates/nsrun" }
+engine-client = { path = "crates/engine-client" }
 engine-proto = { path = "crates/engine-proto" }
 engine = { path = "crates/engine" }
 

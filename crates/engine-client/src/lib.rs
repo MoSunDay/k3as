@@ -29,10 +29,16 @@ impl EngineClient {
     }
 
     /// Health check: `true` when the engine answered `pong`.
-    pub async fn ping(mut self) -> io::Result<bool> {
+    pub async fn ping(self) -> io::Result<bool> {
+        self.ping_pid().await.map(|_| true)
+    }
+
+    /// Health check that also surfaces the pause pid (`Some` on a sandbox
+    /// engine, `None` on a plain one) for the kubelet registry (Q49/Q51).
+    pub async fn ping_pid(mut self) -> io::Result<Option<u32>> {
         send_json(&mut self.stream, &Request::Ping).await?;
         match next_event(&mut self.stream).await? {
-            Some(Event::Pong) => Ok(true),
+            Some(Event::Pong { pid }) => Ok(pid),
             Some(Event::Error { message }) => Err(io::Error::other(message)),
             Some(other) => Err(io::Error::other(format!(
                 "unexpected ping reply: {other:?}"
@@ -56,6 +62,33 @@ impl EngineClient {
         }
     }
 
+    /// Signal a sandbox (pause) engine: the engine answers Exited (for
+    /// the pause child) and Bye, then exits. Consuming one-shot like the
+    /// other control helpers.
+    pub async fn signal(mut self, id: &str, signo: i32) -> io::Result<()> {
+        send_json(
+            &mut self.stream,
+            &Request::Signal {
+                id: id.to_string(),
+                signo,
+            },
+        )
+        .await?;
+        loop {
+            match next_event(&mut self.stream).await? {
+                Some(Event::Exited { .. }) => continue,
+                Some(Event::Bye) => return Ok(()),
+                Some(Event::Error { message }) => return Err(io::Error::other(message)),
+                Some(other) => {
+                    return Err(io::Error::other(format!(
+                        "unexpected signal reply: {other:?}"
+                    )))
+                }
+                None => return Ok(()),
+            }
+        }
+    }
+
     /// Starts a container and returns its event stream.
     pub async fn run(mut self, spec: ContainerSpec) -> io::Result<RunStream> {
         let id = spec.id.clone();
@@ -70,10 +103,24 @@ impl EngineClient {
 
 /// Streamed output + lifecycle events for one container.
 pub enum StreamEvent {
-    Started { pid: u32 },
+    Started {
+        pid: u32,
+    },
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
-    Exited { code: i32 },
+    Exited {
+        code: i32,
+    },
+    /// Q50 exec lifecycle: output rides plain Stdout/Stderr (untagged)
+    /// between ExecStarted and ExecExited.
+    ExecStarted {
+        exec_id: String,
+        pid: u32,
+    },
+    ExecExited {
+        exec_id: String,
+        code: i32,
+    },
     Error(String),
 }
 
@@ -86,6 +133,46 @@ pub struct RunStream {
 impl RunStream {
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Ask the engine to shut down: a running container is killed
+    /// (Exited 143) followed by Bye; the engine process then exits.
+    pub async fn send_shutdown(&mut self) -> io::Result<()> {
+        send_json(&mut self.stream, &Request::Shutdown).await
+    }
+
+    /// Signal the running container without leaving the run connection
+    /// (Q49: `id` must match the container the engine owns).
+    pub async fn send_signal(&mut self, id: &str, signo: i32) -> io::Result<()> {
+        send_json(
+            &mut self.stream,
+            &Request::Signal {
+                id: id.to_string(),
+                signo,
+            },
+        )
+        .await
+    }
+
+    /// Start an exec on the container's own connection (Q50: one exec in
+    /// flight per engine; the engine answers Error while busy).
+    pub async fn send_exec(
+        &mut self,
+        id: &str,
+        argv: Vec<String>,
+        env: Vec<String>,
+        workdir: String,
+    ) -> io::Result<()> {
+        send_json(
+            &mut self.stream,
+            &Request::Exec {
+                id: id.to_string(),
+                argv,
+                env,
+                workdir,
+            },
+        )
+        .await
     }
 
     /// Next event. `Ok(None)` after the container exited (or on EOF).
@@ -121,7 +208,13 @@ impl RunStream {
                         self.done = true;
                         Ok(Some(StreamEvent::Error(message)))
                     }
-                    Event::Pong | Event::Bye => Err(io::Error::new(
+                    Event::ExecStarted { exec_id, pid } => {
+                        Ok(Some(StreamEvent::ExecStarted { exec_id, pid }))
+                    }
+                    Event::ExecExited { exec_id, code } => {
+                        Ok(Some(StreamEvent::ExecExited { exec_id, code }))
+                    }
+                    Event::Pong { .. } | Event::Bye => Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "unexpected control event on a run stream",
                     )),
@@ -227,7 +320,7 @@ mod tests {
             let frame = read_frame_async(&mut s).await.unwrap().unwrap();
             assert_eq!(frame.kind, FrameKind::Json);
             let _: Request = decode_json(&frame.payload).unwrap();
-            let payload = encode_json(&Event::Pong).unwrap();
+            let payload = encode_json(&Event::Pong { pid: None }).unwrap();
             write_frame_async(&mut s, FrameKind::Json, &payload)
                 .await
                 .unwrap();

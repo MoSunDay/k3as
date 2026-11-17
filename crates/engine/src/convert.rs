@@ -19,6 +19,8 @@ pub fn to_run_spec(spec: &ContainerSpec) -> Result<RunSpec, String> {
     run.uid = spec.uid;
     run.gid = spec.gid;
     run.new_net = spec.new_net;
+    run.netns = spec.netns.as_deref().map(std::path::PathBuf::from);
+    run.pause = spec.pause;
     run.no_new_privs = spec.no_new_privs;
     run.mounts = spec
         .mounts
@@ -95,6 +97,20 @@ mod tests {
         assert_eq!(run.cgroup.memory_max, Some(1024));
         assert_eq!(run.cgroup.memory_swap_max, Some(0));
         assert_eq!(run.cgroup_name.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn maps_netns_and_pause() {
+        let mut spec = ContainerSpec::new("c1", "/r", vec!["/bin/true".into()]);
+        spec.netns = Some("/proc/42/ns/net".into());
+        spec.pause = true;
+        spec.log_path = Some("/var/log/c.log".into());
+        let run = to_run_spec(&spec).unwrap();
+        assert_eq!(
+            run.netns.as_deref(),
+            Some(std::path::Path::new("/proc/42/ns/net"))
+        );
+        assert!(run.pause);
     }
 
     #[test]

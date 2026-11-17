@@ -21,6 +21,23 @@ pub fn now_rfc3339(unix_secs: u64) -> String {
     )
 }
 
+/// UTC RFC3339 with a fixed 9-digit nanosecond fraction from a split
+/// timestamp — the CRI container-log line prefix (T4.12, Q50). Fixed
+/// width (no trailing-zero trimming) keeps the kubelet's own reader the
+/// only parser that matters.
+pub fn now_rfc3339_nano(unix_secs: u64, nanos: u32) -> String {
+    let days = (unix_secs / 86_400) as i64;
+    let rem = unix_secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{n:09}Z",
+        h = rem / 3600,
+        mi = (rem / 60) % 60,
+        s = rem % 60,
+        n = nanos
+    )
+}
+
 /// UTC `"YYYY-MM-DD"` from unix seconds — the date component of
 /// [`now_rfc3339`]. T4.6 pod-log date directories (Q39) derive their names
 /// from this so the two spellings can never diverge.

@@ -128,6 +128,21 @@ pub struct ContainerSpec {
     /// Fresh net namespace; P2 joins the CNI sandbox netns instead.
     #[serde(default)]
     pub new_net: bool,
+    /// Join this `/proc/<pid>/ns/net` path instead of creating a fresh
+    /// netns (T4.12, Q49): the pod sandbox engine owns the netns, member
+    /// containers point at its pause pid. Mutually exclusive with
+    /// `new_net`.
+    #[serde(default)]
+    pub netns: Option<String>,
+    /// Pause mode (T4.12, Q49): the engine child parks forever as PID 1
+    /// holding the namespaces — the pod sandbox. Signals keep default
+    /// dispositions so the engine parent reaps `128+WTERMSIG`.
+    #[serde(default)]
+    pub pause: bool,
+    /// Kubelet-side CRI log file the engine appends text lines to
+    /// (T4.12, Q50). None keeps stdout/stderr on the socket only.
+    #[serde(default)]
+    pub log_path: Option<String>,
     #[serde(default = "default_true")]
     pub no_new_privs: bool,
     #[serde(default)]
@@ -153,6 +168,9 @@ impl ContainerSpec {
             gid: 0,
             mounts: Vec::new(),
             new_net: false,
+            netns: None,
+            pause: false,
+            log_path: None,
             no_new_privs: true,
             cgroup_name: None,
             memory_max: None,
@@ -176,17 +194,60 @@ const fn default_true() -> bool {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Ping,
-    Run { spec: ContainerSpec },
+    Run {
+        spec: ContainerSpec,
+    },
+    /// Deliver a signal to the running container (T4.12, Q49). `id` must
+    /// name the container this engine owns.
+    Signal {
+        id: String,
+        signo: i32,
+    },
+    /// Exec a process inside the running container (T4.12, Q50): one
+    /// connection, one in-flight exec, output rides kinds 2/3 on the same
+    /// connection delimited by `ExecStarted`/`ExecExited`.
+    Exec {
+        id: String,
+        argv: Vec<String>,
+        #[serde(default)]
+        env: Vec<String>,
+        #[serde(default = "default_cwd")]
+        workdir: String,
+    },
     Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    Pong,
-    Started { id: String, pid: u32 },
-    Exited { id: String, code: i32 },
-    Error { message: String },
+    /// Probe reply (T4.12, Q51). `pid` is Some on a pause/sandbox engine
+    /// (the pause child's pid) and None on a plain engine; the field is
+    /// omitted on the wire when None so old peers keep `{"event":"pong"}`.
+    Pong {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
+    },
+    Started {
+        id: String,
+        pid: u32,
+    },
+    Exited {
+        id: String,
+        code: i32,
+    },
+    /// The exec relay is live (Q50): `pid` is the container-ns pid.
+    ExecStarted {
+        exec_id: String,
+        pid: u32,
+    },
+    /// The exec relay finished; `code` follows the 128+signal convention.
+    ExecExited {
+        exec_id: String,
+        code: i32,
+    },
+    Error {
+        message: String,
+    },
     Bye,
 }
 
@@ -224,6 +285,53 @@ mod tests {
         assert_eq!(spec.cwd, "/");
         assert!(spec.no_new_privs);
         assert!(spec.mounts.is_empty());
+        assert!(spec.netns.is_none());
+        assert!(!spec.pause);
+        assert!(spec.log_path.is_none());
+    }
+
+    #[test]
+    fn pong_keeps_the_old_wire_shape_without_a_pid() {
+        let raw = encode_json(&Event::Pong { pid: None }).unwrap();
+        assert_eq!(raw, br#"{"event":"pong"}"#);
+        assert_eq!(
+            decode_json::<Event>(&raw).unwrap(),
+            Event::Pong { pid: None }
+        );
+        let with_pid = br#"{"event":"pong","pid":7}"#;
+        assert_eq!(
+            decode_json::<Event>(with_pid).unwrap(),
+            Event::Pong { pid: Some(7) }
+        );
+    }
+
+    #[test]
+    fn signal_and_exec_round_trip() {
+        let req = Request::Signal {
+            id: "c1".into(),
+            signo: 15,
+        };
+        let raw = encode_json(&req).unwrap();
+        assert_eq!(decode_json::<Request>(&raw).unwrap(), req);
+        let req = Request::Exec {
+            id: "c1".into(),
+            argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+            env: Vec::new(),
+            workdir: "/".into(),
+        };
+        let raw = encode_json(&req).unwrap();
+        assert_eq!(decode_json::<Request>(&raw).unwrap(), req);
+        // Old peers that omit env/workdir still parse with defaults.
+        let raw = br#"{"op":"exec","id":"c1","argv":["ls"]}"#;
+        assert_eq!(
+            decode_json::<Request>(raw).unwrap(),
+            Request::Exec {
+                id: "c1".into(),
+                argv: vec!["ls".into()],
+                env: Vec::new(),
+                workdir: "/".into(),
+            }
+        );
     }
 
     #[test]

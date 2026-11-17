@@ -13,8 +13,11 @@
 
 mod cli;
 mod convert;
+mod exec;
+mod logs;
 mod server;
 mod session;
+mod wire;
 
 /// Dispatch `engine <verb>` / `engine-run`. Returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
@@ -39,10 +42,12 @@ fn print_usage() {
          \n\
          init-pro engine-run --rootfs DIR [--hostname NAME] [--uid N] [--gid N]\n\
          \x20   [--env K=V]... [--mount SRC:DST[:ro]]... [--new-net]\n\
-         \x20   [--memory-max BYTES] [--cpu-max QUOTA_PERIOD] [--pids-max N]\n\
+         \x20   [--netns /proc/PID/ns/net] [--memory-max BYTES]\n\
+         \x20   [--cpu-max QUOTA_PERIOD] [--pids-max N]\n\
          \x20   [--cgroup NAME] [--] COMMAND [ARG]...\n\
          \n\
-         init-pro engine serve --socket PATH\n\
+         init-pro engine serve --socket PATH [--pause] [--netns PATH]\n\
+         \x20   [--log-path PATH] [--mount SRC:DST[:ro]]...\n\
          \n\
          The engine must run as real root on a single-threaded process; it\n\
          needs cgroup v2 only when limits are requested. --cgroup NAME only\n\

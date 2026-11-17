@@ -12,31 +12,67 @@ use crate::server;
 
 pub fn run_serve(args: &[String]) -> i32 {
     let mut socket = None;
+    let mut opts = server::ServeOptions::default();
     let mut i = 0;
+    let value = |i: &mut usize, flag: &str| -> Result<String, String> {
+        *i += 1;
+        args.get(*i)
+            .cloned()
+            .ok_or_else(|| format!("engine serve: {flag} needs a value"))
+    };
     while i < args.len() {
-        match args[i].as_str() {
-            "--socket" => {
-                i += 1;
-                socket = args.get(i).map(PathBuf::from);
+        let r = match args[i].as_str() {
+            "--socket" => value(&mut i, "--socket").map(|v| socket = Some(PathBuf::from(v))),
+            "--pause" => {
+                opts.pause = true;
+                Ok(())
             }
+            "--netns" => value(&mut i, "--netns").map(|v| opts.netns = Some(v)),
+            "--log-path" => value(&mut i, "--log-path").map(|v| opts.log_path = Some(v)),
+            "--mount" => value(&mut i, "--mount")
+                .and_then(|v| parse_serve_mount(&v).map(|m| opts.mounts.push(m))),
             "-h" | "--help" => {
                 crate::print_usage();
                 return 0;
             }
-            other => {
-                eprintln!("engine serve: unexpected argument {other:?}");
+            other => Err(format!("engine serve: unexpected argument {other:?}")),
+        };
+        match r {
+            Ok(()) => {}
+            Err(e) if e == "help requested" => return 0,
+            Err(e) => {
+                eprintln!("{e}");
                 return 2;
             }
         }
         i += 1;
     }
+    if opts.pause && opts.netns.is_none() {
+        // A pause sandbox without a netns to join creates a fresh one;
+        // nothing to enforce, documented for clarity.
+    }
     match socket {
-        Some(path) => server::serve(&path),
+        Some(path) => server::serve(&path, &opts),
         None => {
             eprintln!("engine serve: --socket PATH is required");
             2
         }
     }
+}
+
+/// `SRC:DST[:ro]`, the same shape engine-run uses.
+fn parse_serve_mount(raw: &str) -> Result<engine_proto::MountSpec, String> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    let (source, target, readonly) = match parts.as_slice() {
+        [s, t] => (s.to_string(), t.to_string(), false),
+        [s, t, "ro"] => (s.to_string(), t.to_string(), true),
+        _ => return Err(format!("engine serve: bad --mount {raw:?} (SRC:DST[:ro])")),
+    };
+    Ok(engine_proto::MountSpec {
+        source,
+        target,
+        readonly,
+    })
 }
 
 pub fn run_once(args: &[String]) -> i32 {
@@ -100,6 +136,7 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
     let mut cgroup_name = None;
     let mut limits = CgroupLimits::default();
     let mut new_net = false;
+    let mut netns: Option<PathBuf> = None;
     let mut command = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -124,7 +161,7 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
         }
         match arg.as_str() {
             "--rootfs" | "--hostname" | "--uid" | "--gid" | "--env" | "--mount" | "--cgroup"
-            | "--memory-max" | "--cpu-max" | "--pids-max" => {
+            | "--memory-max" | "--cpu-max" | "--pids-max" | "--netns" => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -141,6 +178,7 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
                     "--memory-max" => limits.memory_max = Some(parse_u64(arg, &value)?),
                     "--cpu-max" => limits.cpu_max = Some(value),
                     "--pids-max" => limits.pids_max = Some(parse_u64(arg, &value)?),
+                    "--netns" => netns = Some(PathBuf::from(value)),
                     _ => unreachable!(),
                 }
             }
@@ -160,6 +198,7 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
     spec.env = env;
     spec.mounts = mounts;
     spec.new_net = new_net;
+    spec.netns = netns;
     let has_limits = !limits.is_empty();
     // `cgroup_name` is only meaningful as the home of limits: `nsrun::spawn`
     // skips the cgroup entirely without them, so accepting the flag would be
