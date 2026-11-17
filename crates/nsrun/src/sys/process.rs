@@ -136,8 +136,38 @@ pub fn read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 }
 
 pub fn kill(pid: libc::pid_t) {
-    // SAFETY: plain pid argument; ESRCH means it is already gone.
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    signal_pid(pid, libc::SIGKILL);
+}
+
+/// Delivers `signo` to `pid` (T4.12, Q49/Q50: `Request::Signal`). Best
+/// effort like [`kill`]: ESRCH simply means the process is already gone.
+pub fn signal_pid(pid: libc::pid_t, signo: libc::c_int) {
+    // SAFETY: plain integer arguments; the pid belongs to the caller's
+    // child (checked by `Child::signal` before calling).
+    unsafe { libc::kill(pid, signo) };
+}
+
+/// Restores SIG_DFL for the shutdown trio (T4.12, Q49). The engine
+/// installs handlers before cloning; the pause sandbox never execves, so
+/// without this reset a SIGTERM would only flip a dead flag and the
+/// sandbox would ignore its own termination.
+pub fn reset_shutdown_dispositions() {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        // SAFETY: plain integer arguments; SIG_DFL is the kernel default.
+        unsafe { libc::signal(sig, libc::SIG_DFL) };
+    }
+}
+
+/// Parks the caller forever (T4.12, Q49 pause sandbox). With default
+/// dispositions any fatal signal terminates the process (reported by the
+/// parent as `128+WTERMSIG`); the loop only continues across benign
+/// interruptions.
+pub fn pause_forever() -> ! {
+    loop {
+        // SAFETY: `pause` takes no arguments and only returns after a
+        // handler ran (EINTR), which the loop tolerates.
+        unsafe { libc::pause() };
+    }
 }
 
 /// Writes a child-side failure straight to the report descriptor and exits

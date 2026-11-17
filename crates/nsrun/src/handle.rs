@@ -159,6 +159,15 @@ impl Child {
         sys::kill(self.pid);
     }
 
+    /// Deliver a signal to the container (Q49 `Signal` request). Like
+    /// `kill`, it is a no-op once the child is reaped or reported so a
+    /// recycled pid can never be signalled.
+    pub fn signal(&mut self, signo: i32) {
+        if self.needs_kill() {
+            sys::signal_pid(self.pid, signo);
+        }
+    }
+
     /// SIGKILL may only reach a child that is still ours and unreported;
     /// once it is reaped the pid can be recycled.
     fn needs_kill(&self) -> bool {

@@ -70,9 +70,19 @@ pub struct RunSpec {
     pub uid: u32,
     pub gid: u32,
     pub mounts: Vec<BindMount>,
-    /// Fresh network namespace with loopback up. P2 joins the CNI sandbox
-    /// netns instead; P1 defaults to the host network for the smoke run.
+    /// Fresh network namespace with loopback up. P1 defaults to the host
+    /// network for the smoke run.
     pub new_net: bool,
+    /// Join this existing network namespace instead of creating one
+    /// (T4.12, Q49): a `/proc/<pid>/ns/net` (or nsfs) path owned by the
+    /// pod sandbox engine. Mutually exclusive with `new_net`; loopback
+    /// stays under the sandbox's control.
+    pub netns: Option<PathBuf>,
+    /// Pause mode (T4.12, Q49): after the start gate the child parks
+    /// forever instead of exec'ing — the pod-sandbox PID 1 whose only job
+    /// is holding the namespaces open. Signals use their default
+    /// dispositions, so the parent's waitpid reports `128+WTERMSIG`.
+    pub pause: bool,
     pub no_new_privs: bool,
     /// Capability bounding set retained on exec (Docker default by default).
     pub caps: u64,
@@ -93,6 +103,8 @@ impl RunSpec {
             gid: 0,
             mounts: Vec::new(),
             new_net: false,
+            netns: None,
+            pause: false,
             no_new_privs: true,
             caps: crate::caps::DEFAULT_CAPS,
             cgroup_name: None,
@@ -128,6 +140,26 @@ impl RunSpec {
                     format!("mount {} has an empty source", m.target.display()),
                 ));
             }
+        }
+        if self.netns.is_some() && self.new_net {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "netns and new_net are mutually exclusive (Q49)",
+            ));
+        }
+        if let Some(netns) = &self.netns {
+            if !netns.is_absolute() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("netns must be absolute: {}", netns.display()),
+                ));
+            }
+        }
+        if self.pause && (self.uid != 0 || self.gid != 0 || !self.env.is_empty()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "pause mode accepts no user/env customization (Q49 sandbox)",
+            ));
         }
         if let Some(name) = &self.cgroup_name {
             if name.is_empty()
@@ -207,6 +239,27 @@ mod tests {
     fn rejects_parent_dir_in_mount_target() {
         let mut s = spec();
         s.mounts.push(BindMount::new("/etc/hosts", "/etc/../hosts"));
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn netns_and_new_net_are_exclusive() {
+        let mut s = spec();
+        s.new_net = true;
+        s.netns = Some(PathBuf::from("/proc/1/ns/net"));
+        assert!(s.validate().is_err());
+        s.new_net = false;
+        assert!(s.validate().is_ok());
+        s.netns = Some(PathBuf::from("proc/1/ns/net"));
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn pause_mode_rejects_user_customization() {
+        let mut s = RunSpec::new("/tmp/rootfs", vec!["/pause".into()]);
+        s.pause = true;
+        assert!(s.validate().is_ok());
+        s.env.push("X=1".into());
         assert!(s.validate().is_err());
     }
 

@@ -212,7 +212,9 @@ fn clone_container(
         | libc::CLONE_NEWUTS
         | libc::CLONE_NEWIPC
         | libc::CLONE_NEWCGROUP) as u64;
-    if spec.new_net {
+    // Q49: joining an existing sandbox netns (spec.netns) replaces the
+    // fresh netns; CLONE_NEWNET is only for new_net.
+    if spec.new_net && spec.netns.is_none() {
         flags |= libc::CLONE_NEWNET as u64;
     }
     let with_cgroup = cgroup_fd.is_some();

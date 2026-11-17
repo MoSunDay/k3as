@@ -7,7 +7,7 @@
 //! execve. Never returns.
 
 use std::ffi::CString;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 
 use crate::spec::RunSpec;
@@ -49,6 +49,18 @@ pub fn run_child(spec: &RunSpec, io: ChildIo) -> ! {
     sys::remount(c"/", (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong)
         .unwrap_or_else(|e| fail("make mounts private", e));
 
+    // T4.12 (Q49): join the pod sandbox's network namespace before any
+    // rootfs work — the /proc path only resolves here, in the engine's
+    // mount namespace (runc joins namespaces ahead of pivot_root too).
+    if let Some(netns) = &spec.netns {
+        let path = sys::cstr(netns).unwrap_or_else(|e| fail("join network namespace", e));
+        let fd = sys::open_path(&path, libc::O_RDONLY)
+            .unwrap_or_else(|e| fail("join network namespace", e));
+        sys::setns(fd.as_raw_fd(), libc::CLONE_NEWNET as libc::c_int)
+            .unwrap_or_else(|e| fail("join network namespace", e));
+        drop(fd);
+    }
+
     let rootfs = sys::cstr(&spec.rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
     mount::enter_rootfs(&rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
     let root = inroot::open_root(Path::new(".")).unwrap_or_else(|e| fail("enter rootfs", e));
@@ -88,6 +100,15 @@ pub fn run_child(spec: &RunSpec, io: ChildIo) -> ! {
             std::io::Error::other("the engine closed the start gate"),
         ),
         Err(e) => fail2("start gate", e),
+    }
+
+    // T4.12 (Q49): the pause sandbox parks instead of exec'ing. Signal
+    // dispositions are reset first — the engine installed handlers before
+    // cloning and execve never runs to clear them — so SIGTERM/SIGKILL
+    // terminate with the standard 128+WTERMSIG encoding.
+    if spec.pause {
+        sys::reset_shutdown_dispositions();
+        sys::pause_forever();
     }
 
     caps::apply(spec.caps);
