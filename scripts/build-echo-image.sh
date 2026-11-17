@@ -6,6 +6,8 @@
 # one-shot step binary from build-workflow-image.sh, source identical — so
 # `kubectl exec` assertions (golden G30) exercise exit-code passthrough in
 # the very image the kubelet already runs for logs/probes/volumes coverage.
+# T4.9 adds `/bin/wfcat` (cat one file) — the in-container cgroup knob
+# reader for resources-e2e.sh (no shell/cat in this image by design).
 #
 # Registry egress is blocked in this environment (registry.k8s.io redirects to
 # a blocked CDN, docker.io is blocked, ghcr.io has no usable echo repo), so
@@ -377,11 +379,35 @@ if "$WORK/wfstep" --fail boom >/dev/null 2>"$WORK/fail.err"; then
 fi
 [[ "$(cat "$WORK/fail.err")" == "wfstep: boom" ]] || { echo "error: wfstep --fail stderr mismatch" >&2; exit 1; }
 
+# --- (a3) static wfcat binary (T4.9) -------------------------------------------
+# In-container cgroup assertion vehicle (the image has no shell/cat):
+#   wfcat <file>  -> prints the file's bytes, exit 0 (2 usage, 3 open, 4 read)
+cat > "$WORK/wfcat.c" <<'EOF'
+#include <stdio.h>
+int main(int argc, char **argv) {
+    if (argc != 2) { fprintf(stderr, "usage: wfcat <file>\n"); return 2; }
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) { perror(argv[1]); return 3; }
+    int c, bad = 0;
+    while ((c = fgetc(f)) != EOF) putchar(c);
+    if (ferror(f)) bad = 1;
+    fclose(f);
+    return bad ? 4 : 0;
+}
+EOF
+(cd "$WORK" && "$CC" -static -Os -o wfcat wfcat.c)
+[[ -x "$WORK/wfcat" && -s "$WORK/wfcat" ]] || { echo "error: wfcat binary not built" >&2; exit 1; }
+GOT="$("$WORK/wfcat" "$WORK/wfcat.c")"
+[[ "$GOT" == "#include <stdio.h>"* ]] || { echo "error: wfcat stdout mismatch" >&2; exit 1; }
+if "$WORK/wfcat" >/dev/null 2>&1; then echo "error: wfcat no-arg exited 0" >&2; exit 1; fi
+if "$WORK/wfcat" "$WORK/nope" >/dev/null 2>&1; then echo "error: wfcat missing-file exited 0" >&2; exit 1; fi
+
 # --- (b) deterministic layer tar (/bin/echo, mode 0755, owner 0:0, mtime @0) -
 ROOTDIR="$WORK/rootdir"
 mkdir -p "$ROOTDIR/bin"
 install -m 0755 "$WORK/echo" "$ROOTDIR/bin/echo"
 install -m 0755 "$WORK/wfstep" "$ROOTDIR/bin/wfstep"
+install -m 0755 "$WORK/wfcat" "$ROOTDIR/bin/wfcat"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
     -cf "$WORK/layer.tar" -C "$ROOTDIR" .
 

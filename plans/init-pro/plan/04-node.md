@@ -520,10 +520,30 @@ node registration, and the built-in container engine (T4.11–T4.13).
   - 映射/QoS 单测 + e2e（容器内 `cat /sys/fs/cgroup/memory.max`
     断言）。
 
-- **状态 / Status** — not-started (S40 排期)
-- **证据 / Evidence** — —
+- **状态 / Status** — done (Sprint 40)
+- **证据 / Evidence** — 单测: `kubelet::resources` (映射/QoS 纯函数) +
+  `runtime::cri_json::linux_resources_wire_shape` +
+  `common::quantity`; e2e: `scripts/resources-e2e.sh` R1-R3 (容器内
+  `/sys/fs/cgroup/{memory,cpu}.max` 断言 + `status.qosClass`);
+  gate: `all-gates.sh` (含 battery 新增 resources-e2e.sh)。
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.2
+
+**Sprint 40 实现注记 (2026-11-16):**
+- `common::quantity` 为 quantity 解析 SSOT（自 scheduler/resources.rs
+  迁入并 `pub use` 回 scheduler，两侧共享）；T4.9 无新 Q 码（纯
+  upstream 对齐，QoS 语义即卡面）。
+- QoS 语义 = upstream `GetPodQOS`（仅 regular containers、仅
+  cpu/memory、解析后等值比较）：无任何 request/limit → BestEffort；
+  每容器 cpu+memory requests==limits → Guaranteed；其余 →
+  Burstable。写入 `status.qosClass`（upstream parity）。
+- cpu 映射 = upstream `MilliCPUToShares`（floor 2）/`MilliCPUToQuota`
+  （无 limit → **-1** 显式禁用，period 恒 100000，即使无 limit 也随
+  上游恒定下发）；memory 仅在有 limit 时下发 bytes。
+- `ContainerConfig.linux` 序列化为 crictl proto 字段名
+  (`cpu_period`/`cpu_quota`/`cpu_shares`/`memory_limit_in_bytes`)，
+  零值省略（quota -1 例外）。
+- Out（Deferred 台账）: 节点真实 capacity 探测、eviction。
 
 ---
 

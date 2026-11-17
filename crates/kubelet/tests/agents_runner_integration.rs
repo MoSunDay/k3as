@@ -270,9 +270,7 @@ async fn runner_missing_same_name_recreate_reports_again() {
         shutdown.clone(),
     );
     let path = "/apis/init-pro.io/v1/namespaces/default/agents/missing-re";
-    let pending = |v: &Value| {
-        v["status"]["phase"] == "Pending" && condition_of(v, "RunnerMissing")
-    };
+    let pending = |v: &Value| v["status"]["phase"] == "Pending" && condition_of(v, "RunnerMissing");
 
     post_agent(&client, "missing-re", "task").await;
     let first = wait_for(&client, path, "first RunnerMissing", &pending).await;

@@ -104,6 +104,56 @@ pub struct PodSandboxConfig {
     pub log_directory: String,
 }
 
+/// `LinuxContainerResources` (CRI proto, TODO **T4.9**): the cgroup knobs
+/// crictl applies at container create. Zero values are omitted on the wire
+/// (proto3 "unset"), except `cpu_quota` where **-1** explicitly disables a
+/// CPU cap — upstream kubelet's `MilliCPUToQuota` convention (the kubelet
+/// maps spec resources into this shape; see `kubelet::resources`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct LinuxResources {
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cpu_period: u64,
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    pub cpu_quota: i64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub cpu_shares: u64,
+    #[serde(skip_serializing_if = "is_zero_i64")]
+    pub memory_limit_in_bytes: i64,
+}
+
+impl LinuxResources {
+    /// True when every knob is at its "unset" default (wire omission).
+    pub fn is_empty(&self) -> bool {
+        self.cpu_period == 0
+            && self.cpu_quota == 0
+            && self.cpu_shares == 0
+            && self.memory_limit_in_bytes == 0
+    }
+}
+
+/// `LinuxContainerConfig` (CRI proto): v1 carries only `resources` (T4.9);
+/// `security_context` is deferred.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct LinuxContainerConfig {
+    #[serde(skip_serializing_if = "LinuxResources::is_empty")]
+    pub resources: LinuxResources,
+}
+
+impl LinuxContainerConfig {
+    /// True when nothing would serialize (whole `linux` omitted).
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+
 /// Input config for `crictl create`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContainerConfig {
@@ -121,6 +171,10 @@ pub struct ContainerConfig {
     pub labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub log_path: String,
+    /// T4.9: cgroup resources (cpu shares/quota/period + memory limit);
+    /// omitted entirely when the pod declares none.
+    #[serde(skip_serializing_if = "LinuxContainerConfig::is_empty")]
+    pub linux: LinuxContainerConfig,
 }
 
 // --------------------------------------------------------------- outputs --
@@ -395,6 +449,7 @@ mod tests {
             mounts: vec![],
             labels: container_labels("p", "ns", "u1", "web"),
             log_path: "web.0.log".into(),
+            linux: LinuxContainerConfig::default(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -424,6 +479,7 @@ mod tests {
             }],
             labels: BTreeMap::new(),
             log_path: String::new(),
+            linux: LinuxContainerConfig::default(),
         };
         // CRI proto field names on the wire (crictl JSON resolver accepts
         // them), matching the `log_path` convention of this module.
@@ -440,6 +496,67 @@ mod tests {
         none.mounts = Vec::new();
         let json = serde_json::to_string(&none).unwrap();
         assert!(!json.contains("mounts"), "empty mounts omitted: {json}");
+    }
+
+    #[test]
+    fn linux_resources_wire_shape() {
+        let cfg = ContainerConfig {
+            metadata: ContainerMetadata {
+                name: "web".into(),
+                attempt: 0,
+            },
+            image: ImageSpec {
+                image: "img:1".into(),
+            },
+            command: vec![],
+            args: vec![],
+            envs: vec![],
+            mounts: vec![],
+            labels: BTreeMap::new(),
+            log_path: String::new(),
+            linux: LinuxContainerConfig {
+                resources: LinuxResources {
+                    cpu_period: 100_000,
+                    cpu_quota: 25_000,
+                    cpu_shares: 102,
+                    memory_limit_in_bytes: 64 * 1024 * 1024,
+                },
+            },
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["linux"]["resources"]["cpu_period"], 100_000);
+        assert_eq!(v["linux"]["resources"]["cpu_quota"], 25_000);
+        assert_eq!(v["linux"]["resources"]["cpu_shares"], 102);
+        assert_eq!(
+            v["linux"]["resources"]["memory_limit_in_bytes"],
+            64 * 1024 * 1024
+        );
+        // T4.9 upstream convention: quota -1 (CPU cap disabled) serializes;
+        // zero knobs are omitted so the pre-T4.9 wire shape stays stable.
+        let mut none = cfg.clone();
+        none.linux = LinuxContainerConfig {
+            resources: LinuxResources {
+                cpu_period: 100_000,
+                cpu_quota: -1,
+                cpu_shares: 2,
+                memory_limit_in_bytes: 0,
+            },
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&none).unwrap()).unwrap();
+        assert_eq!(v["linux"]["resources"]["cpu_quota"], -1);
+        assert!(
+            v["linux"]["resources"]
+                .get("memory_limit_in_bytes")
+                .is_none(),
+            "zero memory limit omitted"
+        );
+        // default config: no `linux` key at all
+        let mut dflt = cfg;
+        dflt.linux = LinuxContainerConfig::default();
+        let json = serde_json::to_string(&dflt).unwrap();
+        assert!(!json.contains("linux"), "empty linux omitted: {json}");
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub struct ContainerSpec {
     pub image_pull_policy: String,
     pub env: Vec<crate::env::EnvVar>,
     pub env_from: Vec<crate::env::EnvFromSource>,
+    pub resources: crate::resources::ResourceRequirements,
 }
 
 /// One `spec.containers[].volumeMounts[]` entry (Sprint 20 S2). `mountPath`
@@ -200,6 +201,7 @@ pub fn pod_containers(pod: &Value) -> Vec<ContainerSpec> {
                 image_pull_policy,
                 env: crate::env::parse_env(c),
                 env_from: crate::env::parse_env_from(c),
+                resources: crate::resources::parse_requirements(c),
             })
         })
         .collect()

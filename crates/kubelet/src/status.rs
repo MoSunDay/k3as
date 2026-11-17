@@ -101,8 +101,12 @@ pub fn build_pod_status(
         "Pending"
     };
     let pod_ip = ready_sandbox.and_then(|sb| sb.ip.clone());
+    // T4.9: spec-derived, stable for the pod's lifetime (upstream parity:
+    // `kubectl get pod -o yaml` shows status.qosClass).
+    let qos = crate::resources::qos_class(&pod.containers).as_str();
     let mut status = json!({
         "phase": phase,
+        "qosClass": qos,
         "conditions": [
             {
                 "type": "PodScheduled",
@@ -150,9 +154,10 @@ pub fn status_semantically_eq(a: &Value, b: &Value) -> bool {
     semantic_key(a) == semantic_key(b)
 }
 
-/// (phase, sorted conditions, container outcomes, podIP) — the semantic
-/// status core.
+/// (phase, qosClass, sorted conditions, container outcomes, podIP) — the
+/// semantic status core.
 type SemanticKey = (
+    String,
     String,
     Vec<(String, String, String)>,
     Vec<(String, u64, String)>,
@@ -226,12 +231,17 @@ fn semantic_key(v: &Value) -> SemanticKey {
         })
         .unwrap_or_default();
     containers.sort();
+    let qos = v
+        .pointer("/qosClass")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let pod_ip = v
         .pointer("/podIP")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    (phase, conditions, containers, pod_ip)
+    (phase, qos, conditions, containers, pod_ip)
 }
 
 /// Clone `pod` with `.status` replaced — the body the `/status` route PUTs
