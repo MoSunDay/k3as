@@ -64,6 +64,16 @@ LOG="$(mktemp)"
 "$BIN" server --data-dir "$DD" --bind-address 127.0.0.1 --https-listen-port "$PORT" >"$LOG" 2>&1 &
 SRV=$!
 SRV2=""; STUB_PID=""
+
+# CNI device pre-existence flags, S40c followup: probed BEFORE the trap is
+# installed so the cleanup below only ever deletes devices THIS run created;
+# a pre-existing cni0/flannel.1 (host / live cluster we coexist with) is
+# left untouched.
+CNI0_PREEXISTS=0
+ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
+FLANNEL1_PREEXISTS=0
+ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
+
 # Zero-shim-leftover assertion (T4.1 follow-up, Sprint 28): since the
 # kubelet tears its sandboxes down BEFORE the agent stops containerd, no
 # shim of this run may outlive the daemon. Assert, never silently purge:
@@ -99,6 +109,10 @@ cleanup() {
   for _ in $(seq 1 20); do pgrep -f containerd-shim >/dev/null 2>&1 || break; sleep 0.25; done
   assert_no_run_shims "$DD" || LEFTOVER=1
   rm -rf "$DD" "$LOG" 2>/dev/null || true
+  # CNI hygiene (S40c followup): remove devices THIS run created; a
+  # pre-existing cni0/flannel.1 (host/live-cluster) is left untouched.
+  if [[ "$CNI0_PREEXISTS" != "1" ]]; then ip link del cni0 2>/dev/null || true; fi
+  if [[ "$FLANNEL1_PREEXISTS" != "1" ]]; then ip link del flannel.1 2>/dev/null || true; fi
   [[ "$LEFTOVER" -eq 1 ]] && exit 1
   return 0
 }

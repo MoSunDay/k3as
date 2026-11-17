@@ -77,6 +77,15 @@ SRV_LOG="$(mktemp)"; AG_LOG="$(mktemp)"
 SRV_PID=""; AGENT_PID=""
 PASS=0; FAIL=0
 
+# CNI device pre-existence flags, S40c followup: probed BEFORE the trap is
+# installed so the cleanup below only ever deletes devices THIS run created;
+# a pre-existing cni0/flannel.1 (host / live cluster we coexist with) is
+# left untouched.
+CNI0_PREEXISTS=0
+ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
+FLANNEL1_PREEXISTS=0
+ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
+
 cleanup() {
   trap - EXIT
   [[ -n "$AGENT_PID" ]] && { stop_pid "$AGENT_PID"; AGENT_PID=""; }
@@ -94,6 +103,10 @@ cleanup() {
   done
   # Tolerate leftovers regardless; never let the trap flip the exit status.
   rm -rf "$DD" "$SRV_LOG" "$AG_LOG" 2>/dev/null || true
+  # CNI hygiene (S40c followup): remove devices THIS run created; a
+  # pre-existing cni0/flannel.1 (host/live-cluster) is left untouched.
+  if [[ "$CNI0_PREEXISTS" != "1" ]]; then ip link del cni0 2>/dev/null || true; fi
+  if [[ "$FLANNEL1_PREEXISTS" != "1" ]]; then ip link del flannel.1 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 # Route fatal signals through the EXIT trap (bash skips it on untrapped

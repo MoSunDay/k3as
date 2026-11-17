@@ -26,11 +26,25 @@ address different from 10.244.0.1/24"), 该节点所有 sandbox 创建 ~2s 循�
   时序留有窗口: 构建失败或 SIGINT/SIGTERM 时 cleanup 以默认 0 误删宿主
   预存在 cni0/flannel.1。探测紧跟初始化后, 任何退出路径下 cleanup 引用
   的 flag 均已反映真实预存在状态。
+- 同类缺陷系统收口 (6 脚本, 均为此前不清理自建 cni0/flannel.1 的遗留
+  设备缺陷 — node04 事故的根因形态): `flannel-e2e.sh` / `pod-env-e2e.sh`
+  / `probe-e2e.sh` / `service-traffic-e2e.sh` / `local-up.sh` /
+  `golden-conformance.sh` (仅顶层 teardown 一次, 覆盖全部套件 — 套件级
+  teardown 后设备存续至顶层清理, 时序成立) 按 resources-e2e 模式补:
+  trap 前探测式初始化 + cleanup 末尾守卫删除。例外: local-up 持久模式
+  (LOCAL_UP_DATA_DIR) 不删 — 存活 pod (Q31) 仍需 cni0;
+  `acceptance-2node-e2e.sh` 显式排除 — 驱动常驻 live 簇, 绝不删设备。
+- `scripts/all-gates.sh` (S40c 护栏): 启动记录 cni0/flannel.1 预存在,
+  battery 结束断言自建设备零残留 (宿主共存 live 簇时预存在设备豁免,
+  不删不报)。一处覆盖全部 e2e 脚本的正常 teardown 路径。
 
 **Evidence**
 - 模拟器红绿双证 (log-only `ip` shim 模拟共存宿主 + build 脚本 stub
   `exit 1` 触发早期退出): 修复前 (1f808b8) shim 日志出现 `link del
   cni0`/`link del flannel.1`; 修复后仅 `link show` 探测, 零删除。
+- 诚实缺口: 早期失败路径无常驻自动化护栏 (模拟器为一次性红绿证据,
+  归档 /tmp/s40c-sim); 正常 teardown 路径由 all-gates 护栏覆盖,
+  下一个净机 gate 窗口自证。
 - `bash -n` 通过; 未在本机复跑 e2e (本机正运行 live 双节点簇, 复跑会
   再造 10.42 cni0 并打断 Running pod), 全量回归留给下一个净机 gate 窗口。
 - 事故实证: node04 残留 `cni0=10.42.0.1/24` + `flannel.1=10.42.0.0/32`

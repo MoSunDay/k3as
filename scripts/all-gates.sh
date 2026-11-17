@@ -295,6 +295,14 @@ if [[ "$RUN_E2E" -eq 0 ]]; then
   echo "note: --no-e2e given, gate 8 will be SKIPped"
 fi
 
+# S40c guardrail: record CNI device pre-existence now so the end-of-run
+# residue assert below only flags devices THIS battery created; a host /
+# live-cluster device is never touched.
+CNI0_PREEXISTS=0
+ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
+FLANNEL1_PREEXISTS=0
+ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
+
 FMT_MEMBER_ARGS="$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(" ".join("-p "+m["name"] for m in json.load(sys.stdin)["packages"]))')"
 gate "cargo fmt --check (workspace members)" "01-cargo-fmt" \
@@ -318,6 +326,24 @@ echo "MANUAL: verify index.md + plan/*.md + decisions.md moved in lock-step."
 record "SSOT lock-step (index/plan/decisions)" "N/A (manual)" "-"
 
 summary
+
+# S40c guardrail: devices the battery created must not outlive it. Devices
+# recorded as pre-existing above (e.g. a live cluster on this host) are
+# exempt — never deleted, never flagged.
+RESIDUE=0
+if [[ "$CNI0_PREEXISTS" != "1" ]] && ip link show dev cni0 >/dev/null 2>&1; then
+  echo "FAIL cni0-residue (self-created cni0 outlived the e2e battery)"
+  RESIDUE=1
+fi
+if [[ "$FLANNEL1_PREEXISTS" != "1" ]] && ip link show dev flannel.1 >/dev/null 2>&1; then
+  echo "FAIL flannel.1-residue (self-created flannel.1 outlived the e2e battery)"
+  RESIDUE=1
+fi
+if [[ "$RESIDUE" -eq 1 ]]; then
+  echo "RESULT: FAIL (CNI device residue; S40c guardrail)"
+  exit 1
+fi
+
 if [[ "$FAILS" -gt 0 ]]; then
   echo "RESULT: FAIL (${FAILS} gate(s) failed; logs above)"
   exit 1

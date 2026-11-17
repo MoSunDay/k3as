@@ -55,6 +55,15 @@ PAUSE_REF="init-pro.local/pause:0.1"
 PAUSE_TAR="$DD/pause.tar"
 SERVER_PID="" AGENT_PID=""
 
+# CNI device pre-existence flags, S40c followup: probed BEFORE the trap is
+# installed so the cleanup below only ever deletes devices THIS run created;
+# a pre-existing cni0/flannel.1 (host / live cluster we coexist with) is
+# left untouched.
+CNI0_PREEXISTS=0
+ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
+FLANNEL1_PREEXISTS=0
+ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
+
 cleanup() {
   trap - EXIT INT TERM
   echo; echo "local-up: shutting down ..."
@@ -72,6 +81,12 @@ cleanup() {
   # the tree for the caller (pods/logs survive, Q31).
   if [[ -z "${LOCAL_UP_DATA_DIR:-}" ]]; then
     rm -rf "$DD"
+    # Ephemeral mode only: LOCAL_UP_DATA_DIR runs keep surviving pods (Q31)
+    # alive after the agent stops — their cni0 must stay up.
+    # CNI hygiene (S40c followup): remove devices THIS run created; a
+    # pre-existing cni0/flannel.1 (host/live-cluster) is left untouched.
+    if [[ "$CNI0_PREEXISTS" != "1" ]]; then ip link del cni0 2>/dev/null || true; fi
+    if [[ "$FLANNEL1_PREEXISTS" != "1" ]]; then ip link del flannel.1 2>/dev/null || true; fi
   else
     echo "local-up: data kept at $DD (LOCAL_UP_DATA_DIR)"
   fi
