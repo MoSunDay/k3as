@@ -34,6 +34,7 @@ pub mod agent_exec;
 pub mod agent_objects;
 pub mod agents;
 pub mod cri_backend;
+pub mod engine;
 pub mod env;
 pub mod env_fetch;
 pub mod exec;

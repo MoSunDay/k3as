@@ -64,7 +64,13 @@ async fn ensure_node(client: &HttpJson, cfg: &KubeletConfig) -> Result<(), Strin
     match client.get_json(&path).await {
         Ok((200, _)) => Ok(()),
         Ok((404, _)) => {
-            let body = objects::node_object(name, &cfg.node_ip, cfg.kubelet_port, &now_str());
+            let body = objects::node_object(
+                name,
+                &cfg.node_ip,
+                cfg.kubelet_port,
+                &cfg.runtime_version,
+                &now_str(),
+            );
             match client.post_json("/api/v1/nodes", &body).await {
                 Ok((code, _)) if code == 200 || code == 201 => Ok(()),
                 Ok((409, _)) => Ok(()), // created concurrently elsewhere
@@ -130,10 +136,15 @@ async fn refresh_node_status(client: &HttpJson, cfg: &KubeletConfig, now: &str) 
     let Ok((200, mut node)) = client.get_json(&path).await else {
         return;
     };
-    let Some(status) = objects::node_object(name, &cfg.node_ip, cfg.kubelet_port, now)
-        .pointer("/status")
-        .cloned()
-    else {
+    let Some(status) = objects::node_object(
+        name,
+        &cfg.node_ip,
+        cfg.kubelet_port,
+        &cfg.runtime_version,
+        now,
+    )
+    .pointer("/status")
+    .cloned() else {
         return;
     };
     if let Some(annotations) = reconciled_kubelet_port_annotation(&node, cfg.kubelet_port) {

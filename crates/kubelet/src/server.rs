@@ -377,16 +377,13 @@ async fn exec_handler(
             &format!("container {container:?} of pod {pod_uid:?} not found"),
         );
     };
-    // Same driver construction the runner/cli wiring uses (Q26 route B):
-    // staged crictl + supervisor socket derived from the data dir.
-    let paths = runtime::AgentRuntimePaths::for_data_dir(&st.cfg.data_dir);
-    let Some(ctl) = runtime::CriCtl::for_paths(&paths) else {
-        return failure(
-            StatusCode::BAD_GATEWAY,
-            "relay target crictl exec failed: no staged crictl binary (T4.1)",
-        );
-    };
-    match ctl.exec_container(&view.id, &command, EXEC_TIMEOUT).await {
+    // Backend seam (T4.12): containerd relays via crictl, the builtin
+    // engine rides its exec protocol — same handler either way.
+    match st
+        .backend
+        .exec_container(&view.id, &command, EXEC_TIMEOUT)
+        .await
+    {
         Ok((exit_code, output)) => Json(serde_json::json!({
             "exitCode": exit_code as i64,
             "output": output,

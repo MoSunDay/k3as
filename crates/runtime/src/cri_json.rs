@@ -68,7 +68,7 @@ pub struct ImageSpec {
 }
 
 /// One `KeyValue` entry of `ContainerConfig.envs`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct KeyValue {
     pub key: String,
     pub value: String,
@@ -79,7 +79,7 @@ pub struct KeyValue {
 /// resolver accepts the proto names, same convention as `log_path`).
 /// Sprint 20 S2 (T4.2 Scope B): pod volumes reach the runtime as host
 /// mounts into the container.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Mount {
     pub container_path: String,
     pub host_path: String,
@@ -88,7 +88,7 @@ pub struct Mount {
 
 /// Input config for `crictl runp` / sandbox creation. Empty optional-ish
 /// collections are omitted so the JSON stays close to the crictl examples.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PodSandboxConfig {
     pub metadata: SandboxMetadata,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -155,7 +155,7 @@ fn is_zero_i64(v: &i64) -> bool {
 }
 
 /// Input config for `crictl create`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ContainerConfig {
     pub metadata: ContainerMetadata,
     pub image: ImageSpec,

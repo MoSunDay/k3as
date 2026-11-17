@@ -345,7 +345,13 @@ pub fn pod_stub(view: &PodView) -> Value {
 /// [`crate::runner::KubeletConfig::node_ip`] and the metadata annotation
 /// `init-pro.io/kubelet-port` carries the local log/exec listener port, so
 /// the apiserver relay can dial `ip:port` without extra discovery.
-pub fn node_object(name: &str, node_ip: &str, kubelet_port: u16, now: &str) -> Value {
+pub fn node_object(
+    name: &str,
+    node_ip: &str,
+    kubelet_port: u16,
+    runtime_version: &str,
+    now: &str,
+) -> Value {
     json!({
         "apiVersion": "v1",
         "kind": "Node",
@@ -375,7 +381,7 @@ pub fn node_object(name: &str, node_ip: &str, kubelet_port: u16, now: &str) -> V
             "addresses": [{"type": "InternalIP", "address": node_ip}],
             "nodeInfo": {
                 "kubeletVersion": "init-pro-0.2.0",
-                "containerRuntimeVersion": "containerd://1.7.20",
+                "containerRuntimeVersion": runtime_version,
                 "operatingSystem": "linux",
                 "architecture": "amd64",
             },
@@ -709,7 +715,13 @@ mod tests {
 
     #[test]
     fn node_object_shape() {
-        let n = node_object("n1", "10.0.0.7", 10250, "2026-08-16T00:00:00Z");
+        let n = node_object(
+            "n1",
+            "10.0.0.7",
+            10250,
+            "engine://test",
+            "2026-08-16T00:00:00Z",
+        );
         assert_eq!(n["apiVersion"], "v1");
         assert_eq!(n["kind"], "Node");
         assert_eq!(n["metadata"]["name"], "n1");
@@ -720,6 +732,11 @@ mod tests {
             "10250"
         );
         assert_eq!(n["status"]["capacity"]["pods"], "110");
+        // T4.12 (Q49): the caller's runtime version is reported verbatim.
+        assert_eq!(
+            n["status"]["nodeInfo"]["containerRuntimeVersion"],
+            "engine://test"
+        );
         assert_eq!(n["status"]["conditions"][0]["type"], "Ready");
         assert_eq!(n["status"]["conditions"][0]["status"], "True");
         assert_eq!(

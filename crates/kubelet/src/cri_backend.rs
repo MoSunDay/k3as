@@ -71,6 +71,18 @@ pub trait CriBackend: Send + Sync {
     async fn remove_container(&self, id: &str) -> Result<(), String>;
     async fn stop_pod_sandbox(&self, id: &str) -> Result<(), String>;
     async fn remove_pod_sandbox(&self, id: &str) -> Result<(), String>;
+    /// Exec in a running container: merged output + exit code. Backends
+    /// without an exec seam answer Err (T4.12 wires the engine one).
+    async fn exec_container(
+        &self,
+        container_id: &str,
+        _cmd: &[String],
+        _timeout: std::time::Duration,
+    ) -> Result<(i32, String), String> {
+        Err(format!(
+            "exec not supported by this backend (container {container_id})"
+        ))
+    }
 }
 
 /// Adapter: [`runtime::CriCtl`] subprocess driver -> [`CriBackend`].
@@ -234,6 +246,18 @@ impl CriBackend for CriCtlBackend {
             .remove_pod_sandbox(id)
             .await
             .map_err(|e| format!("{e}"))
+    }
+
+    async fn exec_container(
+        &self,
+        container_id: &str,
+        cmd: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<(i32, String), String> {
+        self.inner
+            .exec_container(container_id, cmd, timeout)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

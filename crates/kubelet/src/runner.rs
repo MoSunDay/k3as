@@ -48,6 +48,11 @@ pub struct KubeletConfig {
     /// Port of the same listener (upstream kubelet convention: 10250);
     /// published via the Node annotation `init-pro.io/kubelet-port`.
     pub kubelet_port: u16,
+    /// `status.nodeInfo.containerRuntimeVersion`. Default mirrors the
+    /// staged containerd (`containerd://1.7.20`); the built-in engine
+    /// (**T4.12**, Q49) overrides via [`Self::with_runtime_version`] with
+    /// `engine://<version>` so `kubectl describe node` tells the truth.
+    pub runtime_version: String,
 }
 
 impl KubeletConfig {
@@ -67,6 +72,7 @@ impl KubeletConfig {
             heartbeat_period: Duration::from_secs(10),
             node_ip: "127.0.0.1".to_string(),
             kubelet_port: 10250,
+            runtime_version: "containerd://1.7.20".to_string(),
         }
     }
 
@@ -79,6 +85,13 @@ impl KubeletConfig {
     /// Override the local log+exec listener port (default 10250).
     pub fn with_kubelet_port(mut self, port: u16) -> Self {
         self.kubelet_port = port;
+        self
+    }
+
+    /// Override `nodeInfo.containerRuntimeVersion` (**T4.12**: the
+    /// built-in engine reports `engine://<common::version()>`).
+    pub fn with_runtime_version(mut self, v: impl Into<String>) -> Self {
+        self.runtime_version = v.into();
         self
     }
 
