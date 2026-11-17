@@ -60,7 +60,23 @@ fi
 # -> scheduler binds g25-node -> kubelet drives CRI -> Running+Ready;
 # kill the container -> kubelet restarts it; delete the Deployment -> GC +
 # kubelet teardown empty every sandbox.
-if [[ -z "$G24_VENDOR_BIN" ]]; then
+# Environment preflight (host CNI hygiene): the golden agents run
+# flannel+CNI and need the host bridge cni0 at 10.42.0.1/24. A pre-existing
+# cni0 is deliberately left untouched (S40c coexistence policy in
+# golden-conformance.sh), so a stale bridge from an older experiment
+# (e.g. 10.244.0.1/24, a different cluster CIDR) makes every
+# RunPodSandbox fail ("cni0 already has an IP address different from
+# 10.42.0.1/24") and pods never leave ContainerCreating — six confusing
+# FAILs. Per the SKIP-not-fail doctrine for environment preconditions,
+# that state becomes ONE actionable SKIP line instead. No cni0 at all, or
+# one already holding a 10.42.x.x address (previously-used same-CIDR
+# host — flannel reuses it), is fine and must NOT gate.
+CNI0_IP="$(ip -4 addr show dev cni0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' | head -1 || true)"
+CNI0_STALE=0
+if [[ -n "$CNI0_IP" && "${CNI0_IP%.*.*}" != "10.42" ]]; then CNI0_STALE=1; fi
+if [[ "$CNI0_STALE" -eq 1 ]]; then
+  echo "SKIP G25/G26 kubelet end-to-end (host cni0 holds $CNI0_IP — stale CNI state from another cluster; ip link delete cni0 to recover)"
+elif [[ -z "$G24_VENDOR_BIN" ]]; then
   echo "SKIP G25 kubelet end-to-end (no vendored containerd)"
 elif ! command -v cc >/dev/null 2>&1; then
   echo "SKIP G25 kubelet end-to-end (no cc for the airgap pause image, Q27)"
@@ -149,7 +165,9 @@ fi
 # config projection + the pod-name hostname (S4) are asserted from inside
 # the container (G26d). Same SKIP gates as G25: no vendored containerd,
 # or no cc for the airgap images (Q27).
-if [[ -z "$G24_VENDOR_BIN" ]]; then
+if [[ "$CNI0_STALE" -eq 1 ]]; then
+  : # already reported by the single G25/G26 stale-cni0 SKIP line above
+elif [[ -z "$G24_VENDOR_BIN" ]]; then
   echo "SKIP G26 kubelet probes/volumes end-to-end (no vendored containerd)"
 elif ! command -v cc >/dev/null 2>&1; then
   echo "SKIP G26 kubelet probes/volumes end-to-end (no cc for the airgap images, Q27)"
@@ -362,7 +380,9 @@ fi
 # SPDY/WebSocket byte-splitting). Same vendor+cc gates as G25/G26 since the
 # workload is the Q27 airgap echo image — which now also ships /bin/wfstep
 # (build-echo-image.sh, same source as build-workflow-image.sh).
-if [[ -z "$G24_VENDOR_BIN" ]]; then
+if [[ "$CNI0_STALE" -eq 1 ]]; then
+  echo "SKIP G30 kubelet logs/exec relay (host cni0 holds $CNI0_IP — stale CNI state from another cluster; ip link delete cni0 to recover)"
+elif [[ -z "$G24_VENDOR_BIN" ]]; then
   echo "SKIP G30 kubelet logs/exec relay (no vendored containerd)"
 elif ! command -v cc >/dev/null 2>&1; then
   echo "SKIP G30 kubelet logs/exec relay (no cc for the airgap echo image)"

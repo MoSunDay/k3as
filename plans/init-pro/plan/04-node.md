@@ -695,10 +695,24 @@ node registration, and the built-in container engine (T4.11–T4.13).
     `containerd.sock`（`runtime/src/lib.rs` unlink 冲突面）。
   - `scripts/all-gates.sh` 全绿（battery 8.x 现有行）。
 
-- **状态 / Status** — in-progress (P2)
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — T4.13 的镜像/CNI 未落地前只能跑 host-rootfs
-  测试 Pod
+- **状态 / Status** — done (Sprint 41; Q49/Q50/Q51)
+- **证据 / Evidence** — 提交 `db12408` (nsrun exec 基座) → `b2f61ba`
+  (engine 协议扩展 + pause/exec/signal + CRI 日志落盘) → `034dab1`
+  (kubelet EngineBackend) → `8d2c383` (cli builtin 选择 + Q51 探针)。
+  落点: `crates/nsrun/src/execin.rs`、`crates/engine/src/{exec,logs,session,wire,server}.rs`、
+  `crates/engine-proto/src/lib.rs` (Signal/Exec/ExecStarted/ExecExited +
+  netns/pause/log_path)、`crates/kubelet/src/engine/*` (backend/registry/
+  launch/logs/exec/pump/spec)、`crates/cli/src/{engine_probe,storage_dsn,runtime}.rs`。Q48 允许清单
+  修正在 Sprint 41 收口: engine 内联 `civil_from_days`/`rfc3339_nano`
+  (logs.rs, 与 `common/time` 逐字同步), Cargo.toml 回到 engine-proto
+  + nsrun 两依赖。tests 全绿: nsrun 28 / engine-proto
+  2 / engine 22 / engine-client 7 / kubelet ~121 / multicall 20 / common
+  15 / runtime 53; clippy -D warnings 0。e2e: `engine-selftest.sh`
+  E1–E11 26/0; `builtin-runtime-e2e.sh` B1–B13。验收面按实测内核语义
+  修正: pid-ns init 仅在装有 handler 时才收到祖先 ns 的 SIGTERM
+  (SIGKILL/SIGSTOP 例外; E10→137 证明 128+WTERMSIG 映射), E11/B8
+  温和停止走 trap 路径; exec 面落在协议脚本 B6/B7 (原计划 E10);
+  探针失败回退由 `engine_probe` 单测覆盖, e2e 级注入留 T4.13 N4。
 - **依赖 / Depends on** — T4.11, T4.2
 
 ---

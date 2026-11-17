@@ -7,6 +7,82 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 41 — T4.12 P2 done: EngineBackend + builtin 选择 + Q51 探针; pid-ns 信号语义实证; golden 净机护栏 (2026-11-18)
+
+**Goal:** T4.12 (内置引擎 kubelet 接线 P2) 收口: `EngineBackend` 落地
+kubelet `CriBackend` 第二实现 (Q49 进程池模型), `--container-engine=builtin`
+真实选择 + Q51 启动探针 (失败回退 staged containerd), exec/日志流按 Q50
+语义补齐; e2e 验收面按**实测内核语义**修正 (pid-ns init 的 SIGTERM 规则);
+all-gates 一次假回归的完整诊断 (宿主 cni0 污染) 与两处真实修复。
+
+**Changes**
+- 提交链 (四个 M 里程碑): `db12408` nsrun exec 基座 (`execin.rs`,
+  无 ptrace 的 stdin/stdout 中继) → `b2f61ba` engine M2 (协议扩展:
+  Signal/Exec/ExecStarted{exec_id,pid}/ExecExited{exec_id,code} 走
+  kind 2/3, netns/pause/log_path 字段; pause engine: Ping→Pong{pid},
+  Run 拒绝, Shutdown 杀 sandbox; CRI 日志 `<RFC3339Nano> <stdout|stderr>
+  <P|F> <line>` O_APPEND 落盘; 恶意请求 send_error 不再断链) →
+  `034dab1` kubelet M3 (`crates/kubelet/src/engine/*`: backend/
+  registry/launch/logs/exec/pump/spec; `CriBackend` 增 exec seam,
+  `KubeletConfig::with_runtime_version` → Node `engine://<ver>`; 容器
+  join `/proc/<sandbox_pid>/ns/net`) → `8d2c383` cli M4 (`run_agent`
+  第 9 参 container_engine; builtin 臂走 Q51 探针, `<dd>/run/engine/
+  _probe.sock` 15s 预算, 失败 kill+wait+unlink 回退 containerd +
+  Warning; 选择落 `run/engine/mode` 供 multicall 对端识别)。
+- e2e: `engine-selftest.sh` 增 E9–E11 (`--netns /proc/<cpid>/ns/net`
+  加入持核进程、SIGKILL→137、trap TERM→7; `pgrep` 缺失时 SKIP);
+  `builtin-runtime-e2e.sh` 增 B6–B11 (exec 单飞 busybox ps 见 PID 1
+  sleep、合并流 rc5、SIGKILL→137 + trap TERM→23 + 再 run 可用、日志
+  两行 stdout P / stderr F 正则校验 9 位纳秒、pause engine pong/
+  --netns 等值/Run 拒绝、活 socket 拒替换 exit 1、恶意帧错误后
+  ping 存活), 旧 B6/B7 顺移 B12/B13 (shutdown→Bye)。
+- **内核语义实证 (写进 04-node.md)**: PID namespace init 只在自身
+  装有 handler 时才收到祖先 ns 的 SIGTERM (SIGKILL/SIGSTOP 豁免);
+  未处理 TERM 被内核静默丢弃 (child 跑满 30s exit 0, SigBlk=0 非
+  blocking 所致)。推论: e2e 温和停止面必须用 trap init; kubelet
+  `stop_container` 已有 TERM→10s STOP_GRACE→SIGKILL 升级链 (k8s
+  语义, 无需修); pause sandbox 停止 = TERM(丢弃)→engine 10s
+  PAUSE_STOP_GRACE→kubelet Shutdown 兜底 (~10s, 记 T4.13 优化)。
+- 假回归诊断 (all-gates gate 7 六连 FAIL): G25a/b/G26a-d/G30 +
+  ST1-ST6 + F3-F5 同因 — 宿主残留 `cni0=10.244.0.1/24` (11-15 的
+  异网段实验, /tmp/envdbg), 每次 RunPodSandbox 报 "cni0 already
+  has an IP address different from 10.42.0.1/24", pod 永久
+  ContainerCreating。**非 M3/M4 回归**: 净机复跑 G25 三连全绿。
+- 真实修复 1 (Q48): gate 6 曾 FAIL — engine M2 误引 `common`
+  (仅用 `now_rfc3339_nano`); 按 Q48 允许清单 (engine-proto + nsrun)
+  内联 `civil_from_days`/`rfc3339_nano` 到 `engine/src/logs.rs`
+  (与 common 逐字同步, 跨断言测试), `Cargo.toml` 回到两依赖。
+- 真实修复 2 (S40c 延续): golden `nodes.sh` 增 cni0 预检 — cni0
+  存在且 IPv4 不属 10.42.0.0/16 时, G25/G26 一行可操作 SKIP
+  (`ip link delete cni0 to recover`) + G30 同因 SKIP, 取代六行
+  误导性 FAIL; 同网段 (10.42.x.x) 或无 cni0 不拦 (flannel 复用
+  语义, S40c 共存策略)。
+
+**Evidence**
+- tests 全绿: nsrun 28 / engine-proto 2 / **engine 22** (+1 内联
+  格式测试) / engine-client 7 / kubelet ~121 / multicall 20 /
+  common 15 / runtime 53; clippy -D warnings 0; fmt clean。
+- e2e: `engine-selftest.sh` **26/0** (E1-E11); `builtin-runtime-e2e.sh`
+  **B1-B13** (engine exited 0)。
+- 净机复现: 手工 G25 流 (server+agent+airgap pause) pod →
+  Running+Ready, sandbox Ready, 容器 Running (清 cni0 后 ~8s)。
+- `scripts/all-gates.sh` 全绿 (10 gates × 22 rows, 本条目当日);
+  golden G24 (含 sandbox smoke)/G25 三连/G26 四连/G30 三连 OK,
+  battery: resources 12/0, service-traffic ST1-ST6, flannel F1-F5。
+- 宿主卫生事故记录 (非仓库缺陷): 诊断期清理 veth 时误删 3 条
+  docker `maplestory-network` 容器 veth (br-* 误判为 CNI 残留);
+  `docker network disconnect -f` + `connect --ip` 原 IP + alias
+  修复, DNS/TCP/监听全验证恢复 (接口名 eth0→eth1, 应用全通配
+  绑定无影响)。教训: 桥名必须判 master (cni0 vs br-*)。
+
+**Retrospective**
+- 假回归烧掉 ~1h, 但换来两处真实收口 (Q48 清单、golden 预检) 与
+  一条内核规则实证 — "golden 六连 FAIL" 先查宿主 CNI 残留再读
+  代码, 已由预检护栏固化。
+- T4.13 (P3) 排面不变: 镜像存储 (overlayfs 解包)、CNI netns 沙箱、
+  pause 停止延迟优化、探针 e2e 注入 (N4)。
+
+
 ## Sprint 40c — resources-e2e teardown 清理自建 CNI 设备 (2026-11-17)
 
 **Goal:** 收口 S40 恢复窗口实证的事故: resources-e2e 在无 cni0 的净机上以

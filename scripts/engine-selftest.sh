@@ -10,6 +10,8 @@
 #   E2 missing executable -> 127         E6 read-only vs read-write bind mounts
 #   E3 exec a directory  -> 126          E7 cgroup v2 limits visible + cleaned
 #   E4 uid/gid/env/hostname              E8 --new-net gives a fresh netns
+#   E9 --netns joins a live netns        E10 signal death: SIGKILL -> 137
+#   E11 SIGTERM runs the trapping init
 #
 # SKIP semantics (Q25): no root, no static busybox, or a kernel without
 # mount_setattr => one "SKIP engine-selftest:" line and exit 0. Any other
@@ -184,6 +186,92 @@ if [[ -n "$CHILD_NET" && "$CHILD_NET" != "$HOST_NET" && "$CHILD_NET" == net:* ]]
   ok "E8 --new-net ($HOST_NET -> $CHILD_NET)"
 else
   bad "E8 --new-net (host [$HOST_NET] child [$CHILD_NET])"
+fi
+
+# --- E9-E11: netns join + signal-death exits -------------------------------
+# These need pgrep to find the container child (the single direct child
+# of a running engine-run). Without pgrep the cases SKIP, not FAIL.
+if ! command -v pgrep >/dev/null; then
+  echo "SKIP E9-E11 (pgrep is not available)"
+else
+  # holder_pid <engine-run-pid>: poll until nsrun::spawn forked the child.
+  holder_pid() {
+    local i p
+    for i in $(seq 100); do
+      p="$(pgrep -P "$1" 2>/dev/null | head -n1)"
+      if [[ -n "$p" ]]; then
+        printf '%s\n' "$p"
+        return 0
+      fi
+      kill -0 "$1" 2>/dev/null || break
+      sleep 0.05
+    done
+    return 1
+  }
+
+  # signal_exit <label> <signo> <want> <argv...>: start a fresh-netns
+  # container, kill its PID 1 from outside. A pid-ns init only receives
+  # an ancestor's SIGTERM if it trapped it (SIGKILL always lands), so
+  # the unhandled case asserts 128+signo and the graceful one the trap
+  # code.
+  signal_exit() {
+    local label="$1" signo="$2" want="$3"; shift 3
+    local r epid cpid
+    r="$(new_rootfs "sig$signo")"
+    "$BIN" engine-run --rootfs "$r" --new-net --mount "$BUSYBOX:/bin/busybox" \
+      -- "$@" >"$TMP/sig$signo.out" 2>"$TMP/sig$signo.err" &
+    epid=$!
+    if cpid="$(holder_pid "$epid")"; then
+      kill "-$signo" "$cpid"
+      set +e
+      wait "$epid"
+      RC=$?
+      set -e
+      check_rc "$label" "$want" "$RC"
+    else
+      bad "$label (holder container never started)"
+      pkill -P "$epid" 2>/dev/null || true
+      kill "$epid" 2>/dev/null || true
+      set +e
+      wait "$epid" 2>/dev/null
+      set -e
+    fi
+  }
+
+  # E9: a second engine-run joins the first container's netns verbatim.
+  R="$(new_rootfs e9)"
+  "$BIN" engine-run --rootfs "$R" --new-net --mount "$BUSYBOX:/bin/busybox" \
+    -- /bin/busybox sleep 30 >"$TMP/e9.hold.out" 2>"$TMP/e9.hold.err" &
+  HOLD=$!
+  if CPID="$(holder_pid "$HOLD")"; then
+    HOLDER_NET="$(readlink "/proc/$CPID/ns/net")"
+    R="$(new_rootfs e9b)"
+    run_engine "$TMP/e9.out" "$TMP/e9.err" \
+      --rootfs "$R" --netns "/proc/$CPID/ns/net" --mount "$BUSYBOX:/bin/busybox" -- \
+      /bin/busybox readlink /proc/self/ns/net
+    check_rc "E9 netns join run" 0 "$RC"
+    JOIN_NET="$(tr -d '[:space:]' <"$TMP/e9.out")"
+    if [[ -n "$JOIN_NET" && "$JOIN_NET" == "$HOLDER_NET" ]]; then
+      ok "E9 --netns joined the holder's netns"
+    else
+      bad "E9 --netns (holder [$HOLDER_NET] joiner [$JOIN_NET])"
+    fi
+    kill "$CPID" 2>/dev/null || true
+    set +e
+    wait "$HOLD" 2>/dev/null
+    set -e
+  else
+    bad "E9 holder container never started"
+    pkill -P "$HOLD" 2>/dev/null || true
+    kill "$HOLD" 2>/dev/null || true
+    set +e
+    wait "$HOLD" 2>/dev/null
+    set -e
+  fi
+
+  signal_exit "E10 SIGKILL death -> 137" 9 137 /bin/busybox sleep 30
+  signal_exit "E11 SIGTERM runs the trapping init (exit 7)" 15 7 \
+    /bin/busybox sh -c 'trap "exit 7" TERM; while :; do sleep 1; done'
 fi
 
 echo

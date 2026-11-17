@@ -5,10 +5,13 @@
 # internal frame format (`u32 LE len | u8 kind | payload`).
 #
 # Cases:
-#   B1 ping/pong                  B5 raw non-UTF8 stdout stays raw
-#   B2 run: stream/exit events    B6 malformed request -> error + close
-#   B3 exec failure: 127 surface  B7 shutdown -> bye + process exit 0
-#   B4 cgroup limits over the wire
+#   B1 ping/pong                  B8 signal: SIGKILL -> 137, TERM trap -> 23
+#   B2 run: stream/exit events    B9 CRI log lines (P/F per stream)
+#   B3 exec failure: 127 surface  B10 pause engine: pong pid + netns join
+#   B4 cgroup limits over the wire  B11 live-socket refusal (Q49)
+#   B5 raw non-UTF8 stdout        B12 malformed request -> error, survives
+#   B6 exec: PID 1 visible in ns  B13 shutdown -> bye + process exit 0
+#   B7 exec: merged streams + code
 #
 # Preconditions: PRE-BUILT binary, real root, static busybox, python3 for the
 # wire client. Missing inputs => "SKIP builtin-runtime-e2e:" + exit 0 (Q25);
@@ -77,21 +80,29 @@ if [[ ! -S "$SOCK" ]]; then
   exit 1
 fi
 
-if ! python3 - "$SOCK" "$ROOTFS" "$BUSYBOX" <<'PY'
+if ! python3 - "$SOCK" "$ROOTFS" "$BUSYBOX" "$BIN" <<'PY'
 import json
 import os
+import re
 import socket
 import struct
+import subprocess
 import sys
+import time
 
-sock_path, rootfs, busybox = sys.argv[1], sys.argv[2], sys.argv[3]
+sock_path, rootfs, busybox, bin_path = (
+    sys.argv[1],
+    sys.argv[2],
+    sys.argv[3],
+    sys.argv[4],
+)
 MOUNT = [{"source": busybox, "target": "/bin/busybox", "readonly": False}]
 
 
-def connect():
+def connect(path=None):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(20)
-    s.connect(sock_path)
+    s.connect(path or sock_path)
     return s
 
 
@@ -216,20 +227,217 @@ assert events[-1].get("event") == "exited" and events[-1].get("code") == 0, even
 assert out == b"a\xffb\n", f"B5 raw stdout {out!r}"
 print("OK   B5 non-UTF8 stdout preserved")
 
-# B6: malformed control JSON -> error event, then the session closes.
+# B6: exec inside a running container sees the container's PID namespace
+# (the `sleep 30` is PID 1 there). One in-flight exec per engine (Q50).
+send_json(
+    s,
+    {
+        "op": "run",
+        "spec": {
+            "id": "b6",
+            "rootfs": rootfs,
+            "argv": ["/bin/busybox", "sleep", "30"],
+            "mounts": MOUNT,
+        },
+    },
+)
+started = recv_event(s)
+assert started.get("event") == "started" and started.get("pid", 0) > 0, started
+
+
+def exec_req(argv):
+    send_json(s, {"op": "exec", "id": "b6", "argv": argv})
+    events, out, err = [], b"", b""
+    while True:
+        kind, payload = recv_frame(s)
+        if kind == 2:
+            out += payload
+        elif kind == 3:
+            err += payload
+        else:
+            event = json.loads(payload)
+            events.append(event)
+            if event.get("event") in ("exec_exited", "error"):
+                return events, out, err
+
+
+events, out, err = exec_req(["/bin/busybox", "ps"])
+assert events[0].get("event") == "exec_started" and events[0].get("exec_id") == "exec-1", events
+assert events[0].get("pid", 0) > 0, events
+assert events[-1] == {"event": "exec_exited", "exec_id": "exec-1", "code": 0}, events
+assert b"sleep" in out, f"B6 ps output {out!r}"
+print("OK   B6 exec sees PID 1 (sleep) in the container ns")
+
+# B7: exec output merges raw kinds 2/3 and the exit code rides ExecExited.
+events, out, err = exec_req(
+    ["/bin/busybox", "sh", "-c", "echo xout; echo xerr >&2; exit 5"]
+)
+assert events[-1].get("code") == 5, events
+assert out == b"xout\n" and err == b"xerr\n", (out, err)
+print("OK   B7 exec merged streams + exit code 5")
+
+# B8: Signal semantics (pid-ns rule: an ancestor's SIGTERM reaches the
+# container init only if it trapped it; SIGKILL always lands). Retire
+# b6's sleep with SIGKILL -> Exited 137, then the graceful path runs a
+# trapping init's handler, then the engine still serves another run.
+send_json(s, {"op": "signal", "id": "b6", "signo": 9})
+assert recv_event(s) == {"event": "exited", "id": "b6", "code": 137}, "B8 SIGKILL must map to 128+9"
+send_json(
+    s,
+    {
+        "op": "run",
+        "spec": {
+            "id": "b8a",
+            "rootfs": rootfs,
+            "argv": [
+                "/bin/busybox",
+                "sh",
+                "-c",
+                "trap 'exit 23' TERM; while :; do sleep 1; done",
+            ],
+            "mounts": MOUNT,
+        },
+    },
+)
+started = recv_event(s)
+assert started.get("event") == "started" and started.get("id") == "b8a", started
+send_json(s, {"op": "signal", "id": "b8a", "signo": 15})
+assert recv_event(s) == {"event": "exited", "id": "b8a", "code": 23}, "B8 graceful TERM must run the init's trap"
+events, out, err = run(
+    s,
+    {
+        "id": "b8b",
+        "rootfs": rootfs,
+        "argv": ["/bin/busybox", "echo", "again"],
+        "mounts": MOUNT,
+    },
+)
+assert events[-1].get("code") == 0 and out == b"again\n", (events, out)
+print("OK   B8 signal: SIGKILL -> 137, TERM trap -> 23; engine serves the next run")
+
+# B9: spec.log_path appends CRI lines "<RFC3339Nano> <stream> <P|F> <body>".
+# `printf p` (no newline) flushes as P on the stream switch to stderr.
+logfile = os.path.join(os.path.dirname(sock_path), "b9.cri.log")
+events, out, err = run(
+    s,
+    {
+        "id": "b9",
+        "rootfs": rootfs,
+        "argv": ["/bin/busybox", "sh", "-c", "printf p; echo e >&2"],
+        "mounts": MOUNT,
+        "log_path": logfile,
+    },
+)
+assert events[-1].get("code") == 0, events
+lines = open(logfile, encoding="utf-8").read().splitlines()
+assert len(lines) == 2, lines
+stamp = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z"
+assert re.fullmatch(stamp + r" stdout P p", lines[0]), lines
+assert re.fullmatch(stamp + r" stderr F e", lines[1]), lines
+print("OK   B9 CRI log lines (stream-switch flush P, newline flush F)")
+
+# B10: a --pause engine (Q49): pong carries the pause pid, a member
+# engine-run --netns joins that netns, Run is refused, Shutdown exits 0.
+tmp = os.path.dirname(sock_path)
+pause_sock = os.path.join(tmp, "pause.sock")
+with open(os.path.join(tmp, "pause.log"), "wb") as pause_log:
+    pause = subprocess.Popen(
+        [bin_path, "engine", "serve", "--socket", pause_sock, "--pause"],
+        stderr=pause_log,
+    )
+for _ in range(200):
+    if os.path.exists(pause_sock):
+        break
+    time.sleep(0.05)
+assert os.path.exists(pause_sock), "B10 pause engine never created its socket"
+psock = connect(pause_sock)
+send_json(psock, {"op": "ping"})
+pong = recv_event(psock)
+assert pong.get("event") == "pong" and pong.get("pid", 0) > 0, pong
+pause_pid = pong["pid"]
+assert os.path.isdir(f"/proc/{pause_pid}"), f"B10 pause pid {pause_pid} not alive"
+holder_netns = os.readlink(f"/proc/{pause_pid}/ns/net")
+joined = subprocess.run(
+    [
+        bin_path,
+        "engine-run",
+        "--rootfs",
+        rootfs,
+        "--netns",
+        f"/proc/{pause_pid}/ns/net",
+        "--mount",
+        f"{busybox}:/bin/busybox",
+        "--",
+        "/bin/busybox",
+        "readlink",
+        "/proc/self/ns/net",
+    ],
+    capture_output=True,
+    timeout=60,
+)
+assert joined.returncode == 0, joined.stderr
+assert joined.stdout.decode().strip() == holder_netns, (
+    f"B10 netns join {joined.stdout!r} != {holder_netns}"
+)
+send_json(
+    psock,
+    {
+        "op": "run",
+        "spec": {"id": "x", "rootfs": rootfs, "argv": ["/bin/busybox", "true"], "mounts": MOUNT},
+    },
+)
+refused = recv_event(psock)
+assert refused.get("event") == "error" and "cannot run" in refused.get("message", ""), refused
+send_json(psock, {"op": "shutdown"})
+assert recv_event(psock) == {"event": "bye"}
+psock.close()
+assert pause.wait(timeout=15) == 0, "B10 pause engine did not exit 0"
+print("OK   B10 pause engine: pong pid, netns join, run refused, exit 0")
+
+# B11: a second engine must refuse a live engine's socket (Q49) and the
+# live engine keeps answering.
+live_sock = os.path.join(tmp, "live.sock")
+with open(os.path.join(tmp, "live.log"), "wb") as live_log:
+    live = subprocess.Popen(
+        [bin_path, "engine", "serve", "--socket", live_sock], stderr=live_log
+    )
+for _ in range(200):
+    if os.path.exists(live_sock):
+        break
+    time.sleep(0.05)
+assert os.path.exists(live_sock), "B11 live engine never created its socket"
+with open(os.path.join(tmp, "dupe.log"), "wb") as dupe_log:
+    dupe = subprocess.Popen(
+        [bin_path, "engine", "serve", "--socket", live_sock], stderr=dupe_log
+    )
+    assert dupe.wait(timeout=15) == 1, "B11 the second engine must refuse (exit 1)"
+dupe_out = open(os.path.join(tmp, "dupe.log"), "rb").read()
+assert b"refusing to replace" in dupe_out, dupe_out
+lsock = connect(live_sock)
+send_json(lsock, {"op": "ping"})
+assert recv_event(lsock) == {"event": "pong"}, "B11 the live engine must keep answering"
+send_json(lsock, {"op": "shutdown"})
+assert recv_event(lsock) == {"event": "bye"}
+lsock.close()
+assert live.wait(timeout=15) == 0
+print("OK   B11 a live engine's socket is never replaced (Q49)")
+
+# B12: malformed control JSON -> error event; since M2 the session
+# survives it (send_error + continue), so a follow-up ping still works.
 send(s, 1, b"{not json")
 event = recv_event(s)
 assert event.get("event") == "error" and event.get("message"), event
-assert s.recv(1) == b"", "B6 session did not close after the error"
+send_json(s, {"op": "ping"})
+assert recv_event(s) == {"event": "pong"}, "B12 session must survive a bad request"
 s.close()
-print("OK   B6 malformed request -> error + close")
+print("OK   B12 malformed request -> error; session survives")
 
-# B7: shutdown is acknowledged, then the engine process exits.
+# B13: shutdown is acknowledged, then the engine process exits.
 s = connect()
 send_json(s, {"op": "shutdown"})
-assert recv_event(s) == {"event": "bye"}, "B7 shutdown not acknowledged"
+assert recv_event(s) == {"event": "bye"}, "B13 shutdown not acknowledged"
 s.close()
-print("OK   B7 shutdown -> bye")
+print("OK   B13 shutdown -> bye")
 PY
 then
   echo "FAIL builtin-runtime-e2e: protocol client failed" >&2
@@ -257,4 +465,4 @@ fi
 grep -q "listening on" "$LOG" || { echo "FAIL engine never logged its listener" >&2; exit 1; }
 
 echo
-echo "builtin-runtime-e2e: B1-B7 passed (engine exited 0)"
+echo "builtin-runtime-e2e: B1-B13 passed (engine exited 0)"
