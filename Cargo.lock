@@ -526,6 +526,7 @@ dependencies = [
  "clap",
  "common",
  "controllers",
+ "engine-client",
  "flanneld",
  "infra",
  "k8s-openapi",
@@ -1062,6 +1063,7 @@ dependencies = [
 name = "engine"
 version = "0.2.0"
 dependencies = [
+ "common",
  "engine-proto",
  "nsrun",
 ]
@@ -2000,6 +2002,8 @@ dependencies = [
  "async-trait",
  "axum",
  "common",
+ "engine-client",
+ "engine-proto",
  "infra",
  "k8s-openapi",
  "runtime",

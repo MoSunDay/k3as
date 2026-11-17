@@ -124,6 +124,15 @@ fn peer_data_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/init-pro"))
 }
 
+/// T4.12 (Q51): the agent records its boot engine selection under
+/// `<data_dir>/run/engine/mode`; `builtin` means the node runs the
+/// built-in engine and no containerd/CRI socket exists.
+fn engine_mode_is_builtin(data_dir: &Path) -> bool {
+    std::fs::read_to_string(data_dir.join("run").join("engine").join("mode"))
+        .map(|m| m.trim() == "builtin")
+        .unwrap_or(false)
+}
+
 /// The agent's containerd/CRI socket under a data dir (matches the layout
 /// `runtime::AgentRuntimePaths` renders — T4.1/Q25; kept duplicated here so
 /// the multicall crate stays dependency-free).
@@ -185,6 +194,16 @@ pub fn ctr_address_args(args: &[String], data_dir: &Path) -> Vec<String> {
 pub fn external_stub(action: Action, args: &[String]) -> std::process::ExitCode {
     if matches!(action, Action::Containerd | Action::Ctr | Action::Crictl) {
         let name = action.as_str();
+        // T4.12 (Q51): a built-in-engine node has no containerd/CRI socket
+        // at all — refuse with a pointer at kubectl instead of exec'ing a
+        // peer that can only fail to connect (or hang on a dead socket).
+        if engine_mode_is_builtin(&peer_data_dir()) {
+            eprintln!(
+                "init-pro {name}: this node runs the built-in engine (T4.12); \
+                 there is no containerd/CRI socket. Use kubectl instead."
+            );
+            return std::process::ExitCode::from(2);
+        }
         if let Some(bin) = staged_peer_in(&peer_data_dir(), name) {
             let data_dir = peer_data_dir();
             let exec_args = match action {

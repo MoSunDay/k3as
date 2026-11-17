@@ -12,7 +12,6 @@
 //! staging.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +19,8 @@ use std::time::Duration;
 use ::runtime as node_runtime;
 use common::embed::EmbeddedManifest;
 use infra::{Config, Shutdown};
+
+use crate::storage_dsn::open_store;
 
 /// Server-only wiring: where to bind the discovery API + which in-process
 /// control-plane components are enabled (Q19).
@@ -66,9 +67,26 @@ pub struct RegistryBind {
 }
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
-    run_supervised("server", cfg, Some(bind), None, None, None, None, None)
+    // Servers never run the node runtime (the `bind.is_none()` blocks are
+    // agent-only), so the engine choice is inert here; pass containerd to
+    // keep the signature honest (T4.12/Q51).
+    run_supervised(
+        "server",
+        cfg,
+        Some(bind),
+        None,
+        None,
+        None,
+        None,
+        None,
+        "containerd".to_string(),
+    )
 }
 
+// T4.12 (Q49/Q51): the agent's CLI flag surface is positional by design
+// (k3s parity); bundling it into a struct mid-T4.12 would churn every
+// caller for no behavioral gain.
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     cfg: Config,
     server_url: Option<String>,
@@ -76,6 +94,9 @@ pub fn run_agent(
     node_ip: String,
     kubelet_port: u16,
     flannel: crate::flannel::FlannelNet,
+    // T4.12 (Q48/Q51): "builtin" runs the node on the built-in engine
+    // (after the boot probe); anything else means the staged containerd.
+    container_engine: String,
     // T7.1 Phase B (Q37): `Some(anyhome_addr)` enables the node-side Agent
     // execution loop (see `run_supervised`).
     agent_exec_addr: Option<String>,
@@ -89,6 +110,7 @@ pub fn run_agent(
         Some((node_ip, kubelet_port)),
         Some(flannel),
         agent_exec_addr,
+        container_engine,
     )
 }
 
@@ -148,6 +170,7 @@ fn run_supervised(
     // execution loop with `addr` as the fallback anyhome NFS address for
     // Agents without a workspace annotation.
     agent_exec_addr: Option<String>,
+    container_engine: String,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -207,7 +230,22 @@ fn run_supervised(
         // T6.3 (Q40): embedded image registry (server-only). Drained right
         // after anyhome, before the API surface.
         let mut registry_drain: Option<tokio::task::JoinHandle<()>> = None;
-        if bind.is_none() {
+        // T4.12 (Q49/Q51): engine selection for this boot. `builtin` runs
+        // the node on the built-in engine once the Q51 boot probe passes;
+        // any probe failure falls back to the staged containerd with a
+        // Warning. The choice is recorded under run/engine/mode (multicall
+        // peers read it to answer "no containerd socket here").
+        let builtin = if bind.is_none() && container_engine == "builtin" {
+            let picked = matches!(
+                crate::engine_probe::probe(&cfg.data_dir, role).await,
+                crate::engine_probe::Outcome::Builtin
+            );
+            crate::engine_probe::write_mode(&cfg.data_dir, picked);
+            picked
+        } else {
+            false
+        };
+        if bind.is_none() && !builtin {
             match node_runtime::start_agent_runtime(&cfg.data_dir, runtime_shutdown.clone()) {
                 Ok(task) => {
                     runtime_drain = Some(tokio::spawn(async move {
@@ -234,38 +272,51 @@ fn run_supervised(
         if bind.is_none() {
             if let Some(url) = server_url {
                 let node = node_name.unwrap_or_else(kubelet::default_node_name);
-                let paths = node_runtime::AgentRuntimePaths::for_data_dir(&cfg.data_dir);
-                match node_runtime::CriCtl::for_paths(&paths) {
-                    Some(cri) => {
-                        // The kubelet http client is plain-http only in v1
-                        // (Q21; TLS lands with T1.3) — reject anything else
-                        // up front so https join URLs degrade, not fail.
-                        if kubelet::http::HttpJson::parse_url(&url).is_err() {
-                            tracing::warn!(
+                // The kubelet http client is plain-http only in v1 (Q21;
+                // TLS lands with T1.3) — reject anything else up front so
+                // https join URLs degrade, not fail. Both backends obey.
+                if kubelet::http::HttpJson::parse_url(&url).is_err() {
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "kubelet needs an http:// --server URL in v1 (Q21); \
+                         kubelet disabled"
+                    );
+                } else if builtin {
+                    // T4.12 (Q49): the kubelet rides the built-in engine —
+                    // no containerd, no staged crictl tree. The Node object
+                    // reports engine://<version> so describe tells the truth.
+                    let kc = kubelet_config(&url, &node, &kubelet_addr, &cfg)
+                        .with_runtime_version(format!("engine://{}", common::version()));
+                    match kubelet::engine::EngineBackend::new(
+                        &cfg.data_dir,
+                        &kc.sandbox_image,
+                    ) {
+                        Ok(backend) => {
+                            // Q49: adopt-or-clean leftover engine sockets.
+                            backend.recover().await;
+                            let handles =
+                                kubelet::spawn(kc, Arc::new(backend), shutdown.clone());
+                            tracing::info!(
                                 target: "init-pro",
                                 role,
-                                "kubelet needs an http:// --server URL in v1 (Q21); \
-                                 kubelet disabled"
+                                node = %node,
+                                server = %url,
+                                "kubelet started (T4.12 built-in engine)"
                             );
-                        } else {
-                            let kc = match &kubelet_addr {
-                                Some((ip, port)) => kubelet::KubeletConfig::new(
-                                    url.clone(),
-                                    node.clone(),
-                                    cfg.data_dir.clone(),
-                                )
-                                .with_node_ip(ip.clone())
-                                .with_kubelet_port(*port),
-                                None => {
-                                    // Defaults (127.0.0.1:10250) — used by
-                                    // non-CLI callers / tests only.
-                                    kubelet::KubeletConfig::new(
-                                        url.clone(),
-                                        node.clone(),
-                                        cfg.data_dir.clone(),
-                                    )
-                                }
-                            };
+                            kubelet_drain = Some(handles);
+                        }
+                        Err(e) => tracing::warn!(
+                            target: "init-pro",
+                            role,
+                            "built-in engine backend unavailable: {e}; kubelet off"
+                        ),
+                    }
+                } else {
+                    let paths = node_runtime::AgentRuntimePaths::for_data_dir(&cfg.data_dir);
+                    match node_runtime::CriCtl::for_paths(&paths) {
+                        Some(cri) => {
+                            let kc = kubelet_config(&url, &node, &kubelet_addr, &cfg);
                             let handles = kubelet::spawn(
                                 kc,
                                 Arc::new(kubelet::CriCtlBackend::new(cri.clone())),
@@ -281,12 +332,12 @@ fn run_supervised(
                             kubelet_drain = Some(handles);
                             cri_drain = Some(cri);
                         }
+                        None => tracing::warn!(
+                            target: "init-pro",
+                            role,
+                            "no staged crictl; kubelet off (T4.1 tree missing)"
+                        ),
                     }
-                    None => tracing::warn!(
-                        target: "init-pro",
-                        role,
-                        "no staged crictl; kubelet off (T4.1 tree missing)"
-                    ),
                 }
                 // T7.1 Phase B (Q37): node-side Agent execution — stage
                 // (or discover) the opencoder runner binary, then run the
@@ -640,59 +691,20 @@ fn run_supervised(
     }
 }
 
-/// `--datastore-endpoint` classification (**T2.3**, decision **Q29**): the
-/// pure DSN-to-backend selector [`open_store`] switches on.
-#[derive(Debug, PartialEq, Eq)]
-enum Dsn {
-    /// Unset or empty: the zero-dependency embedded default (**Q17**).
-    Embedded,
-    /// `rdb://<path>`: the RocksDB (rdb `store` engine) backend
-    /// (`RdbStorage`, **Q33**).
-    Rdb(PathBuf),
-    /// Anything else (including bare `sqlite://`): fatal, unsupported.
-    Unsupported(String),
-}
-
-/// Classify a `--datastore-endpoint` DSN (**T2.3/Q29**). Pure: no I/O, no
-/// side effects — the openable cases stay distinguishable for tests.
-fn classify_dsn(dsn: Option<&str>) -> Dsn {
-    match dsn {
-        None | Some("") => Dsn::Embedded,
-        Some(s) if s.starts_with("rdb://") => match &s["rdb://".len()..] {
-            "" => Dsn::Unsupported(s.to_string()),
-            path => Dsn::Rdb(PathBuf::from(path)),
-        },
-        Some(s) => Dsn::Unsupported(s.to_string()),
-    }
-}
-
-/// Open the storage backend selected by `--datastore-endpoint` (**T2.3**,
-/// decision **Q29**). Unset/empty keeps the embedded default (**Q17**) —
-/// rdb is an explicit opt-in, never a silent behavior change;
-/// `rdb://<path>` opens the RocksDB backend (**Q33**); other schemes are
-/// fatal (etcd-gRPC is deferred to T3.4).
-async fn open_store(dsn: Option<&str>) -> std::io::Result<Arc<dyn storage::StorageBackend>> {
-    match classify_dsn(dsn) {
-        Dsn::Embedded => Ok(Arc::new(storage::EmbeddedStorage::new())),
-        Dsn::Rdb(path) => {
-            let store = storage::RdbStorage::open(&path)
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            tracing::info!(target: "init-pro", path = %path.display(),
-                "rdb datastore (rocksdb) — T2.3/Q33");
-            Ok(Arc::new(store))
-        }
-        Dsn::Unsupported(s) => {
-            let msg = if s == "rdb://" {
-                "--datastore-endpoint rdb:// requires a file path".to_string()
-            } else {
-                format!(
-                    "unsupported --datastore-endpoint scheme (got {s:?}); \
-                     supported: rdb://<path> (T2.3); empty = embedded default"
-                )
-            };
-            Err(std::io::Error::other(msg))
-        }
+/// Build the kubelet config shared by both runtimes (T4.2/T4.12): the
+/// CLI kubelet address overrides the bind/advertise ip:port, else the
+/// 127.0.0.1:10250 defaults (non-CLI callers / tests only).
+fn kubelet_config(
+    url: &str,
+    node: &str,
+    kubelet_addr: &Option<(String, u16)>,
+    cfg: &Config,
+) -> kubelet::KubeletConfig {
+    match kubelet_addr {
+        Some((ip, port)) => kubelet::KubeletConfig::new(url, node, cfg.data_dir.clone())
+            .with_node_ip(ip.clone())
+            .with_kubelet_port(*port),
+        None => kubelet::KubeletConfig::new(url, node, cfg.data_dir.clone()),
     }
 }
 
@@ -754,49 +766,4 @@ fn print_dry_run(cfg: &Config, manifest: &EmbeddedManifest) {
     let links_lines = manifest.data_links.lines().count();
     println!(".sha256sums: {} entries", sums_lines);
     println!(".links: {} entries", links_lines);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// T2.3/Q33: unset or empty DSN must keep the embedded default (Q17) -
-    /// rdb is explicit opt-in only.
-    #[test]
-    fn classify_dsn_empty_is_embedded() {
-        assert_eq!(classify_dsn(None), Dsn::Embedded);
-        assert_eq!(classify_dsn(Some("")), Dsn::Embedded);
-    }
-
-    #[test]
-    fn classify_dsn_rdb_paths() {
-        assert_eq!(
-            classify_dsn(Some("rdb:///tmp/a.rdb")),
-            Dsn::Rdb(PathBuf::from("/tmp/a.rdb"))
-        );
-        assert_eq!(
-            classify_dsn(Some("rdb://rel.rdb")),
-            Dsn::Rdb(PathBuf::from("rel.rdb"))
-        );
-    }
-
-    #[test]
-    fn classify_dsn_rejects_bare_rdb_and_foreign_schemes() {
-        assert_eq!(
-            classify_dsn(Some("rdb://")),
-            Dsn::Unsupported("rdb://".to_string())
-        );
-        assert_eq!(
-            classify_dsn(Some("sqlite:///tmp/a.db")),
-            Dsn::Unsupported("sqlite:///tmp/a.db".to_string())
-        );
-        assert_eq!(
-            classify_dsn(Some("mysql://x")),
-            Dsn::Unsupported("mysql://x".to_string())
-        );
-        assert_eq!(
-            classify_dsn(Some("postgres://y")),
-            Dsn::Unsupported("postgres://y".to_string())
-        );
-    }
 }
