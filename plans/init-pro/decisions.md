@@ -2497,3 +2497,74 @@ overlayfs, 真 root) 全绿，且 kiri 的 `kiri-init` 已用同一模型跑通�
 CNI 沙箱、exec/attach、日志落盘等工程；containerd 与 builtin 双后端
 并存会扩大测试矩阵。明确 out: Windows、CRI gRPC server、pod 级
 user namespace。
+
+## Q49 — T4.12 进程池模型: 每容器一个 `engine serve` (2026-11-17, LOCKED)
+
+**Context.** P1 (Q48) 的 engine 一次只持有一个容器（`engine busy` 拒绝第二
+客户端）。T4.12 要让 kubelet 把整个 Pod 生命周期跑在 builtin engine 上，
+必须先定进程拓扑：单 engine 多容器（需要 stream 复用/多路分解）还是
+每容器一个 engine 进程。
+
+**Options.** (a) 单 engine 进程 + 容器 id 复用连接（协议要 stream_id，
+事件泵要按容器分发）；(b) 每容器一个 `engine serve`，socket 在
+`<data_dir>/run/engine/<id>.sock`；(c) daemon 进程内嵌（违反 Q48 的
+显式进程崩溃模型）。
+
+**Decision.** 选 (b)：每容器一个 `engine serve` 子进程，socket 固定在
+`<data_dir>/run/engine/<id>.sock`。sandbox = **pause 模式 engine**：以
+`--pause` 起一个过 start gate 后永久等待信号的 PID 1（持有 fresh netns，
+永不 execve）；同 Pod 容器以 `--netns /proc/<sandbox_pid>/ns/net` 加入。
+kubelet 侧维护注册表（id → socket/pid/规格），重启后扫
+`<data_dir>/run/engine/` 恢复视图。exec 连**容器自己的 socket**，复用其
+主连接（「连接=容器」，见 Q50）。规模上限：**>64 容器/节点则重审**
+（届时切单进程多会话 + stream_id v2，开新卡）。
+
+**Consequences.** (+) 协议无需复用/多路分解；单容器崩溃面 = 单 engine
+进程；注册表是纯状态可单测。(−) 每容器一个进程 + 一个 socket 的 fd/进程
+开销；**agent 重启 = 容器全灭**（连接断 → engine 收割容器；接受并记录，
+不做热迁移）；并发受 Q48 单线程约束，由多进程横向解决。
+
+## Q50 — T4.12 日志与 exec 流: O_APPEND CRI 日志 + 单连接合并 exec (2026-11-17, LOCKED)
+
+**Context.** kubelet 的日志读取侧（T4.6/Q39）按
+`<log_root>/<uid>/<YYYY-MM-DD>/<name>.<attempt>.log` + CRI 文本行 +
+copytruncate 轮转工作；builtin engine 必须落出**同构**文件。exec 方面
+P1 帧协议只有 run 流（kind 2/3 raw stdout/stderr）。
+
+**Options.** 日志：(a) kubelet 事件泵收集后落盘（泵断 = 日志丢）；
+(b) engine 直接 O_APPEND 写 CRI 文本。exec：(a) 第二连接 + kind 4
+attach 扩展；(b) exec 骑容器主连接，输出与容器流共用 kind 2/3。
+
+**Decision.** 日志选 (b)：engine 按 kubelet 既有路径以 **O_APPEND** 写
+CRI 文本行（`<RFC3339Nano> <stdout|stderr> <P|F> <line>`；attempt 由
+kubelet 侧注册表按 `max+1` 决定，与读取侧 newest-attempt 挑选兼容，
+copytruncate 轮转语义不变）。exec 选 (b)：**单连接、单在途**；
+`Request::Exec` 在容器主连接上发出，`ExecStarted`/`ExecExited` 事件
+定界，stdout/stderr 以 kind 2/3 复用承载（无 exec id 标签 —— 归属由
+「连接=容器 + 单在途」保证）。**kind 4（stdin）双侧维持拒绝**；TTY、
+attach、port-forward 明确 out（记 v2）。
+
+**Consequences.** (+) 日志与 containerd 路径同构，读取/轮转面零改动；
+泵断不丢已落盘日志；exec 无新帧 kind。(−) exec 输出与容器输出在 wire
+上不可区分（单在途约束 + ExecStarted/ExecExited 定界弥补）；无 stdin
+意味着 `kubectl exec -i` 的输入面 v1 缺失（记录在案）。
+
+## Q51 — T4.12 节点级 one-shot 回退: boot 探针失败退回 containerd (2026-11-17, LOCKED)
+
+**Context.** Q48 规定 preflight 失败时 `engine serve` 是硬错误，节点级
+选择（builtin vs containerd）需要一个不依赖 kubelet 的启动期判定点。
+
+**Options.** (a) 直接信任 preflight 的静态检查（root/mount_setattr/proc）
+——覆盖不了 socket 布局损坏、SELinux 等运行态失败；(b) boot 时起一个
+one-shot 探针 engine，ping 预算内应答才算 builtin 可用。
+
+**Decision.** 选 (b)：agent/server 启动且 `--container-engine=builtin`
+时，在 `<data_dir>/run/engine/_probe.sock` 起一个 `engine serve` 探针，
+**15s ping 预算**；失败（含探测到 live engine 占位）→ kill + wait +
+unlink 陈旧 socket → **回退 containerd 路径**并打 Warning。默认值仍是
+`containerd`；默认翻转是 T4.13 N4 的 go/no-go 决定，不在本卡。
+
+**Consequences.** (+) 运行态失败也有确定回退，节点永不因 builtin 探针
+失败而 boot 失败；探针 socket 与容器 socket 同目录，布局单点。
+(−) builtin 启动路径多一次进程起落（~百 ms 级）；「probe 成功但后续
+容器起失败」仍按普通容器错误面处理（不整节点回退）。

@@ -646,49 +646,56 @@ node registration, and the built-in container engine (T4.11–T4.13).
 
 ---
 
-## T4.12 — 内置引擎 kubelet 接线 P2 (`CriBackend` + exec + 真实选择)
+## T4.12 — 内置引擎 kubelet 接线 P2 (`EngineBackend` + exec + 真实选择)
 
 - **目标 / Goal**
-  kubelet 能把 Pod 生命周期跑在 builtin engine 上，并由
-  `--container-engine=builtin` 真实选择；不经过 containerd/crictl。
+  kubelet 能把 Pod 生命周期跑在 builtin engine 上（Q49 进程池模型：
+  每容器一个 `engine serve`，sandbox = pause engine），并由
+  `--container-engine=builtin` 经 Q51 boot 探针真实选择；不经过
+  containerd/crictl。
 
 - **核心实现 / Core implementation**
-  - `crates/kubelet/src/engine_backend.rs` (NEW): `EngineBackend`
-    实现 `crates/kubelet/src/cri_backend.rs` 的 `CriBackend` 11 个方法；
-    用 `engine-client` 维持单连接，事件泵把 stdout/stderr/exited 映射回
-    现有 runner。
-  - `crates/cli/src/runtime.rs::CriCtl::for_paths` 选择面：builtin 分支
-    跳过 vendor containerd/crictl staging，改起
-    `init-pro engine serve --socket`；preflight 失败回退 containerd 并
-    发 Warning。
-  - `CriBackend::exec_container`：协议扩展 attach/stdin/close-stdin
-    (kind 4 已有) + 退出帧；kubelet 日志走既有 log path 落盘。
-  - Pod sandbox：每 Pod 一个 netns；容器不再各自 `CLONE_NEWNET`，
-    而是在 nsrun child 里 `setns` 到 sandbox netns (为 T4.13 CNI 留
-    接缝)；非网络 namespace 语义不变。
+  - `crates/kubelet/src/engine/` (NEW 目录，非单文件): `backend.rs`
+    (`EngineBackend` 实现 `CriBackend` 11 方法；状态串
+    `SANDBOX_READY`/`CONTAINER_RUNNING`/`CONTAINER_EXITED`)、
+    `registry.rs` (id→socket/pid/规格；重启后扫
+    `<dd>/run/engine/` 恢复)、`launch.rs` (起 sandbox=pause engine +
+    容器 engine；wait 收割映射 `Exited`)、`logs.rs` (与 kubelet 读取侧
+    同构的日志路径计算)、`exec.rs` (连容器 socket 发 `Exec`，供
+    `server.rs`/`runner.rs` 直调面)。
+  - `nsrun` 基座: `RunSpec` 增 `netns`/`pause`；child 对
+    `/proc/<sandbox_pid>/ns/net` `setns`（先于 pivot_root）；pause 模式
+    过 start gate 后永久等待信号（Q49 sandbox）；`Child::signal(signo)`
+    （SIGKILL 直发）；`nsrun/src/execin.rs` (NEW): fork-relay exec 进
+    运行中容器的 mnt/ipc/uts/net/cgroup(+pid) namespace + chroot 阶梯
+    （PID ns 需 fork-relay，>1 天探针则按停止规则降级）。
+  - 协议扩展 (`engine-proto`): `ContainerSpec` 增 `netns`/`pause`/
+    `log_path`；`Request` 增 `Signal{id,signo}`、`Exec{id,argv,env,
+    workdir}`；`Event` 增 `ExecStarted{exec_id,pid}`、
+    `ExecExited{exec_id,code}`。exec 单在途，kind 2/3 复用；**kind 4
+    双侧维持拒绝**（Q50）；engine 侧 `logs.rs` (NEW) 以 O_APPEND 写
+    CRI 文本行（Q50 路径）。
+  - 选择 + 回退: `--container-engine` 值真实解析（`builtin|containerd`）；
+    builtin 分支跳过 vendor staging/监督，起 Q51 boot 探针
+    （`_probe.sock` + 15s ping 预算，失败 kill+wait+unlink 后回退
+    containerd 并 Warning）；builtin 时 node runtimeVersion 报
+    `engine://<version>`；幂等删除复用 tolerate() 文本匹配。
   - 移除 `--container-engine=builtin` 的 "not wired" 告警；P1 的
     `engine-run`/`engine serve` 保持调试入口。
 
 - **验收手段 / Acceptance**
-  - Fake engine 单测：11 个 `CriBackend` 方法 + 事件映射 + 回退分支。
-  - 集成：kubelet 跑 `engine serve`，创建/启动/停止/删除容器；
-    `kubectl logs`/`exec` 经 apiserver 真实往返。
-  - `scripts/builtin-runtime-e2e.sh` 扩 B8+：kubelet 选 builtin 后
-    Pod 达到 Running，日志/exec 可见；containerd 不在进程树。
-  - `scripts/all-gates.sh` 全绿。
+  - Fake-engine 单测（沿 `tests/support/mod.rs` 模式）: 11 个
+    `CriBackend` 方法 + 事件映射 + attempt 递增（max+1 规则）。
+  - `scripts/engine-selftest.sh` 增 **E9**（sandbox pause: pause 引擎
+    ping 带 pid、`--netns` 加入验证同 netns）、**E10**（运行中容器
+    exec: ps 可见、合并流往返、退出码透传）、**E11**（signal → 容器以
+    `128+WTERMSIG` 退出）。
+  - `scripts/builtin-runtime-e2e.sh` 扩 B8+: signal/exec/pause/日志
+    落盘 + 选择翻转 + 探针失败回退 + engine socket 永不复用
+    `containerd.sock`（`runtime/src/lib.rs` unlink 冲突面）。
+  - `scripts/all-gates.sh` 全绿（battery 8.x 现有行）。
 
-- **P1 → P2 遗留 / Carry-over (S38c 显式记账)** — 以下三项是 P1 **刻意**
-  不做、留给本卡 (T4.12) 的:
-  1. 过 start gate 之后的容器侧 stderr 仍只是 "fd 2 消息 + 退出码"，尚未
-     升格为类型化的 `Output::Error` / `Event::Error` (P1 只保证 125/126/
-     127 三档退出码可读，错误分类留给 backend 映射)。
-  2. 真并发：P1 单线程一次只跑一个容器 (第二个客户端得到 `engine busy`
-     回复)，容器级并发需在本卡的 `EngineBackend` 里用连接池/队列解决，
-     而不是给 engine 加线程。
-  3. `crates/engine-client` 现有 tokio 事件泵尚未接进 kubelet —— 它正是
-     本卡 `EngineBackend` 的接线对象。
-
-- **状态 / Status** — not-started (P2)
+- **状态 / Status** — in-progress (P2)
 - **证据 / Evidence** — —
 - **卡点 / Blockers** — T4.13 的镜像/CNI 未落地前只能跑 host-rootfs
   测试 Pod
@@ -718,7 +725,8 @@ node registration, and the built-in container engine (T4.11–T4.13).
   - 单测：digest 校验、平台选择、层合并顺序、CNI result 解析。
   - e2e: 只跑 builtin engine 的集群 (无 containerd 二进制) 起一个真实
     镜像 Pod，`kubectl logs/exec` + Pod IP 可达 + Service NodePort
-    流量；`scripts/builtin-runtime-e2e.sh` 扩镜像/CNI 用例。
+    流量；`scripts/builtin-pod-e2e.sh` (NEW, P1–P10) 入 battery
+    **8.13**。
   - `scripts/all-gates.sh` (golden + battery) 全绿。
 
 - **状态 / Status** — not-started (P3)

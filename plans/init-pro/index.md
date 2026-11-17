@@ -38,7 +38,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | done (Sprint 40; cpu shares/quota(-1)/period=100000 + mem limit 经 kubelet::resources 纯函数映射 upstream 惯例; status.qosClass 三级; quantity 解析 SSOT 移 common; e2e resources-e2e.sh R1-R4 容器内 cgroup 断言; capacity/eviction Deferred) | T4.2 |
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
 | T4.11 | 4 | 内置容器引擎内核 P1: clone3/namespace + 单线程 engine + 帧协议 (无 runc/containerd, Q48) | done (P1 kernel+protocol; `engine-run`/`engine serve`) | T4.1 |
-| T4.12 | 4 | 内置引擎 kubelet 接线 P2: `CriBackend`/exec + `--container-engine=builtin` 真实选择 | not-started (P2) | T4.11, T4.2 |
+| T4.12 | 4 | 内置引擎 kubelet 接线 P2: `EngineBackend`/exec + `--container-engine=builtin` 真实选择 (Q49 进程池 + Q50 日志/exec 流 + Q51 探针回退) | in-progress (P2) | T4.11, T4.2 |
 | T4.13 | 4 | 内置引擎镜像存储 + CNI 沙箱 P3 (overlayfs 层解包 + flannel netns) | not-started (P3) | T4.12, T4.3, T6.3 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
@@ -56,11 +56,12 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 
-**Counts:** 45 TODOs · 29 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 45 TODOs · 29 done · 3 in-progress (T4.12 P2
+Q49/Q50/Q51；T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
-· 13 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 12 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=13 · Layer5=7 · Layer6=3 · Layer7=5.
 
 ---
