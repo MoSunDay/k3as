@@ -21,8 +21,16 @@ address different from 10.244.0.1/24"), 该节点所有 sandbox 创建 ~2s 循�
   (PREEXISTS 标志, 初始化先于 trap 以兼容 `set -u`); cleanup 末尾仅删除
   本运行创建的设备 (`ip link del ... || true`), 预存在设备不碰 — 与既有
   "复用宿主 cni0 网段" 的共存语义对齐, 保护 live 簇主机。
+- `scripts/resources-e2e.sh` (后续修正, S40c 评审遗留): PREEXISTS 探测上移
+  至 trap 安装之前。修复前 "flag 初始化(0) → trap → 镜像构建 → 探测" 的
+  时序留有窗口: 构建失败或 SIGINT/SIGTERM 时 cleanup 以默认 0 误删宿主
+  预存在 cni0/flannel.1。探测紧跟初始化后, 任何退出路径下 cleanup 引用
+  的 flag 均已反映真实预存在状态。
 
 **Evidence**
+- 模拟器红绿双证 (log-only `ip` shim 模拟共存宿主 + build 脚本 stub
+  `exit 1` 触发早期退出): 修复前 (1f808b8) shim 日志出现 `link del
+  cni0`/`link del flannel.1`; 修复后仅 `link show` 探测, 零删除。
 - `bash -n` 通过; 未在本机复跑 e2e (本机正运行 live 双节点簇, 复跑会
   再造 10.42 cni0 并打断 Running pod), 全量回归留给下一个净机 gate 窗口。
 - 事故实证: node04 残留 `cni0=10.42.0.1/24` + `flannel.1=10.42.0.0/32`

@@ -74,10 +74,16 @@ BASE="http://127.0.0.1:${API_PORT}"
 DD="$(mktemp -d)"
 SRV_LOG="$DD/server.log"; AG_LOG="$DD/agent.log"
 SRV_PID=""; AGENT_PID=""
-# CNI device pre-existence flags; init'd before the trap so cleanup never sees
-# unset vars under `set -u` (the trap below references them).
+# CNI device pre-existence flags: initialized AND probed BEFORE the trap is
+# installed, so cleanup — on ANY exit path, including an image-build failure
+# or SIGINT/SIGTERM in the pre-probe window the flags' defaults used to leave
+# open — never sees unset vars (`set -u`) or stale zeros, and deletes only
+# devices THIS run creates. A pre-existing cni0/flannel.1 belongs to the host
+# (live cluster we coexist with, CIDR reuse below) and must survive the e2e.
 CNI0_PREEXISTS=0
+ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
 FLANNEL1_PREEXISTS=0
+ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
 PAUSE_REF="init-pro.local/pause:0.1"
 ECHO_REF="init-pro.local/echo:0.1"
 NODE_NAME="res-node"
@@ -115,12 +121,6 @@ if [[ "$CNI0_ADDR" =~ ^([0-9]+\.[0-9]+)\.[0-9]+\.[0-9]+/ ]]; then
   CLUSTER_CIDR="${BASH_REMATCH[1]}.0.0/16"
   echo "resources e2e: host cni0 is ${CNI0_ADDR}; reusing ${CLUSTER_CIDR}"
 fi
-# Record whether cni0/flannel.1 already exist so teardown deletes only devices
-# this run creates — a pre-existing pair belongs to the host (live cluster we
-# coexist with, CIDR reuse above) and must survive the e2e.
-ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
-ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
-
 echo "resources e2e: booting cluster (API $BASE, datadir $DD, cidr $CLUSTER_CIDR)"
 "$BIN" server --data-dir "$DD/srv" --bind-address 127.0.0.1 --https-listen-port "$API_PORT" \
   --cluster-cidr "$CLUSTER_CIDR" >"$SRV_LOG" 2>&1 &
