@@ -11,6 +11,8 @@
 #   R2  BestEffort (no resources): cpu.max "max 100000", memory.max "max"
 #       + qosClass BestEffort (quota -1 => no cap, memory omitted)
 #   R3  Burstable (cpu request only): no cpu/mem cap + qosClass Burstable
+#   R4  sub-10m cpu limit: quota clamps up to the 1000µs CFS minimum
+#       (cgroup v2 rejects lower) -> cpu.max "1000 100000"
 #
 # cgroup v2 only (in-container `memory.max`/`cpu.max` paths); a v1 host
 # SKIPs (configuration state, not a conformance break). SKIP semantics
@@ -100,7 +102,8 @@ echo "resources e2e: building the offline images (pause + echo/wfcat) ..."
 
 # --- cluster boot (probe-e2e coexistence recipe) --------------------------------
 CLUSTER_CIDR="10.42.0.0/16"
-CNI0_ADDR="$(ip -4 -o addr show dev cni0 2>/dev/null | awk '{print $4; exit}')"
+# `ip` exits 1 when cni0 does not exist (F11 window / clean host); pipefail would abort the script, so neutralize and let the regex guard below keep the 10.42 default.
+CNI0_ADDR="$(ip -4 -o addr show dev cni0 2>/dev/null | awk '{print $4; exit}' || true)"
 if [[ "$CNI0_ADDR" =~ ^([0-9]+\.[0-9]+)\.[0-9]+\.[0-9]+/ ]]; then
   CLUSTER_CIDR="${BASH_REMATCH[1]}.0.0/16"
   echo "resources e2e: host cni0 is ${CNI0_ADDR}; reusing ${CLUSTER_CIDR}"
@@ -229,8 +232,24 @@ else
   bad "R3 pod res-burstable never became Running"
 fi
 
+# --- R4: sub-10m limit clamps to the 1000µs CFS minimum (S40 review P3) ---------
+new_pod res-clamp R4.json "{
+  \"name\": \"c\", \"image\": \"$ECHO_REF\",
+  \"resources\": {\"limits\": {\"cpu\": \"5m\"}}
+}"
+if [[ "$(wait_pod_running res-clamp)" == "RUN" ]]; then
+  Q="$(pod_field res-clamp 'p.get("status",{}).get("qosClass")=="Burstable" and "S"')"
+  [[ "$Q" == "S" ]] && ok "R4a 5m-limit pod Running, qosClass Burstable" \
+                     || bad "R4a qosClass wrong: $(pod_field res-clamp 'p.get("status",{}).get("qosClass")')"
+  C="$(cgroup_read res-clamp /sys/fs/cgroup/cpu.max)"
+  [[ "$C" == "1000 100000" ]] && ok "R4b quota clamped to CFS floor (cpu.max == '1000 100000')" \
+                             || bad "R4b cpu.max == '$C' (want '1000 100000')"
+else
+  bad "R4 pod res-clamp never became Running (quota below CFS floor?)"
+fi
+
 # --- teardown hygiene (probe-e2e G25C idiom) -------------------------------------
-for p in res-limited res-besteffort res-burstable; do
+for p in res-limited res-besteffort res-burstable res-clamp; do
   curl -s -o /dev/null -X DELETE "$BASE/api/v1/namespaces/default/pods/$p" || true
 done
 for _ in $(seq 1 120); do

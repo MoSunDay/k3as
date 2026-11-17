@@ -523,7 +523,7 @@ node registration, and the built-in container engine (T4.11–T4.13).
 - **状态 / Status** — done (Sprint 40)
 - **证据 / Evidence** — 单测: `kubelet::resources` (映射/QoS 纯函数) +
   `runtime::cri_json::linux_resources_wire_shape` +
-  `common::quantity`; e2e: `scripts/resources-e2e.sh` R1-R3 (容器内
+  `common::quantity`; e2e: `scripts/resources-e2e.sh` R1-R4 (容器内
   `/sys/fs/cgroup/{memory,cpu}.max` 断言 + `status.qosClass`);
   gate: `all-gates.sh` (含 battery 新增 resources-e2e.sh)。
 - **卡点 / Blockers** — none

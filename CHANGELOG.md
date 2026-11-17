@@ -7,6 +7,28 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 40b — T4.9 尾巴: quota CFS 最小钳位 + e2e 净机健壮性 (2026-11-17)
+
+**Goal:** S40 评审 P3 收口: `cpu_quota` 整除下取, sub-10m limit (如 `5m`)
+算出 500µs, 低于 cgroup v2 CFS 最小配额 1000µs → 内核 EINVAL → 容器创建
+循环重试 (该 pod 卡 Pending)。顺带修 resources-e2e 在无 cni0 主机
+(F11 净机窗口) 上的 set -e 自杀。
+
+**Changes**
+- `crates/kubelet/src/resources.rs`: `cpu_quota` 钳位 `.max(1000)`
+  (kernel 拒绝低于一个 period-slice 的 quota); 单测
+  `cpu_quota_clamps_to_cfs_minimum` (5m/9m → 1000, 10m 恰 1000)。
+- `scripts/resources-e2e.sh`: 新增 R4 (5m limit pod → Running +
+  `cpu.max "1000 100000"`, 修复前该 pod 卡 Pending — 回归钉死);
+  `cni0` 探测加 `|| true` (`ip addr show dev cni0` 设备缺失时退出码 1,
+  `set -euo pipefail` 下直接杀死脚本, 下游 regex 守卫本就打算兜底)。
+
+**Evidence**
+- `cargo test --workspace --locked`: 1057 passed 0 failed (+1 钳位单测);
+  clippy -D warnings 0。
+- resources-e2e: **12/12** (R1a-R4b, F11 窗口净机上跑通 — 即第二个
+  修复的实证; 前次同样环境 1.5s 内 RC=1 静默死亡)。
+
 ## Sprint 40 — T4.9 资源限制 → CRI linux.resources + QoS 分级 (done) (2026-11-16)
 
 **Goal:** Pod `resources.limits/requests` 运行时强制进容器 cgroup

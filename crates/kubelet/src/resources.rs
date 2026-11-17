@@ -77,12 +77,15 @@ fn cpu_shares(milli: i64) -> u64 {
 
 /// Upstream `MilliCPUToQuota` at the default 100000 period: no limit →
 /// **-1** (cap explicitly disabled, proto3 0 would mean "unset"); else
-/// `milli * period / 1000`.
+/// `milli * period / 1000`, clamped UP to the 1000µs CFS minimum —
+/// cgroup v2 rejects any quota below one full period-slice (kernel
+/// EINVAL), so a sub-10m limit must not compute 100..900µs (Sprint 40
+/// review follow-up).
 fn cpu_quota(milli: i64) -> i64 {
     if milli <= 0 {
         return -1;
     }
-    (milli * 100_000) / 1000
+    ((milli * 100_000) / 1000).max(1000)
 }
 
 /// The default CFS period kubelet pins whenever it sends a quota.
@@ -250,6 +253,18 @@ mod tests {
         let l = linux_resources(&r);
         assert_eq!(l.cpu_shares, 1536);
         assert_eq!(l.memory_limit_in_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn cpu_quota_clamps_to_cfs_minimum() {
+        // 5m limit: naive math gives 500µs < the cgroup v2 minimum ->
+        // must clamp up to 1000 (9m stays 900 -> also clamped; 10m exact).
+        let r = reqs(&[], &[("cpu", "5m")]);
+        assert_eq!(linux_resources(&r).cpu_quota, 1000);
+        let r = reqs(&[], &[("cpu", "9m")]);
+        assert_eq!(linux_resources(&r).cpu_quota, 1000);
+        let r = reqs(&[], &[("cpu", "10m")]);
+        assert_eq!(linux_resources(&r).cpu_quota, 1000);
     }
 
     #[test]
