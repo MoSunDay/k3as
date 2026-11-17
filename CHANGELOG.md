@@ -7,6 +7,27 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 40c — resources-e2e teardown 清理自建 CNI 设备 (2026-11-17)
+
+**Goal:** 收口 S40 恢复窗口实证的事故: resources-e2e 在无 cni0 的净机上以
+默认 10.42 起 cni0/flannel.1, teardown 不删设备 → 同机稍后加入异网段
+(10.244) live 簇时, bridge ADD 报 code 999 ("cni0 already has an IP
+address different from 10.244.0.1/24"), 该节点所有 sandbox 创建 ~2s 循环
+失败, pod 永久 Pending (手工 `ip link del cni0 flannel.1` 后 kubelet 重试
+循环 3s 内自愈, 4/4 Running)。
+
+**Changes**
+- `scripts/resources-e2e.sh`: 启动探测时记录 cni0/flannel.1 是否已存在
+  (PREEXISTS 标志, 初始化先于 trap 以兼容 `set -u`); cleanup 末尾仅删除
+  本运行创建的设备 (`ip link del ... || true`), 预存在设备不碰 — 与既有
+  "复用宿主 cni0 网段" 的共存语义对齐, 保护 live 簇主机。
+
+**Evidence**
+- `bash -n` 通过; 未在本机复跑 e2e (本机正运行 live 双节点簇, 复跑会
+  再造 10.42 cni0 并打断 Running pod), 全量回归留给下一个净机 gate 窗口。
+- 事故实证: node04 残留 `cni0=10.42.0.1/24` + `flannel.1=10.42.0.0/32`
+  → 删除后自愈, 跨节点 pod ping (host-gw) 0% loss。
+
 ## Sprint 40b — T4.9 尾巴: quota CFS 最小钳位 + e2e 净机健壮性 (2026-11-17)
 
 **Goal:** S40 评审 P3 收口: `cpu_quota` 整除下取, sub-10m limit (如 `5m`)
