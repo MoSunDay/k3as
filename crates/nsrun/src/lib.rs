@@ -20,6 +20,8 @@
 mod caps;
 mod cgroup;
 mod child;
+mod exec_relay;
+mod execin;
 mod handle;
 mod inroot;
 mod mount;
@@ -30,6 +32,22 @@ mod sys;
 use std::io;
 use std::os::fd::AsRawFd;
 
+pub use execin::{exec_into, ExecProc, ExecSpec};
+
+/// Poll a raw descriptor for writability (T4.12 gate 3: the engine's only
+/// poll(2) reach outside `sys`). `Ok(false)` means the budget expired.
+/// `POLLERR`/`POLLHUP` count as ready so the following write surfaces the
+/// real error instead of a silent timeout.
+pub fn poll_writable(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    sys::poll(std::slice::from_mut(&mut pfd), ms)?;
+    Ok(pfd.revents & (libc::POLLOUT | libc::POLLERR | libc::POLLHUP) != 0)
+}
 pub use handle::{Child, Output};
 pub use signal::{install_shutdown_flag, shutdown_requested};
 pub use spec::{BindMount, CgroupLimits, RunSpec};
@@ -295,7 +313,7 @@ fn read_report(fd: libc::c_int, timeout_ms: i32) -> io::Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }
 
-fn readable(fd: libc::c_int, timeout_ms: i32) -> io::Result<bool> {
+pub(crate) fn readable(fd: libc::c_int, timeout_ms: i32) -> io::Result<bool> {
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,

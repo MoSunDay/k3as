@@ -23,7 +23,7 @@ pub enum Output {
 /// Idle slices a reaped child may keep its capture pipes open (a grandchild
 /// inherited them) before `Exited` is reported anyway. `wait` slices are
 /// 100 ms, so the drain is bounded to roughly 300 ms.
-const EXIT_GRACE_SLICES: u8 = 3;
+pub(crate) const EXIT_GRACE_SLICES: u8 = 3;
 
 /// Poll slice used by the blocking wait helpers.
 const WAIT_SLICE: Duration = Duration::from_millis(100);
@@ -31,8 +31,82 @@ const WAIT_SLICE: Duration = Duration::from_millis(100);
 /// Drop-time predicate, kept a pure function so its truth table is testable
 /// without a live pid: only a child that is neither reaped nor reported may
 /// still be SIGKILLed (once reaped the pid can belong to another process).
-fn should_kill(status: Option<i32>, exit_sent: bool) -> bool {
+pub(crate) fn should_kill(status: Option<i32>, exit_sent: bool) -> bool {
     status.is_none() && !exit_sent
+}
+
+/// One `poll(2)`-watched capture pipe.
+fn watch(fd: libc::c_int) -> libc::pollfd {
+    libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }
+}
+
+/// Capture-pipe poll core shared by `Child` and the exec handle (T4.12,
+/// Q50): watches whichever pipes are still open and reads one ready chunk
+/// (EAGAIN = no event). Wait status and grace policy stay with callers.
+pub(crate) fn poll_pipes(
+    stdout: &OwnedFd,
+    stderr: &OwnedFd,
+    stdout_open: &mut bool,
+    stderr_open: &mut bool,
+    timeout: Duration,
+) -> io::Result<Option<Output>> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut fds: Vec<libc::pollfd> = Vec::new();
+    if *stdout_open {
+        fds.push(watch(stdout.as_raw_fd()));
+    }
+    if *stderr_open {
+        fds.push(watch(stderr.as_raw_fd()));
+    }
+    if fds.is_empty() {
+        std::thread::sleep(timeout.min(Duration::from_millis(10)));
+        return Ok(None);
+    }
+    sys::poll(&mut fds, timeout_ms)?;
+    let mut found: Option<Output> = None;
+    let mut index = 0;
+    if *stdout_open {
+        if fds[index].revents != 0 {
+            found = read_chunk(stdout.as_raw_fd(), true, stdout_open)?;
+        }
+        index += 1;
+    }
+    if found.is_none() && *stderr_open && fds[index].revents != 0 {
+        found = read_chunk(stderr.as_raw_fd(), false, stderr_open)?;
+    }
+    Ok(found)
+}
+
+/// `waitpid(WNOHANG)` with the shared ECHILD -> 255 convention.
+pub(crate) fn wait_status(pid: libc::pid_t) -> io::Result<Option<i32>> {
+    match sys::waitpid_nohang(pid) {
+        Ok(code) => Ok(code),
+        Err(e) if e.raw_os_error() == Some(libc::ECHILD) => Ok(Some(255)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Bounded wait shared by `Child` and the exec handle: 100 ms slices
+/// through `next` until it yields `Exited`, else the budget expires.
+pub(crate) fn wait_loop(
+    budget: Duration,
+    timeout_msg: &str,
+    mut next: impl FnMut(Duration) -> io::Result<Option<Output>>,
+) -> io::Result<i32> {
+    let deadline = std::time::Instant::now().checked_add(budget);
+    let slice = budget.min(WAIT_SLICE);
+    loop {
+        if let Some(Output::Exited(code)) = next(slice)? {
+            return Ok(code);
+        }
+        if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_msg));
+        }
+    }
 }
 
 /// A cloned container process owned by the engine.
@@ -64,42 +138,13 @@ impl Child {
         if self.exit_sent {
             return Ok(None);
         }
-        let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-        let mut fds: Vec<libc::pollfd> = Vec::new();
-        if self.stdout_open {
-            fds.push(libc::pollfd {
-                fd: self.stdout.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            });
-        }
-        if self.stderr_open {
-            fds.push(libc::pollfd {
-                fd: self.stderr.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            });
-        }
-        if fds.is_empty() {
-            let status = self.poll_status()?;
-            if let Some(code) = status {
-                return Ok(Some(self.emit_exit(code)));
-            }
-            std::thread::sleep(timeout.min(Duration::from_millis(10)));
-            return Ok(None);
-        }
-        sys::poll(&mut fds, timeout_ms)?;
-        let mut found: Option<Output> = None;
-        let mut index = 0;
-        if self.stdout_open {
-            if fds[index].revents != 0 {
-                found = read_chunk(self.stdout.as_raw_fd(), true, &mut self.stdout_open)?;
-            }
-            index += 1;
-        }
-        if found.is_none() && self.stderr_open && fds[index].revents != 0 {
-            found = read_chunk(self.stderr.as_raw_fd(), false, &mut self.stderr_open)?;
-        }
+        let found = poll_pipes(
+            &self.stdout,
+            &self.stderr,
+            &mut self.stdout_open,
+            &mut self.stderr_open,
+            timeout,
+        )?;
         let status = self.poll_status()?;
         if found.is_some() {
             self.grace = 0;
@@ -128,19 +173,7 @@ impl Child {
             // Already reported once; waiting again cannot produce a code.
             return Err(io::Error::other("the child exit was already reported"));
         }
-        let deadline = std::time::Instant::now().checked_add(budget);
-        let slice = budget.min(WAIT_SLICE);
-        loop {
-            if let Some(Output::Exited(code)) = self.next_event(slice)? {
-                return Ok(code);
-            }
-            if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "container did not exit",
-                ));
-            }
-        }
+        wait_loop(budget, "container did not exit", |t| self.next_event(t))
     }
 
     /// Blocking wait that drains stdout/stderr as Exited is approached.
@@ -183,12 +216,7 @@ impl Child {
 
     fn poll_status(&mut self) -> io::Result<Option<i32>> {
         if self.status.is_none() {
-            match sys::waitpid_nohang(self.pid) {
-                Ok(Some(code)) => self.status = Some(code),
-                Ok(None) => {}
-                Err(e) if e.raw_os_error() == Some(libc::ECHILD) => self.status = Some(255),
-                Err(e) => return Err(e),
-            }
+            self.status = wait_status(self.pid)?;
         }
         Ok(self.status)
     }
@@ -209,7 +237,11 @@ impl Drop for Child {
     }
 }
 
-fn read_chunk(fd: libc::c_int, stdout: bool, open: &mut bool) -> io::Result<Option<Output>> {
+pub(crate) fn read_chunk(
+    fd: libc::c_int,
+    stdout: bool,
+    open: &mut bool,
+) -> io::Result<Option<Output>> {
     let mut buf = [0u8; 8192];
     match sys::read(fd, &mut buf) {
         Ok(0) => {

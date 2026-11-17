@@ -36,6 +36,36 @@ pub fn setns(fd: RawFd, nstype: libc::c_int) -> io::Result<()> {
     check(unsafe { libc::setns(fd, nstype) } as libc::c_long, "setns").map(drop)
 }
 
+/// fork(2) for the T4.12 (Q50) exec relay. The engine parent is
+/// single-threaded (`ensure_single_threaded` is checked before the call),
+/// so the classic fork-in-threaded-process hazards do not apply.
+pub fn fork() -> io::Result<libc::pid_t> {
+    // SAFETY: fork takes no arguments; both halves of the split keep valid
+    // process state because the caller is single-threaded.
+    check(unsafe { libc::fork() } as libc::c_long, "fork").map(|p| p as libc::pid_t)
+}
+
+/// The caller's pid as seen in its CURRENT pid namespace: after the exec
+/// relay's setns(CLONE_NEWPID) the fork-born child reads the container pid.
+pub fn getpid() -> libc::pid_t {
+    // SAFETY: no arguments, no preconditions and cannot fail.
+    unsafe { libc::getpid() }
+}
+
+/// Best-effort close for the fork relays, which never unwind and therefore
+/// never run the parent-side `OwnedFd` destructors.
+pub fn close_fd(fd: RawFd) {
+    // SAFETY: plain descriptor argument; EBADF/EINTR are harmless here.
+    unsafe { libc::close(fd) };
+}
+
+/// `_exit(2)`: the only exit a fork relay may take (no unwinding, so no
+/// double-close of descriptors the parent still owns).
+pub fn exit_raw(code: libc::c_int) -> ! {
+    // SAFETY: `_exit` never returns and only consumes the exit code.
+    unsafe { libc::_exit(code) }
+}
+
 /// Arms the parent-death signal: the kernel takes this process down with
 /// `SIGKILL` when its parent dies, so a crashed engine cannot leave a
 /// half-built container (or its cgroup) behind. Linux clears the setting on

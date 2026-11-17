@@ -4,6 +4,7 @@
 
 use std::ffi::CStr;
 use std::io;
+use std::os::fd::RawFd;
 
 use super::check;
 
@@ -51,6 +52,24 @@ pub fn chdir(path: &CStr) -> io::Result<()> {
     check(
         unsafe { libc::chdir(path.as_ptr()) } as libc::c_long,
         "chdir",
+    )
+    .map(drop)
+}
+
+/// Enters the directory behind `fd` (T4.12, Q50 exec): the relay's O_PATH
+/// handle on `/proc/<pid>/root` needs no path walk through engine mounts.
+pub fn fchdir(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fd` is a descriptor the caller owns; the kernel only reads it.
+    check(unsafe { libc::fchdir(fd) } as libc::c_long, "fchdir").map(drop)
+}
+
+/// `chroot(2)` on "." after `fchdir(root_fd)`: the nsenter-style way the
+/// exec relay enters the container rootfs without pivot_root.
+pub fn chroot(path: &CStr) -> io::Result<()> {
+    // SAFETY: valid NUL-terminated path.
+    check(
+        unsafe { libc::chroot(path.as_ptr()) } as libc::c_long,
+        "chroot",
     )
     .map(drop)
 }
