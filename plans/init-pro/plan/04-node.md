@@ -712,7 +712,7 @@ node registration, and the built-in container engine (T4.11–T4.13).
   修正: pid-ns init 仅在装有 handler 时才收到祖先 ns 的 SIGTERM
   (SIGKILL/SIGSTOP 例外; E10→137 证明 128+WTERMSIG 映射), E11/B8
   温和停止走 trap 路径; exec 面落在协议脚本 B6/B7 (原计划 E10);
-  探针失败回退由 `engine_probe` 单测覆盖, e2e 级注入留 T4.13 N4。
+  探针失败回退由 `engine_probe` 单测覆盖; e2e 级注入 Sprint 43 收口裁定不再排期 (Q51 决策面已单测覆盖, 'N4' 名已被 Sprint 42 网络面占用——见 CHANGELOG Sprint 43)。
 - **依赖 / Depends on** — T4.11, T4.2
 
 ---
@@ -721,46 +721,62 @@ node registration, and the built-in container engine (T4.11–T4.13).
 
 - **目标 / Goal**
   builtin engine 能拉取并运行真实镜像 (内嵌 registry / Docker Registry
-  v2)，并给 Pod 一个确定的网络面，形成 containerd-free 闭环。网络面已
-  由 **Q52** 定案：host netns 共享 (hostNetwork 语义，零 CNI/零
-  veth/零 IPAM)；镜像存储 (overlayfs 解包) 仍 open。
+  v2)，并给 Pod 一个确定的网络面，形成 containerd-free 闭环。两面均已
+  定案收口：网络面 **Q52** (host netns 共享)；镜像存储 **Q53/Q54**
+  (层目录共享 + per-container overlayfs 视图, tar/flate2/zstd 解包)。
 
 - **核心实现 / Core implementation**
-  - **网络面 (done, Sprint 42, Q52)**：builtin 模式下所有 Pod 共享宿主
+  - **网络面 (Sprint 42, Q52)**：builtin 模式下所有 Pod 共享宿主
     netns——pause 沙箱 `engine serve --pause --host-net` 不再
-    CLONE_NEWNET (nsrun 零改动，`new_net=false && netns=None` 路径
-    已存在)；worker 容器照旧 `setns /proc/<pause_pid>/ns/net` (=
-    宿主 netns)；`EngineBackend` 存 `node_ip`，`list_sandboxes` 对
-    SANDBOX_READY 视图置 `ip = --node-ip`，`build_pod_status` 以
-    `host_ip = cfg.node_ip` 落 `hostIP` → podIP == hostIP == node
-    IP；agent 在 builtin 下跳过 flanneld (containerd 路径的 flannel
-    CNI, Q34 不变)。端口冲突由用户自负 (hostNetwork 同语义)；
-    `--node-ip` 默认 127.0.0.1 仅单节点正确，多节点需显式传真实 IP。
-  - 镜像存储 (open)：Registry v2 pull (manifest list 平台选择、
-    config + layer digest 校验)、content-addressed blob CAS、
-    overlayfs 层解包/合并、image config 的 env/entrypoint/cmd/user
-    合并；GC/磁盘配额；每容器一个 merged 视图 (或只读 lower + 可写
-    upper) 传给 nsrun `RunSpec.rootfs`；与 T6.3 内嵌 registry 对接
-    (默认 `--registry-addr`)；镜像拉取凭证只走环境/Secret，不落代码。
-  - 明确 out (Q52)：CNI/veth/网桥、netpol/egress 限制、跨节点
+    CLONE_NEWNET (nsrun 零改动)；worker 照旧
+    `setns /proc/<pause_pid>/ns/net` (= 宿主 netns)；
+    `EngineBackend` 存 `node_ip`，`list_sandboxes` 对 SANDBOX_READY
+    视图置 `ip = --node-ip`，`build_pod_status` 落
+    `hostIP = cfg.node_ip` → podIP == hostIP == node IP；agent 在
+    builtin 下跳过 flanneld (containerd 路径 Q34 不变)。端口冲突由
+    用户自负 (hostNetwork 同语义)；`--node-ip` 默认 127.0.0.1 仅
+    单节点正确，多节点需显式传真实 IP。
+  - **镜像存储 (Sprint 43, Q53/Q54, M1-M5)**：真实 registry-v2
+    拉取链路 (`engine/image/{pull,reference,manifest,config}.rs`:
+    manifest list 平台选择、digest 逐 blob 校验、单飞 single-flight;
+    Docker PascalCase + OCI lowerCamel config 双态解析) → 节点侧
+    content-addressed CAS (`cas.rs`: blobs/refs/merged/tmp + 原子
+    提交) → tar/gzip/zstd 解包到共享层目录 `layers/<digest>`
+    (解包一次, 遍历防护 + 双 whiteout 语义: 内核 overlay 路径
+    char 0:0 mknod + `trusted.overlay.opaque`, fused 兜底逻辑删除)
+    → per-container overlayfs 视图 `views/<id>/{upper,work,merged}`
+    (`probe.rs` 一次性可用性探测, 不可用退 fused-copy)。镜像 config
+    即真源 (`spec.rs merge_launch`: entrypoint/cmd/env/user/cwd 合并)。
+    GC = mark-sweep (ref 文件即根集合; `recover()` 启动清扫 +
+    `remove_image`); 配额软帽 `--builtin-image-quota` 拉取前预检;
+    拉取凭证仅环境变量 (`INIT_PRO_PULL_AUTH[_<MUNGED>]`, Q35 D1
+    同源不落盘), imagePullSecrets 推迟; 默认 `--registry-addr`
+    对接 T6.3 内嵌 registry。
+  - 明确 out (Q52/Q53)：CNI/veth/网桥、netpol/egress、跨节点
     overlay；镜像构建、跨节点镜像分发协议、Windows 镜像。
 
 - **验收手段 / Acceptance**
-  - 单测：digest 校验、平台选择、层合并顺序 (镜像存储落地后补)。
-  - e2e：`scripts/builtin-runtime-e2e.sh` **N1–N5** (battery 8.5) —
-    N1 pause `--host-net` 留宿主 netns、N2 worker join 后仍在宿主
-    netns、N3 builtin pod (`busybox httpd`) 宿主端口可达、N4
-    podIP==hostIP==node IP、N5 删 pod 端口释放；镜像存储落地后补
-    真实镜像 Pod (`kubectl logs/exec` + Service NodePort)。
-  - `scripts/all-gates.sh` (golden + battery) 全绿。
+  - 单测：digest 校验、平台选择、`parse_ref` 矩阵、`merge_launch`
+    合并矩阵、unpack 白盒 (遍历防护 + 双 whiteout)、GC/usage。
+  - e2e：`builtin-runtime-e2e.sh` **N1-N5** (battery 8.5) +
+    `builtin-image-e2e.sh` **I1-I8** (battery 8.13) — I1/I2 拉取+
+    失败隔离、I3 双层+whiteout 共享解包+overlay、I4 entrypoint 即
+    命令、I5 env 合并 logs/exec、I6 NodePort 30000 + 端口冲突、
+    I7 启动 GC、I8a CAS 持久化不重拉、I8b 配额干净失败。
+  - `scripts/all-gates.sh` (golden + battery 10 门 + 8.13) 全绿。
 
-- **状态 / Status** — in-progress (网络面 done via Q52; 镜像存储 open)
-- **证据 / Evidence** — `crates/engine/src/{server,cli}.rs`
-  (`--host-net` + `new_net = netns.is_none() && !host_net`；serve
-  解析抽出 `parse_serve` + 2 单测)、`crates/kubelet/src/engine/
-  {launch,backend}.rs` (host-net pause + `node_ip` overlay)、
-  `crates/kubelet/src/{status,runner}.rs` (`host_ip` 参 = `--node-ip`
-  + 1 单测)、`crates/cli/src/runtime.rs` (builtin 跳过 flanneld)；
-  e2e N1–N5 全绿；all-gates 10/10 (test 1081/0, golden 74/0)。
-- **卡点 / Blockers** — none (网络面前置 T4.12 已 done；镜像存储待排期)
+- **状态 / Status** — done (Sprint 42 网络面 Q52; Sprint 43 镜像
+  存储 M1-M5, Q53/Q54)
+- **证据 / Evidence** — Stage A `56276a8` (review 收尾: --host-net/
+  --netns 互斥 + runtime.rs 拆 stage_cmd.rs)；M1 `8b7d20c`
+  (decisions Q53/Q54 + `engine/image/{mod,manifest,config}.rs`)；
+  M2 `7412728` (http.rs 流式 GET + `cas.rs` + `pull.rs`/`reference.rs`
+  + `--registry-addr`)；M3 `4a2efe4` (`unpack.rs`(+tests)/`layers.rs`
+  /`gc.rs`/`probe.rs` + `OverlaySpec` 全链路 overlay)；M4 `f06b448`
+  (`spec.rs merge_launch` + STOP_GRACE 注解 + exec env 继承)；
+  M5 `7df9db8` (配额软帽 + 启动 GC + 环境变量凭证 + `remove_image`)。
+  测试 `cargo test --workspace --locked` **1131 / 0**；clippy
+  `-D warnings` 0；golden 73/0 (g24 registry.k8s.io 离线 SKIP, Q25)；
+  builtin-image-e2e I1-I8 双跑全绿；runtime-e2e + parity 23/23。
+- **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.12, T4.3, T6.3

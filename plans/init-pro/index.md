@@ -39,7 +39,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
 | T4.11 | 4 | 内置容器引擎内核 P1: clone3/namespace + 单线程 engine + 帧协议 (无 runc/containerd, Q48) | done (P1 kernel+protocol; `engine-run`/`engine serve`) | T4.1 |
 | T4.12 | 4 | 内置引擎 kubelet 接线 P2: `EngineBackend`/exec + `--container-engine=builtin` 真实选择 (Q49 进程池 + Q50 日志/exec 流 + Q51 探针回退) | done (Sprint 41; host-rootfs Pod 生命周期闭环, 镜像/CNI 留 T4.13) | T4.11, T4.2 |
-| T4.13 | 4 | 内置引擎镜像存储 + Pod 网络面 P3 (overlayfs 层解包; 网络面 = host netns 共享) | in-progress (网络面 done via Q52 host-netns; 镜像存储 open) | T4.12, T4.3, T6.3 |
+| T4.13 | 4 | 内置引擎镜像存储 + Pod 网络面 P3 (网络面 = host netns 共享 Q52; 镜像存储 = registry-v2 拉取 + 共享层解包 + per-container overlayfs Q53/Q54) | done (Sprint 42 网络面 Q52; Sprint 43 镜像存储 M1-M5) | T4.12, T4.3, T6.3 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
@@ -56,11 +56,10 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 
-**Counts:** 45 TODOs · 30 done · 3 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 45 TODOs · 32 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
-与 Scope B ServiceLB Q41 已 done；T4.13 网络面 done via Q52 host-netns
-共享——镜像存储 open)
+与 Scope B ServiceLB Q41 已 done)
 · 11 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=13 · Layer5=7 · Layer6=3 · Layer7=5.
 

@@ -7,6 +7,73 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 43 — T4.13 done: builtin 镜像存储面 M1-M5 (Q53 层共享+overlayfs 视图 / Q54 tar+flate2+zstd); builtin-image-e2e I1-I8 (2026-11-18)
+
+**Goal:** T4.13 镜像存储面按 **Q53/Q54** 定案收口——builtin engine 从
+"显式 command + host-dir rootfs" 升级为真实 registry-v2 拉取链路:
+manifest/config 解析 → 节点侧 content-addressed CAS → 共享层解包
+(`layers/<digest>` 解包一次) → per-container overlayfs 视图
+(`views/<id>/{upper,work,merged}`, fused-copy 兜底) → 镜像 config 即
+真源 (entrypoint/cmd/env/user/workdir 合并) → GC/配额/凭证收尾。
+T4.13 转 **done** (42 网络面 + 43 镜像存储)。
+
+**Changes**
+- Stage A (`56276a8`, Sprint 42 review 收尾): `engine serve`
+  `--host-net`/`--netns` 互斥 (parse_serve post-Err + 2 单测);
+  backend node-IP overlay 单测; e2e 头部 kubectl 误用改 REST;
+  registry.rs Q52 注释; runtime.rs 778 行逼近上限 → 拆
+  `crates/cli/src/stage_cmd.rs` (718/67 行)。
+- M1 (`8b7d20c`): decisions **Q53/Q54 LOCKED**; `engine/image/
+  {mod,manifest,config}.rs` — manifest list 平台选择、digest helper、
+  Docker PascalCase + OCI lowerCamel config 双态解析、merge_argv/
+  merge_env 纯函数; 依赖 tar/flate2(rust_backend)/zstd (Q54)。
+- M2 (`7412728`): `http.rs` 流式 raw GET (RawBody/RawHead, duplex
+  双测); `cas.rs` CAS (blobs/refs/merged/tmp + 原子提交 + mark-sweep);
+  `pull.rs`+`reference.rs` (单飞 single-flight、逐 blob digest 校验、
+  parse_ref 矩阵); backend `pull_image`/`resolve_rootfs`/
+  `list_image_tags` 真路径; agent `--registry-addr` (默认
+  `registry::DEFAULT_ADDR`, 对接 T6.3)。
+- M3 (`4a2efe4`): `unpack.rs` 路径遍历防护 + **双 whiteout 语义**
+  (内核 overlay 路径 char 0:0 mknod + `trusted.overlay.opaque`;
+  fused 兜底逻辑删除/清空, 纯 fs); `layers.rs` 共享层 + `gc.rs` +
+  `probe.rs` (root-gated mount 探测一次, 不可用退 fused); 
+  engine-proto `OverlaySpec` + nsrun `mount.rs overlay_rootfs`
+  (lowerdir 反序, enter_rootfs 前) 全链路 overlay 透传。
+- M4 (`f06b448`): `spec.rs merge_launch` (显式 command 覆盖
+  entrypoint/cmd; pod env 追加 last-wins; user 数值 uid[:gid] 或镜像
+  /etc/passwd 命名解析; cwd 绝对路径校验)——"必须显式 command"
+  stopgap 删除; STOP_GRACE spec-aware (pod 注解
+  `init-pro.io/stop-grace-seconds` 1..=600 钳位); engine exec 空 env
+  继承容器 env。
+- M5 (`7df9db8`): 配额软帽 `--builtin-image-quota` (usage_bytes 全量
+  统计 + 拉取前预检, 0=off); GC 触发 (agent 启动 `recover()` 清扫孤儿
+  层 + `remove_image` remove_ref+gc, CriBackend default-Err 兜底);
+  拉取凭证仅环境变量 (`auth_header_for`: INIT_PRO_PULL_AUTH_<MUNGED>
+  → INIT_PRO_PULL_AUTH, Q35 D1 同源不落盘), imagePullSecrets 推迟。
+- **Q51 "N4" 名字占用澄清**: T4.12 证据里的 "e2e 级注入留 T4.13 N4"
+  中的 N4 是占位名, 已被 Sprint 42 网络面 N4 (podIP==hostIP) 占用;
+  e2e 级探针注入不再排期 (probe 决策由 `engine_probe` 单测覆盖, e2e
+  注入需 sabotaged engine + containerd 兜底环境, 收益边际)。
+- 度: 新增/迭代文件均达标 (backend.rs 723 / http.rs 730 /
+  runtime.rs 736 / cas.rs 397 / pull.rs 377, 上限 800)。
+
+**Tests:** `cargo test --workspace --locked` → **1131 passed / 0
+failed** (Sprint 42 基线 1081, 净增 50); clippy `-D warnings` 0。
+
+**Gates:** 收口全量复跑 `all-gates.sh` → **PASS (gates=10 rows=23
+fails=0)**——fmt/build/test 1131-0/clippy/unsafe-audit/singlethread/
+golden **73/0** 本机 (g24 = registry.k8s.io 不可达离线 SKIP, Q25
+doctrine; 联网环境为 74/0)/battery 8.1-8.13 全 PASS (builtin-image
+214s; builtin-runtime B1-B13+N1-N5)/parity 23/23。口径对账: 计划
+"11/11" 实为 **10 门 + battery 新行 8.13** (builtin-image-e2e 为
+battery 末位条目, 门数不变); I1-I8 累计三跑全绿 (子代理 ×2 + 主线
+复跑 + all-gates 收口跑)。SSOT 同步: decisions.md **Q53/Q54
+LOCKED**、04-node.md T4.13 → done (M1-M5 证据 + Q51 N4 澄清回填
+T4.12 行)、index.md 计数 30→**32 done** (顺带修正 T4.12 关闭后
+未同步的陈旧计数) / 3→**2 in-progress**。
+
+---
+
 ## Sprint 42 — T4.13 网络面 done: builtin Pod 网络 = host netns 共享 (Q52); builtin e2e N1–N5 (2026-11-18)
 
 **Goal:** T4.13 的网络面按 **Q52** 定案收口——builtin 模式所有 Pod 共享
