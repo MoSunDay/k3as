@@ -6,7 +6,7 @@
 //! (`sha256_digest`). Registry pull, CAS and layer unpack land in later
 //! T4.13 milestones; this module is deliberately free of I/O.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Accepted manifest media types — mirrors
@@ -31,7 +31,7 @@ pub fn is_index_type(mt: &str) -> bool {
 
 /// OCI/Docker content descriptor: `mediaType`, `digest`, `size` and, in
 /// index entries, the target `platform`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Descriptor {
     #[serde(default)]
@@ -44,7 +44,7 @@ pub struct Descriptor {
 
 /// Target platform of an index entry (`architecture`, `os`, optional
 /// `variant` / `osVersion`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Platform {
     pub architecture: String,
@@ -198,6 +198,13 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+/// `sha256:<hex>` over a streaming hash — the incremental face of
+/// [`sha256_digest`] for blobs that must not buffer whole (Q53/Q54).
+pub(crate) fn sha256_digest_of_hasher(hasher: sha2::Sha256) -> String {
+    use sha2::Digest as _;
+    format!("sha256:{}", hex_encode(&hasher.finalize()))
 }
 
 #[cfg(test)]

@@ -94,4 +94,16 @@ pub struct AgentCmd {
         value_name = "FILE"
     )]
     pub flannel_conf: Option<std::path::PathBuf>,
+
+    /// Default registry the built-in engine pulls images from when the
+    /// image reference carries no host of its own (T4.13 M2, Q54 — init-pro
+    /// extension, not k3s parity; mirrors the server's registry flag).
+    /// env `INIT_PRO_REGISTRY_ADDR`.
+    #[arg(
+        long = "registry-addr",
+        env = "INIT_PRO_REGISTRY_ADDR",
+        default_value = registry::DEFAULT_ADDR,
+        value_name = "ADDR"
+    )]
+    pub registry_addr: String,
 }

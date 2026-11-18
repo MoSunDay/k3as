@@ -2,8 +2,11 @@
 //! over per-container engine processes. Sandboxes are pause engines
 //! sharing the host netns (Q52): no CLONE_NEWNET for the pause child;
 //! containers join `/proc/<pause_pid>/ns/net` (= host netns) and log to
-//! the CRI text file directly (Q50). No image store/CNI until T4.13 —
-//! only host-dir rootfs test pods run.
+//! the CRI text file directly (Q50). Since T4.13 M2 the image store is
+//! REAL: registry-v2 pulls land in the content-addressed CAS
+//! (`engine/images`, Q53/Q54) and resolve to fused-merge rootfs dirs
+//! (M3 replaces the fused extraction with per-layer unpack + overlayfs).
+//! CNI stays never-by-design for builtin pods (Q52: host netns).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +14,8 @@ use std::time::Duration;
 
 use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
 
+use super::image::pull::Puller;
+use super::image::{ImageStore, PulledImage};
 use super::launch;
 use super::pump::{self, Ctrl};
 use super::registry::{Entry, Pending, Proc, Registry};
@@ -29,6 +34,11 @@ pub struct EngineBackend {
     images_dir: PathBuf,
     sandbox_image: String,
     node_ip: String,
+    /// T4.13 M2: the content-addressed image store under
+    /// `<data_dir>/engine/images` (Q53/Q54) + the pull client bound to the
+    /// configured registry.
+    store: ImageStore,
+    puller: Puller,
     registry: Registry,
 }
 
@@ -54,15 +64,26 @@ fn new_id(prefix: &str) -> String {
 }
 
 impl EngineBackend {
-    pub fn new(data_dir: &Path, sandbox_image: &str, node_ip: &str) -> std::io::Result<Self> {
+    /// `registry_addr` (T4.13 M2, Q54): the default registry image
+    /// references without their own host pull from.
+    pub fn new(
+        data_dir: &Path,
+        sandbox_image: &str,
+        node_ip: &str,
+        registry_addr: &str,
+    ) -> std::io::Result<Self> {
         let engine_dir = launch::engine_dir(data_dir);
         std::fs::create_dir_all(&engine_dir)?;
         let images_dir = data_dir.join("images");
+        let store = ImageStore::open(&data_dir.join("engine").join("images"))?;
+        let puller = Puller::new(registry_addr, store.clone());
         Ok(Self {
             engine_dir,
             images_dir,
             sandbox_image: sandbox_image.to_string(),
             node_ip: node_ip.to_string(),
+            store,
+            puller,
             registry: Registry::default(),
         })
     }
@@ -97,20 +118,37 @@ impl EngineBackend {
         self.engine_dir.join(format!("{id}.sock"))
     }
 
-    /// Host-dir image resolution (T4.12 stopgap): an absolute directory
-    /// or a name staged under `<data_dir>/images/`. Real store = T4.13.
+    /// Image rootfs resolution (T4.13 M2): (1) an absolute host directory,
+    /// (2) a pulled CAS reference (by normalized ref, or by digest for
+    /// `repo@sha256:` spellings) whose fused-merge dir exists, (3) a name
+    /// staged under `<data_dir>/images/` (T4.12 host-dir stopgap, kept for
+    /// B-compat).
     fn resolve_rootfs(&self, image: &str) -> Result<PathBuf, String> {
         let direct = Path::new(image);
         if direct.is_absolute() && direct.is_dir() {
             return Ok(direct.to_path_buf());
         }
+        if let Some(img) = self.cas_ref(image) {
+            let dir = self.store.merged_dir(&img.digest);
+            if dir.is_dir() {
+                return Ok(dir);
+            }
+        }
         let staged = self.images_dir.join(image);
         if staged.is_dir() {
             return Ok(staged);
         }
-        Err(format!(
-            "no image store until T4.13: {image:?} is not a staged host-dir rootfs"
-        ))
+        Err(format!("builtin engine: image {image:?} not pulled"))
+    }
+
+    /// The CAS pull record for `image`, if one exists: exact normalized
+    /// reference first, then digest lookup for `repo@sha256:` spellings.
+    fn cas_ref(&self, image: &str) -> Option<PulledImage> {
+        let pr = super::image::parse_ref(image, self.puller.host()).ok()?;
+        let key = super::image::reference::normalized(&pr);
+        self.store
+            .get_ref(&key)
+            .or_else(|| self.store.find_ref_by_digest(&pr.digest?))
     }
 
     async fn wait_state(&self, id: &str, want: &str, budget: Duration) -> bool {
@@ -175,6 +213,9 @@ impl CriBackend for EngineBackend {
                 }
             }
         }
+        // T4.13 M2: pulled CAS refs read as present so sync's IfNotPresent
+        // short-circuits without a network round-trip.
+        tags.extend(self.store.list_refs().into_iter().map(|r| r.reference));
         Ok(tags)
     }
 
@@ -186,7 +227,8 @@ impl CriBackend for EngineBackend {
         if self.resolve_rootfs(image).is_ok() {
             return Ok(());
         }
-        Err(format!("no image store until T4.13: cannot pull {image:?}"))
+        // T4.13 M2 (Q53/Q54): real registry-v2 pull into the CAS.
+        self.puller.pull(image).await.map(|_| ())
     }
 
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String> {
@@ -406,7 +448,13 @@ mod tests {
     async fn ready_sandboxes_overlay_node_ip_notready_stay_none() {
         let dir = temp_data_dir("ip-overlay");
         std::fs::create_dir_all(&dir).unwrap();
-        let backend = EngineBackend::new(&dir, "registry.local/pause:0", "192.0.2.7").unwrap();
+        let backend = EngineBackend::new(
+            &dir,
+            "registry.local/pause:0",
+            "192.0.2.7",
+            "127.0.0.1:15000",
+        )
+        .unwrap();
         backend
             .registry
             .insert(sandbox_entry(&dir, "sb-ready", "SANDBOX_READY"));

@@ -67,8 +67,9 @@ pub struct RegistryBind {
 
 pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
     // Servers never run the node runtime (the `bind.is_none()` blocks are
-    // agent-only), so the engine choice is inert here; pass containerd to
-    // keep the signature honest (T4.12/Q51).
+    // agent-only), so the engine choice and registry addr are inert here;
+    // pass containerd + the default registry to keep the signature honest
+    // (T4.12/Q51, T4.13).
     run_supervised(
         "server",
         cfg,
@@ -79,6 +80,7 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
         None,
         None,
         "containerd".to_string(),
+        registry::DEFAULT_ADDR.to_string(),
     )
 }
 
@@ -99,6 +101,9 @@ pub fn run_agent(
     // T7.1 Phase B (Q37): `Some(anyhome_addr)` enables the node-side Agent
     // execution loop (see `run_supervised`).
     agent_exec_addr: Option<String>,
+    // T4.13 M2 (Q54): the default registry the built-in engine pulls
+    // host-less image references from (`--registry-addr`).
+    registry_addr: String,
 ) -> ExitCode {
     run_supervised(
         "agent",
@@ -110,6 +115,7 @@ pub fn run_agent(
         Some(flannel),
         agent_exec_addr,
         container_engine,
+        registry_addr,
     )
 }
 
@@ -170,6 +176,9 @@ fn run_supervised(
     // Agents without a workspace annotation.
     agent_exec_addr: Option<String>,
     container_engine: String,
+    // T4.13 M2 (Q54): default registry for host-less image refs (builtin
+    // engine pulls; inert for the staged containerd path).
+    registry_addr: String,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -291,6 +300,7 @@ fn run_supervised(
                         &cfg.data_dir,
                         &kc.sandbox_image,
                         &kc.node_ip,
+                        &registry_addr,
                     ) {
                         Ok(backend) => {
                             // Q49: adopt-or-clean leftover engine sockets.

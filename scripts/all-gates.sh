@@ -84,6 +84,7 @@ BATTERY=(
   resources-e2e.sh
   service-traffic-e2e.sh
   flannel-e2e.sh
+  builtin-image-e2e.sh
 )
 # Scripts that would FAIL (not SKIP) without root -> pre-gated here.
 # Keep this list minimal: engine-selftest.sh and builtin-runtime-e2e.sh already

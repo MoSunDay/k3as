@@ -198,6 +198,9 @@ where
                 // workspace fallback (no NFS); only the flag's absence of a
                 // value is a mount address, never a loop switch.
                 (!ag.disable_agent_exec).then(|| ag.anyhome_addr.clone()),
+                // T4.13 M2 (Q54): the default registry the built-in engine
+                // pulls host-less image references from.
+                ag.registry_addr.clone(),
             )
         }
         Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),
