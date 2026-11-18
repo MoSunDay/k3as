@@ -174,7 +174,9 @@ impl Registry {
                 name: e.name.clone(),
                 namespace: e.namespace.clone(),
                 uid: e.uid.clone(),
-                // No CNI until T4.13: the builtin sandbox has loopback only.
+                // Q52: builtin pods share the host netns — the sandbox
+                // never gets CNI; ip stays None here and the backend
+                // overlays the node IP on READY views.
                 ip: None,
             })
             .collect()

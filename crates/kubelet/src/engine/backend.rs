@@ -365,3 +365,61 @@ impl CriBackend for EngineBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_data_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "init-pro-engine-backend-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn sandbox_entry(dir: &Path, id: &str, state: &str) -> Entry {
+        Entry {
+            id: id.to_string(),
+            socket: dir.join("engine").join(format!("{id}.sock")),
+            proc: Proc::Sandbox(None),
+            state: state.to_string(),
+            exit_code: None,
+            pid: Some(7),
+            netns: Some("/proc/7/ns/net".to_string()),
+            name: id.to_string(),
+            namespace: "default".to_string(),
+            uid: String::new(),
+            attempt: 0,
+            labels: BTreeMap::new(),
+            pending: None,
+            ctrl: None,
+        }
+    }
+
+    /// Q52 node-IP overlay: READY sandboxes report the node IP, NOTREADY
+    /// entries keep ip:None (no fake IPs for dead sandboxes).
+    #[tokio::test]
+    async fn ready_sandboxes_overlay_node_ip_notready_stay_none() {
+        let dir = temp_data_dir("ip-overlay");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backend = EngineBackend::new(&dir, "registry.local/pause:0", "192.0.2.7").unwrap();
+        backend
+            .registry
+            .insert(sandbox_entry(&dir, "sb-ready", "SANDBOX_READY"));
+        backend
+            .registry
+            .insert(sandbox_entry(&dir, "sb-dead", "SANDBOX_NOTREADY"));
+
+        let views = backend.list_sandboxes().await.expect("list sandboxes");
+        let ready = views.iter().find(|v| v.id == "sb-ready").unwrap();
+        let dead = views.iter().find(|v| v.id == "sb-dead").unwrap();
+        assert_eq!(ready.ip.as_deref(), Some("192.0.2.7"));
+        assert_eq!(dead.ip, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

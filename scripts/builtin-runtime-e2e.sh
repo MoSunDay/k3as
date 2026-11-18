@@ -14,7 +14,7 @@
 #   B7 exec: merged streams + code
 #   N1 host-net pause == host netns (Q52)   N2 worker join stays host netns
 #   N3-N5 builtin cluster (Q52): shared-netns pod serves a host port,
-#   podIP==hostIP==node IP via kubectl, port released on delete.
+#   podIP==hostIP==node IP via REST, port released on delete.
 #
 # Preconditions: PRE-BUILT binary, real root, static busybox, python3 for the
 # wire client. Missing inputs => "SKIP builtin-runtime-e2e:" + exit 0 (Q25);

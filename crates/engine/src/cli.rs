@@ -23,11 +23,6 @@ pub fn run_serve(args: &[String]) -> i32 {
             return 2;
         }
     };
-    if opts.pause && opts.netns.is_none() {
-        // A pause sandbox without a netns to join creates a fresh one
-        // unless `--host-net` keeps it in the host netns (Q52); nothing
-        // to enforce, documented for clarity.
-    }
     match socket {
         Some(path) => server::serve(&path, &opts),
         None => {
@@ -70,6 +65,13 @@ fn parse_serve(args: &[String]) -> Result<(Option<PathBuf>, server::ServeOptions
         };
         r?;
         i += 1;
+    }
+    // Q52: --host-net keeps the sandbox in the host netns; --netns joins a
+    // specific one. Both at once is contradictory — fail fast.
+    if opts.host_net && opts.netns.is_some() {
+        return Err(
+            "engine serve: --host-net and --netns are mutually exclusive (Q52)".to_string(),
+        );
     }
     Ok((socket, opts))
 }
@@ -316,6 +318,36 @@ mod tests {
     fn serve_host_net_defaults_off() {
         let (_, opts) = parse_serve(&args(&["--socket", "/tmp/s2.sock"])).expect("serve flags");
         assert!(!opts.pause && !opts.host_net);
+    }
+
+    #[test]
+    fn serve_host_net_and_netns_are_mutually_exclusive() {
+        let both = args(&[
+            "--socket",
+            "/tmp/s.sock",
+            "--pause",
+            "--host-net",
+            "--netns",
+            "/proc/1/ns/net",
+        ]);
+        let err = match parse_serve(&both) {
+            Ok(_) => panic!("host-net + netns must conflict"),
+            Err(e) => e,
+        };
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn serve_conflicting_net_flags_exit_two() {
+        let rc = run_serve(&args(&[
+            "--socket",
+            "/tmp/s4.sock",
+            "--pause",
+            "--host-net",
+            "--netns",
+            "/proc/1/ns/net",
+        ]));
+        assert_eq!(rc, 2);
     }
 
     #[test]

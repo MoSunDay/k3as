@@ -19,6 +19,7 @@ mod flannel;
 mod flannel_keeper;
 mod runtime;
 mod stage;
+mod stage_cmd;
 mod storage_dsn;
 
 use std::path::PathBuf;
@@ -199,7 +200,7 @@ where
                 (!ag.disable_agent_exec).then(|| ag.anyhome_addr.clone()),
             )
         }
-        Some(Command::Stage { dry_run }) => runtime::run_stage(cfg, dry_run, manifest),
+        Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),
         None => {
             // `init-pro` with no subcommand: print help to stdout, exit 0
             // (k3s prints usage; we keep it success so the contract is friendly).
