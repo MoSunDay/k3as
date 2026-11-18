@@ -2,11 +2,13 @@
 //! over per-container engine processes. Sandboxes are pause engines
 //! sharing the host netns (Q52): no CLONE_NEWNET for the pause child;
 //! containers join `/proc/<pause_pid>/ns/net` (= host netns) and log to
-//! the CRI text file directly (Q50). Since T4.13 M2 the image store is
-//! REAL: registry-v2 pulls land in the content-addressed CAS
-//! (`engine/images`, Q53/Q54) and resolve to fused-merge rootfs dirs
-//! (M3 replaces the fused extraction with per-layer unpack + overlayfs).
-//! CNI stays never-by-design for builtin pods (Q52: host netns).
+//! the CRI text file directly (Q50). Since T4.13 the image store is REAL:
+//! registry-v2 pulls land in the content-addressed CAS
+//! (`engine/images`, Q53/Q54), layers are unpacked ONCE into shared
+//! per-layer dirs, and each container gets a per-container overlayfs
+//! view (or the whiteout-aware fused-copy fallback when the kernel path
+//! is unavailable). CNI stays never-by-design for builtin pods (Q52:
+//! host netns).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +42,10 @@ pub struct EngineBackend {
     store: ImageStore,
     puller: Puller,
     registry: Registry,
+    /// T4.13 M3 (Q53): overlayfs availability probed once at startup.
+    /// True = per-container overlayfs views over shared unpacked layers;
+    /// false keeps the whiteout-aware fused-copy fallback.
+    overlay_ok: bool,
 }
 
 /// Engine errors that mean "gone already" — removes are idempotent.
@@ -49,6 +55,19 @@ fn already_gone(message: &str) -> bool {
         || m.contains("no such file")
         || m.contains("not exist")
         || m.contains("already removed")
+}
+
+/// Where a container's `/` comes from (T4.13 M3, Q53): a plain directory
+/// (host dir, fused merge, or a T4.12 staged name) or a per-container
+/// overlayfs view over shared unpacked layers.
+enum ResolvedRootfs {
+    Dir(PathBuf),
+    Overlay {
+        mountpoint: PathBuf,
+        lower: Vec<PathBuf>,
+        upper: PathBuf,
+        work: PathBuf,
+    },
 }
 
 /// Distinctive id: time-ordered hex + a process-local counter.
@@ -75,7 +94,21 @@ impl EngineBackend {
         let engine_dir = launch::engine_dir(data_dir);
         std::fs::create_dir_all(&engine_dir)?;
         let images_dir = data_dir.join("images");
-        let store = ImageStore::open(&data_dir.join("engine").join("images"))?;
+        let images_root = data_dir.join("engine").join("images");
+        let store = ImageStore::open(&images_root)?;
+        // T4.13 M3 (Q53): one root-gated probe decides the rootfs path —
+        // per-container overlayfs views or the fused-copy fallback.
+        let overlay_ok = super::image::probe::overlay_supported(&images_root.join(".probe"));
+        tracing::info!(
+            target: "init-pro",
+            overlay_ok,
+            "builtin image rootfs: {} (Q53)",
+            if overlay_ok {
+                "per-container overlayfs views"
+            } else {
+                "fused-copy fallback"
+            }
+        );
         let puller = Puller::new(registry_addr, store.clone());
         Ok(Self {
             engine_dir,
@@ -85,6 +118,7 @@ impl EngineBackend {
             store,
             puller,
             registry: Registry::default(),
+            overlay_ok,
         })
     }
 
@@ -108,6 +142,10 @@ impl EngineBackend {
                 cleaned += 1;
             }
         }
+        // T4.13 M3 (Q53): the engines that owned the overlay views are
+        // gone; their upper/work scratch is dead weight. The shared layer
+        // dirs stay (they are the point of the unpack-once cache).
+        self.store.clear_views();
         tracing::info!(
             target: "init-pro", cleaned,
             "builtin engine recovery: stopped stray engines (T4.12)"
@@ -118,27 +156,51 @@ impl EngineBackend {
         self.engine_dir.join(format!("{id}.sock"))
     }
 
-    /// Image rootfs resolution (T4.13 M2): (1) an absolute host directory,
+    /// Image rootfs resolution (T4.13): (1) an absolute host directory,
     /// (2) a pulled CAS reference (by normalized ref, or by digest for
-    /// `repo@sha256:` spellings) whose fused-merge dir exists, (3) a name
-    /// staged under `<data_dir>/images/` (T4.12 host-dir stopgap, kept for
-    /// B-compat).
-    fn resolve_rootfs(&self, image: &str) -> Result<PathBuf, String> {
+    /// `repo@sha256:` spellings) whose shared layers exist — an overlayfs
+    /// view when the kernel path is available (Q53), else the cached
+    /// whiteout-aware fused merge, (3) a name staged under
+    /// `<data_dir>/images/`.
+    fn resolve(&self, image: &str, container_id: &str) -> Result<ResolvedRootfs, String> {
         let direct = Path::new(image);
         if direct.is_absolute() && direct.is_dir() {
-            return Ok(direct.to_path_buf());
+            return Ok(ResolvedRootfs::Dir(direct.to_path_buf()));
         }
         if let Some(img) = self.cas_ref(image) {
-            let dir = self.store.merged_dir(&img.digest);
-            if dir.is_dir() {
-                return Ok(dir);
+            self.store.ensure_layers(&img)?;
+            if self.overlay_ok {
+                let view = self.store.new_view(container_id)?;
+                return Ok(ResolvedRootfs::Overlay {
+                    mountpoint: view.mountpoint,
+                    lower: img
+                        .layers
+                        .iter()
+                        .map(|l| self.store.layer_dir(&l.digest))
+                        .collect(),
+                    upper: view.upper,
+                    work: view.work,
+                });
             }
+            return self
+                .store
+                .ensure_merged_fused(&img)
+                .map(ResolvedRootfs::Dir);
         }
         let staged = self.images_dir.join(image);
         if staged.is_dir() {
-            return Ok(staged);
+            return Ok(ResolvedRootfs::Dir(staged));
         }
         Err(format!("builtin engine: image {image:?} not pulled"))
+    }
+
+    /// Presence-only check for `pull_image` (IfNotPresent semantics): no
+    /// side effects, so nothing is created before the pull decision.
+    fn image_present(&self, image: &str) -> bool {
+        let direct = Path::new(image);
+        (direct.is_absolute() && direct.is_dir())
+            || self.cas_ref(image).is_some()
+            || self.images_dir.join(image).is_dir()
     }
 
     /// The CAS pull record for `image`, if one exists: exact normalized
@@ -224,7 +286,7 @@ impl CriBackend for EngineBackend {
             // The pause engine parks before exec — no rootfs needed.
             return Ok(());
         }
-        if self.resolve_rootfs(image).is_ok() {
+        if self.image_present(image) {
             return Ok(());
         }
         // T4.13 M2 (Q53/Q54): real registry-v2 pull into the CAS.
@@ -329,8 +391,29 @@ impl CriBackend for EngineBackend {
             .registry
             .netns_of(&pending.sandbox_id)
             .ok_or_else(|| format!("sandbox {} is not ready", pending.sandbox_id))?;
-        let rootfs = self.resolve_rootfs(&pending.ccfg.image.image)?;
-        let es = spec::container_spec(id, &rootfs, &pending, sandbox_netns)?;
+        let (rootfs, overlay) = match self.resolve(&pending.ccfg.image.image, id)? {
+            ResolvedRootfs::Dir(dir) => (dir, None),
+            ResolvedRootfs::Overlay {
+                mountpoint,
+                lower,
+                upper,
+                work,
+            } => (
+                mountpoint,
+                Some(engine_proto::OverlaySpec {
+                    lower: lower
+                        .into_iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    upper: upper.to_string_lossy().into_owned(),
+                    work: work.to_string_lossy().into_owned(),
+                }),
+            ),
+        };
+        let mut es = spec::container_spec(id, &rootfs, &pending, sandbox_netns)?;
+        // T4.13 M3 (Q53): the engine child mounts the overlay view over
+        // `rootfs` before entering it; plain dirs keep `overlay: None`.
+        es.overlay = overlay;
         let child = launch::spawn_engine(&socket, false, false)
             .map_err(|e| format!("spawn engine: {e}"))?;
         launch::wait_socket(&socket)
@@ -377,6 +460,8 @@ impl CriBackend for EngineBackend {
             let _ = ctrl.send(Ctrl::Shutdown).await;
             self.wait_state(id, "CONTAINER_EXITED", KILL_GRACE).await;
         }
+        // T4.13 M3 (Q53): drop the container's overlay view scratch.
+        self.store.remove_view(id);
         self.registry.remove(id);
         Ok(())
     }

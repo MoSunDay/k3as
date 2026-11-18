@@ -2006,6 +2006,7 @@ dependencies = [
  "flate2",
  "infra",
  "k8s-openapi",
+ "nix 0.30.1",
  "runtime",
  "serde",
  "serde_json",
@@ -2014,6 +2015,8 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
+ "xattr",
+ "zstd",
 ]
 
 [[package]]

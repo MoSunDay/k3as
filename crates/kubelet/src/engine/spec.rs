@@ -53,6 +53,9 @@ pub(crate) fn container_spec(
             .collect(),
         new_net: false,
         netns: Some(sandbox_netns),
+        // T4.13 M3 (Q53): set by the backend when the image resolves to a
+        // per-container overlayfs view (plain dirs keep None).
+        overlay: None,
         pause: false,
         log_path: Some(log.to_string_lossy().into_owned()),
         no_new_privs: true,

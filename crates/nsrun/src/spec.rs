@@ -54,6 +54,18 @@ impl CgroupLimits {
     }
 }
 
+/// Overlayfs view mounted over the rootfs before it is entered (T4.13
+/// M3, Q53): shared unpacked image layers as read-only lowers plus a
+/// per-container writable upper. All paths are host-side absolutes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlay {
+    /// Bottom-up lower dirs (image layer order; the mount helper reverses
+    /// them — the kernel wants topmost first).
+    pub lower: Vec<PathBuf>,
+    pub upper: PathBuf,
+    pub work: PathBuf,
+}
+
 /// What to run: a rootfs, a command, and the isolation knobs for this slice.
 #[derive(Debug, Clone)]
 pub struct RunSpec {
@@ -78,6 +90,9 @@ pub struct RunSpec {
     /// pod sandbox engine. Mutually exclusive with `new_net`; loopback
     /// stays under the sandbox's control.
     pub netns: Option<PathBuf>,
+    /// Overlayfs lowers/upper mounted over `rootfs` before it is entered
+    /// (T4.13 M3, Q53). None keeps `rootfs` a plain directory.
+    pub overlay: Option<Overlay>,
     /// Pause mode (T4.12, Q49): after the start gate the child parks
     /// forever instead of exec'ing — the pod-sandbox PID 1 whose only job
     /// is holding the namespaces open. Signals use their default
@@ -104,6 +119,7 @@ impl RunSpec {
             mounts: Vec::new(),
             new_net: false,
             netns: None,
+            overlay: None,
             pause: false,
             no_new_privs: true,
             caps: crate::caps::DEFAULT_CAPS,
@@ -153,6 +169,22 @@ impl RunSpec {
                     io::ErrorKind::InvalidInput,
                     format!("netns must be absolute: {}", netns.display()),
                 ));
+            }
+        }
+        if let Some(ov) = &self.overlay {
+            if ov.lower.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "overlay needs at least one lower dir (Q53)",
+                ));
+            }
+            for p in ov.lower.iter().chain([&ov.upper, &ov.work]) {
+                if !p.is_absolute() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("overlay dir must be absolute: {}", p.display()),
+                    ));
+                }
             }
         }
         if self.pause && (self.uid != 0 || self.gid != 0 || !self.env.is_empty()) {
@@ -251,6 +283,23 @@ mod tests {
         s.new_net = false;
         assert!(s.validate().is_ok());
         s.netns = Some(PathBuf::from("proc/1/ns/net"));
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn overlay_defaults_none_and_validates_paths() {
+        assert!(spec().overlay.is_none());
+        let ov = |lower: Vec<&str>| Overlay {
+            lower: lower.into_iter().map(PathBuf::from).collect(),
+            upper: PathBuf::from("/views/c/upper"),
+            work: PathBuf::from("/views/c/work"),
+        };
+        let mut s = spec();
+        s.overlay = Some(ov(vec!["/layers/l1", "/layers/l2"]));
+        assert!(s.validate().is_ok());
+        s.overlay = Some(ov(vec!["layers/l1"]));
+        assert!(s.validate().is_err());
+        s.overlay = Some(ov(vec![]));
         assert!(s.validate().is_err());
     }
 

@@ -106,6 +106,18 @@ pub struct MountSpec {
     pub readonly: bool,
 }
 
+/// Overlayfs view mounted over `rootfs` by the engine child (T4.13 M3,
+/// Q53): unpacked image layers are shared read-only lowers, writes land
+/// in the per-container upper dir.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlaySpec {
+    /// Bottom-up lower dirs (image layer order; kernel wants topmost
+    /// first, the child reverses).
+    pub lower: Vec<String>,
+    pub upper: String,
+    pub work: String,
+}
+
 /// What to run. Mirrors the CRI fields the kubelet already carries, minus
 /// the P2+ fields (labels, log path, CNI result).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +146,12 @@ pub struct ContainerSpec {
     /// `new_net`.
     #[serde(default)]
     pub netns: Option<String>,
+    /// Per-container overlayfs view (T4.13 M3, Q53): `rootfs` names the
+    /// mountpoint; the engine child mounts `overlay` with these dirs
+    /// before entering the rootfs. `lower` is bottom-up (image layer
+    /// order). None keeps `rootfs` a plain directory.
+    #[serde(default)]
+    pub overlay: Option<OverlaySpec>,
     /// Pause mode (T4.12, Q49): the engine child parks forever as PID 1
     /// holding the namespaces — the pod sandbox. Signals keep default
     /// dispositions so the engine parent reaps `128+WTERMSIG`.
@@ -169,6 +187,7 @@ impl ContainerSpec {
             mounts: Vec::new(),
             new_net: false,
             netns: None,
+            overlay: None,
             pause: false,
             log_path: None,
             no_new_privs: true,
@@ -286,6 +305,7 @@ mod tests {
         assert!(spec.no_new_privs);
         assert!(spec.mounts.is_empty());
         assert!(spec.netns.is_none());
+        assert!(spec.overlay.is_none());
         assert!(!spec.pause);
         assert!(spec.log_path.is_none());
     }

@@ -20,6 +20,12 @@ pub fn to_run_spec(spec: &ContainerSpec) -> Result<RunSpec, String> {
     run.gid = spec.gid;
     run.new_net = spec.new_net;
     run.netns = spec.netns.as_deref().map(std::path::PathBuf::from);
+    // T4.13 M3 (Q53): per-container overlayfs view passthrough.
+    run.overlay = spec.overlay.as_ref().map(|ov| nsrun::Overlay {
+        lower: ov.lower.iter().map(PathBuf::from).collect(),
+        upper: PathBuf::from(&ov.upper),
+        work: PathBuf::from(&ov.work),
+    });
     run.pause = spec.pause;
     run.no_new_privs = spec.no_new_privs;
     run.mounts = spec
@@ -111,6 +117,31 @@ mod tests {
             Some(std::path::Path::new("/proc/42/ns/net"))
         );
         assert!(run.pause);
+    }
+
+    #[test]
+    fn maps_overlay_passthrough() {
+        let mut spec = ContainerSpec::new("c1", "/views/c/mnt", vec!["/bin/true".into()]);
+        spec.overlay = Some(engine_proto::OverlaySpec {
+            lower: vec!["/layers/l1".into(), "/layers/l2".into()],
+            upper: "/views/c/upper".into(),
+            work: "/views/c/work".into(),
+        });
+        let run = to_run_spec(&spec).unwrap();
+        let ov = run.overlay.as_ref().expect("overlay mapped");
+        assert_eq!(
+            ov.lower,
+            [PathBuf::from("/layers/l1"), PathBuf::from("/layers/l2")]
+        );
+        assert_eq!(ov.upper, PathBuf::from("/views/c/upper"));
+        assert_eq!(ov.work, PathBuf::from("/views/c/work"));
+        // Defaults stay plain-dir rootfs.
+        assert!(
+            to_run_spec(&ContainerSpec::new("c2", "/r", vec!["/bin/true".into()]))
+                .unwrap()
+                .overlay
+                .is_none()
+        );
     }
 
     #[test]

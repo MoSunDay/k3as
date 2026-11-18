@@ -10,8 +10,9 @@
 //! Exec output rides untagged kinds 2/3 delimited by
 //! `ExecStarted`/`ExecExited`; container output is discarded here —
 //! logs come from the CRI text file the engine appends to (Q50).
-//! Image store and CNI are T4.13; until then only host-dir rootfs
-//! test pods run.
+//! Images are real since T4.13 (Q53/Q54): registry-v2 pulls unpack
+//! once into shared per-layer dirs and containers run on per-container
+//! overlayfs views (fused-copy fallback when the kernel path is out).
 
 pub mod backend;
 pub mod exec;

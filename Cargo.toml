@@ -118,6 +118,12 @@ zstd = "0.13"
 # (miniz_oxide backend, zero unsafe, no C zlib) + existing zstd.
 tar = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# T4.13 M3 (Q53): per-layer whiteout translation + the overlayfs probe —
+# nix 0.30 pure-Rust safe wrappers (mknod / mount / umount2 / Uid). nix
+# 0.30 dropped xattr support, so the trusted.overlay.opaque marker uses
+# the `xattr` crate (already locked via the rdb tree; pure Rust, no C).
+nix = { version = "0.30", default-features = false, features = ["fs", "user", "mount"] }
+xattr = "1"
 # HTTP framework (T1.2). axum is built on hyper/tokio/tower and is shared by
 # both the apiserver (T1.2) and the Router data plane (T5.2 "hyper body streaming").
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "macros"] }

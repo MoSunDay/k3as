@@ -50,7 +50,7 @@ pub fn poll_writable(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io
 }
 pub use handle::{Child, Output};
 pub use signal::{install_shutdown_flag, shutdown_requested};
-pub use spec::{BindMount, CgroupLimits, RunSpec};
+pub use spec::{BindMount, CgroupLimits, Overlay, RunSpec};
 
 /// The caller must be single-threaded for the fork-like clone3.
 pub fn ensure_single_threaded() -> io::Result<()> {

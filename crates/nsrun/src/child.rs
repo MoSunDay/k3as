@@ -62,6 +62,12 @@ pub fn run_child(spec: &RunSpec, io: ChildIo) -> ! {
     }
 
     let rootfs = sys::cstr(&spec.rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
+    // T4.13 M3 (Q53): the overlayfs view must be mounted over the rootfs
+    // BEFORE enter_rootfs — its bind mount would bury the overlay. The
+    // child's mount ns is already private, so the mount cannot leak.
+    if let Some(ov) = &spec.overlay {
+        mount::overlay_rootfs(&rootfs, ov).unwrap_or_else(|e| fail("overlay rootfs", e));
+    }
     mount::enter_rootfs(&rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
     let root = inroot::open_root(Path::new(".")).unwrap_or_else(|e| fail("enter rootfs", e));
     mount::container_filesystems().unwrap_or_else(|e| fail("mount", e));

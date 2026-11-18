@@ -1,12 +1,14 @@
-//! T4.13 image store (Q53/Q54): content-addressed blob store + ref table +
-//! fused-merge cache under `<data_dir>/engine/images/`.
+//! T4.13 image store (Q53/Q54): content-addressed blob store + ref table
+//! under `<data_dir>/engine/images/`.
 //!
-//! Layout: `blobs/<algo>/<hex>` (CAS: digest-named, deduped by rename),
+//! Layout: `blobs/<algo>/<hex>` (CAS: digest-named, deduped by rename) and
 //! `refs/<refkey>.json` (the pull record: manifest digest + config/layer
-//! descriptors), `merged/<manifest-digest-hex>/` (the M2 fused rootfs
-//! extracted from the layer stack), `tmp/` (in-flight downloads committed by
-//! atomic rename). Pure helpers are free functions; [`ImageStore`] is a
-//! cheap handle (root path + a tmp counter) safe to clone.
+//! descriptors), plus `tmp/` (in-flight downloads committed by atomic
+//! rename). The M3 caches live in [`super::layers`] (`layers/` per-layer
+//! unpack dirs, `views/` overlay scratch, `merged/` fused fallback) and
+//! mark-sweep GC in [`super::gc`]. Pure helpers are free functions;
+//! [`ImageStore`] is a cheap handle (root path + a tmp counter) safe to
+//! clone.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +16,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::gc;
 use super::manifest::Descriptor;
 
 /// A completed pull: the normalized reference, the manifest digest (the CAS
@@ -27,7 +30,7 @@ pub struct PulledImage {
 }
 
 /// `(algo, hex)` of a `algo:hex` digest; a bare hex is `sha256`-assumed.
-fn digest_parts(digest: &str) -> (&str, &str) {
+pub(super) fn digest_parts(digest: &str) -> (&str, &str) {
     match digest.split_once(':') {
         Some((algo, hex)) => (algo, hex),
         None => ("sha256", digest),
@@ -48,9 +51,9 @@ pub struct ImageStore {
 
 impl ImageStore {
     /// Open (idempotently create) the store at `root`: blobs/, refs/,
-    /// merged/, tmp/ all spring into existence.
+    /// layers/, views/, merged/, tmp/ all spring into existence.
     pub fn open(root: &Path) -> std::io::Result<Self> {
-        for sub in ["blobs/sha256", "refs", "merged", "tmp"] {
+        for sub in ["blobs/sha256", "refs", "layers", "views", "merged", "tmp"] {
             std::fs::create_dir_all(root.join(sub))?;
         }
         Ok(Self {
@@ -156,69 +159,14 @@ impl ImageStore {
             .find(|img| img.digest == repo_digest)
     }
 
-    /// Mark-sweep GC: mark the manifest/config/layer digests of every ref,
-    /// then delete CAS blobs and `merged/` dirs that no ref still owns.
-    /// Only ever walks inside the store root. Returns
-    /// `(blobs_removed, merged_removed)`.
-    pub fn gc(&self) -> Result<(usize, usize), String> {
-        let mut marked: Vec<String> = Vec::new();
-        for img in self.list_refs() {
-            marked.push(img.digest.clone());
-            marked.push(img.config.digest.clone());
-            marked.extend(img.layers.iter().map(|l| l.digest.clone()));
-        }
-        let is_marked = |d: &str| marked.iter().any(|m| m == d);
-
-        let mut blobs_removed = 0usize;
-        let blobs_root = self.root.join("blobs");
-        for algo in list_dirs(&blobs_root) {
-            for hex in list_files(&blobs_root.join(&algo)) {
-                let digest = format!("{algo}:{hex}");
-                if !is_marked(&digest) {
-                    let p = blobs_root.join(&algo).join(&hex);
-                    std::fs::remove_file(&p)
-                        .map_err(|e| format!("gc blob {}: {e}", p.display()))?;
-                    blobs_removed += 1;
-                }
-            }
-        }
-
-        let mut merged_removed = 0usize;
-        for hex in list_dirs(&self.root.join("merged")) {
-            let digest = format!("sha256:{hex}");
-            if !is_marked(&digest) {
-                let p = self.root.join("merged").join(&hex);
-                std::fs::remove_dir_all(&p)
-                    .map_err(|e| format!("gc merged {}: {e}", p.display()))?;
-                merged_removed += 1;
-            }
-        }
-        Ok((blobs_removed, merged_removed))
+    /// Mark-sweep GC: mark the manifest/config/layer digests of every
+    /// ref, then delete CAS blobs, `merged/` fused dirs and `layers/`
+    /// per-layer dirs no ref still owns (`views/` is ephemeral per-
+    /// container scratch, never swept). Returns `(blobs_removed,
+    /// merged_removed, layers_removed)`.
+    pub fn gc(&self) -> Result<(usize, usize, usize), String> {
+        gc::sweep(&self.root, &self.list_refs())
     }
-}
-
-/// Immediate subdirectory names (empty on any I/O error).
-fn list_dirs(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.path().is_dir())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Immediate regular-file names (empty on any I/O error).
-fn list_files(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.path().is_file())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -260,7 +208,7 @@ mod tests {
     #[test]
     fn open_creates_layout_and_reopen_lists_refs() {
         let (store, root) = temp_store("layout");
-        for sub in ["blobs/sha256", "refs", "merged", "tmp"] {
+        for sub in ["blobs/sha256", "refs", "layers", "views", "merged", "tmp"] {
             assert!(root.join(sub).is_dir(), "{sub} missing");
         }
         store
@@ -332,14 +280,18 @@ mod tests {
         std::fs::create_dir_all(store.merged_dir(&orphan)).unwrap();
         std::fs::create_dir_all(store.merged_dir(&kept.digest)).unwrap();
 
-        let (blobs, merged) = store.gc().unwrap();
-        assert_eq!((blobs, merged), (1, 1));
+        // An orphan per-layer dir (M3): unreferenced digest is swept too.
+        std::fs::create_dir_all(store.layer_dir(&orphan)).unwrap();
+
+        let (blobs, merged, layers) = store.gc().unwrap();
+        assert_eq!((blobs, merged, layers), (1, 1, 1));
         assert!(!store.has_blob(&orphan));
         assert!(!store.merged_dir(&orphan).exists());
+        assert!(!store.layer_dir(&orphan).exists());
         assert!(store.has_blob(&kept.config.digest));
         assert!(store.merged_dir(&kept.digest).is_dir());
         // Idempotent: nothing left to sweep.
-        assert_eq!(store.gc().unwrap(), (0, 0));
+        assert_eq!(store.gc().unwrap(), (0, 0, 0));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

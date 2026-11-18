@@ -1,11 +1,12 @@
 //! T4.13 image store (Q53/Q54): the registry-v2 pull chain — single-flight
 //! dedupe, manifest/index resolution with digest verification, streaming
-//! CAS blob downloads, and the M2 fused extraction. Reference parsing lives
-//! in `ref.rs`; plain HTTP only (Q21: TLS arrives with T1.3).
+//! CAS blob downloads, then the M3 per-layer unpack into `layers/`
+//! (rootfs views are resolved lazily at container start). Reference
+//! parsing lives in `reference.rs`; plain HTTP only (Q21: TLS arrives
+//! with T1.3).
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use sha2::Digest as _;
@@ -14,7 +15,7 @@ use tokio::io::AsyncReadExt as _;
 use super::cas::{ImageStore, PulledImage};
 use super::manifest::{
     parse_manifest, select_manifest, select_platform, sha256_digest, sha256_digest_of_hasher,
-    Descriptor, Manifest, ParsedManifest, MANIFEST_TYPES,
+    Manifest, ParsedManifest, MANIFEST_TYPES,
 };
 use super::reference::{host_port, normalized, parse_ref};
 use crate::http::get_raw;
@@ -114,14 +115,16 @@ impl Puller {
         for layer in &single.layers {
             self.fetch_blob(&host, port, &repo, &layer.digest).await?;
         }
-        // T4.13 M3 stopgap: fused rootfs (see ensure_merged).
-        self.ensure_merged(&digest, &single.layers)?;
+        // T4.13 M3 (Q53): per-layer unpack is the pull-side artifact —
+        // each layer lands ONCE in `layers/<hex>`; the fused fallback and
+        // per-container overlay views resolve lazily at container start.
         let img = PulledImage {
             reference: key,
             digest,
             config: single.config,
             layers: single.layers,
         };
+        self.store.ensure_layers(&img)?;
         self.store.put_ref(&img)?;
         Ok(img)
     }
@@ -220,78 +223,6 @@ impl Puller {
         }
         self.store.commit(&tmp, digest)
     }
-
-    /// T4.13 M3 stopgap: NAIVE fused extraction. Every layer is unpacked,
-    /// IN MANIFEST ORDER, onto ONE directory — later layers overwrite
-    /// earlier files. No per-layer unpack dirs, no overlayfs, no whiteout
-    /// (`.wh.*`) handling, no diff_ids tracking; those land in M3. Sync
-    /// filesystem work on the caller's task — fine for M2's micro images.
-    pub(crate) fn ensure_merged(
-        &self,
-        manifest_digest: &str,
-        layers: &[Descriptor],
-    ) -> Result<PathBuf, String> {
-        let merged = self.store.merged_dir(manifest_digest);
-        if merged.is_dir() {
-            return Ok(merged);
-        }
-        let hex = manifest_digest
-            .rsplit(':')
-            .next()
-            .unwrap_or(manifest_digest);
-        let staging = self
-            .store
-            .root()
-            .join("merged")
-            .join(format!(".tmp-{hex}-{}", std::process::id()));
-        std::fs::create_dir_all(&staging).map_err(|e| format!("stage merged rootfs: {e}"))?;
-        let unpack = || -> Result<(), String> {
-            for layer in layers {
-                // Media type decides the decompression wrap BEFORE any I/O
-                // (an unsupported type fails without touching the CAS).
-                let gzip = match layer.media_type.as_str() {
-                    "application/vnd.docker.image.rootfs.diff.tar.gzip"
-                    | "application/vnd.oci.image.layer.v1.tar+gzip"
-                    | "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip" => true,
-                    "application/vnd.docker.image.rootfs.diff.tar"
-                    | "application/vnd.oci.image.layer.v1.tar" => false,
-                    other => {
-                        return Err(format!(
-                            "layer mediaType {other} unsupported until T4.13 M3"
-                        ))
-                    }
-                };
-                let blob = self.store.blob_path(&layer.digest);
-                let file = std::fs::File::open(&blob)
-                    .map_err(|e| format!("open layer {}: {e}", layer.digest))?;
-                let dec: Box<dyn std::io::Read> = if gzip {
-                    Box::new(flate2::read::GzDecoder::new(file))
-                } else {
-                    Box::new(file)
-                };
-                let mut arch = tar::Archive::new(dec);
-                arch.set_overwrite(true);
-                arch.set_unpack_xattrs(false);
-                arch.set_preserve_mtime(false);
-                arch.unpack(&staging)
-                    .map_err(|e| format!("unpack layer {}: {e}", layer.digest))?;
-            }
-            Ok(())
-        };
-        match unpack() {
-            Ok(()) => {
-                std::fs::rename(&staging, &merged).map_err(|e| {
-                    let _ = std::fs::remove_dir_all(&staging);
-                    format!("publish merged rootfs: {e}")
-                })?;
-                Ok(merged)
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                Err(e)
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -307,82 +238,6 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
-    }
-
-    /// Build a deterministic gzip tar layer holding `name -> contents`.
-    fn gz_layer(files: &[(&str, &str)]) -> Vec<u8> {
-        let mut tar_bytes = std::io::Cursor::new(Vec::new());
-        {
-            let mut b = tar::Builder::new(&mut tar_bytes);
-            for (name, content) in files {
-                let mut h = tar::Header::new_gnu();
-                h.set_size(content.len() as u64);
-                h.set_mode(0o644);
-                h.set_cksum();
-                b.append_data(&mut h, name, std::io::Cursor::new(content.as_bytes()))
-                    .unwrap();
-            }
-            b.finish().unwrap();
-        }
-        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        enc.write_all(tar_bytes.get_ref()).unwrap();
-        enc.finish().unwrap()
-    }
-
-    #[test]
-    fn ensure_merged_unpacks_layers_in_order_later_wins() {
-        let root = temp_root("merged");
-        let store = ImageStore::open(&root).unwrap();
-        let puller = Puller::new("127.0.0.1:15000", store.clone());
-        let l1 = gz_layer(&[("bin/app", "one"), ("bin/base", "base")]);
-        let l2 = gz_layer(&[("bin/app", "overwritten")]);
-        let layers: Vec<Descriptor> = [l1.clone(), l2.clone()]
-            .iter()
-            .map(|bytes| Descriptor {
-                media_type: "application/vnd.docker.image.rootfs.diff.tar.gzip".into(),
-                digest: sha256_digest(bytes),
-                size: bytes.len() as u64,
-                platform: None,
-            })
-            .collect();
-        for (bytes, desc) in [l1, l2].iter().zip(&layers) {
-            std::fs::write(store.blob_path(&desc.digest), bytes).unwrap();
-        }
-        let digest = sha256_digest(b"manifest");
-        let merged = puller.ensure_merged(&digest, &layers).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(merged.join("bin/app")).unwrap(),
-            "overwritten"
-        );
-        assert_eq!(
-            std::fs::read_to_string(merged.join("bin/base")).unwrap(),
-            "base"
-        );
-        // Cache hit: a second call returns the same dir, no new staging.
-        assert_eq!(puller.ensure_merged(&digest, &layers).unwrap(), merged);
-        let staged: Vec<_> = std::fs::read_dir(root.join("merged"))
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
-            .collect();
-        assert!(staged.is_empty(), "staging dirs must be renamed away");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn ensure_merged_rejects_unsupported_layer_media_type() {
-        let root = temp_root("unsupported");
-        let store = ImageStore::open(&root).unwrap();
-        let puller = Puller::new("127.0.0.1:15000", store);
-        let layer = Descriptor {
-            media_type: "application/vnd.oci.image.layer.v1.tar+zstd".into(),
-            digest: sha256_digest(b"zstd-bytes"),
-            size: 11,
-            platform: None,
-        };
-        let err = puller.ensure_merged("sha256:m", &[layer]).unwrap_err();
-        assert!(err.contains("unsupported until T4.13 M3"), "{err}");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

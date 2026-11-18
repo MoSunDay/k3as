@@ -14,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::inroot::{self, Last};
-use crate::spec::BindMount;
+use crate::spec::{BindMount, Overlay};
 use crate::sys;
 
 /// Makes `rootfs` a mount point and enters it. Required before
@@ -31,6 +31,34 @@ pub fn enter_rootfs(rootfs: &std::ffi::CStr) -> io::Result<()> {
         None,
     )?;
     sys::chdir(rootfs)
+}
+
+/// Mount the per-container overlayfs view over `rootfs` (T4.13 M3, Q53):
+/// shared unpacked image layers as read-only lowers, per-container
+/// upper/work for writes. Must run BEFORE [`enter_rootfs`] — its bind
+/// mount would bury the overlay. `lower` arrives bottom-up (image layer
+/// order); the kernel wants topmost first.
+pub fn overlay_rootfs(rootfs: &std::ffi::CStr, ov: &Overlay) -> io::Result<()> {
+    if ov.lower.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "overlay needs at least one lower dir (Q53)",
+        ));
+    }
+    let lower = ov
+        .lower
+        .iter()
+        .rev()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(":");
+    let data = format!(
+        "lowerdir={lower},upperdir={},workdir={}",
+        ov.upper.to_string_lossy(),
+        ov.work.to_string_lossy()
+    );
+    let data_c = sys::cstr(&data)?;
+    sys::mount(c"overlay", rootfs, c"overlay", 0, Some(&data_c))
 }
 
 pub fn apply_bind(root: BorrowedFd<'_>, m: &BindMount) -> io::Result<()> {

@@ -2635,3 +2635,4 @@ kubelet 依赖二者 + `sha2`（digest 校验）。断点续传 (Range) 明确 o
 **Consequences.** (+) 纯 Rust 解包链, 无 shell-out; digest 校验单点在 kubelet。 (−) tar
 crate 需自行处理 whiteout/路径穿越（不可信任镜像内容, M3 落地）；flate2 rust_backend
 比 C zlib 慢（测试镜像量级可忽略）。
+（M3 补注: per-layer whiteout 落地引入 nix 0.30 纯 Rust 安全封装, 仅用 mknod/setxattr, 已在锁内 — 零 C 编译依赖不变。）
