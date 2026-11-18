@@ -201,6 +201,8 @@ where
                 // T4.13 M2 (Q54): the default registry the built-in engine
                 // pulls host-less image references from.
                 ag.registry_addr.clone(),
+                // T4.13 M5 (Q53): soft builtin image-store quota (0 = off).
+                ag.builtin_image_quota,
             )
         }
         Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),

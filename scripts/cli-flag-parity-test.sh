@@ -147,6 +147,12 @@ live_help "t-registry" server --registry-addr --disable-registry --registry-tag-
 live_help "t-engine-server" server --container-engine
 live_help "t-engine-agent" agent --container-engine
 
+# ---------------------------------------------------------------------------
+# T4.13 (Q53) live-help surface: the builtin image-store quota knob is wired
+# on `agent` (the role that runs the built-in engine's image store).
+# ---------------------------------------------------------------------------
+live_help "t413-agent" agent --builtin-image-quota --registry-addr
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

@@ -555,11 +555,14 @@ pub struct RawResponse<S = TcpStream> {
 /// be distinguishable from a transport failure); only protocol-level
 /// garbage (bad status line, no head) is [`HttpError::BadResponse`]. The
 /// body of a dropped error response simply dies with the connection.
+/// `extra_headers` (T4.13 M5) rides after `Host`/`Accept` — the pull
+/// chain passes its env-var `Authorization` header through verbatim.
 pub async fn get_raw(
     host: &str,
     port: u16,
     path: &str,
     accept: &str,
+    extra_headers: &[(&str, String)],
 ) -> Result<RawResponse, HttpError> {
     let mut stream = tcp_connect(host, port).await?;
     let host_hdr = if port == 80 {
@@ -567,9 +570,14 @@ pub async fn get_raw(
     } else {
         format!("{host}:{port}")
     };
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host_hdr}\r\nAccept: {accept}\r\nConnection: close\r\n\r\n"
-    );
+    let mut req = format!("GET {path} HTTP/1.1\r\nHost: {host_hdr}\r\nAccept: {accept}\r\n");
+    for (name, value) in extra_headers {
+        req.push_str(name);
+        req.push_str(": ");
+        req.push_str(value);
+        req.push_str("\r\n");
+    }
+    req.push_str("Connection: close\r\n\r\n");
     stream
         .write_all(req.as_bytes())
         .await

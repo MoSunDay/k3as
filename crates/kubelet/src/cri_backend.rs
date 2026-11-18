@@ -53,6 +53,14 @@ pub trait CriBackend: Send + Sync {
     /// [`crate::sync::plan`] (Always / IfNotPresent / Never — Sprint 20
     /// S3); the backend stays a dumb pull with no policy logic of its own.
     async fn pull_image(&self, image: &str) -> Result<(), String>;
+    /// Delete one image (T4.13 M5 image-delete face; `crictl rmi`). The
+    /// builtin engine implements ref-drop + GC; the containerd adapter
+    /// inherits this default until its `crictl rmi` face lands. Unknown
+    /// images are Ok (idempotent).
+    async fn remove_image(&self, image: &str) -> Result<(), String> {
+        let _ = image;
+        Err("remove_image not supported by this backend".to_string())
+    }
     /// All pod sandboxes, every state (`crictl pods`).
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String>;
     /// All containers, every state (`crictl ps -a`).

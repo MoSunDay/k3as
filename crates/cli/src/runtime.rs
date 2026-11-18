@@ -81,6 +81,7 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
         None,
         "containerd".to_string(),
         registry::DEFAULT_ADDR.to_string(),
+        0,
     )
 }
 
@@ -104,6 +105,8 @@ pub fn run_agent(
     // T4.13 M2 (Q54): the default registry the built-in engine pulls
     // host-less image references from (`--registry-addr`).
     registry_addr: String,
+    // T4.13 M5 (Q53): soft builtin image-store quota in bytes (0 = off).
+    builtin_image_quota: u64,
 ) -> ExitCode {
     run_supervised(
         "agent",
@@ -116,6 +119,7 @@ pub fn run_agent(
         agent_exec_addr,
         container_engine,
         registry_addr,
+        builtin_image_quota,
     )
 }
 
@@ -179,6 +183,9 @@ fn run_supervised(
     // T4.13 M2 (Q54): default registry for host-less image refs (builtin
     // engine pulls; inert for the staged containerd path).
     registry_addr: String,
+    // T4.13 M5 (Q53): soft builtin image-store quota (0 = off; builtin
+    // engine only — the staged containerd path ignores it).
+    builtin_image_quota: u64,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -301,7 +308,9 @@ fn run_supervised(
                         &kc.sandbox_image,
                         &kc.node_ip,
                         &registry_addr,
-                    ) {
+                    )
+                    .map(|b| b.with_image_quota(builtin_image_quota))
+                    {
                         Ok(backend) => {
                             // Q49: adopt-or-clean leftover engine sockets.
                             backend.recover().await;

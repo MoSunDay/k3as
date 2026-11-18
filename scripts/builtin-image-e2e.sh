@@ -25,6 +25,21 @@
 #      ENVPOD-UP; pod adds MERGED_FROM with NO command. Asserts logs
 #      show the marker and `kubectl exec ... env` sees BOTH vars
 #      (image env survived, pod env appended last-wins).
+#   I6 NodePort (M5, Q41/Q52): Pod img-svc (test/httpd:v1, containerPort
+#      18080) + Service (selector app=img-svc, port 80 -> targetPort
+#      18080); the router's nodePort plane must serve the pod through the
+#      auto-allocated nodePort. Then the host-port conflict rule: a second
+#      pod on the same port never reaches Running (host-netns bind fails)
+#      while the first pod keeps serving.
+#   I7 GC (M5, Q53): test/shared:v1 embeds whtwo's layer[0] BYTES (same
+#      digest); deleting whtwo's ref FILE (white-box: the ref is the unit
+#      of ownership, startup-GC is v1's delete face) and restarting the
+#      agent sweeps whtwo's unique layer while the SHARED base survives
+#      and the in-use shared pod recovers.
+#   I8 (M5): (a) CAS persistence — the registry's copy of test/httpd:v1's
+#      layer blob is DELETED, a fresh pod still runs (a re-pull would
+#      404); (b) --builtin-image-quota 1024 — a >4KiB image pull fails
+#      cleanly (pod Pending, agent alive, quota error logged).
 #
 # Preconditions: PRE-BUILT binary, real root, static busybox, curl +
 # python3 (image fabrication + REST). Missing inputs => "SKIP
@@ -125,6 +140,8 @@ sed -i "s#IMGDIR#$IMG2_DIR#" "$IMG2_DIR/spec.json"
 REPO2="test/whtwo"
 push_image "$IMG2_DIR" "$REPO2" v1 "$IMG2_DIR/spec.json"
 bimg_ok "two-layer whiteout image pushed to $REG/v2/$REPO2:v1"
+# M5 white-box handles: whtwo's layer digests (layer[1] is whtwo-unique).
+WHTWO_L0="${BIMG_LAYER_DIGESTS[0]}"; WHTWO_L1="${BIMG_LAYER_DIGESTS[1]}"
 
 # post_pod's heredoc is unquoted: $3 lands verbatim in the JSON body (no
 # re-expansion), so the container-side $(cat ...) reaches the Pod intact.
@@ -155,6 +172,7 @@ sed -i "s#IMGDIR#$IMG3_DIR#" "$IMG3_DIR/spec.json"
 REPO3="test/httpd"
 push_image "$IMG3_DIR" "$REPO3" v1 "$IMG3_DIR/spec.json"
 bimg_ok "entrypoint-only image pushed to $REG/v2/$REPO3:v1"
+HTTPD_LAYER="${BIMG_LAYER_DIGESTS[0]}" # M5 I8a: the registry blob to delete
 
 # NO command in the pod: the image Entrypoint must be the launch argv.
 code="$(post_pod_json img-entry '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-entry","namespace":"default"},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/'"$REPO3"':v1"}]}}')"
@@ -226,5 +244,148 @@ grep -q "MERGED_FROM=pod-value" <<<"$EXEC2" \
   || bimg_fail "I5 exec env never showed the pod's MERGED_FROM (got: ${EXEC2:-<empty>})"
 bimg_ok "I5 image env survives, pod env appends (logs + kubectl exec env)"
 
+# --- I6: NodePort through the router plane + host-port conflict (M5) -------
+code="$(post_pod_json img-svc '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc","namespace":"default","labels":{"app":"img-svc"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":18080}]}]}}')"
+[[ "$code" == "201" ]] || bimg_fail "I6 pod POST -> $code"
+code="$(api_post_json api/v1/namespaces/default/services '{"apiVersion":"v1","kind":"Service","metadata":{"name":"img-svc","namespace":"default"},"spec":{"type":"NodePort","selector":{"app":"img-svc"},"ports":[{"name":"web","port":80,"targetPort":18080,"protocol":"TCP"}]}}')"
+[[ "$code" == "201" ]] || bimg_fail "I6 service POST -> $code"
+PHASE="$(wait_phase img-svc Running 120)"
+[[ "$PHASE" == "Running" ]] \
+  || bimg_fail "I6 pod never reached Running (phase=${PHASE:-none}; agent log: $(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
+NODEPORT=""
+for _ in $(seq 1 60); do
+  NODEPORT="$(svc_node_port img-svc web)"
+  [[ "$NODEPORT" =~ ^[0-9]+$ ]] && break
+  sleep 0.5
+done
+[[ "$NODEPORT" =~ ^[0-9]+$ ]] || bimg_fail "I6 no auto-allocated nodePort (got '${NODEPORT:-}')"
+BODY=""
+for _ in $(seq 1 60); do
+  BODY="$(curl -fsS "http://127.0.0.1:${NODEPORT}/index.html" 2>/dev/null || true)"
+  [[ "$BODY" == "IMG-ENTRYPOINT" ]] && break
+  sleep 0.5
+done
+[[ "$BODY" == "IMG-ENTRYPOINT" ]] \
+  || bimg_fail "I6 nodePort :${NODEPORT} never served the pod (got: ${BODY:-<empty>})"
+bimg_ok "I6 NodePort ${NODEPORT} -> 127.0.0.1:18080 pod (Q41 router, Q52 host netns)"
+
+# Host-port conflict (Q52: builtin pods share the host netns): a second
+# pod on 18080 must crash-loop (never stably Running) while the first serves.
+code="$(post_pod_json img-svc2 '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc2","namespace":"default","labels":{"app":"img-svc2"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":18080}]}]}}')"
+[[ "$code" == "201" ]] || bimg_fail "I6 conflicting pod POST -> $code"
+STABLE=0
+for _ in $(seq 1 60); do # 30s: transient Running between start and bind-fail is tolerated
+  if [[ "$(pod_phase img-svc2)" == "Running" ]]; then
+    sleep 1; P2="$(pod_phase img-svc2)"; sleep 1; P3="$(pod_phase img-svc2)"
+    [[ "$P2" == "Running" && "$P3" == "Running" ]] && { STABLE=1; break; }
+  fi
+  sleep 0.5
+done
+[[ "$STABLE" -eq 0 ]] || bimg_fail "I6 conflicting pod reached stable Running on the taken port"
+BODY="$(curl -fsS "http://127.0.0.1:${NODEPORT}/index.html" 2>/dev/null || true)"
+[[ "$BODY" == "IMG-ENTRYPOINT" ]] || bimg_fail "I6 first pod stopped serving after the conflict"
+bimg_ok "I6 host-port conflict: second pod crash-loops, first pod keeps serving"
+delete_pod img-svc2; delete_pod img-svc
+code="$(api_delete api/v1/namespaces/default/services/img-svc)"
+[[ "$code" == "200" || "$code" == "404" ]] || bimg_fail "I6 service DELETE -> $code"
+wait_port_free 18080
+bimg_ok "I6 cleanup: pods + service gone, port 18080 freed"
+
+# --- I7: startup GC sweeps unreferenced layers; shared layers survive ------
+# test/shared:v1 layer[0] is byte-identical to whtwo's layer[0] (same busybox
+# base); layer[1] adds s.txt. White-box (v1's delete face is startup-GC):
+# the ref FILE under <agent>/engine/images/refs/ is the unit of ownership.
+IMG5_DIR="$DD/img5"; mkdir -p "$IMG5_DIR"
+cat > "$IMG5_DIR/spec.json" <<'SPEC'
+{"out": "IMGDIR", "layers": [
+ [["bin/busybox","file","@busybox","0755"],
+  ["bin/sh","symlink","busybox"],
+  ["a.txt","file","l1"],
+  ["del/me.txt","file","x"],
+  ["sub/old.txt","file","o"]],
+ [["s.txt","file","s"]]
+], "config": {}}
+SPEC
+sed -i "s#IMGDIR#$IMG5_DIR#" "$IMG5_DIR/spec.json"
+REPO5="test/shared"
+push_image "$IMG5_DIR" "$REPO5" v1 "$IMG5_DIR/spec.json"
+[[ "${BIMG_LAYER_DIGESTS[0]}" == "$WHTWO_L0" ]] \
+  || bimg_fail "I7 shared layer[0] digest mismatch (${BIMG_LAYER_DIGESTS[0]} != $WHTWO_L0)"
+bimg_ok "shared image pushed; layer[0] digest == whtwo's base ($WHTWO_L0)"
+
+code="$(post_pod img-shared "127.0.0.1:${REG_PORT}/$REPO5:v1" '["sh","-c","echo SHARED-UP; sleep 600"]')"
+[[ "$code" == "201" ]] || bimg_fail "I7 pod POST -> $code"
+PHASE="$(wait_phase img-shared Running 120)"
+[[ "$PHASE" == "Running" ]] || bimg_fail "I7 shared pod never reached Running"
+delete_pod img-wh # whtwo must be out of use before its ref goes
+REFS="$DD/agent/engine/images/refs"
+WHTWO_REF="$(grep -l "\"reference\":\"127.0.0.1:${REG_PORT}/test/whtwo:v1\"" "$REFS"/*.json 2>/dev/null | head -1)"
+[[ -n "$WHTWO_REF" ]] || bimg_fail "I7 whtwo ref file not found under $REFS"
+rm -f "$WHTWO_REF"
+bimg_ok "I7 whtwo ref file deleted (${WHTWO_REF##*/}); restarting agent"
+restart_agent
+PHASE="$(wait_phase img-shared Running 120)"
+[[ "$PHASE" == "Running" ]] \
+  || bimg_fail "I7 shared pod did not recover after restart (phase=${PHASE:-none})"
+L1HEX="${WHTWO_L1#sha256:}"; L0HEX="${WHTWO_L0#sha256:}"
+[[ ! -e "$DD/agent/engine/images/layers/$L1HEX" && ! -e "$DD/agent/engine/images/blobs/sha256/$L1HEX" ]] \
+  || bimg_fail "I7 whtwo-unique layer survived GC (layers/ or blobs/ still has $L1HEX)"
+[[ -d "$DD/agent/engine/images/layers/$L0HEX" || -e "$DD/agent/engine/images/blobs/sha256/$L0HEX" ]] \
+  || bimg_fail "I7 SHARED base layer was swept ($L0HEX gone)"
+grep -q "builtin image GC" "$AGENT_LOG" \
+  || bimg_fail "I7 startup GC never logged (agent log: $(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
+bimg_ok "I7 startup GC swept whtwo's unique layer; shared base + in-use pod survived"
+
+# --- I8a: CAS persistence across restart (no re-pull) ----------------------
+code="$(delete_registry_blob test/httpd "$HTTPD_LAYER")"
+[[ "$code" == "202" ]] || bimg_fail "I8a registry blob DELETE -> $code (expected 202)"
+code="$(post_pod_json img-cas '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-cas","namespace":"default"},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1"}]}}')"
+[[ "$code" == "201" ]] || bimg_fail "I8a pod POST -> $code"
+PHASE="$(wait_phase img-cas Running 120)"
+[[ "$PHASE" == "Running" ]] \
+  || bimg_fail "I8a pod never ran from the CAS (phase=${PHASE:-none}; a re-pull would 404 the deleted layer)"
+BODY=""
+for _ in $(seq 1 40); do
+  BODY="$(curl -fsS http://127.0.0.1:18080/index.html 2>/dev/null || true)"
+  [[ -n "$BODY" ]] && break
+  sleep 0.5
+done
+[[ "$BODY" == "IMG-ENTRYPOINT" ]] || bimg_fail "I8a CAS pod never served (got: ${BODY:-<empty>})"
+bimg_ok "I8a CAS hit: pod ran with the registry blob deleted (no re-pull)"
+delete_pod img-cas; wait_port_free 18080
+
+# --- I8b: quota soft cap -> clean pull failure, agent survives -------------
+delete_pod img-bad # keep the quota error attributable to img-big
+restart_agent --builtin-image-quota 1024
+IMG6_DIR="$DD/img6"; mkdir -p "$IMG6_DIR"
+PAD="$(printf 'P%.0s' $(seq 1 5000))"
+cat > "$IMG6_DIR/spec.json" <<SPEC
+{"out": "$IMG6_DIR", "layers": [[
+  ["bin/busybox", "file", "@busybox", "0755"],
+  ["bin/sh", "symlink", "busybox"],
+  ["pad.bin", "file", "$PAD", "0644"]
+]], "config": {}}
+SPEC
+REPO6="test/big"
+push_image "$IMG6_DIR" "$REPO6" v1 "$IMG6_DIR/spec.json"
+code="$(post_pod img-big "127.0.0.1:${REG_PORT}/$REPO6:v1" '["sh","-c","sleep 600"]')"
+[[ "$code" == "201" ]] || bimg_fail "I8b pod POST -> $code"
+QUOTA_ERR=""
+for _ in $(seq 1 40); do # 20s: pod stays Pending AND the error is logged
+  QUOTA_ERR="$(grep -o "builtin image store quota exceeded[^\"]*" "$AGENT_LOG" | head -1 || true)"
+  PHASE="$(pod_phase img-big)"
+  [[ -n "$QUOTA_ERR" && "$PHASE" != "Running" ]] && break
+  sleep 0.5
+done
+[[ -n "$QUOTA_ERR" ]] \
+  || bimg_fail "I8b quota error never logged (agent log: $(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
+for _ in $(seq 1 30); do # stay Pending >= 15s more
+  [[ "$(pod_phase img-big)" != "Running" ]] || bimg_fail "I8b quota'd pod reached Running"
+  sleep 0.5
+done
+kill -0 "$AGENT_PID" 2>/dev/null || bimg_fail "I8b agent died on the quota error"
+[[ "$(pod_phase img-big)" != "Running" ]] || bimg_fail "I8b quota'd pod reached Running"
+bimg_ok "I8b quota: pull failed cleanly ($QUOTA_ERR); pod Pending, agent alive"
+
 echo
-echo "builtin-image-e2e: I1-I5 passed (real registry-v2 pull chain, T4.13 M4 image-config launch)"
+echo "builtin-image-e2e: I1-I8 passed (real registry-v2 pull chain, T4.13 M4 launch + M5 GC/quota)"

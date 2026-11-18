@@ -106,4 +106,17 @@ pub struct AgentCmd {
         value_name = "ADDR"
     )]
     pub registry_addr: String,
+
+    /// Soft quota cap (BYTES) on the built-in engine's image store
+    /// (T4.13 M5, Q53 — init-pro extension): checked BEFORE a pull
+    /// downloads blobs/layers; a pull that would exceed the cap fails
+    /// cleanly (the pod stays Pending, the agent survives). 0 disables
+    /// the cap entirely (the DEFAULT). env `INIT_PRO_BUILTIN_IMAGE_QUOTA`.
+    #[arg(
+        long = "builtin-image-quota",
+        env = "INIT_PRO_BUILTIN_IMAGE_QUOTA",
+        default_value_t = 0,
+        value_name = "BYTES"
+    )]
+    pub builtin_image_quota: u64,
 }

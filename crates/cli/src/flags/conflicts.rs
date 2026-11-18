@@ -137,6 +137,7 @@ mod tests {
             disable_agent_exec: false,
             anyhome_addr: "127.0.0.1:11111".to_string(),
             registry_addr: "127.0.0.1:15000".to_string(),
+            builtin_image_quota: 0,
         }
     }
 

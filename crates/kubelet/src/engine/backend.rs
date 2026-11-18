@@ -137,6 +137,14 @@ impl EngineBackend {
         })
     }
 
+    /// T4.13 M5: soft quota cap (bytes) on the builtin image store —
+    /// checked BEFORE a pull downloads blobs/layers; 0 = unlimited (the
+    /// default, matching the CLI flag's default-off posture).
+    pub fn with_image_quota(mut self, bytes: u64) -> Self {
+        self.puller = self.puller.with_quota(bytes);
+        self
+    }
+
     /// Restart hygiene (Q49): the agent's death killed the containers
     /// (client EOF), but engine processes linger idle. Ping every
     /// socket: live idlers get Shutdown; dead paths are unlinked.
@@ -161,6 +169,19 @@ impl EngineBackend {
         // gone; their upper/work scratch is dead weight. The shared layer
         // dirs stay (they are the point of the unpack-once cache).
         self.store.clear_views();
+        // T4.13 M5 (Q53): startup GC trigger — sweep CAS blobs, per-layer
+        // dirs and fused merges no ref file still owns (the ref table is
+        // the unit of ownership; the API delete face drops refs).
+        match self.store.gc() {
+            Ok((blobs, merged, layers)) => tracing::info!(
+                target: "init-pro", blobs, layers, merged,
+                "builtin image GC: {blobs} blob(s), {layers} layer dir(s), {merged} merged dir(s) removed"
+            ),
+            Err(e) => tracing::warn!(
+                target: "init-pro", error = %e,
+                "builtin image GC failed at startup (continuing)"
+            ),
+        }
         tracing::info!(
             target: "init-pro", cleaned,
             "builtin engine recovery: stopped stray engines (T4.12)"
@@ -337,6 +358,22 @@ impl CriBackend for EngineBackend {
         }
         // T4.13 M2 (Q53/Q54): real registry-v2 pull into the CAS.
         self.puller.pull(image).await.map(|_| ())
+    }
+
+    /// T4.13 M5 image-delete face: drop the ref FILE (by normalized ref,
+    /// or by manifest digest for `repo@sha256:` spellings), then GC —
+    /// blobs/layers/merged dirs no surviving ref owns are swept; layers
+    /// SHARED with a kept ref survive (dedupe by digest). Unknown image
+    /// is `Ok(())` (idempotent, `crictl rmi` semantics). The caller owns
+    /// the in-use question: deleting a ref an in-flight pod still needs
+    /// frees its layers at the next GC.
+    async fn remove_image(&self, image: &str) -> Result<(), String> {
+        let Some(img) = self.cas_ref(image) else {
+            return Ok(());
+        };
+        self.store.remove_ref(&img.reference);
+        self.store.gc()?;
+        Ok(())
     }
 
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String> {
@@ -609,6 +646,78 @@ mod tests {
         assert_eq!(ready.ip.as_deref(), Some("192.0.2.7"));
         assert_eq!(dead.ip, None);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T4.13 M5 remove_image: ref drop + GC — unique blobs/layers go,
+    /// layers SHARED with a surviving ref stay, unknown refs are Ok.
+    #[tokio::test]
+    async fn remove_image_sweeps_uniques_keeps_shared_layers() {
+        let dir = temp_data_dir("rm-image");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backend = EngineBackend::new(
+            &dir,
+            "registry.local/pause:0",
+            "192.0.2.7",
+            "127.0.0.1:15000",
+        )
+        .unwrap();
+        let mk_img = |reference: &str, uniq: &str| PulledImage {
+            reference: reference.to_string(),
+            digest: format!("sha256:{}", uniq.repeat(64)),
+            config: super::super::image::Descriptor {
+                media_type: "cfg".into(),
+                digest: format!("sha256:{}", format!("{uniq}c").repeat(32)),
+                size: 1,
+                platform: None,
+            },
+            layers: vec![super::super::image::Descriptor {
+                media_type: "layer".into(),
+                digest: format!("sha256:{}", "shared".repeat(16)),
+                size: 1,
+                platform: None,
+            }],
+        };
+        let gone = mk_img("127.0.0.1:15000/test/gone:v1", "a");
+        let keep = mk_img("127.0.0.1:15000/test/keep:v1", "b");
+        let put_blob = |digest: &str| {
+            let tmp = backend.store.tmp_file();
+            std::fs::write(&tmp, digest.as_bytes()).unwrap();
+            backend.store.commit(&tmp, digest).unwrap();
+        };
+        for img in [&gone, &keep] {
+            backend.store.put_ref(img).unwrap();
+            put_blob(&img.digest);
+            put_blob(&img.config.digest);
+            std::fs::create_dir_all(backend.store.layer_dir(&img.layers[0].digest)).unwrap();
+        }
+        put_blob(&gone.layers[0].digest);
+        put_blob(&keep.layers[0].digest);
+
+        crate::cri_backend::CriBackend::remove_image(&backend, "127.0.0.1:15000/test/gone:v1")
+            .await
+            .expect("remove_image");
+        // Unknown image: idempotent Ok, nothing else swept.
+        crate::cri_backend::CriBackend::remove_image(&backend, "127.0.0.1:15000/test/never:v1")
+            .await
+            .expect("remove_image unknown is Ok");
+        assert!(
+            !backend.store.has_blob(&gone.digest),
+            "unique manifest gone"
+        );
+        assert!(
+            !backend.store.has_blob(&gone.config.digest),
+            "unique cfg gone"
+        );
+        assert!(
+            backend.store.has_blob(&keep.layers[0].digest),
+            "shared layer blob survives"
+        );
+        assert!(
+            backend.store.layer_dir(&keep.layers[0].digest).is_dir(),
+            "shared layer dir survives"
+        );
+        assert_eq!(backend.store.gc().unwrap(), (0, 0, 0), "nothing left");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

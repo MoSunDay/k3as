@@ -159,6 +159,17 @@ impl ImageStore {
             .find(|img| img.digest == repo_digest)
     }
 
+    /// T4.13 M5: on-disk usage of the durable image store — the sum of
+    /// regular-file lengths under `blobs/`, `layers/` and `merged/`
+    /// (one walk; `tmp/` in-flight downloads and `views/` per-container
+    /// scratch are excluded — the quota is about RETAINED images).
+    pub fn usage_bytes(&self) -> u64 {
+        ["blobs", "layers", "merged"]
+            .iter()
+            .map(|sub| dir_tree_bytes(&self.root.join(sub)))
+            .sum()
+    }
+
     /// Mark-sweep GC: mark the manifest/config/layer digests of every
     /// ref, then delete CAS blobs, `merged/` fused dirs and `layers/`
     /// per-layer dirs no ref still owns (`views/` is ephemeral per-
@@ -167,6 +178,36 @@ impl ImageStore {
     pub fn gc(&self) -> Result<(usize, usize, usize), String> {
         gc::sweep(&self.root, &self.list_refs())
     }
+
+    /// T4.13 M5 (the image-delete face): drop the pull record of
+    /// `reference`; `true` when a ref file existed. The ref FILE is the
+    /// unit of ownership — after this the next `gc()` sweeps every
+    /// blob/layer/merged dir no remaining ref owns. Callers own the
+    /// in-use question (a removed ref in active use frees shared layers).
+    pub fn remove_ref(&self, reference: &str) -> bool {
+        let path = self
+            .root
+            .join("refs")
+            .join(format!("{}.json", refkey(reference)));
+        std::fs::remove_file(&path).is_ok()
+    }
+}
+
+/// Recursive sum of regular-file lengths under `dir` (0 when absent).
+fn dir_tree_bytes(dir: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            total += dir_tree_bytes(&path);
+        } else if path.is_file() {
+            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    total
 }
 
 #[cfg(test)]
@@ -243,6 +284,65 @@ mod tests {
             "reg.io/other:v2"
         );
         assert!(store.find_ref_by_digest("sha256:nope").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn usage_counts_durable_trees_and_excludes_tmp() {
+        let (store, root) = temp_store("usage");
+        assert_eq!(store.usage_bytes(), 0, "empty store");
+        let img = img("reg.io/u:v1", &format!("sha256:{}", "e".repeat(64)));
+        store.put_ref(&img).unwrap();
+        for (digest, bytes) in [
+            (img.config.digest.clone(), b"cfg-bytes".to_vec()),
+            (img.layers[0].digest.clone(), vec![7u8; 512]),
+        ] {
+            let tmp = store.tmp_file();
+            std::fs::write(&tmp, &bytes).unwrap();
+            store.commit(&tmp, &digest).unwrap();
+        }
+        // tmp/ scratch + views/ scratch must NOT count (M5 quota face).
+        std::fs::write(store.tmp_file(), vec![1u8; 4096]).unwrap();
+        assert_eq!(
+            store.usage_bytes(),
+            (b"cfg-bytes".len() + 512) as u64,
+            "blobs count, tmp does not"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remove_ref_unowns_for_gc_and_is_idempotent() {
+        let (store, root) = temp_store("rmref");
+        // Distinct digests per image (the `img()` fixture shares them).
+        let custom = |reference: &str, tag: char| PulledImage {
+            reference: reference.to_string(),
+            digest: format!("sha256:{}", tag.to_string().repeat(64)),
+            config: Descriptor {
+                media_type: "cfg".into(),
+                digest: format!("sha256:{}", format!("{tag}c").repeat(32)),
+                size: 1,
+                platform: None,
+            },
+            layers: vec![Descriptor {
+                media_type: "layer".into(),
+                digest: format!("sha256:{}", format!("{tag}l").repeat(32)),
+                size: 1,
+                platform: None,
+            }],
+        };
+        let gone = custom("reg.io/gone:v1", 'g');
+        let keep = custom("reg.io/keep:v1", 'k');
+        for img in [&gone, &keep] {
+            store.put_ref(img).unwrap();
+            let tmp = store.tmp_file();
+            std::fs::write(&tmp, b"blob").unwrap();
+            store.commit(&tmp, &img.layers[0].digest).unwrap();
+        }
+        assert!(store.remove_ref(&gone.reference));
+        assert!(!store.remove_ref(&gone.reference), "second remove: no ref");
+        assert_eq!(store.gc().unwrap(), (1, 0, 0), "only gone's blob swept");
+        assert!(store.has_blob(&keep.layers[0].digest));
         let _ = std::fs::remove_dir_all(&root);
     }
 

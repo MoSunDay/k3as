@@ -141,7 +141,9 @@ put_manifest() { # REPO MANIFEST_FILE TAG -> echoes the PUT status
 
 # push_image OUT_DIR REPO TAG SPEC_FILE: build + push config & layers +
 # manifest; asserts every hop (fails the script on a non-201). Digests
-# contain ':' so the blob pairs use '|' as their separator.
+# contain ':' so the blob pairs use '|' as their separator. Records the
+# pushed descriptors in globals for the white-box cases: BIMG_CONFIG_DIGEST
+# and the array BIMG_LAYER_DIGESTS (layer order).
 push_image() {
   local out="$1" repo="$2" tag="$3" spec="$4" code digest file i
   mkdir -p "$out"
@@ -151,6 +153,11 @@ push_image() {
   for ((i = 0; 2 + 2 * i + 1 < ${#words[@]}; i++)); do
     blobs+=("${words[2 + 2 * i]}|$out/layer$i.tar.gz")
   done
+  BIMG_CONFIG_DIGEST="${words[0]}"
+  BIMG_LAYER_DIGESTS=()
+  for ((i = 0; 2 + 2 * i + 1 < ${#words[@]}; i++)); do
+    BIMG_LAYER_DIGESTS+=("${words[2 + 2 * i]}")
+  done
   for f_d in "${blobs[@]}"; do
     digest="${f_d%%|*}"; file="${f_d#*|}"
     code="$(push_blob "$repo" "$file" "$digest")"
@@ -159,6 +166,10 @@ push_image() {
   code="$(put_manifest "$repo" "$out/manifest.json" "$tag")"
   [[ "$code" == "201" ]] \
     || bimg_fail "manifest PUT $repo:$tag -> $code (expected 201): $(head -c 200 "$DD/manifest-put.out")"
+}
+
+delete_registry_blob() { # REPO DIGEST -> status (202 = accepted, T6.3 CAS)
+  curl -s -o /dev/null -w '%{http_code}' -X DELETE "$REG/v2/$1/blobs/$2"
 }
 
 # --- pod helpers -----------------------------------------------------------
@@ -201,4 +212,66 @@ wait_logs() { # NAME PATTERN TENTHS -> logs once the pattern shows up
     sleep 0.5
   done
   echo "$logs"
+}
+
+# --- generic REST + service helpers (M5) ------------------------------------
+api_post_json() { # PATH BODY -> POST status
+  curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+    --data-binary "$2" "$BASE/$1"
+}
+
+api_delete() { # PATH -> DELETE status
+  curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/$1"
+}
+
+delete_pod() { # NAME -> DELETE + bounded wait until gone (port frees)
+  local code i
+  code="$(api_delete "api/v1/namespaces/default/pods/$1")"
+  [[ "$code" == "200" || "$code" == "404" ]] || bimg_fail "pod DELETE $1 -> $code"
+  for i in $(seq 1 60); do
+    [[ "$(pod_phase "$1")" == "" ]] && break
+    sleep 0.5
+  done
+}
+
+wait_port_free() { # PORT -> fail if still answering after the bounded wait
+  local i
+  for i in $(seq 1 60); do
+    curl -fsS -m 1 "http://127.0.0.1:$1/" >/dev/null 2>&1 || return 0
+    sleep 0.5
+  done
+  bimg_fail "port $1 still open after cleanup"
+}
+
+svc_node_port() { # NAME PORTNAME -> allocated nodePort ("" when none)
+  curl -s "$BASE/api/v1/namespaces/default/services/$1" | python3 -c '
+import json,sys
+try: svc=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for p in svc.get("spec",{}).get("ports",[]):
+    if p.get("name")=="'"$2"'" and p.get("nodePort") is not None: print(p["nodePort"]); break' 2>/dev/null || true
+}
+
+# --- agent restart (M5: CAS persistence + startup-GC triggers) --------------
+restart_agent() { # EXTRA_ARGS... : stop the agent, relaunch on the SAME
+  # data dir with the base flags + extras; waits for the kubelet marker in
+  # a FRESH log so stale greps cannot lie. Updates AGENT_PID/AGENT_LOG.
+  local i
+  if [[ -n "${AGENT_PID:-}" ]]; then
+    kill -TERM "$AGENT_PID" 2>/dev/null || true
+    for i in $(seq 1 40); do kill -0 "$AGENT_PID" 2>/dev/null || break; sleep 0.25; done
+    kill -KILL "$AGENT_PID" 2>/dev/null || true
+    wait "$AGENT_PID" 2>/dev/null || true
+  fi
+  AGENT_RESTARTS=$(( ${AGENT_RESTARTS:-0} + 1 ))
+  AGENT_LOG="$DD/agent${AGENT_RESTARTS}.log"
+  "$BIN" agent --data-dir "$DD/agent" --token dev --server "$BASE" \
+    --node-name "$NODE" --container-engine builtin \
+    --registry-addr "127.0.0.1:${REG_PORT}" "$@" >"$AGENT_LOG" 2>&1 &
+  AGENT_PID=$!
+  for i in $(seq 1 300); do
+    grep -q "kubelet started (T4.12 built-in engine)" "$AGENT_LOG" && break; sleep 0.1
+  done
+  grep -q "kubelet started (T4.12 built-in engine)" "$AGENT_LOG" \
+    || bimg_fail "agent restart never came up ($(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
 }
