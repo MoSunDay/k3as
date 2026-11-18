@@ -11,6 +11,36 @@ use nsrun::{BindMount, CgroupLimits, Output, RunSpec};
 use crate::server;
 
 pub fn run_serve(args: &[String]) -> i32 {
+    let (socket, opts) = match parse_serve(args) {
+        Ok(v) => v,
+        // `-h`/`--help` is a request, not a usage error.
+        Err(e) if e == "help requested" => {
+            crate::print_usage();
+            return 0;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    if opts.pause && opts.netns.is_none() {
+        // A pause sandbox without a netns to join creates a fresh one
+        // unless `--host-net` keeps it in the host netns (Q52); nothing
+        // to enforce, documented for clarity.
+    }
+    match socket {
+        Some(path) => server::serve(&path, &opts),
+        None => {
+            eprintln!("engine serve: --socket PATH is required");
+            2
+        }
+    }
+}
+
+/// Parses the `serve` flag surface. Returns `Err("help requested")` for
+/// `-h`/`--help` so the caller can print usage without treating a help
+/// request as a usage error.
+fn parse_serve(args: &[String]) -> Result<(Option<PathBuf>, server::ServeOptions), String> {
     let mut socket = None;
     let mut opts = server::ServeOptions::default();
     let mut i = 0;
@@ -27,37 +57,21 @@ pub fn run_serve(args: &[String]) -> i32 {
                 opts.pause = true;
                 Ok(())
             }
+            "--host-net" => {
+                opts.host_net = true;
+                Ok(())
+            }
             "--netns" => value(&mut i, "--netns").map(|v| opts.netns = Some(v)),
             "--log-path" => value(&mut i, "--log-path").map(|v| opts.log_path = Some(v)),
             "--mount" => value(&mut i, "--mount")
                 .and_then(|v| parse_serve_mount(&v).map(|m| opts.mounts.push(m))),
-            "-h" | "--help" => {
-                crate::print_usage();
-                return 0;
-            }
+            "-h" | "--help" => return Err("help requested".to_string()),
             other => Err(format!("engine serve: unexpected argument {other:?}")),
         };
-        match r {
-            Ok(()) => {}
-            Err(e) if e == "help requested" => return 0,
-            Err(e) => {
-                eprintln!("{e}");
-                return 2;
-            }
-        }
+        r?;
         i += 1;
     }
-    if opts.pause && opts.netns.is_none() {
-        // A pause sandbox without a netns to join creates a fresh one;
-        // nothing to enforce, documented for clarity.
-    }
-    match socket {
-        Some(path) => server::serve(&path, &opts),
-        None => {
-            eprintln!("engine serve: --socket PATH is required");
-            2
-        }
-    }
+    Ok((socket, opts))
 }
 
 /// `SRC:DST[:ro]`, the same shape engine-run uses.
@@ -283,6 +297,25 @@ mod tests {
         assert!(parse(&[]).is_err());
         let args = vec!["--rootfs".to_string(), "/r".to_string()];
         assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn serve_flags_parse_host_net() {
+        let (socket, opts) =
+            parse_serve(&args(&["--socket", "/tmp/s.sock", "--pause", "--host-net"]))
+                .expect("serve flags");
+        assert_eq!(
+            socket.map(|p| p.display().to_string()).as_deref(),
+            Some("/tmp/s.sock")
+        );
+        assert!(opts.pause && opts.host_net);
+        assert!(opts.netns.is_none());
+    }
+
+    #[test]
+    fn serve_host_net_defaults_off() {
+        let (_, opts) = parse_serve(&args(&["--socket", "/tmp/s2.sock"])).expect("serve flags");
+        assert!(!opts.pause && !opts.host_net);
     }
 
     #[test]

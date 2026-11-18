@@ -1,6 +1,7 @@
 //! `EngineBackend` (T4.12, Q49): [`crate::cri_backend::CriBackend`]
 //! over per-container engine processes. Sandboxes are pause engines
-//! (fresh netns); containers join `/proc/<pause_pid>/ns/net` and log to
+//! sharing the host netns (Q52): no CLONE_NEWNET for the pause child;
+//! containers join `/proc/<pause_pid>/ns/net` (= host netns) and log to
 //! the CRI text file directly (Q50). No image store/CNI until T4.13 —
 //! only host-dir rootfs test pods run.
 
@@ -27,6 +28,7 @@ pub struct EngineBackend {
     engine_dir: PathBuf,
     images_dir: PathBuf,
     sandbox_image: String,
+    node_ip: String,
     registry: Registry,
 }
 
@@ -52,7 +54,7 @@ fn new_id(prefix: &str) -> String {
 }
 
 impl EngineBackend {
-    pub fn new(data_dir: &Path, sandbox_image: &str) -> std::io::Result<Self> {
+    pub fn new(data_dir: &Path, sandbox_image: &str, node_ip: &str) -> std::io::Result<Self> {
         let engine_dir = launch::engine_dir(data_dir);
         std::fs::create_dir_all(&engine_dir)?;
         let images_dir = data_dir.join("images");
@@ -60,6 +62,7 @@ impl EngineBackend {
             engine_dir,
             images_dir,
             sandbox_image: sandbox_image.to_string(),
+            node_ip: node_ip.to_string(),
             registry: Registry::default(),
         })
     }
@@ -187,7 +190,19 @@ impl CriBackend for EngineBackend {
     }
 
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String> {
-        Ok(self.registry.sandbox_views())
+        // Q52: builtin pods share the host netns — a READY sandbox's IP is
+        // the node IP (registry views start ip:None; overlaid here).
+        Ok(self
+            .registry
+            .sandbox_views()
+            .into_iter()
+            .map(|mut sb| {
+                if sb.state == "SANDBOX_READY" && sb.ip.is_none() {
+                    sb.ip = Some(self.node_ip.clone());
+                }
+                sb
+            })
+            .collect())
     }
 
     async fn list_containers(&self) -> Result<Vec<ContainerView>, String> {
@@ -197,8 +212,9 @@ impl CriBackend for EngineBackend {
     async fn run_pod_sandbox(&self, cfg: &PodSandboxConfig) -> Result<String, String> {
         let id = new_id("sb-");
         let socket = self.socket_for(&id);
-        let child =
-            launch::spawn_engine(&socket, true).map_err(|e| format!("spawn pause engine: {e}"))?;
+        // Q52: builtin pause sandbox = host netns (no fresh netns, no CNI).
+        let child = launch::spawn_engine(&socket, true, true)
+            .map_err(|e| format!("spawn pause engine: {e}"))?;
         launch::wait_socket(&socket)
             .await
             .map_err(|e| format!("pause engine never came up: {e}"))?;
@@ -273,8 +289,8 @@ impl CriBackend for EngineBackend {
             .ok_or_else(|| format!("sandbox {} is not ready", pending.sandbox_id))?;
         let rootfs = self.resolve_rootfs(&pending.ccfg.image.image)?;
         let es = spec::container_spec(id, &rootfs, &pending, sandbox_netns)?;
-        let child =
-            launch::spawn_engine(&socket, false).map_err(|e| format!("spawn engine: {e}"))?;
+        let child = launch::spawn_engine(&socket, false, false)
+            .map_err(|e| format!("spawn engine: {e}"))?;
         launch::wait_socket(&socket)
             .await
             .map_err(|e| format!("engine never came up: {e}"))?;

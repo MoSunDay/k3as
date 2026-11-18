@@ -20,13 +20,20 @@ pub(crate) fn engine_dir(data_dir: &Path) -> PathBuf {
 }
 
 /// Re-exec `init-pro engine serve --socket PATH [--pause]`.
-/// stderr lands next to the socket for post-mortem (`<id>.engine.log`).
-pub(crate) fn spawn_engine(socket: &Path, pause: bool) -> io::Result<Child> {
+/// `host_net` (Q52) is pause-only: the builtin pause sandbox stays in
+/// the host netns instead of creating a fresh one. stderr lands next to
+/// the socket for post-mortem (`<id>.engine.log`).
+pub(crate) fn spawn_engine(socket: &Path, pause: bool, host_net: bool) -> io::Result<Child> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("engine").arg("serve").arg("--socket").arg(socket);
     if pause {
         cmd.arg("--pause");
+        // Q52: the builtin pause sandbox stays in the host netns; workers
+        // join /proc/<pause_pid>/ns/net regardless (flag is pause-only).
+        if host_net {
+            cmd.arg("--host-net");
+        }
     }
     let log = engine_stderr_path(socket);
     if let Some(parent) = log.parent() {

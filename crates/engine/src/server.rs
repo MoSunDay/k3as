@@ -32,6 +32,9 @@ const ACCEPT_POLL: Duration = Duration::from_millis(20);
 #[derive(Default)]
 pub struct ServeOptions {
     pub pause: bool,
+    /// Q52: keep the pause sandbox in the engine's (host) netns — no
+    /// CLONE_NEWNET, no loopback bring-up; the default stays a fresh netns.
+    pub host_net: bool,
     pub netns: Option<String>,
     pub log_path: Option<String>,
     pub mounts: Vec<MountSpec>,
@@ -131,14 +134,18 @@ pub fn serve(socket: &Path, opts: &ServeOptions) -> i32 {
 }
 
 /// Spawns the Q49 sandbox child: a pause-mode container whose only job is
-/// holding a fresh netns (or joining `netns`) open with PID 1 parked.
-/// The rootfs is an empty dir beside the socket — pause never execs.
+/// holding a fresh netns (or joining `netns`, or staying in the host
+/// netns with `--host-net`, Q52) open with PID 1 parked. The rootfs is
+/// an empty dir beside the socket — pause never execs.
 fn spawn_pause(socket: &Path, opts: &ServeOptions) -> io::Result<Child> {
     let rootfs = PathBuf::from(format!("{}.pause-rootfs", socket.display()));
     std::fs::create_dir_all(&rootfs)?;
     let mut run = nsrun::RunSpec::new(rootfs, vec!["/pause".into()]);
     run.pause = true;
     run.netns = opts.netns.as_deref().map(std::path::PathBuf::from);
-    run.new_net = opts.netns.is_none();
+    // Q52: --host-net keeps the sandbox in the host netns — no unshare,
+    // no setns, no lo bring-up. nsrun only adds CLONE_NEWNET when
+    // new_net && netns.is_none(), so this stays a zero-config path.
+    run.new_net = opts.netns.is_none() && !opts.host_net;
     nsrun::spawn(&run)
 }

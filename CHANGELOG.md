@@ -7,6 +7,61 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 42 — T4.13 网络面 done: builtin Pod 网络 = host netns 共享 (Q52); builtin e2e N1–N5 (2026-11-18)
+
+**Goal:** T4.13 的网络面按 **Q52** 定案收口——builtin 模式所有 Pod 共享
+宿主 netns (hostNetwork 语义：零 CNI/零 veth/零 IPAM/零新用户 flag)，
+podIP == hostIP == `--node-ip`；agent 在 builtin 下跳过 flanneld；
+验收面 N1–N5 落进 `builtin-runtime-e2e.sh`。镜像存储 (overlayfs) 仍
+open，T4.13 保持 in-progress。
+
+**Changes**
+- engine P1: `engine serve` 增内部 flag `--host-net`——`ServeOptions
+  .host_net` + `spawn_pause` 的 `new_net = netns.is_none() &&
+  !host_net` (nsrun 零改动，`new_net=false && netns=None` 路径本就
+  存在；pause 子进程留在 engine=宿主 netns：不 unshare、不 setns、
+  不 lo up)。serve 参数循环抽出 `parse_serve` 供单测 (解析 2 测)；
+  usage 文本同步。
+- kubelet P2: `spawn_engine(socket, pause, host_net)` 仅 pause 透传；
+  `EngineBackend::new(.., node_ip)` 存 `--node-ip`，pause 沙箱
+  `spawn_engine(sock, true, true)`，`list_sandboxes` 对
+  SANDBOX_READY 视图 overlay `ip=node_ip` (registry 视图仍
+  `ip:None`)；`build_pod_status` 增尾参 `host_ip` (runner 传
+  `&cfg.node_ip`)，`hostIP` 由硬编码 `127.0.0.1` 改为 node IP (与
+  `objects::node_object` 同源)；status 测试 22 处调用点机械补参
+  (断言值不变) + 新增 host_ip 直通测试。
+- cli P3: builtin 分支 `EngineBackend::new` 补传 `&kc.node_ip`；
+  flannel 块改 `if builtin { info "builtin: pods share host netns,
+  flannel skipped (Q52)" }` (containerd 路径 Q34 原样)。runtime.rs
+  778 行 (<800 上限)。
+- e2e P4: `builtin-runtime-e2e.sh` 468→676 行——**N1** pause
+  `--host-net` pong pid 存活且 `/proc/<pid>/ns/net` == 测试进程
+  netns；**N2** worker `engine-run --netns /proc/<pause>/ns/net`
+  join 后仍在宿主 netns；**N3–N5** 起真实 server+agent
+  (`--container-engine builtin`，无 containerd 二进制/无 CNI)：
+  host-dir rootfs pod (`busybox httpd -f -p <port>`) 宿主端口可达、
+  pod GET 断言 podIP==hostIP==node InternalIP、删 pod 后端口释放
+  (connect refused)；cleanup trap 收割 server/agent。B10/E8/E9 语义
+  不动 (engine 默认仍是 fresh netns)。
+- 实施修正 2 处: 子代理虚报的 `spawn_pause` host_net 行漏改 (e2e N1
+  红灯抓出后补)；N4 初版误用 `init-pro kubectl` 子命令——kubectl 是
+  argv[0] multicall 别名 (Q1) 且内置 `get` 仅覆盖 workflow/agent 面
+  (T3.1b/T7.3 范围) → 改 REST pod GET 断言 (与 ST 系列同法)。
+
+**Tests:** `cargo test --workspace --locked` → **1081 passed / 0
+failed** (基线 1078 + 净增 3: engine cli 解析 ×2 + kubelet status
+host_ip ×1)；clippy `-D warnings` 0。
+
+**Gates:** all-gates **10/10 PASS**——fmt/build/test/clippy、
+unsafe-audit (unsafe 仍仅 nsrun)、engine-singlethread、golden
+**74/0**、battery 8.1–8.12 全 PASS (builtin-runtime-e2e 含 N1–N5
+30s、service-traffic 6/0、flannel 5/0 均不回归)。SSOT 同步:
+decisions.md **Q52 LOCKED**、04-node.md T4.13 → in-progress (网络面
+done / 镜像存储 open)、index.md 计数行同步 (3 in-progress · 11
+not-started)。
+
+---
+
 ## Sprint 41 — T4.12 P2 done: EngineBackend + builtin 选择 + Q51 探针; pid-ns 信号语义实证; golden 净机护栏 (2026-11-18)
 
 **Goal:** T4.12 (内置引擎 kubelet 接线 P2) 收口: `EngineBackend` 落地

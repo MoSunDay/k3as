@@ -46,7 +46,7 @@ fn print_usage() {
          \x20   [--cpu-max QUOTA_PERIOD] [--pids-max N]\n\
          \x20   [--cgroup NAME] [--] COMMAND [ARG]...\n\
          \n\
-         init-pro engine serve --socket PATH [--pause] [--netns PATH]\n\
+         init-pro engine serve --socket PATH [--pause] [--host-net] [--netns PATH]\n\
          \x20   [--log-path PATH] [--mount SRC:DST[:ro]]...\n\
          \n\
          The engine must run as real root on a single-threaded process; it\n\

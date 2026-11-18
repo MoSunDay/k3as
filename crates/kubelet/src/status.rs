@@ -27,6 +27,7 @@ pub fn build_pod_status(
     snap: &Snapshot,
     now: &str,
     probes: &PodProbeState,
+    host_ip: &str,
 ) -> Value {
     let ready_sandbox = snap
         .sandboxes
@@ -126,11 +127,11 @@ pub fn build_pod_status(
         "containerStatuses": statuses,
     });
     if let Some(ip) = &pod_ip {
-        // hostIP: single-node clusters advertise loopback (the agent and the
-        // pod sandbox share one host); mirrored in objects::node_object.
+        // hostIP: the kubelet's node IP (--node-ip) — same source as
+        // objects::node_object; builtin pods share it (podIP == hostIP, Q52).
         status["podIP"] = json!(ip);
         status["podIPs"] = json!([{ "ip": ip }]);
-        status["hostIP"] = json!("127.0.0.1");
+        status["hostIP"] = json!(host_ip);
     }
     status
 }
@@ -325,6 +326,7 @@ mod tests {
             &snap("CONTAINER_RUNNING"),
             "2026-08-16T00:00:00Z",
             &no_probes(),
+            "127.0.0.1",
         );
         assert_eq!(s["phase"], "Running");
         assert_eq!(s["conditions"][0]["type"], "PodScheduled");
@@ -341,7 +343,13 @@ mod tests {
 
     #[test]
     fn exited_container_is_pending_and_terminated() {
-        let s = build_pod_status(&pod(), &snap("CONTAINER_EXITED"), "T", &no_probes());
+        let s = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_EXITED"),
+            "T",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert_eq!(s["phase"], "Pending");
         assert_eq!(s["conditions"][1]["status"], "False");
         assert_eq!(
@@ -353,7 +361,13 @@ mod tests {
             "Completed"
         );
         // Non-exit unknown states map to error termination.
-        let s = build_pod_status(&pod(), &snap("CONTAINER_UNKNOWN"), "T", &no_probes());
+        let s = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_UNKNOWN"),
+            "T",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert_eq!(
             s["containerStatuses"][0]["state"]["terminated"]["exitCode"],
             137
@@ -368,7 +382,13 @@ mod tests {
     // Argo Workflow containers exit rather than run forever).
     #[test]
     fn never_policy_exited_zero_is_succeeded() {
-        let s = build_pod_status(&pod_with_restart("Never"), &snap_exit(0), "T", &no_probes());
+        let s = build_pod_status(
+            &pod_with_restart("Never"),
+            &snap_exit(0),
+            "T",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert_eq!(s["phase"], "Succeeded");
         assert_eq!(s["conditions"][1]["status"], "False");
         assert_eq!(
@@ -379,7 +399,13 @@ mod tests {
 
     #[test]
     fn never_policy_exited_nonzero_is_failed() {
-        let s = build_pod_status(&pod_with_restart("Never"), &snap_exit(1), "T", &no_probes());
+        let s = build_pod_status(
+            &pod_with_restart("Never"),
+            &snap_exit(1),
+            "T",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert_eq!(s["phase"], "Failed");
         assert_eq!(
             s["containerStatuses"][0]["state"]["terminated"]["exitCode"],
@@ -398,6 +424,7 @@ mod tests {
             &snap_exit(0),
             "T",
             &no_probes(),
+            "127.0.0.1",
         );
         assert_eq!(s["phase"], "Succeeded", "nothing left to restart");
     }
@@ -409,6 +436,7 @@ mod tests {
             &snap_exit(1),
             "T",
             &no_probes(),
+            "127.0.0.1",
         );
         assert_eq!(s["phase"], "Pending", "non-zero keeps restarting");
     }
@@ -422,6 +450,7 @@ mod tests {
             &snap_exit(0),
             "T",
             &no_probes(),
+            "127.0.0.1",
         );
         assert_eq!(s["phase"], "Pending");
     }
@@ -435,6 +464,7 @@ mod tests {
             &snap("CONTAINER_RUNNING"),
             "T",
             &no_probes(),
+            "127.0.0.1",
         );
         assert_eq!(s["phase"], "Running");
     }
@@ -443,7 +473,7 @@ mod tests {
     fn missing_container_reports_waiting() {
         let mut s0 = snap("CONTAINER_RUNNING");
         s0.containers.clear();
-        let s = build_pod_status(&pod(), &s0, "T", &no_probes());
+        let s = build_pod_status(&pod(), &s0, "T", &no_probes(), "127.0.0.1");
         assert_eq!(s["phase"], "Pending");
         assert_eq!(
             s["containerStatuses"][0]["state"]["waiting"]["reason"],
@@ -453,10 +483,28 @@ mod tests {
 
     #[test]
     fn semantic_eq_ignores_timestamps_only() {
-        let a = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T1", &no_probes());
-        let b = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T2", &no_probes());
+        let a = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_RUNNING"),
+            "T1",
+            &no_probes(),
+            "127.0.0.1",
+        );
+        let b = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_RUNNING"),
+            "T2",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert!(status_semantically_eq(&a, &b), "timestamps must not matter");
-        let c = build_pod_status(&pod(), &snap("CONTAINER_EXITED"), "T1", &no_probes());
+        let c = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_EXITED"),
+            "T1",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert!(!status_semantically_eq(&a, &c), "state change must matter");
         let mut d = a.clone();
         d["containerStatuses"][0]["restartCount"] = json!(1);
@@ -470,7 +518,7 @@ mod tests {
     fn ready_sandbox_ip_surfaces_as_pod_ip() {
         let mut snap = snap("CONTAINER_RUNNING");
         snap.sandboxes[0].ip = Some("10.42.0.10".into());
-        let s = build_pod_status(&pod(), &snap, "T", &no_probes());
+        let s = build_pod_status(&pod(), &snap, "T", &no_probes(), "127.0.0.1");
         assert_eq!(s["phase"], "Running");
         assert_eq!(s["podIP"], "10.42.0.10");
         assert_eq!(s["podIPs"][0]["ip"], "10.42.0.10");
@@ -479,7 +527,13 @@ mod tests {
 
     #[test]
     fn ready_sandbox_without_ip_omits_pod_ip() {
-        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &no_probes());
+        let s = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_RUNNING"),
+            "T",
+            &no_probes(),
+            "127.0.0.1",
+        );
         assert_eq!(s["phase"], "Running");
         assert!(s.get("podIP").is_none(), "no ip -> no podIP key: {s}");
         assert!(s.get("podIPs").is_none());
@@ -489,15 +543,15 @@ mod tests {
     #[test]
     fn semantic_eq_detects_pod_ip_change() {
         let snap = snap("CONTAINER_RUNNING");
-        let without = build_pod_status(&pod(), &snap, "T", &no_probes());
+        let without = build_pod_status(&pod(), &snap, "T", &no_probes(), "127.0.0.1");
         let mut with_ip = snap.clone();
         with_ip.sandboxes[0].ip = Some("10.42.0.10".into());
-        let with = build_pod_status(&pod(), &with_ip, "T", &no_probes());
+        let with = build_pod_status(&pod(), &with_ip, "T", &no_probes(), "127.0.0.1");
         assert!(
             !status_semantically_eq(&without, &with),
             "late-arriving podIP must trigger a status re-write"
         );
-        let same = build_pod_status(&pod(), &with_ip, "T2", &no_probes());
+        let same = build_pod_status(&pod(), &with_ip, "T2", &no_probes(), "127.0.0.1");
         assert!(status_semantically_eq(&with, &same));
     }
 
@@ -514,7 +568,7 @@ mod tests {
     fn exited_container_reports_real_exit_code() {
         let mut s0 = snap("CONTAINER_EXITED");
         s0.containers[0].exit_code = 7;
-        let s = build_pod_status(&pod(), &s0, "T", &no_probes());
+        let s = build_pod_status(&pod(), &s0, "T", &no_probes(), "127.0.0.1");
         assert_eq!(
             s["containerStatuses"][0]["state"]["terminated"]["exitCode"],
             7
@@ -524,7 +578,7 @@ mod tests {
             "Error"
         );
         s0.containers[0].exit_code = 0;
-        let s = build_pod_status(&pod(), &s0, "T", &no_probes());
+        let s = build_pod_status(&pod(), &s0, "T", &no_probes(), "127.0.0.1");
         assert_eq!(
             s["containerStatuses"][0]["state"]["terminated"]["reason"],
             "Completed"
@@ -552,7 +606,13 @@ mod tests {
             tracker.observe(false, 1, &pspec);
             assert_eq!(tracker.status, crate::probes::ProbeStatus::Failure);
         }
-        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &probes);
+        let s = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_RUNNING"),
+            "T",
+            &probes,
+            "127.0.0.1",
+        );
         assert_eq!(s["phase"], "Running", "phase is NOT probe-gated");
         assert_eq!(s["conditions"][1]["status"], "False");
         assert_eq!(s["conditions"][1]["reason"], "ContainersNotReady");
@@ -575,9 +635,24 @@ mod tests {
                 .tracker(crate::probes::ProbeKind::Readiness)
                 .observe(true, 2, &pspec);
         }
-        let s = build_pod_status(&pod(), &snap("CONTAINER_RUNNING"), "T", &probes);
+        let s = build_pod_status(
+            &pod(),
+            &snap("CONTAINER_RUNNING"),
+            "T",
+            &probes,
+            "127.0.0.1",
+        );
         assert_eq!(s["conditions"][1]["status"], "True");
         assert_eq!(s["conditions"][1]["reason"], "ContainersReady");
         assert_eq!(s["containerStatuses"][0]["ready"], true);
+    }
+
+    #[test]
+    fn host_ip_param_surfaces_as_host_ip() {
+        let mut snap = snap("CONTAINER_RUNNING");
+        snap.sandboxes[0].ip = Some("10.42.0.5".into());
+        let s = build_pod_status(&pod(), &snap, "T", &no_probes(), "10.9.8.7");
+        assert_eq!(s["podIP"], "10.42.0.5");
+        assert_eq!(s["hostIP"], "10.9.8.7");
     }
 }

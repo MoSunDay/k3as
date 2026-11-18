@@ -291,6 +291,7 @@ fn run_supervised(
                     match kubelet::engine::EngineBackend::new(
                         &cfg.data_dir,
                         &kc.sandbox_image,
+                        &kc.node_ip,
                     ) {
                         Ok(backend) => {
                             // Q49: adopt-or-clean leftover engine sockets.
@@ -393,7 +394,15 @@ fn run_supervised(
                 // crictl: flanneld only needs the API surface + netlink.
                 // `--flannel-backend=none` keeps the agent flannel-free.
                 let net = flannel.clone().unwrap_or_default();
-                if crate::flannel::is_enabled(&net) {
+                if builtin {
+                    // Q52: builtin pods share the host netns — no CNI, no
+                    // veth, no subnet.env; flanneld would be a no-op.
+                    tracing::info!(
+                        target: "init-pro",
+                        role,
+                        "builtin: pods share host netns, flannel skipped (Q52)"
+                    );
+                } else if crate::flannel::is_enabled(&net) {
                     match crate::flannel::spawn_flannel(
                         &cfg.data_dir,
                         &url,

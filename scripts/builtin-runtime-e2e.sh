@@ -12,6 +12,9 @@
 #   B5 raw non-UTF8 stdout        B12 malformed request -> error, survives
 #   B6 exec: PID 1 visible in ns  B13 shutdown -> bye + process exit 0
 #   B7 exec: merged streams + code
+#   N1 host-net pause == host netns (Q52)   N2 worker join stays host netns
+#   N3-N5 builtin cluster (Q52): shared-netns pod serves a host port,
+#   podIP==hostIP==node IP via kubectl, port released on delete.
 #
 # Preconditions: PRE-BUILT binary, real root, static busybox, python3 for the
 # wire client. Missing inputs => "SKIP builtin-runtime-e2e:" + exit 0 (Q25);
@@ -43,11 +46,21 @@ ROOTFS="$TMP/rootfs"
 SOCK="$TMP/engine.sock"
 LOG="$TMP/engine.log"
 ENGINE_PID=""
+NDD=""; NCLUSTER_SRV_PID=""; NCLUSTER_AGENT_PID=""
 cleanup() {
   if [[ -n "$ENGINE_PID" ]] && kill -0 "$ENGINE_PID" 2>/dev/null; then
     kill "$ENGINE_PID" 2>/dev/null || true
     wait "$ENGINE_PID" 2>/dev/null || true
   fi
+  for p in "$NCLUSTER_AGENT_PID" "$NCLUSTER_SRV_PID"; do
+    if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then
+      kill "$p" 2>/dev/null || true
+      for _ in $(seq 1 40); do kill -0 "$p" 2>/dev/null || break; sleep 0.25; done
+      kill -KILL "$p" 2>/dev/null || true
+      wait "$p" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$NDD"
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -394,6 +407,61 @@ psock.close()
 assert pause.wait(timeout=15) == 0, "B10 pause engine did not exit 0"
 print("OK   B10 pause engine: pong pid, netns join, run refused, exit 0")
 
+# N1 (Q52): --host-net keeps the pause sandbox in the host netns — no
+# CLONE_NEWNET, no lo bring-up. pong pid alive + sandbox netns == the
+# test process's own netns.
+host_netns = os.readlink("/proc/self/ns/net")
+hn_sock = os.path.join(tmp, "hn-pause.sock")
+with open(os.path.join(tmp, "hn-pause.log"), "wb") as hn_log:
+    hn = subprocess.Popen(
+        [bin_path, "engine", "serve", "--socket", hn_sock, "--pause", "--host-net"],
+        stderr=hn_log,
+    )
+for _ in range(200):
+    if os.path.exists(hn_sock):
+        break
+    time.sleep(0.05)
+assert os.path.exists(hn_sock), "N1 host-net pause engine never bound its socket"
+hsock = connect(hn_sock)
+send_json(hsock, {"op": "ping"})
+pong = recv_event(hsock)
+assert pong.get("event") == "pong" and pong.get("pid", 0) > 0, pong
+hn_pid = pong["pid"]
+assert os.path.isdir(f"/proc/{hn_pid}"), f"N1 pause pid {hn_pid} not alive"
+assert os.readlink(f"/proc/{hn_pid}/ns/net") == host_netns, (
+    f"N1 pause netns must equal host netns (Q52), got pid {hn_pid}"
+)
+# N2 (Q52): a worker joining /proc/<host-net-pause>/ns/net lands in the
+# host netns too — same assertion shape as B10, opposite netns source.
+joined_hn = subprocess.run(
+    [
+        bin_path,
+        "engine-run",
+        "--rootfs",
+        rootfs,
+        "--netns",
+        f"/proc/{hn_pid}/ns/net",
+        "--mount",
+        f"{busybox}:/bin/busybox",
+        "--",
+        "/bin/busybox",
+        "readlink",
+        "/proc/self/ns/net",
+    ],
+    capture_output=True,
+    timeout=60,
+)
+assert joined_hn.returncode == 0, joined_hn.stderr
+assert joined_hn.stdout.decode().strip() == host_netns, (
+    f"N2 worker netns {joined_hn.stdout!r} != host {host_netns}"
+)
+send_json(hsock, {"op": "shutdown"})
+assert recv_event(hsock) == {"event": "bye"}
+hsock.close()
+assert hn.wait(timeout=15) == 0, "N1 host-net pause engine did not exit 0"
+print("OK   N1 pause --host-net: pong pid alive, sandbox netns == host netns (Q52)")
+print("OK   N2 worker joins host-net pause: readlink == host netns (Q52)")
+
 # B11: a second engine must refuse a live engine's socket (Q49) and the
 # live engine keeps answering.
 live_sock = os.path.join(tmp, "live.sock")
@@ -465,4 +533,122 @@ fi
 grep -q "listening on" "$LOG" || { echo "FAIL engine never logged its listener" >&2; exit 1; }
 
 echo
-echo "builtin-runtime-e2e: B1-B13 passed (engine exited 0)"
+
+# --- N3-N5 (Q52): builtin cluster — pods share the host netns -------------
+# Boots server + agent (--container-engine builtin, NO containerd bundle,
+# NO CNI): a pod whose container binds a host port is reachable from the
+# host, reports podIP == hostIP == node IP, and releases the port on delete.
+RUN_CLUSTER=1
+if ! command -v curl >/dev/null 2>&1; then
+  echo "SKIP N3-N5 (no curl for the builtin cluster cases)"
+  RUN_CLUSTER=0
+fi
+if [[ "$RUN_CLUSTER" -eq 1 ]]; then
+  pick_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  }
+  fetch() {
+    python3 -c '
+import sys, urllib.request
+try:
+    sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())
+except Exception:
+    sys.exit(1)
+' "$1" 2>/dev/null || true
+  }
+  nok() { echo "OK   $*"; }
+  nfail() { echo "FAIL $*" >&2; exit 1; }
+
+  API_PORT="$(pick_port)"
+  BASE="http://127.0.0.1:${API_PORT}"
+  NODE="hn-node"
+  WEB_PORT="$(pick_port)"
+  NDD="$(mktemp -d /tmp/init-pro-hostnet-e2e.XXXXXX)"
+  NCLUSTER_SRV_LOG="$NDD/server.log"; NCLUSTER_AGENT_LOG="$NDD/agent.log"
+
+  # Pod rootfs: host-dir image (T4.12 stopgap) with busybox baked in; the
+  # container is `busybox httpd -f -p PORT` serving / == the rootfs root.
+  NRFS="$NDD/webrootfs"
+  mkdir -p "$NRFS/bin"
+  cp "$BUSYBOX" "$NRFS/bin/busybox"
+  chmod 755 "$NRFS/bin/busybox"
+  echo "hello-hostnet-q52" >"$NRFS/index.html"
+
+  "$BIN" server --data-dir "$NDD/srv" --bind-address 127.0.0.1 \
+    --https-listen-port "$API_PORT" >"$NCLUSTER_SRV_LOG" 2>&1 &
+  NCLUSTER_SRV_PID=$!
+  for _ in $(seq 1 60); do
+    grep -q "discovery listening" "$NCLUSTER_SRV_LOG" && break; sleep 0.1
+  done
+  grep -q "discovery listening" "$NCLUSTER_SRV_LOG" \
+    || nfail "N3 server never reported listening ($(tail -5 "$NCLUSTER_SRV_LOG" | tr '\n' ' '))"
+
+  "$BIN" agent --data-dir "$NDD/agent" --token dev --server "$BASE" \
+    --node-name "$NODE" --container-engine builtin >"$NCLUSTER_AGENT_LOG" 2>&1 &
+  NCLUSTER_AGENT_PID=$!
+  for _ in $(seq 1 300); do
+    grep -q "kubelet started (T4.12 built-in engine)" "$NCLUSTER_AGENT_LOG" && break; sleep 0.1
+  done
+  grep -q "kubelet started (T4.12 built-in engine)" "$NCLUSTER_AGENT_LOG" \
+    || nfail "N3 builtin agent never came up ($(tail -5 "$NCLUSTER_AGENT_LOG" | tr '\n' ' '))"
+  grep -q "flannel skipped (Q52)" "$NCLUSTER_AGENT_LOG" \
+    || nfail "N3 builtin agent must skip flanneld (Q52)"
+
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    --data-binary @- "$BASE/api/v1/namespaces/default/pods" <<EOF
+{"apiVersion":"v1","kind":"Pod","metadata":{"name":"hostnet-web","namespace":"default"},
+ "spec":{"containers":[{"name":"web","image":"$NRFS",
+   "command":["/bin/busybox","httpd","-f","-p","$WEB_PORT"]}]}}
+EOF
+)"
+  [[ "$CODE" == "201" ]] || nfail "N3 pod POST -> $CODE"
+
+  # N3: the pod's host port answers from the host (shared netns, Q52).
+  BODY=""
+  for _ in $(seq 1 120); do
+    BODY="$(fetch "http://127.0.0.1:${WEB_PORT}/")"
+    [[ "$BODY" == "hello-hostnet-q52" ]] && break
+    sleep 0.5
+  done
+  [[ "$BODY" == "hello-hostnet-q52" ]] \
+    || nfail "N3 host port :$WEB_PORT never served the pod (got ${BODY:-<refused>}; agent log: $NCLUSTER_AGENT_LOG)"
+  nok "N3 builtin pod serves host port $WEB_PORT (host netns shared, Q52)"
+
+  # N4: the served pod JSON reports podIP == hostIP == the node's
+  # InternalIP. (The bundled kubectl `get` speaks only the workflow/agent
+  # surfaces today — T3.1b/T7.3 scope — so this reads the REST pod object.)
+  NODE_IP="$(curl -s "$BASE/api/v1/nodes/$NODE" | python3 -c '
+import json,sys
+n=json.load(sys.stdin)
+for a in n.get("status",{}).get("addresses",[]):
+    if a.get("type")=="InternalIP": print(a["address"]); break
+')"
+  [[ -n "$NODE_IP" ]] || nfail "N4 node $NODE has no InternalIP"
+  CODE="$(curl -s -o "$NDD/pod.json" -w '%{http_code}' "$BASE/api/v1/namespaces/default/pods/hostnet-web")"
+  [[ "$CODE" == "200" ]] || nfail "N4 pod GET -> $CODE"
+  python3 - "$NODE_IP" "$NDD/pod.json" <<'PY2' || nfail "N4 podIP/hostIP mismatch (expected node IP $NODE_IP)"
+import json,sys
+node_ip, path = sys.argv[1], sys.argv[2]
+s = json.load(open(path))["status"]
+assert s.get("podIP") == node_ip, f"podIP {s.get('podIP')!r} != node {node_ip!r}"
+assert s.get("hostIP") == node_ip, f"hostIP {s.get('hostIP')!r} != node {node_ip!r}"
+PY2
+  nok "N4 podIP == hostIP == node IP ($NODE_IP, Q52)"
+
+  # N5: delete the pod -> the host port is released (connect refused).
+  curl -s -o /dev/null -X DELETE "$BASE/api/v1/namespaces/default/pods/hostnet-web"
+  RELEASED=0
+  for _ in $(seq 1 120); do
+    if [[ -z "$(fetch "http://127.0.0.1:${WEB_PORT}/")" ]]; then RELEASED=1; break; fi
+    sleep 0.5
+  done
+  [[ "$RELEASED" -eq 1 ]] || nfail "N5 port $WEB_PORT still answering after pod delete"
+  nok "N5 pod delete releases the host port (Q52)"
+fi
+
+echo
+if [[ "$RUN_CLUSTER" -eq 1 ]]; then
+  echo "builtin-runtime-e2e: B1-B13 + N1-N5 passed (engine exited 0; Q52 host-netns pods)"
+else
+  echo "builtin-runtime-e2e: B1-B13 + N1-N2 passed (engine exited 0)"
+fi

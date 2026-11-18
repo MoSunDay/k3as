@@ -2568,3 +2568,34 @@ unlink 陈旧 socket → **回退 containerd 路径**并打 Warning。默认值�
 失败而 boot 失败；探针 socket 与容器 socket 同目录，布局单点。
 (−) builtin 启动路径多一次进程起落（~百 ms 级）；「probe 成功但后续
 容器起失败」仍按普通容器错误面处理（不整节点回退）。
+
+## Q52 — T4.13 网络面: builtin Pod 网络 = host netns 共享 (2026-11-18, LOCKED)
+
+**Context.** T4.12 (Q49) 之后 builtin 引擎的 pause 沙箱默认开 fresh
+netns，但没有 CNI——无 IP 分配、无跨 ns 连通，podIP 恒缺失。T4.13 原
+计划把 flannel CNI (Q34) 接进 builtin 路径；但 overlay CNI 意味着完整
+数据面 (veth/网桥/IPAM/netlink/subnet.env) 与 containerd 路径几乎
+重复，而 builtin 的定位是零依赖的最小运行面。
+
+**Options.** (a) 内嵌 flannel CNI 进 builtin 路径 (完整数据面)；
+(b) host netns 共享 = hostNetwork 语义：pause 沙箱不 CLONE_NEWNET，
+worker 照旧 setns pause netns (= 宿主)，podIP = hostIP = `--node-ip`；
+(c) 极简独立 netns + NAT (自研 mini-CNI)。
+
+**Decision.** 选 (b)：builtin 模式下所有 Pod 共享宿主 netns。零桥、零
+veth、零 netlink、零 IPAM、零新依赖、零新用户 flag (engine serve 内
+部 flag `--host-net`，仅 kubelet builtin 路径在 pause 时传入)；nsrun
+零改动 (`new_net=false && netns=None` 路径本就存在)。`EngineBackend`
+存 `node_ip`，`list_sandboxes` 对 SANDBOX_READY 视图置
+`ip=node_ip`；`build_pod_status` 增 `host_ip` 参 (=`cfg.node_ip`)，
+故 podIP == hostIP == node IP。agent 在 builtin 下跳过 flanneld；
+containerd 路径 (Q34 flannel) 一切不变。验收面：
+`scripts/builtin-runtime-e2e.sh` N1–N5。
+
+**Consequences.** (+) 零配置零鉴权即得全连通 (pod↔pod / pod↔host /
+pod↔外网)；无 CNI 依赖面与重复实现；hostNetwork 用户语义可直测。
+(−) **无网络隔离**：builtin Pod 与宿主共享端口空间，冲突由用户自负
+(hostNetwork 同语义)；明示不做 netpol/egress 限制；`--node-ip` 默认
+127.0.0.1 仅单节点正确，多节点需显式传真实 IP；进程/PID/mount/UTS/IPC
+隔离保留不变 (只放开 net ns)。T4.13 网络面就此关闭，overlayfs 镜像
+存储仍 open。

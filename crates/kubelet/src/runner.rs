@@ -473,7 +473,7 @@ async fn sync_once(
         if view.deleted {
             continue;
         }
-        let status = build_pod_status(view, &snap, &now, probes);
+        let status = build_pod_status(view, &snap, &now, probes, &cfg.node_ip);
         if matches!(last_status.get(key), Some(prev) if status_semantically_eq(prev, &status)) {
             continue;
         }
