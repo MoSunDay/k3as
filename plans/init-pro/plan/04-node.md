@@ -754,6 +754,9 @@ node registration, and the built-in container engine (T4.11–T4.13).
     对接 T6.3 内嵌 registry。
   - 明确 out (Q52/Q53)：CNI/veth/网桥、netpol/egress、跨节点
     overlay；镜像构建、跨节点镜像分发协议、Windows 镜像。
+  - 默认引擎 go/no-go (Q51 遗留, Sprint 43 裁定)：**不翻转**——默认
+    仍 `containerd`，builtin 保持 opt-in (`--container-engine=builtin`;
+    多节点 flannel/netpol 面 T4.3 仍深绑 containerd, 翻转另立决策)。
 
 - **验收手段 / Acceptance**
   - 单测：digest 校验、平台选择、`parse_ref` 矩阵、`merge_launch`

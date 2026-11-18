@@ -53,7 +53,11 @@ T4.13 转 **done** (42 网络面 + 43 镜像存储)。
 - **Q51 "N4" 名字占用澄清**: T4.12 证据里的 "e2e 级注入留 T4.13 N4"
   中的 N4 是占位名, 已被 Sprint 42 网络面 N4 (podIP==hostIP) 占用;
   e2e 级探针注入不再排期 (probe 决策由 `engine_probe` 单测覆盖, e2e
-  注入需 sabotaged engine + containerd 兜底环境, 收益边际)。
+  注入需 sabotaged engine + containerd 兜底环境, 收益边际)。同 bullet
+  裁定 Q51 遗留的**默认引擎 go/no-go: 不翻转**——默认仍是 `containerd`
+  (Q48 姿势不变): builtin 是 Q52 host-netns 单节点语义, 多节点
+  flannel/netpol 面 (T4.3) 仍深绑 containerd; 翻转另立决策, 不早于
+  T4.3 收口。
 - 度: 新增/迭代文件均达标 (backend.rs 723 / http.rs 730 /
   runtime.rs 736 / cas.rs 397 / pull.rs 377, 上限 800)。
 
