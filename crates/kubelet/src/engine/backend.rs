@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
 
 use super::image::pull::Puller;
-use super::image::{ImageStore, PulledImage};
+use super::image::{ConfigBody, ImageStore, PulledImage};
 use super::launch;
 use super::pump::{self, Ctrl};
 use super::registry::{Entry, Pending, Proc, Registry};
@@ -25,8 +25,10 @@ use super::spec;
 use engine_client::EngineClient;
 use runtime::{ContainerConfig, PodSandboxConfig};
 
-/// SIGTERM grace before SIGKILL on stop (kube's 30s is generous for
-/// test pods; T4.13 can make it spec-aware).
+/// Default SIGTERM grace before SIGKILL on stop (kube's 30s is generous
+/// for test pods). T4.13 M4 (Q53): a pod annotation
+/// `init-pro.io/stop-grace-seconds` overrides it per container (clamped
+/// to 1..=600s; see [`EngineBackend::stop_grace`]).
 const STOP_GRACE: Duration = Duration::from_secs(10);
 const KILL_GRACE: Duration = Duration::from_secs(5);
 const STATE_POLL: Duration = Duration::from_millis(100);
@@ -68,6 +70,19 @@ enum ResolvedRootfs {
         upper: PathBuf,
         work: PathBuf,
     },
+}
+
+/// Named-image-user resolution (T4.13 M4, Q53): scan the candidate
+/// rootfs/layer dirs TOPMOST first (the last layer that ships
+/// `/etc/passwd` wins, matching unpack order) and look the name up in
+/// it. Reads only; a missing passwd anywhere means `None`.
+fn named_user_lookup(dirs: &[PathBuf]) -> impl Fn(&str) -> Option<(u32, u32)> + use<'_> {
+    move |name: &str| {
+        dirs.iter()
+            .rev()
+            .filter_map(|dir| std::fs::read_to_string(dir.join("etc/passwd")).ok())
+            .find_map(|content| spec::parse_passwd_uids(&content).get(name).copied())
+    }
 }
 
 /// Distinctive id: time-ordered hex + a process-local counter.
@@ -213,6 +228,20 @@ impl EngineBackend {
             .or_else(|| self.store.find_ref_by_digest(&pr.digest?))
     }
 
+    /// The image config body behind `image` (T4.13 M4, Q53): `None` for
+    /// host-dir/staged images without a CAS record; the config blob is
+    /// read from the CAS and parsed whenever the image was pulled.
+    fn image_config_body(&self, image: &str) -> Result<Option<ConfigBody>, String> {
+        let Some(img) = self.cas_ref(image) else {
+            return Ok(None);
+        };
+        let blob = self.store.blob_path(&img.config.digest);
+        let bytes = std::fs::read(&blob)
+            .map_err(|e| format!("read image config {}: {e}", blob.display()))?;
+        let parsed = super::image::parse_image_config(&bytes)?;
+        Ok(Some(parsed.config))
+    }
+
     async fn wait_state(&self, id: &str, want: &str, budget: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + budget;
         loop {
@@ -259,6 +288,23 @@ impl EngineBackend {
             cfg.metadata.uid.clone(),
             cfg.labels.clone(),
         )
+    }
+
+    /// The SIGTERM grace for one container (T4.13 M4, Q53): the pod
+    /// annotation `init-pro.io/stop-grace-seconds` overrides the default
+    /// [`STOP_GRACE`], clamped to 1..=600s so a typo cannot wedge the
+    /// sync loop. Unparseable/absent values keep the default.
+    fn stop_grace(&self, id: &str) -> Duration {
+        self.registry
+            .pending(id)
+            .and_then(|p| {
+                p.pcfg
+                    .annotations
+                    .get("init-pro.io/stop-grace-seconds")
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .map(|s| Duration::from_secs(s.clamp(1, 600)))
+            .unwrap_or(STOP_GRACE)
     }
 }
 
@@ -391,8 +437,8 @@ impl CriBackend for EngineBackend {
             .registry
             .netns_of(&pending.sandbox_id)
             .ok_or_else(|| format!("sandbox {} is not ready", pending.sandbox_id))?;
-        let (rootfs, overlay) = match self.resolve(&pending.ccfg.image.image, id)? {
-            ResolvedRootfs::Dir(dir) => (dir, None),
+        let (rootfs, overlay, layer_dirs) = match self.resolve(&pending.ccfg.image.image, id)? {
+            ResolvedRootfs::Dir(dir) => (dir.clone(), None, vec![dir]),
             ResolvedRootfs::Overlay {
                 mountpoint,
                 lower,
@@ -402,15 +448,24 @@ impl CriBackend for EngineBackend {
                 mountpoint,
                 Some(engine_proto::OverlaySpec {
                     lower: lower
-                        .into_iter()
+                        .iter()
                         .map(|p| p.to_string_lossy().into_owned())
                         .collect(),
                     upper: upper.to_string_lossy().into_owned(),
                     work: work.to_string_lossy().into_owned(),
                 }),
+                // `/etc/passwd` reads happen per-layer (the view itself is
+                // only mounted inside the engine child).
+                lower,
             ),
         };
-        let mut es = spec::container_spec(id, &rootfs, &pending, sandbox_netns)?;
+        // T4.13 M4 (Q53): the image config is the launch source of truth —
+        // entrypoint/cmd/env/user/workingDir merge under the CRI request
+        // (explicit pod command overrides; pod env appends last-wins).
+        let img = self.image_config_body(&pending.ccfg.image.image)?;
+        let resolve_named_user = named_user_lookup(&layer_dirs);
+        let launch = spec::merge_launch(&pending.ccfg, img.as_ref(), Some(&resolve_named_user))?;
+        let mut es = spec::container_spec(id, &rootfs, &pending, sandbox_netns, launch)?;
         // T4.13 M3 (Q53): the engine child mounts the overlay view over
         // `rootfs` before entering it; plain dirs keep `overlay: None`.
         es.overlay = overlay;
@@ -437,9 +492,10 @@ impl CriBackend for EngineBackend {
             Some((state, _)) if state != "CONTAINER_RUNNING" => return Ok(()),
             _ => {}
         }
+        let grace = self.stop_grace(id);
         if let Some(ctrl) = self.registry.ctrl(id) {
             let _ = ctrl.send(Ctrl::Signal(15)).await;
-            if self.wait_state(id, "CONTAINER_EXITED", STOP_GRACE).await {
+            if self.wait_state(id, "CONTAINER_EXITED", grace).await {
                 return Ok(());
             }
             let _ = ctrl.send(Ctrl::Signal(9)).await;

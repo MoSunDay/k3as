@@ -46,12 +46,13 @@ pub fn parse_image_config(bytes: &[u8]) -> Result<ImageConfig, String> {
     serde_json::from_slice(bytes).map_err(|e| format!("image config JSON: {e}"))
 }
 
-/// Resolve the container argv (Q53: feeds the engine `ContainerSpec`).
+/// Resolve the container argv (Q53: feeds the T4.13 `spec::merge_launch`).
 ///
 /// An explicit CRI `command` overrides the image: `command ++ args`
 /// (args may be empty) wins outright. Without `command`, the image's
 /// `entrypoint ++ cmd` is used. May return an empty vec — the caller
-/// (T4.12 `container_spec`) reports "no command" for the container.
+/// (`engine::spec::merge_launch`) then reports "no command" for the
+/// container.
 pub fn merge_argv(cfg: &ConfigBody, command: &[String], args: &[String]) -> Vec<String> {
     if !command.is_empty() {
         command.iter().chain(args.iter()).cloned().collect()

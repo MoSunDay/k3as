@@ -276,7 +276,9 @@ fn sandbox_cfg(view: &PodView, log_root: &Path, date: &str) -> PodSandboxConfig 
             attempt: 0,
         },
         labels: pod_labels(&view.name, &view.namespace, &view.uid),
-        annotations: BTreeMap::new(),
+        // T4.13 M4 (Q53): pod `metadata.annotations` ride along — the
+        // builtin engine reads `init-pro.io/stop-grace-seconds` at stop.
+        annotations: view.annotations.clone(),
         // Hostname passthrough (Sprint 20 S4, T4.2 Scope B): v1 uses the
         // pod name verbatim so containers stop inheriting the sandbox
         // host's hostname. Full upstream FQDN semantics

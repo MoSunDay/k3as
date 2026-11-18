@@ -242,6 +242,9 @@ fn run_one(
     fb: &mut FrameBuffer,
 ) -> io::Result<Outcome> {
     let id = spec.id.clone();
+    // T4.13 M4 (Q53): execs with an empty env inherit the CONTAINER's
+    // merged env (image env + pod env) — k8s exec semantics.
+    let container_env = spec.env.clone();
     let mut log = match spec
         .log_path
         .as_deref()
@@ -304,6 +307,7 @@ fn run_one(
                     &mut child,
                     &mut live_exec,
                     &mut exec_seq,
+                    &container_env,
                 )? {
                     let _ = log.as_mut().map(|l| l.finish());
                     return Ok(Outcome::Exit);
@@ -364,6 +368,7 @@ fn peer_request(
     child: &mut Child,
     live_exec: &mut Option<(String, nsrun::ExecProc)>,
     exec_seq: &mut u64,
+    container_env: &[String],
 ) -> io::Result<Option<Outcome>> {
     if frame.kind == FrameKind::Stdin {
         send_error(stream, "stdin frames are refused (Q50)")?;
@@ -400,6 +405,13 @@ fn peer_request(
             } else if live_exec.is_some() {
                 send_error(stream, "exec busy: one in-flight exec per engine (Q50)")?;
             } else {
+                // T4.13 M4 (Q53): an empty exec env means "the container's
+                // merged env" (the kubelet pump sends none).
+                let env = if env.is_empty() {
+                    container_env.to_vec()
+                } else {
+                    env
+                };
                 match exec::start(child.pid(), argv, env, workdir) {
                     Ok(mut proc) => {
                         let exec_id = exec::next_exec_id(exec_seq);

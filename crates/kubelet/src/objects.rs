@@ -3,6 +3,8 @@
 //! through JSON pointers; every function is total and side-effect free so
 //! the reconcile core stays unit-testable.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
 use crate::probes::ProbeSpec;
@@ -78,6 +80,8 @@ pub enum VolumeKind {
 /// Pod identity + the fields the sync loop consumes. `marker` is the pod's
 /// `resourceVersion` at observation time so status writes can skip no-op
 /// pods. `restart_policy` is `spec.restartPolicy`, defaulting to "Always".
+/// `annotations` carries `metadata.annotations` through to the CRI sandbox
+/// config (T4.13 M4, Q53: `init-pro.io/stop-grace-seconds` et al).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodView {
     pub key: String,
@@ -89,6 +93,7 @@ pub struct PodView {
     pub deleted: bool,
     pub marker: String,
     pub restart_policy: String,
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// `"namespace/name"` key; namespace defaults to `"default"`.
@@ -325,6 +330,17 @@ pub fn pod_view(pod: &Value) -> Option<PodView> {
             .filter(|p| matches!(*p, "Always" | "OnFailure" | "Never"))
             .unwrap_or("Always")
             .to_string(),
+        // T4.13 M4 (Q53): pod annotations ride along to the sandbox config
+        // (the builtin engine reads `init-pro.io/stop-grace-seconds`).
+        annotations: pod
+            .pointer("/metadata/annotations")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|value| (k.clone(), value.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -538,6 +554,15 @@ mod tests {
         assert!(!v.deleted);
         assert_eq!(v.marker, "7");
         assert_eq!(v.restart_policy, "Always", "absent restartPolicy defaults");
+        assert!(v.annotations.is_empty(), "absent annotations default empty");
+        // T4.13 M4 (Q53): metadata.annotations ride along to the sandbox.
+        let ann = json!({"metadata": {"name": "a", "annotations": {
+            "init-pro.io/stop-grace-seconds": "3", "skipped": 7}},
+            "spec": {"containers": [], "nodeName": "n1"}});
+        assert_eq!(
+            pod_view(&ann).unwrap().annotations,
+            BTreeMap::from([("init-pro.io/stop-grace-seconds".into(), "3".into())])
+        );
         assert!(pod_view(&json!({})).is_none());
     }
 
