@@ -15,6 +15,7 @@
 
 pub mod backend;
 pub mod exec;
+pub mod image;
 pub mod launch;
 pub mod logs;
 pub mod pump;

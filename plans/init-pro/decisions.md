@@ -2599,3 +2599,39 @@ pod↔外网)；无 CNI 依赖面与重复实现；hostNetwork 用户语义可�
 127.0.0.1 仅单节点正确，多节点需显式传真实 IP；进程/PID/mount/UTS/IPC
 隔离保留不变 (只放开 net ns)。T4.13 网络面就此关闭，overlayfs 镜像
 存储仍 open。
+## Q53 — T4.13 镜像存储: 层目录共享 + per-container overlayfs (兜底融合复制) (2026-11-18, LOCKED)
+
+**Context.** T4.13 镜像存储需要把 CAS 层喂给 nsrun `RunSpec.rootfs`。层只解包一次是
+镜像存储的核心收益（磁盘 + 启动时间）；每个容器必须有可写面（upperdir）。
+
+**Options.** (a) 层目录共享 (`<data_dir>/engine/images/layers/<algo>-<hex>` 只解一次，
+只读) + per-container overlayfs (lower=层目录按 manifest 逆序, upper/work per-container
+在 `<data_dir>/engine/images/views/<id>/`, mount 失败兜底为融合复制整树)；
+(b) 每容器融合复制整树（无 nsrun 改动, 磁盘/启动重）。
+
+**Decision.** 选 (a)：nsrun `RunSpec` 增 `overlay { lower: Vec<PathBuf>, upper: PathBuf,
+work: PathBuf }` 可选项（unsafe 仅 nsrun 合例, mount 时序在 pivot_root 前）；overlayfs
+mount 失败（内核不支持/权限）时兜底为把 lower 链按序复制进 upper（whiteout 已应用），
+语义与 containerd 的 snapshotter 降级路径一致。层合并顺序 = manifest layers 顺序
+（layers[0] 最底）。
+
+**Consequences.** (+) 层共享零复制、容器启动只建空 upper；兜底路径保证任何内核可跑。
+(−) nsrun 增加 mount(2) 面（既有 unsafe 边界内）；兜底复制代价 O(镜像大小)；upper/work
+目录在容器删除时整体清除。
+
+## Q54 — T4.13 解包/拉取依赖: tar + flate2(rust_backend) + zstd, HTTP 复用 kubelet 客户端 (2026-11-18, LOCKED)
+
+**Context.** 解包 OCI 层需要 tar + gzip（docker 层）解压；已有 zstd（vendor 面）；拉取
+manifest/blob 需要一个 HTTP GET。builtin 引擎的定位是零外部命令依赖。
+
+**Options.** (a) `tar` crate + `flate2`（miniz_oxide 纯 Rust backend, 零 unsafe, 不引
+zlib-ng/C）+ 既有 `zstd`；拉取走 `kubelet/src/http.rs` 扩展 raw-bytes GET（不引 HTTP
+新依赖）；(b) shell out 系统 tar/gzip（与 builtin 零依赖定位冲突）。
+
+**Decision.** 选 (a)：workspace 增加 `tar = "0.4"` 与 `flate2 = { version = "1",
+default-features = false, features = ["rust_backend"] }`（caret-only, 锁入 Cargo.lock）；
+kubelet 依赖二者 + `sha2`（digest 校验）。断点续传 (Range) 明确 out。
+
+**Consequences.** (+) 纯 Rust 解包链, 无 shell-out; digest 校验单点在 kubelet。 (−) tar
+crate 需自行处理 whiteout/路径穿越（不可信任镜像内容, M3 落地）；flate2 rust_backend
+比 C zlib 慢（测试镜像量级可忽略）。

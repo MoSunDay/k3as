@@ -14,9 +14,13 @@ axum = { workspace = true }
 common = { workspace = true }
 engine-client = { workspace = true }
 engine-proto = { workspace = true }
+flate2 = { workspace = true }
 infra = { workspace = true }
 runtime = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
@@ -26,3 +30,10 @@ apiserver = { workspace = true }
 k8s-openapi = { workspace = true }
 storage = { workspace = true }
 tokio = { workspace = true }
+
+# T4.13 (Q54): tar/flate2 are locked in now for the registry-pull +
+# layer-unpack slice; this milestone only uses sha2/serde. Cargo's
+# unused_dependencies manifest lint would flag them until then (M2
+# consumes both; drop this block if it outlives the sprint).
+[lints.cargo]
+unused_dependencies = "allow"
