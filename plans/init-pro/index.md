@@ -63,13 +63,13 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T8.2 | 8 | TrafficSplit 加权一键切流 (init-pro.io/v1, 短名 ts, Q57) | done (Sprint 45, Q57) | T5.4, T1.1 |
 | T8.3 | 8 | ServicePipeline/Build 内嵌 CI/CD 控制器 (M2 core, Q56) | done (Sprint 45, Q56) | T8.1, T6.3, T1.2, T3.1 |
 | T8.4 | 8 | pipeline 面收尾: CLI flags + 进程内 e2e (M2, Q56) | done (Sprint 45, Q56) | T8.3 |
-| T8.5 | 8 | canary 发布控制器 (M3, Q58) | not-started | T8.2, T8.3, T8.4 |
+| T8.5 | 8 | canary 发布控制器 (M3, Q58) | done (Sprint 46, Q58) | T8.2, T8.3, T8.4 |
 
-**Counts:** 51 TODOs · 37 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 51 TODOs · 38 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
-· 12 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 11 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=14 · Layer5=7 · Layer6=3 · Layer7=5 · Layer8=5.
 
 ---

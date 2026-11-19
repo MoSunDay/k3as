@@ -281,3 +281,105 @@ async fn build_without_source_fails_terminally() {
         revision
     );
 }
+
+/// Canary variant of [`pipeline_json`] (T8.5/Q58): `spec.release` pointing at
+/// the stable pair the test seeds.
+fn canary_pipeline_json(tag: &str) -> Value {
+    let mut value = pipeline_json(tag);
+    value["spec"]["release"] = json!({
+        "trafficSplit": "web",
+        "stableService": "web-stable",
+        "steps": [{"weight": 100, "pauseSeconds": 600}],
+    });
+    value
+}
+
+#[tokio::test]
+async fn canary_release_rolls_a_canary_instead_of_patching_stable() {
+    let client = client();
+    let dep_key = Key::new("apps", "deployments", "default", "web");
+    let svc_key = Key::new("", "services", "default", "web-stable");
+    client
+        .create(
+            &dep_key,
+            json!({
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": "web", "namespace": "default"},
+                "spec": {
+                    "selector": {"matchLabels": {"app": "web"}},
+                    "template": {
+                        "metadata": {"labels": {"app": "web"}},
+                        "spec": {"containers": [{"name": "app", "image": "team/web:v0"}]},
+                    },
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    client
+        .create(
+            &svc_key,
+            json!({
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {"name": "web-stable", "namespace": "default"},
+                "spec": {"selector": {"app": "web"}, "ports": [{"port": 80}]},
+            }),
+        )
+        .await
+        .unwrap();
+    client
+        .create(
+            &Key::new("init-pro.io", "trafficsplits", "default", "web"),
+            json!({
+                "apiVersion": "init-pro.io/v1",
+                "kind": "TrafficSplit",
+                "metadata": {"name": "web", "namespace": "default"},
+                "spec": {"service": "web-entry", "backends": [{"service": "web-stable", "weight": 100}]},
+            }),
+        )
+        .await
+        .unwrap();
+    let sp = client
+        .create(&sp_key(), canary_pipeline_json("v1"))
+        .await
+        .unwrap();
+    create_build(&client, &sp, "web-v1-ab12c", "v1", "Succeeded").await;
+
+    reconcile(&client, &sp, &cfg()).await.unwrap();
+
+    // The canary rolls; the stable image is NOT patched (promotion owns it).
+    let stored = stored_pipeline(&client).await;
+    assert_eq!(stored["status"]["phase"], json!("Rolling"));
+    assert_eq!(stored["status"]["rollout"]["step"], json!(0));
+    assert_eq!(stored["status"]["observedTag"], json!(null));
+    let canary_key = Key::new("apps", "deployments", "default", "web-canary");
+    let canary = client.get(&canary_key).await.unwrap().unwrap();
+    assert_eq!(
+        canary["spec"]["template"]["spec"]["containers"][0]["image"],
+        json!("team/web:v1")
+    );
+    let stable = client.get(&dep_key).await.unwrap().unwrap();
+    assert_eq!(
+        stable["spec"]["template"]["spec"]["containers"][0]["image"],
+        json!("team/web:v0"),
+        "the stable Deployment is untouched while rolling"
+    );
+    let canary_svc = Key::new("", "services", "default", "web-stable-canary");
+    assert!(client.get(&canary_svc).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn deleting_pipeline_creates_no_build_and_writes_no_status() {
+    let client = client();
+    let mut sp = create_pipeline(&client, "v1").await;
+    sp["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
+    reconcile(&client, &sp, &cfg()).await.unwrap();
+
+    assert!(
+        children(&client).await.is_empty(),
+        "a draining pipeline builds nothing"
+    );
+    assert_eq!(stored_pipeline(&client).await["status"], json!(null));
+}

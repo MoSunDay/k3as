@@ -10,10 +10,11 @@ Milestones:
   their API CRDs — done (Sprint 45).
 - **M2** = T8.3 core (ServicePipeline/Build controller + executor) + T8.4 wiring
   (CLI flags, default-on posture, in-process e2e) — done (Sprint 45).
-- **M3** = T8.5 canary release (DRAFT **Q58**, controller not started).
+- **M3** = T8.5 canary release (**Q58** LOCKED; controller + in-process e2e) —
+  done (Sprint 46).
 
 Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
-(canary, DRAFT). The plain-HTTP image posture is inherited from **Q38**
+(canary, LOCKED). The plain-HTTP image posture is inherited from **Q38**
 (intranet h2c) + **Q40** (embedded registry), not a separate decision.
 
 ---
@@ -209,7 +210,7 @@ Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
 
 ---
 
-## T8.5 — canary 发布控制器 (M3, Q58 DRAFT)
+## T8.5 — canary 发布控制器 (M3, Q58)
 
 - **目标 / Goal**
   Pipeline-owned canary rollout: `ServicePipeline.spec.release` drives a
@@ -218,30 +219,52 @@ Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
   pauses, then promotes or aborts.
 
 - **核心实现 / Core implementation**
-  - API types already exist since M1 (`crates/api/src/pipeline.rs`):
-    `PipelineRelease` (`trafficSplit`, `stableService`, `canaryService`,
-    `canaryDeployment`, ordered `steps[]`), `ReleaseStep`
-    (`{weight, pauseSeconds}`), `RolloutStatus` (`step`/`weight`/`since`) and
-    the `Rolling`/`Promoted`/`Aborted` phase constants.
-  - Planned controller (not started): create/clone the canary Deployment +
-    Service, apply each step's weight to the TrafficSplit, wait
-    `pauseSeconds`, advance `status.rollout`; **promote** = patch the stable
-    Deployment image to the new tag and set the canary weight to 0;
-    **abort** = delete the canary objects and set the weight to 0.
-  - Explicitly: the fields are parsed and exposed by discovery today, but NO
-    reconciler consumes `spec.release` — the controller is M3.
+  - API types since M1 (`crates/api/src/pipeline.rs`): `PipelineRelease`
+    (`trafficSplit`, `stableService`, `canaryService`, `canaryDeployment`,
+    ordered `steps[]`, plus the additive `abort` of Q58 D4), `ReleaseStep`
+    (`{weight, pauseSeconds}`), `RolloutStatus` (`step`/`weight`/`since` plus
+    the additive `revision`) and the `Rolling`/`Promoted`/`Aborted` phase
+    constants.
+  - New module `crates/controllers/src/controllers/pipeline/canary/`:
+    `plan.rs` = pure decisions (canary names + ownership-conflict check, stable
+    selector key subtraction, step selection from `steps[]` and the wall-clock
+    soak, advance vs promote vs done, D9 config validation); `apply.rs` =
+    merge/ensure helpers (canary Deployment/Service clone-or-update,
+    TrafficSplit backend rewrite to `[{stable, 100-w}, {canary, w}]`, canary
+    delete, stable image patch via `patch_target_deployment`, status/CAS
+    writes); `mod.rs` = the step machine (`Rolling` entry, `status.rollout`
+    bookkeeping, promote, idempotent abort).
+  - Reconcile hook in `crates/controllers/src/controllers/pipeline/mod.rs`:
+    after a Succeeded `Build` for this tag, a valid `spec.release` enters the
+    canary machine instead of the immediate stable image patch;
+    `spec.release.abort` short-circuits at the top of reconcile (before the
+    Build is created). A `metadata.deletionTimestamp` guard precedes both
+    (namespace drain ordering; also fixes the pre-existing Build-resurrection
+    race).
+  - GC rows: `("apps","deployments")` and `("","services")` join
+    `gc.rs` `DEPENDENT_KINDS`, so the 2s backstop sweep lists those two kinds
+    cluster-wide; canary children carry the `ServicePipeline` controller
+    ownerReference.
+  - Revisions: canary children are retained at weight 0 after a promote and
+    reused by the next tag; abort is the recycle path. Caveats: no health-gated
+    auto-abort (a crash-looping canary still promotes) and canary pods share
+    the stable pod volumes, so RWO PVCs can block scheduling.
 
-- **验收 / Acceptance** (planned)
-  - In-process e2e mirroring T8.4: a release with 2-3 steps reaches `Promoted`
-    with the stable Deployment on the new image and the TrafficSplit weight back
-    at 0/100; an aborted release removes the canary objects and never touches
-    the stable image.
+- **验收 / Acceptance**
+  - `cargo test -p controllers --locked`: `plan.rs` unit tests (names and
+    ownership conflict, selector subtraction, step advance/soak) plus the
+    in-process e2e in `crates/controllers/tests/canary.rs`:
+    `canary_release_rolls_through_steps_and_promotes`,
+    `aborted_release_removes_canary_and_keeps_stable_image`,
+    `deleting_the_pipeline_gc_removes_canary_children`.
 
-- **状态 / Status** — not-started (M3; DRAFT Q58).
-- **证据 / Evidence** — API types + schema/discovery coverage only.
-- **卡点 / Blockers** — Q58 is not locked: canary naming/ownership, pause clock
-  source (wall clock, no cron), auto-abort policy and the canary replica knob
-  are open; depends on all of T8.2/T8.3/T8.4 landing first.
+- **状态 / Status** — done (Sprint 46, M3, Q58).
+- **证据 / Evidence** — Q58 lock (D1-D9) + the additive API fields
+  (`spec.release.abort`, `rollout.revision`); `cargo test -p controllers
+  --locked` (138 lib + 48 integration; the 3 canary e2e tests above green in
+  ~6s) and `cargo test --workspace --locked` **1241 passed / 0 failed** (85
+  suites); `scripts/all-gates.sh` **gates=10, fails=0** (golden 51/0).
+- **卡点 / Blockers** — none.
 - **依赖 / Depends on** — T8.2, T8.3, T8.4.
 
 ---
@@ -254,7 +277,7 @@ T6.3, T4.1              -> T8.1  (M1)
 T5.4, T1.1              -> T8.2  (M1)
 T8.1, T6.3, T1.2, T3.1  -> T8.3  (M2 core)
 T8.3                    -> T8.4  (M2)
-T8.2, T8.3, T8.4        -> T8.5  (M3, DRAFT Q58)
+T8.2, T8.3, T8.4        -> T8.5  (M3, Q58)
 
 flow:  T6.3 ─> T8.1 ─> T8.3 ─> T8.4 ─┐
        T5.4 ─> T8.2 ─────────────────┴─> T8.5

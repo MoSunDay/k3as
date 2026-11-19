@@ -7,6 +7,62 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 46 — T8.5 done: canary 发布控制器 + stepped TrafficSplit (M3, Q58 LOCKED) (2026-11-19)
+
+**Goal:** Layer 8 交付面收口 (M3)——`ServicePipeline.spec.release` 驱动
+pipeline-owned canary：克隆 stable Deployment/Service，按 `steps[]` 步进
+TrafficSplit 权重 (每步 wall-clock soak，2s pipeline resync 驱动)，到顶
+promote (patch stable image + 权重 100/0，children 保留在 0) 或
+`spec.release.abort` 幂等回收。Q58 由 DRAFT 转 **LOCKED** (D1-D9)，
+T8.5 转 **done**；Layer 8 M1-M3 全部关闭。
+
+**Changes**
+- T8.5 API (`crates/api/src/pipeline.rs`): 两个加性字段——`PipelineRelease.
+  abort: bool` (缺省省略) 与 `RolloutStatus.revision: String` (tag 变化即
+  重开 step 0；空串省略)；`round_trip_is_lossless`/`wire_shape_uses_camel_
+  case` 扩展 + `new_fields_are_omitted_when_unset`。
+- T8.5 controller (`controllers/src/controllers/pipeline/canary/`, 7 文件
+  1683 行, 全部 <400): `plan.rs` 纯决策——D1 默认名 `<stable>-canary` +
+  ownerRef 校验 (`CanaryConflict`)、D2 stable selector 键相减、D5 克隆
+  stable replicas (缺省 1)、D7 revision/step 判定与 wall-clock soak、
+  D9 `ReleaseInvalid` 校验；`children.rs` Deployment/Service 克隆 (Service
+  去 nodePort) + 反抖 merge；`apply.rs` ensure/clone-or-update、TrafficSplit
+  backend 改写 `[{stable,100-w},{canary,w}]`、canary 删除、stable image
+  patch；`mod.rs` 状态机 (`Rolling` 进入、`status.rollout` 记账、promote、
+  abort；命名 Ready=False 原因 `ReleaseInvalid`/`TrafficSplitMissing`/
+  `StableDeploymentMissing`/`StableServiceMissing`/`CanaryConflict`)。
+- Reconcile hook (`pipeline/mod.rs`): 本 tag 的 Build Succeeded 且有合法
+  `spec.release` 时进入 canary 机而非直接 patch stable；abort 在 Build
+  创建前短路；`deletionTimestamp` drain 守卫前置 (顺带修复既有 Build
+  复活竞态)。GC `DEPENDENT_KINDS` 8→10 (`apps/deployments`,
+  `""/services`)，2s 兜底扫描覆盖 canary children。
+- T8.5 e2e (`crates/controllers/tests/canary.rs`, 383 行): 3 用例——
+  `canary_release_rolls_through_steps_and_promotes` (50/5s→100/0s，
+  split 50/50→Promoted + observedTag v1，canary children 形状，rollout
+  清空，仅 1 个 Build)、`aborted_release_removes_canary_and_keeps_stable_
+  image`、`deleting_the_pipeline_gc_removes_canary_children`。
+- SSOT: decisions **Q58 LOCKED 2026-11-19** (D1-D9)；`plan/08-delivery.md`
+  T8.5 done + M3 done；`index.md` 51 TODO (38 done / 2 in-progress / 11
+  not-started，Layer8=5)；`agents.md` 38/51 + 交付面段落 + Q58 bullet。
+
+**Tests:** `cargo test --workspace --locked` → **1241 passed / 0
+failed** (85 suites; Sprint 45 基线 1220, 净增 **21**)。关键套件:
+api 84 / controllers 187 (lib 138 + integration 49；canary plan 9 单测 +
+canary e2e 3) / router 50 / registry 30 / kubectl 78 / cli 81。
+clippy `--workspace --all-targets -D warnings` 0。
+
+**Gates:** 收口全量复跑 `scripts/all-gates.sh` → **RESULT: PASS**
+(gates=10 rows=24 fails=0 skips=2)——fmt/build/clippy/unsafe-audit/
+engine-singlethread 全 PASS；`cargo test --workspace --locked`
+**1241 / 0**（85 suites）；golden **51 passed / 0 failed**（6 SKIP：
+g24 registry 不可达 + G25/G26/G29/G30/G60-G66/G80-G82 宿主外来 cni0
+共存守卫，S40c/Q25 doctrine）；battery 8.1-8.14 全行绿（8.11
+service-traffic + 8.12 flannel 因宿主 cni0 持有 10.244.0.1 自 SKIP，
+SKIP-not-fail；8.13 builtin-image I1-I8 190s；8.14 builtin-hostroot
+H1-H8 255s）；cli-flag-parity 25/25。
+
+---
+
 ## Sprint 45 — T8.1-T8.4 done: 镜像交付信任 + TrafficSplit 加权切流 + ServicePipeline/Build 内嵌 CI/CD (Q56/Q57 LOCKED, Q58 DRAFT) (2026-11-19)
 
 **Goal:** Layer 8 交付面收口——镜像交付信任 (certs.d 明文 HTTP +

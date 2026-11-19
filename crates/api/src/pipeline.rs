@@ -173,6 +173,10 @@ pub struct PipelineRelease {
     /// Ordered weight steps; `pauseSeconds` is the soak time before the next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<ReleaseStep>,
+    /// Abort the in-flight canary (`true` = delete the canary Deployment +
+    /// Service, weight back to 0; the stable image is never touched).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub abort: bool,
 }
 
 /// One canary step.
@@ -223,7 +227,8 @@ pub struct BuildRef {
     pub finished_at: String,
 }
 
-/// Canary rollout progress (`status.rollout`).
+/// Canary rollout progress (`status.rollout`) incl. the image the current
+/// canary revision runs (T8.5, Q58).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RolloutStatus {
@@ -233,6 +238,9 @@ pub struct RolloutStatus {
     /// Current canary weight.
     #[serde(default)]
     pub weight: i32,
+    /// Image reference the current canary revision runs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub revision: String,
     /// RFC3339-ish timestamp the current weight was applied.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub since: String,
@@ -334,10 +342,21 @@ mod tests {
                             pause_seconds: 0,
                         },
                     ],
+                    abort: true,
                 }),
                 paused: false,
             },
         )
+    }
+
+    /// A populated `status.rollout` (T8.5, Q58) for the revision field.
+    fn rollout_status() -> RolloutStatus {
+        RolloutStatus {
+            step: 1,
+            weight: 10,
+            revision: "reg.local:5000/team/web:v1".into(),
+            since: "2026-11-19T00:00:00Z".into(),
+        }
     }
 
     #[test]
@@ -354,6 +373,13 @@ mod tests {
     fn round_trip_is_lossless() {
         let p = pipeline();
         assert_eq!(round_trip(&p).unwrap(), p);
+        // T8.5: both new fields survive the JSON cycle — `spec.release.abort`
+        // on the pipeline, `status.rollout.revision` on the rollout status.
+        assert!(p.spec.release.as_ref().expect("release").abort);
+        let rollout = rollout_status();
+        let back: RolloutStatus = round_trip(&rollout).unwrap();
+        assert_eq!(back, rollout);
+        assert_eq!(back.revision, "reg.local:5000/team/web:v1");
     }
 
     #[test]
@@ -378,5 +404,18 @@ mod tests {
         assert!(json.contains("\"timeoutSeconds\":1800"));
         assert!(json.contains("\"pauseSeconds\":30"));
         assert!(json.contains("\"trafficSplit\":\"code-grapher\""));
+        assert!(json.contains("\"abort\":true"));
+        let rollout = serde_json::to_string(&rollout_status()).unwrap();
+        assert!(rollout.contains("\"revision\":\"reg.local:5000/team/web:v1\""));
+    }
+
+    #[test]
+    fn new_fields_are_omitted_when_unset() {
+        // T8.5: `abort` defaults to false and `revision` to empty, so both stay
+        // off the wire for a pipeline that never started a canary.
+        let json = serde_json::to_string(&PipelineRelease::default()).unwrap();
+        assert!(!json.contains("\"abort\""));
+        let rollout = serde_json::to_string(&RolloutStatus::default()).unwrap();
+        assert!(!rollout.contains("\"revision\""));
     }
 }

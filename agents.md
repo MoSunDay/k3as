@@ -134,18 +134,20 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   (Argo Workflows, Q30; model/engine since extracted to the
   link_repos/arust-workflow reference, Q42), T7.4 (anyhome, Q36), and
   T7.5 (anyhome Pod-level annotation mounts, Q43). Phase 1 (M0 + M1) is
-  complete; 37/51 TODOs done.
-- Delivery plane (Layer 8, T8.1-T8.4 done in Sprint 45, Q56/Q57): certs.d
-  plain-HTTP image trust (`hosts.toml`, T8.1) + registry V2 push client +
-  `docker save` importer; `TrafficSplit` (`ts`) weighted one-click switching
-  folded into the Router's NodePort plane (T8.2, Q57); `ServicePipeline`/
-  `Build` embedded CI/CD (default-on, `--disable-pipeline` /
-  `--pipeline-dir`, Q56) with full-object CAS status; and an in-process
-  pipeline e2e (real registry v2 + fake docker shim, T8.4). Next on this
-  layer: T8.5 canary release (DRAFT Q58 — API types since M1, controller
-  M3), plus the still-open T4.10 (kubelet volumes), T5.6 (SNI/TLS
-  remainder, blocked on T5.5) and the T4.3 remainder (host-gw/multi-node,
-  netpol = T4.4).
+  complete; 38/51 TODOs done.
+- Delivery plane (Layer 8, T8.1-T8.5 done in Sprints 45-46, Q56/Q57/Q58):
+  certs.d plain-HTTP image trust (`hosts.toml`, T8.1) + registry V2 push
+  client + `docker save` importer; `TrafficSplit` (`ts`) weighted one-click
+  switching folded into the Router's NodePort plane (T8.2, Q57);
+  `ServicePipeline`/`Build` embedded CI/CD (default-on, `--disable-pipeline`
+  / `--pipeline-dir`, Q56) with full-object CAS status; an in-process
+  pipeline e2e (real registry v2 + fake docker shim, T8.4); and the
+  pipeline-owned canary release (T8.5, Q58) — `<deployment>-canary` clone +
+  canary Service + stepped TrafficSplit weights with wall-clock soak, then
+  promote (stable image patch, weights 100/0) or abort (`spec.release.abort`
+  recycles the children). Layer 8 is closed out (M1-M3); remaining on the
+  critical path: T4.10 (kubelet volumes), T5.6 (SNI/TLS remainder, blocked
+  on T5.5) and the T4.3 remainder (host-gw/multi-node, netpol = T4.4).
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -209,7 +211,11 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - Q57 - T8.2: `TrafficSplit` (`ts`) is the weighted-switching primitive - the
   Router folds splits into per-endpoint openrusty weights (scaled by 100,
   deterministic remainder, zero-weight backends dropped), no service mesh.
-- Q58 - T8.5 canary release (DRAFT, M3 not started): pipeline-owned canary
-  Deployment/Service + stepped TrafficSplit weights; API types exist since M1.
+- Q58 - T8.5 (LOCKED S46): pipeline-owned canary release - `spec.release`
+  drives `<deployment>-canary` + a cloned canary Service + stepped
+  TrafficSplit weights (wall-clock soak on the 2s pipeline resync), then
+  promote (stable image patch + weights 100/0, children retained) or abort
+  (`spec.release.abort`, idempotent, recycles the children); no health-gated
+  auto-abort in M3.
 
 Read `plans/init-pro/decisions.md` for the full list (Q1-Q58).

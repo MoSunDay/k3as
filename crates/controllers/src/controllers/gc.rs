@@ -39,8 +39,9 @@ pub(crate) const ORPHAN_ANNOTATION: &str = "init-pro.io/deletion-propagation";
 /// `(group, resource)` of every kind the GC sweeps for dangling controller
 /// ownerReferences (cluster-wide list). A5: `init-pro.io/agents` (Workflow
 /// step Agent children) join the sweep universe (Q35); T8.3/Q56 adds
-/// `init-pro.io/builds` (ServicePipeline children).
-pub(crate) const DEPENDENT_KINDS: [(&str, &str); 8] = [
+/// `init-pro.io/builds` (ServicePipeline children); T8.5/Q58 adds the canary
+/// `apps/deployments` + core `services` children a pipeline owns.
+pub(crate) const DEPENDENT_KINDS: [(&str, &str); 10] = [
     ("", "pods"),
     ("apps", "replicasets"),
     ("", "endpoints"),
@@ -49,6 +50,8 @@ pub(crate) const DEPENDENT_KINDS: [(&str, &str); 8] = [
     ("argoproj.io", "workflows"),
     ("init-pro.io", "agents"),
     ("init-pro.io", "builds"),
+    ("apps", "deployments"),
+    ("", "services"),
 ];
 
 /// Owner kinds the GC is authoritative over (each has an informer cache);
@@ -228,7 +231,7 @@ mod tests {
 
     #[test]
     fn dependent_kinds_are_the_sweep_universe() {
-        assert_eq!(DEPENDENT_KINDS.len(), 8);
+        assert_eq!(DEPENDENT_KINDS.len(), 10);
         assert!(DEPENDENT_KINDS.contains(&("", "pods")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "replicasets")));
         assert!(DEPENDENT_KINDS.contains(&("", "endpoints")));
@@ -237,6 +240,9 @@ mod tests {
         assert!(DEPENDENT_KINDS.contains(&("argoproj.io", "workflows")));
         assert!(DEPENDENT_KINDS.contains(&("init-pro.io", "agents")));
         assert!(DEPENDENT_KINDS.contains(&("init-pro.io", "builds")));
+        // T8.5/Q58: the canary Deployment/Service children a pipeline owns.
+        assert!(DEPENDENT_KINDS.contains(&("apps", "deployments")));
+        assert!(DEPENDENT_KINDS.contains(&("", "services")));
         // The drain kinds (namespace.rs) are a superset for teardown; the
         // sweep universe only needs owner-carrying kinds.
         for kind in DEPENDENT_KINDS {

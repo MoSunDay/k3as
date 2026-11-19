@@ -15,6 +15,10 @@
 //! * [`build::reconcile`] runs the per-Build phase machine
 //!   `Building -> Publishing -> Succeeded|Failed`, driving the docker CLI
 //!   through [`executor`] and the embedded registry through [`publish`].
+//! * With `spec.release` set (T8.5/Q58) a Succeeded build no longer patches
+//!   the stable Deployment: [`canary::roll`] owns a canary Deployment/Service
+//!   pair plus the `TrafficSplit` weights and promotes on the last soaked
+//!   step; `spec.release.abort` runs [`canary::abort`] before anything else.
 //!
 //! Disabled posture (Q56): with `ManagerConfig::pipeline == None` the runner
 //! spawns no worker and enqueues nothing at all; [`reconcile`] is then a
@@ -26,6 +30,10 @@
 //! [`status::write_status`], which also owns the bounded log tail.
 
 pub mod build;
+/// Canary release controller (TODO **T8.5**, decision **Q58**): owns the
+/// `<deployment>-canary` / `<service>-canary` children and the per-step
+/// `TrafficSplit` weights; promotes into the stable Deployment or aborts.
+mod canary;
 pub mod executor;
 /// Pure decisions over raw JSON (naming, ownership, phases, image patch).
 mod plan;
@@ -96,12 +104,28 @@ pub async fn reconcile(
     if context.is_empty() && archive.is_empty() {
         return Ok(()); // no source: nothing to build
     }
+    // Q58 / namespace DRAIN: a pipeline being deleted must not create
+    // children that the namespace drain would then race (its canary
+    // Deployment/Service are reaped by the GC cascade anyway).
+    if sp
+        .pointer("/metadata/deletionTimestamp")
+        .map(|v| !v.is_null())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
     let reference = format!("{}:{}", repository.trim_end_matches(':'), tag);
     let uid = sp
         .pointer("/metadata/uid")
         .and_then(Value::as_str)
         .unwrap_or("");
     let key = Key::new(API_GROUP, "servicepipelines", ns, pipeline);
+
+    // Q58 abort: delete the canary children and reset the split. Runs before
+    // the build path so an abort never starts or promotes a build.
+    if canary::abort_requested(sp) {
+        return canary::abort(client, &key, sp, ns, pipeline, uid).await;
+    }
 
     // Children are listed FRESH through the client (the cache lags and this
     // pass owns its CAS base); only controller-owned children of THIS
@@ -133,6 +157,15 @@ pub async fn reconcile(
                 return hold_failure(client, &key, sp, latest, tag).await;
             }
             if phase_of(latest) == api::build::PHASE_SUCCEEDED {
+                // Q58: a canary release never patches the stable Deployment
+                // directly -- it rolls the canary and promotes on the last
+                // soaked step.
+                if canary::has_release(sp) {
+                    return canary::roll(
+                        client, &key, sp, latest, ns, pipeline, uid, tag, &reference,
+                    )
+                    .await;
+                }
                 return promote(client, &key, sp, latest, ns, tag, &reference).await;
             }
         }
@@ -248,8 +281,9 @@ async fn create_build(
     write_status(client, key, sp, state).await.map(|_| ())
 }
 
-/// Patch the target Deployment's container image (Q56 promotion step).
-async fn patch_target_deployment(
+/// Patch the target Deployment's container image (Q56 promotion step; Q58
+/// promote step of a canary release).
+pub(super) async fn patch_target_deployment(
     client: &Arc<dyn Client>,
     ns: &str,
     sp: &Value,

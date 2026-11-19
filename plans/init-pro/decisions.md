@@ -2757,7 +2757,7 @@ Router 已经有 resolver (Endpoints/Service reflect) + openrusty `apply_config`
 未来项); L4 NodePort 面按连接分配, 权重 0 的 backend 是被丢弃而非优雅摘流;
 权重必须显式写在 backend 上 (无默认值推导)。
 
-## Q58 — T8.5 canary release: pipeline-owned canary + stepped TrafficSplit (DRAFT 2026-11-19, M3 not started)
+## Q58 — T8.5 canary release: pipeline-owned canary + stepped TrafficSplit (LOCKED 2026-11-19)
 
 **Context.** Q56 让 ServicePipeline 能「构建 + 推送 + 改 stable Deployment 镜像」,
 但直接改 stable 是 all-or-nothing。Q57 已给出按权重切流的一等原语, 缺的是
@@ -2769,21 +2769,63 @@ service 都要手搓一套时序, 且 promote 需要同时改 Deployment 与权�
 canary Deployment/Service + 分步权重; (b) 复用 Argo Rollouts 语义 (外部 CRD);
 (c) 只给用户 TrafficSplit, 不做自动 promote。
 
-**Decision (proposed, 未锁定).** 倾向 (a)。要点:
-- `ServicePipeline.spec.release` 驱动 `<deployment>-canary` Deployment 与 canary
-  Service (从 stable 克隆: 同 selector 语义、同端口), 二者由 pipeline 拥有。
-- 有序 `steps[]` = `{weight, pauseSeconds}`: 逐步把 canary 权重写进 TrafficSplit
-  (Q57), 每步 soak `pauseSeconds` 后再进下一步; `status.rollout`
-  (`RolloutStatus`) 报 step index / weight / since; phase `Rolling`。
-- **promote** = stable Deployment 镜像 patch 成新 tag + canary 权重归 0 (canary
-  对象按策略保留或回收), phase `Promoted`。
-- **abort** = 删除 canary 对象 + 权重归 0, phase `Aborted` (stable 永不动)。
-- **现状声明.** API 类型自 M1 起已存在 (`PipelineRelease`/`ReleaseStep`/
-  `RolloutStatus`, `crates/api/src/pipeline.rs`), 但**控制器是 M3**: 当前没有
-  任何 reconciler 消费 `spec.release` (字段被解析、被 discovery 暴露、无行为)。
+**Decision.** 选 (a)。要点:
+- **D1 命名/归属.** `spec.release.canaryDeployment` / `canaryService` 为空时由
+  pipeline 拥有 `<stable-deployment>-canary` Deployment 与
+  `<stable-service>-canary` Service; 显式名字照用。子对象带
+  `metadata.ownerReferences` (`controller:true`, `blockOwnerDeletion:true` →
+  `ServicePipeline`) 与标签 `init-pro.io/pipeline: <name>`。目标名字上已有对象但
+  缺该 owner/label 即**不收养**: condition `Ready=False reason=CanaryConflict`,
+  phase `Failed`。
+- **D2 selector 不相交.** canary Deployment 的 `spec.selector.matchLabels` =
+  `{init-pro.io/pipeline: <p>, init-pro.io/canary: "true"}` (跨 revision 稳定)。
+  canary pod template 标签 = stable pod-template 标签**去掉**所有出现在 stable
+  Service `spec.selector` 里的 key, 再加三个标签: `init-pro.io/pipeline`、
+  `init-pro.io/canary: "true"`、`init-pro.io/revision: <slug(tag)>`。canary
+  Service 的 `spec.selector` = 这三个标签 (带 revision, 故新 tag 永不路由到旧
+  canary pod)。stable Service/Deployment 除最终 promote 的镜像 patch 外**永不**被
+  改。理由: k8s Service selector 是等值匹配的子集判定, 减 key 是唯一能把 canary
+  pod 挡在 stable Service 外的办法。
+- **D3 pause 时钟.** 只用 wall clock (无 cron): `status.rollout.since` 是
+  RFC3339, 经 `crate::time::now_rfc3339`/`parse_rfc3339`; 步进挂在既有的 2s
+  `PIPELINE_RESYNC` 上。每一步的 `pauseSeconds` 都要 soak, **含最后一步**, 之后
+  才 promote。
+- **D4 abort / 自动 abort.** 新增字段 `spec.release.abort: bool` (wire
+  `abort`)。abort 在 reconcile 顶部检查 (早于建 Build) 且幂等: 删 canary
+  Deployment+Service (NotFound 视为良性), 权重写回 `stable 100 / canary 0`,
+  phase `Aborted`, `status.rollout` 清空, `observedTag` 不动, stable 镜像不碰。
+  M3 **无自动 abort** (尚无健康信号); 清掉 `abort` 即从 step 0 重跑。
+- **D5 副本数.** canary Deployment 克隆 stable 的 `spec.replicas` (缺省 = 1)。
+  M3 不加新旋钮/旗标。
+- **D6 promote 策略.** promote = patch stable Deployment 镜像 (既有
+  `patch_target_deployment`) + 权重写回 `stable 100 / canary 0`, phase
+  `Promoted`, `observedTag` 前进, `status.rollout` 清空。canary 子对象**保留**在
+  权重 0, 供下一个 tag 复用 (回收路径是 abort)。
+- **D7 revision 跟踪.** 新增字段 `RolloutStatus.revision: String` = 正在金丝雀的
+  镜像引用; 滚动中 tag/reference 变化 → 从 step 0 重启。
+- **D8 TrafficSplit 契约.** 指定的 TrafficSplit 必须预先存在 (Q57, operator
+  拥有); 缺失 → `Ready=False reason=TrafficSplitMissing`, phase `Failed`, 不建
+  任何子对象。控制器**只**改写 `spec.backends` 为恰好
+  `[{stable, 100-w}, {canary, w}]`; `spec.service` 永不触碰。零权重 backend 已被
+  Router 丢弃 (Q57)。
+- **D9 非法配置.** 缺 `spec.target.deployment`、`trafficSplit`/`stableService`
+  缺失或为空、`steps[]` 为空、权重越界 0..=100、canary 名等于其 stable 名 →
+  `Ready=False reason=ReleaseInvalid`, phase `Failed`, 无重建环。
 
-**Consequences.** (+) 一个对象覆盖「构建→金丝雀→promote」, 中间态对用户可见;
-权重时序建立在 Q57 的纯函数折算式上, 可单测。 (−) 未锁定即可能变: canary 资源
-命名/归属、pause 的时钟来源 (wall clock, 无 cron)、失败自动 abort 的策略、多
-副本 canary 的副本数旋钮都还是开放问题; 依赖 T8.2/T8.3/T8.4 全部落地后才能
-实现; 需要新的 namespace DRAIN/GC 依赖面 (canary Deployment/Service 归属)。
+**现状声明.** API 类型自 M1 起已存在 (`PipelineRelease`/`ReleaseStep`/
+`RolloutStatus`, `crates/api/src/pipeline.rs`; Sprint 46 追加 `spec.release.abort`
+与 `rollout.revision` 两个 additive 字段), 控制器在 Sprint 46 落地:
+`crates/controllers/src/controllers/pipeline/canary/{mod,plan,apply}.rs` (`plan.rs`
+纯决策、`apply.rs` merge/ensure 辅助、`mod.rs` 步进机), 钩子在
+`pipeline/mod.rs` (本 tag 的 Build `Succeeded` 之后), 进程内 e2e 在
+`crates/controllers/tests/canary.rs`。
+
+**Consequences.** (+) 一个对象覆盖「构建→金丝雀→promote/abort」, 中间态对用户
+可见; 权重时序建立在 Q57 的纯函数折算式上, 可单测; canary 与 stable 靠 selector
+减 key 严格隔离, 无 mesh、无外部 CRD。 (−) GC 依赖面变宽: `DEPENDENT_KINDS`
+增加 `("apps","deployments")` 与 `("","services")`, 2s 兜底 sweep 现在要全集群
+列这两类; namespace draining 的次序使 pipeline reconciler 里的
+`metadata.deletionTimestamp` 守卫成为必需 (顺带修掉既有的 Build 复活竞态);
+无健康门控的自动 abort —— crash-loop 的 canary 照样 promote; canary 克隆共享
+pod 卷, RWO PVC 会阻塞调度 (已记录的 caveat); 发布活跃期 TrafficSplit 的
+backends 归 pipeline 所有。
