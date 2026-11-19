@@ -74,13 +74,14 @@ failed** (Sprint 42 基线 1081, 净增 51——含评审收尾 +1); clippy
 `-D warnings` 0。
 
 **Gates:** 收口全量复跑 `all-gates.sh` → **PASS (gates=10 rows=23
-fails=0)**——fmt/build/test 1131-0/clippy/unsafe-audit/singlethread/
+fails=0)**——最终树 (`b278bef`, 含评审收尾) 复跑 gate 3 = test
+**1132-0**；fmt/build/clippy/unsafe-audit/singlethread/
 golden **73/0** 本机 (g24 = registry.k8s.io 不可达离线 SKIP, Q25
 doctrine; 联网环境为 74/0)/battery 8.1-8.13 全 PASS (builtin-image
 214s; builtin-runtime B1-B13+N1-N5)/parity 23/23。口径对账: 计划
 "11/11" 实为 **10 门 + battery 新行 8.13** (builtin-image-e2e 为
-battery 末位条目, 门数不变); I1-I8 累计三跑全绿 (子代理 ×2 + 主线
-复跑 + all-gates 收口跑)。SSOT 同步: decisions.md **Q53/Q54
+battery 末位条目, 门数不变); I1-I8 累计五跑全绿 (子代理 ×2 + 主线
+复跑 + 评审收尾后复跑 + all-gates 收口跑 ×2)。SSOT 同步: decisions.md **Q53/Q54
 LOCKED**、04-node.md T4.13 → done (M1-M5 证据 + Q51 N4 澄清回填
 T4.12 行)、index.md 计数 30→**32 done** (顺带修正 T4.12 关闭后
 未同步的陈旧计数) / 3→**2 in-progress**。
