@@ -203,6 +203,17 @@ except Exception: print("")
 ' 2>/dev/null || true
 }
 
+pod_restart_count() { # NAME -> max container restartCount (-1 on error)
+  curl -s "$BASE/api/v1/namespaces/default/pods/$1" | python3 -c '
+import json,sys
+try:
+    st = json.load(sys.stdin).get("status", {})
+    cs = st.get("containerStatuses") or []
+    print(max([c.get("restartCount", 0) for c in cs], default=-1))
+except Exception: print(-1)
+' 2>/dev/null || true
+}
+
 wait_phase() { # NAME WANT TENTHS -> final phase (0.5s per tenth)
   local phase=""
   for _ in $(seq 1 "$3"); do

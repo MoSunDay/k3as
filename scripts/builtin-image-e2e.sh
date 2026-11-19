@@ -275,18 +275,20 @@ done
 bimg_ok "I6 NodePort ${NODEPORT} -> 127.0.0.1:${HTTPD_PORT} pod (Q41 router, Q52 host netns)"
 
 # Host-port conflict (Q52: builtin pods share the host netns): a second
-# pod on ${HTTPD_PORT} must crash-loop (never stably Running) while the first serves.
+# pod on ${HTTPD_PORT} must crash-loop (restartCount climbs) while the first serves.
 code="$(post_pod_json img-svc2 '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc2","namespace":"default","labels":{"app":"img-svc2"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":'"$HTTPD_PORT"'}]}]}}')"
 [[ "$code" == "201" ]] || bimg_fail "I6 conflicting pod POST -> $code"
-STABLE=0
-for _ in $(seq 1 60); do # 30s: transient Running between start and bind-fail is tolerated
-  if [[ "$(pod_phase img-svc2)" == "Running" ]]; then
-    sleep 1; P2="$(pod_phase img-svc2)"; sleep 1; P3="$(pod_phase img-svc2)"
-    [[ "$P2" == "Running" && "$P3" == "Running" ]] && { STABLE=1; break; }
-  fi
+# restartPolicy Always keeps phase flickering Running<->Pending while the
+# bind fails in ~50ms (status writes lag under load — phase stability is
+# NOT evidence); the crash-loop VERDICT is restartCount growth (>=2).
+RC2=""
+for _ in $(seq 1 60); do # 30s
+  RC2="$(pod_restart_count img-svc2)"
+  [[ "$RC2" =~ ^[0-9]+$ ]] && [[ "$RC2" -ge 2 ]] && break
   sleep 0.5
 done
-[[ "$STABLE" -eq 0 ]] || bimg_fail "I6 conflicting pod reached stable Running on the taken port"
+[[ "${RC2:-x}" =~ ^[0-9]+$ ]] && [[ "$RC2" -ge 2 ]] \
+  || bimg_fail "I6 conflicting pod never crash-looped (restartCount=${RC2:-none}; agent log: $(tail -3 "$AGENT_LOG" | tr '\n' ' '))"
 BODY="$(curl -fsS "http://127.0.0.1:${NODEPORT}/index.html" 2>/dev/null || true)"
 [[ "$BODY" == "IMG-ENTRYPOINT" ]] || bimg_fail "I6 first pod stopped serving after the conflict"
 bimg_ok "I6 host-port conflict: second pod crash-loops, first pod keeps serving"
