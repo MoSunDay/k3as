@@ -141,7 +141,11 @@ impl Puller {
         // T4.13 M5: the soft quota gates the EXPENSIVE part (blob/layer
         // downloads); the manifest round-trip above is tiny by design.
         // `incoming` counts only descriptors NOT already in the CAS, so a
-        // re-pull of a fully-present image never trips the cap.
+        // re-pull of a fully-present image never trips the cap. Soft by
+        // design (Q53): single-flight is per-image, so two DIFFERENT
+        // images pulled concurrently can each pass the pre-check and
+        // together exceed the cap — revisit if parallel image sync ever
+        // lands (Sprint 43 review follow-up note).
         if self.quota > 0 {
             let incoming: u64 = std::iter::once(&single.config)
                 .chain(single.layers.iter())

@@ -60,9 +60,18 @@ T4.13 转 **done** (42 网络面 + 43 镜像存储)。
   T4.3 收口。
 - 度: 新增/迭代文件均达标 (backend.rs 723 / http.rs 730 /
   runtime.rs 736 / cas.rs 397 / pull.rs 377, 上限 800)。
+- **评审收尾 (P2/P3)**: `remove_image` 在用保护 (crictl rmi 语义)——
+  registry `Entry` 增镜像引用字段 + `images()` 快照, 删除前按 `cas_ref`
+  归一化匹配在用容器, 活 overlayfs lowerdir 之上拒绝清扫 (新单测
+  `remove_image_refuses_in_use_image`); backend.rs 撞 800 行上限 →
+  remove_image 两测拆出 `engine/backend/rm_image_tests.rs` (679/136 行,
+  同 `image/unpack.rs`+`unpack/tests.rs` 先例); pull.rs 记配额并发越帽
+  (soft-by-design) 与 recover() 记引擎生命周期耦合 (PDEATHSIG 链) 两
+  处评审注记。测试 1131→**1132 / 0**。
 
-**Tests:** `cargo test --workspace --locked` → **1131 passed / 0
-failed** (Sprint 42 基线 1081, 净增 50); clippy `-D warnings` 0。
+**Tests:** `cargo test --workspace --locked` → **1132 passed / 0
+failed** (Sprint 42 基线 1081, 净增 51——含评审收尾 +1); clippy
+`-D warnings` 0。
 
 **Gates:** 收口全量复跑 `all-gates.sh` → **PASS (gates=10 rows=23
 fails=0)**——fmt/build/test 1131-0/clippy/unsafe-audit/singlethread/

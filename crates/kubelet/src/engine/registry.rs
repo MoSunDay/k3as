@@ -45,6 +45,10 @@ pub(crate) struct Entry {
     pub uid: String,
     pub attempt: u32,
     pub labels: BTreeMap<String, String>,
+    /// The image reference this entry runs (containers: the ccfg image;
+    /// sandboxes: the pause image). Empty only in legacy/test fixtures.
+    /// T4.13 review follow-up: lets `remove_image` refuse in-use images.
+    pub image: String,
     pub pending: Option<Pending>,
     /// Live control channel into the pump task (running containers).
     pub ctrl: Option<tokio::sync::mpsc::Sender<pump::Ctrl>>,
@@ -64,6 +68,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Registry {
     pub fn insert(&self, entry: Entry) {
         lock(&self.inner).insert(entry.id.clone(), entry);
+    }
+
+    /// Snapshot of `(id, image)` for every live entry — the in-use
+    /// check face for `remove_image` (matching happens in the backend,
+    /// where reference normalization lives).
+    pub fn images(&self) -> Vec<(String, String)> {
+        lock(&self.inner)
+            .iter()
+            .map(|(id, e)| (id.clone(), e.image.clone()))
+            .collect()
     }
 
     pub fn state(&self, id: &str) -> Option<(String, Option<i32>)> {

@@ -171,7 +171,11 @@ impl EngineBackend {
         self.store.clear_views();
         // T4.13 M5 (Q53): startup GC trigger — sweep CAS blobs, per-layer
         // dirs and fused merges no ref file still owns (the ref table is
-        // the unit of ownership; the API delete face drops refs).
+        // the unit of ownership; the API delete face drops refs). Safe
+        // ONLY because engines die with the agent (Q48/Q49 PDEATHSIG
+        // chain): no live overlay view can reference a swept layer. If
+        // engines ever outlive the agent, this must first confirm no
+        // live views (review follow-up note, Sprint 43).
         match self.store.gc() {
             Ok((blobs, merged, layers)) => tracing::info!(
                 target: "init-pro", blobs, layers, merged,
@@ -371,6 +375,21 @@ impl CriBackend for EngineBackend {
         let Some(img) = self.cas_ref(image) else {
             return Ok(());
         };
+        // T4.13 review follow-up (crictl rmi semantics): a live container
+        // holds the shared layer dir as its overlayfs lowerdir — sweeping
+        // it now would delete the dir under a running mount. Refuse until
+        // the container is removed; matching goes through cas_ref so tag
+        // and digest spellings of the same reference both count as in-use.
+        for (id, used) in self.registry.images() {
+            if self
+                .cas_ref(&used)
+                .is_some_and(|u| u.reference == img.reference)
+            {
+                return Err(format!(
+                    "builtin engine: image {image} in use by container {id} (remove the container first)"
+                ));
+            }
+        }
         self.store.remove_ref(&img.reference);
         self.store.gc()?;
         Ok(())
@@ -426,6 +445,7 @@ impl CriBackend for EngineBackend {
             uid,
             attempt: cfg.metadata.attempt,
             labels,
+            image: self.sandbox_image.clone(),
             pending: None,
             ctrl: None,
         });
@@ -452,6 +472,7 @@ impl CriBackend for EngineBackend {
             uid: pcfg.metadata.uid.clone(),
             attempt: ccfg.metadata.attempt,
             labels: ccfg.labels.clone(),
+            image: ccfg.image.image.clone(),
             pending: Some(Pending {
                 ccfg: ccfg.clone(),
                 pcfg: pcfg.clone(),
@@ -590,7 +611,7 @@ impl CriBackend for EngineBackend {
 mod tests {
     use super::*;
 
-    fn temp_data_dir(tag: &str) -> PathBuf {
+    pub(super) fn temp_data_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "init-pro-engine-backend-{tag}-{}-{}",
             std::process::id(),
@@ -601,7 +622,7 @@ mod tests {
         ))
     }
 
-    fn sandbox_entry(dir: &Path, id: &str, state: &str) -> Entry {
+    pub(super) fn sandbox_entry(dir: &Path, id: &str, state: &str) -> Entry {
         Entry {
             id: id.to_string(),
             socket: dir.join("engine").join(format!("{id}.sock")),
@@ -615,6 +636,7 @@ mod tests {
             uid: String::new(),
             attempt: 0,
             labels: BTreeMap::new(),
+            image: String::new(),
             pending: None,
             ctrl: None,
         }
@@ -648,76 +670,9 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    /// T4.13 M5 remove_image: ref drop + GC — unique blobs/layers go,
-    /// layers SHARED with a surviving ref stay, unknown refs are Ok.
-    #[tokio::test]
-    async fn remove_image_sweeps_uniques_keeps_shared_layers() {
-        let dir = temp_data_dir("rm-image");
-        std::fs::create_dir_all(&dir).unwrap();
-        let backend = EngineBackend::new(
-            &dir,
-            "registry.local/pause:0",
-            "192.0.2.7",
-            "127.0.0.1:15000",
-        )
-        .unwrap();
-        let mk_img = |reference: &str, uniq: &str| PulledImage {
-            reference: reference.to_string(),
-            digest: format!("sha256:{}", uniq.repeat(64)),
-            config: super::super::image::Descriptor {
-                media_type: "cfg".into(),
-                digest: format!("sha256:{}", format!("{uniq}c").repeat(32)),
-                size: 1,
-                platform: None,
-            },
-            layers: vec![super::super::image::Descriptor {
-                media_type: "layer".into(),
-                digest: format!("sha256:{}", "shared".repeat(16)),
-                size: 1,
-                platform: None,
-            }],
-        };
-        let gone = mk_img("127.0.0.1:15000/test/gone:v1", "a");
-        let keep = mk_img("127.0.0.1:15000/test/keep:v1", "b");
-        let put_blob = |digest: &str| {
-            let tmp = backend.store.tmp_file();
-            std::fs::write(&tmp, digest.as_bytes()).unwrap();
-            backend.store.commit(&tmp, digest).unwrap();
-        };
-        for img in [&gone, &keep] {
-            backend.store.put_ref(img).unwrap();
-            put_blob(&img.digest);
-            put_blob(&img.config.digest);
-            std::fs::create_dir_all(backend.store.layer_dir(&img.layers[0].digest)).unwrap();
-        }
-        put_blob(&gone.layers[0].digest);
-        put_blob(&keep.layers[0].digest);
-
-        crate::cri_backend::CriBackend::remove_image(&backend, "127.0.0.1:15000/test/gone:v1")
-            .await
-            .expect("remove_image");
-        // Unknown image: idempotent Ok, nothing else swept.
-        crate::cri_backend::CriBackend::remove_image(&backend, "127.0.0.1:15000/test/never:v1")
-            .await
-            .expect("remove_image unknown is Ok");
-        assert!(
-            !backend.store.has_blob(&gone.digest),
-            "unique manifest gone"
-        );
-        assert!(
-            !backend.store.has_blob(&gone.config.digest),
-            "unique cfg gone"
-        );
-        assert!(
-            backend.store.has_blob(&keep.layers[0].digest),
-            "shared layer blob survives"
-        );
-        assert!(
-            backend.store.layer_dir(&keep.layers[0].digest).is_dir(),
-            "shared layer dir survives"
-        );
-        assert_eq!(backend.store.gc().unwrap(), (0, 0, 0), "nothing left");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
+
+/// T4.13 `remove_image` semantics (Q53 + review follow-up): split out
+/// of backend.rs at the 800-line rule, same shape as `image/unpack.rs`.
+#[cfg(test)]
+mod rm_image_tests;
