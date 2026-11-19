@@ -4,6 +4,56 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- builtin-hostroot: Sprint 44 (2026-11-19) — T4.14 host-rootfs default
+  (**Q55**): `--builtin-rootfs host|image` (default **host**; env
+  `INIT_PRO_BUILTIN_ROOTFS`) — host mode runs containers on the host
+  rootfs (NEWNS mount table is the only visibility boundary); root
+  resolution = absolute dir -> staged `<data>/engine/images/<name>` ->
+  legacy `<data>/images/<name>` -> actionable error. Annotations:
+  `init-pro.io/host-mounts` (`container-path=host-path[:ro|:rw]`,
+  Q43-shaped; collision with volumeMounts blocks the pod's creates) and
+  `init-pro.io/rootfs: image` (one-shot pull under a host engine). Image
+  chain (Q53/Q54) demoted to explicit opt-in. Known limit: rootfs=`/`
+  literal unsupported (nsrun pre-pivot sysfs EBUSY — read-only host tree
+  via fabricated rootfs + `/host=/:ro`). New `kubelet/src/
+  {engine/rootfs.rs,host_mounts.rs}`; nsrun zero-code (ns set locked).
+  e2e `scripts/builtin-hostroot-e2e.sh` H1-H8 (battery 8.14; H8 reruns
+  I1-I8 under `--builtin-rootfs image`). Net-machine hardening: dynamic
+  `HTTPD_PORT` (Q52 host-netns binds are global) + dynamic
+  `--kubelet-port` in `scripts/lib/builtin-image-lib.sh` (concurrent
+  batteries no longer collide on 10250; apiserver pod_io follows the
+  node annotation) + I6 conflict assertion via restartCount growth
+  (Always keeps phase flickering Running/Pending — phase stability is
+  not evidence). Tests 1211 -> 1220; all-gates PASS (0 fail, 2 SKIP).
+- delivery-plane: Sprint 45 (2026-11-19) — T8.1-T8.4 (**Q56/Q57** locked,
+  Q58 draft): (a) T8.1 containerd certs.d `hosts.toml` plain-HTTP trust
+  + registry V2 push client (`registry/src/client.rs`, `tests/
+  push_client.rs`) + `docker save` importer (`tarimg.rs`); (b) T8.2
+  **TrafficSplit** (`ts`, Q57) folded into the router NodePort plane —
+  per-endpoint weights x100 + deterministic remainder, zero-weight
+  backends dropped, hot reload; (c) T8.3 **ServicePipeline/Build**
+  embedded CI/CD (Q56, default-on `--disable-pipeline`): one immutable
+  Build per tag transition, host docker executor pushes through the
+  embedded registry, full-object CAS status; (d) T8.4 in-process
+  pipeline e2e (real registry v2 + fake docker shim). Cards: registry,
+  router-data-plane; spec `plans/init-pro/plan/08-delivery.md`.
+  Tests 1140 -> 1220 (+80); clippy 0.
+- builtin-image: Sprints 42-43 (2026-11-18) — T4.13 image storage chain
+  complete: Q52 Pod networking = host-netns share (`--host-netns`/
+  `--netns` mutual exclusion); Q53 shared content-addressed layers +
+  per-container overlayfs views (`views/<id>/{upper,work,merged}`,
+  fused-copy fallback) with both whiteout semantics; Q54 tar+flate2+
+  zstd deps. Launch truth = image config (entrypoint/cmd/env/user/
+  workingdir merge under the CRI request, `spec.rs merge_launch`);
+  single-flight pulls with per-blob digest verify; quota soft-cap
+  `--builtin-image-quota`; startup GC + ref-counted remove_image.
+  e2e `scripts/builtin-image-e2e.sh` I1-I8 (registry-v2 push via
+  python3-fabricated images).
+- builtin-selection: Sprints 38-41 (2026-11-17/18) — T4.12 P2/P3:
+  `--container-engine builtin|containerd` real selection (Q51 probe:
+  boot-probe fallback with warn), `kubelet::EngineBackend` (CriBackend
+  P2), exec relay two-level + pause-sandbox mode (Q49/Q50), CRI log
+  files to date dirs. e2e E9-E11/B6-B13 + N1-N5; engine-selftest 26/0.
 - anyhome-pod-mounts: Sprint 35 + 36b (2026-11-09/10) — T7.5 Pod-level
   anyhome annotation mounts (**Q43**): `init-pro.io/anyhome` (rw/ro) +
   `init-pro.io/anyhome-mounts` (multi-path) on any Pod default to NFS

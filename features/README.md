@@ -12,7 +12,8 @@ status of record lives in `plans/init-pro/index.md`.
 | scheduler | done (T3.2) | [card](scheduler.md) | scheduler | `crates/scheduler/`, `crates/apiserver/src/binding.rs` |
 | server-side-apply | done (T1.2c) | [card](server-side-apply.md) | api, apiserver | `crates/api/src/apply/`, `crates/apiserver/src/apply.rs` |
 | containerd-runtime | done (T4.1) | [card](containerd-runtime.md) | runtime, multicall | `crates/runtime/`, `crates/multicall/src/lib.rs`, `vendor/versions.toml` |
-| builtin-engine | P1 done (T4.11, Q48); P2/P3 pending | [card](builtin-engine.md) | nsrun, engine, engine-proto, engine-client, init-pro | `crates/nsrun/`, `crates/engine*/`, `scripts/engine-selftest.sh` |
+| builtin-engine | done (T4.11-T4.14, Q48-Q55) | [card](builtin-engine.md) | nsrun, engine, engine-proto, engine-client, kubelet, init-pro | `crates/nsrun/`, `crates/engine*/`, `crates/kubelet/src/engine/`, `scripts/builtin-image-e2e.sh`, `scripts/builtin-hostroot-e2e.sh` |
+| delivery-plane | done (T8.1-T8.4, Q56/Q57; T8.5 draft Q58) | - (see SSOT: `plans/init-pro/plan/08-delivery.md`) | registry, router, controllers, api, cli | `crates/registry/src/{client,tarimg}.rs`, `crates/router/src/split.rs`, `crates/controllers/src/controllers/pipeline/` |
 | kubelet | Scope A+B+C done (T4.2 closed, Sprint 24) | [card](kubelet.md) | kubelet, apiserver, runtime | `crates/kubelet/`, `crates/apiserver/src/pod_status.rs`, `scripts/build-pause-image.sh` |
 | multicall-cli | done (T0.1, T0.4) | - (see SSOT) | multicall, cli | `crates/multicall/`, `crates/cli/` |
 | build-bundling | done (T0.2) | - (see SSOT) | vendor | `crates/vendor/`, `crates/init-pro/build.rs` |

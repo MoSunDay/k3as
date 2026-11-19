@@ -1,9 +1,14 @@
 # Built-in container engine
 
-Status: **P1 done (T4.11, Q48)** — kernel + single-threaded engine +
-protocol. P2 (kubelet wiring, T4.12) and P3 (images + CNI, T4.13) are
-not started. The default runtime is still `containerd`; `builtin` is
-accepted by the CLI but only warned until T4.12.
+Status: **done (T4.11-T4.14, Q48-Q55)** — P1 kernel + single-threaded
+engine + protocol (Q48); P2 `kubelet::EngineBackend` + real
+`--container-engine=builtin` selection with probe fallback (T4.12,
+Q49-Q51); P3 registry-v2 pull chain + shared CAS layers + per-container
+overlayfs views + image-config launch truth (T4.13, Q52-Q54); P4
+host-rootfs default `--builtin-rootfs host|image` + host-mounts /
+rootfs annotations (T4.14, Q55). The default runtime stays `containerd`
+(Q51 go/no-go: builtin remains opt-in); CNI/flannel conformance face is
+the open remainder (T4.3).
 
 ## What it is
 
@@ -150,15 +155,18 @@ be real root, Linux 5.12+, and have cgroup v2 for limit cases.
 
 ## Roadmap
 
-- **T4.12 (P2):** `kubelet::EngineBackend` implementing `CriBackend`,
-  exec/attach over the frame protocol, sandbox netns + `setns`, and a
-  real `--container-engine=builtin` selection with containerd fallback.
-- **T4.13 (P3):** Registry v2 pull + content-addressed layer store +
-  overlayfs rootfs + flannel CNI sandbox, so a builtin-only node can run
-  real images.
-
-Until then the engine is a first-class internal capability and a
-debug/smoke surface, not the default pod runtime.
+- **T4.12 (P2) — done:** `kubelet::EngineBackend` implementing
+  `CriBackend`, exec relay over the frame protocol, and a real
+  `--container-engine=builtin` selection with containerd fallback.
+- **T4.13 (P3) — done:** Registry v2 pull + content-addressed layer
+  store + per-container overlayfs rootfs (Q53/Q54); image config is the
+  launch source of truth; quota + startup GC. Pod networking = host
+  netns share (Q52).
+- **T4.14 (P4) — done:** host-rootfs default + `init-pro.io/host-mounts`
+  / `init-pro.io/rootfs` annotations (Q55); image chain is opt-in.
+- **Open:** flannel/CNI conformance face rides T4.3 (host-gw,
+  multi-node); the engine itself ships as an opt-in alternative to
+  containerd.
 
 ## Attribution
 
