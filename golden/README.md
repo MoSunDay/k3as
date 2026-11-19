@@ -25,7 +25,7 @@ build-configuration state is not a conformance break.
 | G01 | discovery | `GET /api` → APIVersions lists core `v1` | T0.6, T1.1 |
 | G02 | discovery | `GET /apis` → APIGroupList includes init-pro.io | T0.6, T1.1 |
 | G03 | discovery | `GET /api/v1` → core/v1 resource list (9 kinds, incl. PVCs) | T0.6, T1.1 |
-| G04 | discovery | `GET /apis/init-pro.io/v1` → luarouters CRD resource list | T0.6, T1.1 |
+| G04 | discovery | `GET /apis/init-pro.io/v1` → resource list (agents ag, builds bld, luarouters, servicepipelines sp, trafficsplits ts) | T0.6, T1.1 |
 | G05 | discovery | unknown group/version → 404 | T0.6 |
 | G06 | storage | empty pods collection list → 200 | T1.2b |
 | G07 | storage | POST ConfigMap → 201 | T1.2b |
@@ -46,13 +46,13 @@ build-configuration state is not a conformance break.
 | G22 | scheduler | nodeSelector placement + PodScheduled=True + Unschedulable | T3.2 |
 | G23 | scheduler | HTTP extender filter steers placement via scheduler config | T3.2 |
 | G24 | nodes | agent supervises containerd; `crictl version/ps` over CRI. SKIP: no vendor bundle; the registry pull smoke SKIPs best-effort | T4.1 |
-| G25 | nodes | Deployment pod Running+Ready on the agent node over real containerd; container kill → kubelet restart; delete → zero sandboxes (legs a/b/c). SKIP: no vendor bundle or no cc (Q27 pause image) | T4.2 |
-| G26 | nodes | readiness gates Ready, liveness restarts after /fail, emptyDir bootcount, configMap projection + hostname==pod (legs a-d). SKIP: no vendor bundle or no cc | T4.2 |
-| G30 | nodes | kubectl logs relays container lines, `logs -f` follows appended lines, exec runs `/bin/wfstep` (rc0 + merged output) and propagates remote exit 1 (legs a-d). SKIP: no vendor bundle or no cc | T4.2 Scope C, Q31 |
+| G25 | nodes | Deployment pod Running+Ready on the agent node over real containerd; container kill → kubelet restart; delete → zero sandboxes (legs a/b/c). SKIP: no vendor bundle, no cc (Q27 pause image), or a foreign host cni0 (coexistence, S40c) | T4.2 |
+| G26 | nodes | readiness gates Ready, liveness restarts after /fail, emptyDir bootcount, configMap projection + hostname==pod (legs a-d). SKIP: no vendor bundle, no cc, or a foreign host cni0 (S40c) | T4.2 |
+| G30 | nodes | kubectl logs relays container lines, `logs -f` follows appended lines, exec runs `/bin/wfstep` (rc0 + merged output) and propagates remote exit 1 (legs a-d). SKIP: no vendor bundle, no cc, or a foreign host cni0 (S40c) | T4.2 Scope C, Q31 |
 | G31 | networking | `GET /apis/networking.k8s.io/v1` byte-stable (ingresses `ing`, ingressclasses) | Q32 router swap |
 | G27 | argoproj | `GET /apis/argoproj.io/v1alpha1` byte-stable (wf/cwf/cronwf shortNames) | T7.3 Scope A |
 | G28 | argoproj | Workflow + CronWorkflow CRUD/SSA lifecycle + generateName minting | T7.3 Scope A |
-| G29 | argoproj | two-step Workflow runs to Succeeded over the agent/containerd stack; status reports Steps root + Succeeded Pod nodes (wfstep one-shot image, Q27). SKIP: no vendor bundle or no cc | T7.3 Scope B |
+| G29 | argoproj | two-step Workflow runs to Succeeded over the agent/containerd stack; status reports Steps root + Succeeded Pod nodes (wfstep one-shot image, Q27). SKIP: no vendor bundle, no cc, or a foreign host cni0 (S40c) | T7.3 Scope B |
 
 ## Growing the suite
 

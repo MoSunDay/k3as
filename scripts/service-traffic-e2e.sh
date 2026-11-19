@@ -50,6 +50,14 @@ if ! command -v cc >/dev/null 2>&1; then
   echo "SKIP service-traffic e2e (no cc for the offline image builders)"
   exit 0
 fi
+# S40c coexistence: a foreign cni0 (host / live cluster) makes every
+# RunPodSandbox fail CNI setup, so the suite SKIPs instead of false-failing
+# — same policy as golden G25/G26/G30. A clean host still runs ST1-ST6.
+CNI0_IP="$(ip -4 addr show dev cni0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' | head -1 || true)"
+if [[ -n "$CNI0_IP" && "${CNI0_IP%.*.*}" != "10.42" ]]; then
+  echo "SKIP service-traffic e2e (host cni0 holds $CNI0_IP — stale CNI state from another cluster; ip link delete cni0 to recover)"
+  exit 0
+fi
 
 # Pick a free loopback port (avoids clashing with a host apiserver / prior run).
 pick_port() {

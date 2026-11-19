@@ -47,6 +47,20 @@ async fn run_one(cri: &dyn CriBackend, action: &Action) -> Result<(), String> {
             pcfg,
             ..
         } => {
+            // T4.14 (Q55): bind sources must exist. The mount(2) itself is
+            // the permission verdict (node creds decide, no ACL guessing),
+            // but a missing source gets a clearer error here than deep in
+            // the runtime — host-mounts annotation paths are user-owned
+            // and never converge on their own.
+            for m in &ccfg.mounts {
+                if !std::path::Path::new(&m.host_path).exists() {
+                    return Err(format!(
+                        "mount source {} does not exist on the node \
+                         (init-pro.io/host-mounts paths are user-owned)",
+                        m.host_path
+                    ));
+                }
+            }
             let id = cri.create_container(sandbox_id, ccfg, pcfg).await?;
             cri.start_container(&id).await
         }

@@ -15,6 +15,8 @@ use runtime::cri_json::{
 use runtime::{ContainerConfig, LinuxContainerConfig, PodSandboxConfig};
 
 use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
+use crate::host_mounts::{self, HostMount};
+use crate::http::HttpJson;
 use crate::objects::{ContainerSpec, PodView};
 use crate::probes::PodProbeState;
 
@@ -110,6 +112,11 @@ pub fn plan(
     let mut seen = BTreeSet::new();
     for (key, view) in desired {
         seen.insert(key.clone());
+        // T4.14 (Q55): the host-mounts annotation resolves once per pod —
+        // an invalid annotation blocks every container create this cycle
+        // (upstream CreateContainerConfigError; the runner posts the
+        // event, the cycle retries once the annotation is fixed).
+        let hosts = host_mounts::collect(view);
         let observed = sb_by_pod.get(key).cloned().unwrap_or_default();
         let pod_containers = ct_by_pod.get(key).cloned().unwrap_or_default();
         let (ours, stale): (Vec<_>, Vec<_>) = observed
@@ -218,6 +225,16 @@ pub fn plan(
                 );
                 continue;
             }
+            // T4.14 (Q55): a bad host-mounts annotation blocks the whole
+            // pod's creates for the cycle (same upstream error class).
+            if let Err(err) = &hosts {
+                tracing::warn!(
+                    target: "init-pro",
+                    pod = %key, error = %err,
+                    "kubelet: host-mounts annotation blocked the create (cycle retries)"
+                );
+                continue;
+            }
             let attempt = observed
                 .iter()
                 .map(|c| c.attempt)
@@ -244,6 +261,7 @@ pub fn plan(
                     attempt,
                     log_root,
                     resolved_env(envs, key, &spec.name),
+                    hosts.as_deref().unwrap_or_default(),
                 )),
                 pcfg: sandbox_cfg(view, log_root, date),
             });
@@ -320,6 +338,7 @@ fn container_cfg(
     attempt: u32,
     log_root: &Path,
     envs: Vec<(String, String)>,
+    hosts: &[HostMount],
 ) -> ContainerConfig {
     ContainerConfig {
         metadata: ContainerMetadata {
@@ -343,7 +362,14 @@ fn container_cfg(
         // (configMap/secret read-only); unknown volume names are skipped
         // so the CRI create fails and the cycle retries after the volume
         // pass converges.
-        mounts: crate::volumes::resolve_mounts(spec, &view.volumes, &view.uid, log_root),
+        mounts: {
+            // T4.14 (Q55): named pod volumes PLUS the hostdir kind — the
+            // validated host-mounts annotation binds straight through.
+            let mut mounts =
+                crate::volumes::resolve_mounts(spec, &view.volumes, &view.uid, log_root);
+            mounts.extend(host_mounts::cri_mounts(hosts));
+            mounts
+        },
         // T4.9: cpu shares/quota/period + memory limit from the spec's
         // requests/limits (upstream milliCPUToShares/milliCPUToQuota
         // conventions; the mapping lives in crate::resources).
@@ -527,4 +553,120 @@ pub async fn drain_sandboxes(cri: &dyn CriBackend, budget: Duration) -> usize {
             0
         }
     }
+}
+
+/// T4.14 (Q55): POST upstream-parity `Failed` Warning events for sync
+/// actions that errored — host-mode EnsureImage misses (matched back to
+/// the pods referencing the image, since `Action::EnsureImage` carries no
+/// pod key) and container create failures (missing rootfs dir, failed
+/// bind source). Deduped by pod+message: one event per distinct failure,
+/// not per cycle; keys go stale-cold via the `live` retain.
+pub async fn emit_action_error_events(
+    client: &HttpJson,
+    node_name: &str,
+    wanted: &BTreeMap<String, PodView>,
+    outcomes: &[(Action, Result<(), String>)],
+    last: &mut BTreeMap<String, String>,
+    now: &str,
+) {
+    let mut live: BTreeSet<String> = BTreeSet::new();
+    for (action, res) in outcomes {
+        let Err(message) = res else {
+            continue;
+        };
+        let targets: Vec<(&str, &PodView, String)> = match action {
+            // The pull failed for every pod that wants this image.
+            Action::EnsureImage(image) => wanted
+                .values()
+                .filter(|v| !v.deleted && v.containers.iter().any(|c| c.image == *image))
+                .map(|v| {
+                    (
+                        v.key.as_str(),
+                        v,
+                        format!("image {image:?}: pull/presence failed"),
+                    )
+                })
+                .collect(),
+            Action::CreateStartContainer { pod_key, ccfg, .. } => {
+                let Some(view) = wanted.get(pod_key) else {
+                    continue;
+                };
+                let name = ccfg.metadata.name.clone();
+                vec![(
+                    pod_key.as_str(),
+                    view,
+                    format!("container {name}: create failed"),
+                )]
+            }
+            _ => continue,
+        };
+        for (pod_key, view, what) in targets {
+            let dedup = format!("{pod_key}\0{message}");
+            live.insert(dedup.clone());
+            if last.contains_key(&dedup) {
+                continue;
+            }
+            let event = failed_event(
+                &view.namespace,
+                &view.name,
+                &view.uid,
+                &what,
+                message,
+                node_name,
+                now,
+            );
+            let path = format!("/api/v1/namespaces/{}/events", view.namespace);
+            match client.post_json(&path, &event).await {
+                Ok((201, _)) => {
+                    last.insert(dedup, message.clone());
+                }
+                Ok((code, body)) => tracing::debug!(
+                    target: "init-pro",
+                    code = code, %body,
+                    "kubelet: action error event POST rejected"
+                ),
+                Err(e) => tracing::debug!(
+                    target: "init-pro",
+                    error = %e,
+                    "kubelet: action error event POST failed"
+                ),
+            }
+        }
+    }
+    last.retain(|k, _| live.contains(k));
+}
+
+/// One `Failed` Warning event (Q55): `message` is the actionable backend
+/// error, `what` names the image or container it belongs to.
+fn failed_event(
+    namespace: &str,
+    pod: &str,
+    uid: &str,
+    what: &str,
+    message: &str,
+    node: &str,
+    now: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Event",
+        "metadata": {
+            "generateName": format!("{pod}."),
+            "namespace": namespace,
+        },
+        "involvedObject": {
+            "kind": "Pod",
+            "apiVersion": "v1",
+            "namespace": namespace,
+            "name": pod,
+            "uid": uid,
+        },
+        "reason": "Failed",
+        "message": format!("{what}: {message}"),
+        "type": "Warning",
+        "count": 1,
+        "firstTimestamp": now,
+        "lastTimestamp": now,
+        "source": {"component": "kubelet", "host": node},
+    })
 }

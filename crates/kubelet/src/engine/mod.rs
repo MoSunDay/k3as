@@ -21,6 +21,8 @@ pub mod launch;
 pub mod logs;
 pub mod pump;
 pub mod registry;
+pub mod rootfs;
 pub mod spec;
 
 pub use backend::EngineBackend;
+pub use rootfs::{resolve_mode, RootfsMode, ROOTFS_ANNOTATION};

@@ -7,10 +7,11 @@
 //!   informer handlers (Agent -> Workflow included, A5);
 //! * [`spawn_gc_on_delete`] -- the fire-and-forget GC handoff on owner
 //!   DELETE events (Q20);
-//! * [`spawn_worker`] / [`spawn_worker_with_cluster_cidr`] -- the worker
-//!   loop: race `next()` against stop, reconcile, then classify the error
-//!   (benign not-found/already-exists, Conflict -> rate-limited retry,
-//!   anything else -> rate-limited requeue);
+//! * [`spawn_worker`] -- the worker loop: race `next()` against stop,
+//!   reconcile, then classify the error (benign not-found/already-exists,
+//!   Conflict -> rate-limited retry, anything else -> rate-limited
+//!   requeue); every per-kind config rides one [`WorkerConfig`] (Q34/Q36/
+//!   Q41/Q56) so the worker arity stays fixed;
 //! * the resync consts + [`reconcile_key`] -- the per-kind dispatch, where
 //!   self-terminating resyncs (`add_after`) keep time-driven controllers
 //!   (Deployment progress deadline, Workflow/CronWorkflow schedules)
@@ -24,7 +25,7 @@ use tokio::task::JoinHandle;
 
 use crate::client::Client;
 use crate::controllers::{
-    cronworkflow, daemonset, deployment, endpoints, gc, namespace, node_cidr, replicaset,
+    cronworkflow, daemonset, deployment, endpoints, gc, namespace, node_cidr, pipeline, replicaset,
     service_lb, statefulset, workflow, Caches,
 };
 use crate::error::ControllerError;
@@ -68,39 +69,27 @@ pub(crate) fn enqueue_owner(q: &Arc<WorkQueue>, ev: &WatchEvent, kind: &str) {
     }
 }
 
+/// Live manager config threaded into every worker (Q34 podCIDR, Q36
+/// workspace NFS, Q41 ServiceLB, Q56 pipeline). Cloned per worker; the
+/// inner values are cheap `Arc`/`Option` handles.
+#[derive(Clone, Default)]
+pub(crate) struct WorkerConfig {
+    /// Parsed `--cluster-cidr`; `None` = podCIDR allocator disabled (Q34).
+    pub(crate) cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
+    /// anyhome NFS endpoint: Workflow step pods get `/workspace` (Q36).
+    pub(crate) workspace_nfs: Arc<Option<String>>,
+    /// Pipeline plane config; `None` = pipeline controllers disabled (Q56).
+    pub(crate) pipeline: Arc<Option<pipeline::PipelineConfig>>,
+}
+
+/// Worker loop for one queue. `WorkerConfig` carries every per-kind knob so
+/// the signature stays stable as controllers are added (Q34/Q36/Q41/Q56).
 pub(crate) fn spawn_worker(
     client: &Arc<dyn Client>,
     caches: &Arc<Caches>,
     queue: &Arc<WorkQueue>,
     kind: Kind,
-    workspace_nfs: Arc<Option<String>>,
-    stop: &Stop,
-    now: NowFn,
-) -> JoinHandle<()> {
-    spawn_worker_with_cluster_cidr(
-        client,
-        caches,
-        queue,
-        kind,
-        Arc::new(None),
-        workspace_nfs,
-        stop,
-        now,
-    )
-}
-
-/// [`spawn_worker`] variant carrying the podCIDR allocator config
-/// (T4.3 Scope A, Q34: `Kind::NodeCidr` needs the parsed `--cluster-cidr`)
-/// plus the workspace NFS endpoint (T-anyhome, Q36: `Kind::Workflow` needs
-/// it for the step-pod `/workspace` auto-mount).
-#[allow(clippy::too_many_arguments)] // 8 = over the lint's ceiling; all live config
-pub(crate) fn spawn_worker_with_cluster_cidr(
-    client: &Arc<dyn Client>,
-    caches: &Arc<Caches>,
-    queue: &Arc<WorkQueue>,
-    kind: Kind,
-    cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
-    workspace_nfs: Arc<Option<String>>,
+    cfg: WorkerConfig,
     stop: &Stop,
     now: NowFn,
 ) -> JoinHandle<()> {
@@ -119,18 +108,7 @@ pub(crate) fn spawn_worker_with_cluster_cidr(
                     None => break,
                 },
             };
-            match reconcile_key(
-                &client,
-                &caches,
-                &queue,
-                kind,
-                &cluster_cidr,
-                &workspace_nfs,
-                &key,
-                &now,
-            )
-            .await
-            {
+            match reconcile_key(&client, &caches, &queue, kind, &cfg, &key, &now).await {
                 Ok(()) => {
                     queue.forget(&key);
                     queue.done(&key);
@@ -169,20 +147,22 @@ const WORKFLOW_RESYNC: Duration = Duration::from_secs(5);
 /// with no event to observe, so the queue re-enqueues periodically (the
 /// same shape as WORKFLOW_RESYNC).
 const CRONWORKFLOW_RESYNC: Duration = Duration::from_secs(5);
+/// ServicePipeline resync (T8.3, Q56): promotion waits on the target
+/// Deployment's rollout (and on a Build child the cache may not have seen
+/// yet), so a quiesced pipeline still re-checks every 2s. The Builds
+/// themselves get NO resync: the informer's initial LIST re-delivers
+/// in-flight children, and a periodic kick could double-run a docker
+/// build.
+const PIPELINE_RESYNC: Duration = Duration::from_secs(2);
 
-/// Per-kind dispatch (see the module doc). Grows one config parameter per
-/// plumb-through (Q34 podCIDR, T-anyhome/Q36 workspace), hence the allow.
-#[allow(clippy::too_many_arguments)] // 8 = over the lint's ceiling; all live config
+/// Per-kind dispatch (see the module doc). All per-kind config arrives
+/// through [`WorkerConfig`] (Q34 podCIDR, Q36 workspace NFS, Q56 pipeline).
 pub(crate) async fn reconcile_key(
     client: &Arc<dyn Client>,
     caches: &Caches,
     queue: &Arc<WorkQueue>,
     kind: Kind,
-    cluster_cidr: &Option<node_cidr::ClusterCidr>,
-    // T-anyhome (Q36): Some(addr) = Workflow step pods get the /workspace
-    // NFS volume auto-mounted from the anyhome endpoint (and Agent children
-    // get the workspace contract annotation).
-    workspace_nfs: &Option<String>,
+    cfg: &WorkerConfig,
     key: &str,
     now: &NowFn,
 ) -> Result<(), ControllerError> {
@@ -191,7 +171,7 @@ pub(crate) async fn reconcile_key(
     // client (this kind has no cache) so the CAS base is the current
     // revision; a concurrent node patch surfaces as Conflict -> requeue.
     if let Kind::NodeCidr = kind {
-        let Some(cluster) = cluster_cidr else {
+        let Some(cluster) = cfg.cluster_cidr.as_ref() else {
             return Ok(()); // allocator disabled: no --cluster-cidr
         };
         return match client.get(&Key::new("", "nodes", "", key)).await? {
@@ -274,7 +254,7 @@ pub(crate) async fn reconcile_key(
             let Some(wf) = caches.workflows.get(ns, name) else {
                 return Ok(()); // deleted from cache: nothing to do
             };
-            workflow::reconcile(client, &wf, workspace_nfs).await?;
+            workflow::reconcile(client, &wf, &cfg.workspace_nfs).await?;
             // Resync backstop (see WORKFLOW_RESYNC); the loop self-
             // terminates once the object leaves the cache.
             queue.add_after(key.to_string(), WORKFLOW_RESYNC);
@@ -290,6 +270,30 @@ pub(crate) async fn reconcile_key(
             // object leaves the cache.
             queue.add_after(key.to_string(), CRONWORKFLOW_RESYNC);
             Ok(())
+        }
+        // CI/CD pipeline controller (T8.3, Q56): tags -> Build children ->
+        // registry push -> Deployment image promotion. The 2s resync keeps
+        // a quiesced pipeline re-checking its rollout / build child.
+        Kind::ServicePipeline => {
+            let Some(sp) = caches.servicepipelines.get(ns, name) else {
+                return Ok(()); // deleted from cache: nothing to do
+            };
+            pipeline::reconcile(client, &sp, &cfg.pipeline).await?;
+            queue.add_after(key.to_string(), PIPELINE_RESYNC);
+            Ok(())
+        }
+        // Build phase machine (T8.3, Q56): one docker build + registry push
+        // per child. No resync on purpose (see PIPELINE_RESYNC): a re-run of
+        // a terminal Build writes nothing (the phase is immutable) and an
+        // in-flight one is owned by the worker currently processing it.
+        Kind::Build => {
+            let Some(build) = caches.builds.get(ns, name) else {
+                return Ok(());
+            };
+            let Some(pipeline_cfg) = cfg.pipeline.as_ref() else {
+                return Ok(()); // pipeline plane disabled
+            };
+            pipeline::build::reconcile(client, &build, pipeline_cfg).await
         }
     }
 }

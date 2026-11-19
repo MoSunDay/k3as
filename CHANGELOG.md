@@ -7,6 +7,160 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 45 — T8.1-T8.4 done: 镜像交付信任 + TrafficSplit 加权切流 + ServicePipeline/Build 内嵌 CI/CD (Q56/Q57 LOCKED, Q58 DRAFT) (2026-11-19)
+
+**Goal:** Layer 8 交付面收口——镜像交付信任 (certs.d 明文 HTTP +
+registry v2 push 客户端 + `docker save` 导入) → `TrafficSplit` (ts)
+按权重一键切 NodePort 流量 → `ServicePipeline`/`Build` 内嵌 CI/CD
+(tag 跃迁即构建/推送/patch Deployment) → CLI 默认开启 + 进程内 e2e。
+T8.1-T8.4 转 **done**；T8.5 canary 以 **Q58 DRAFT** 立项 (M3 未开工)。
+
+**Changes**
+- T8.1 runtime (`crates/runtime/src/config.rs`): containerd config 增
+  `[plugins."io.containerd.grpc.v1.cri".registry] config_path =
+  <runtime_dir>/certs.d` (None 则整块不渲染)；`render_hosts_toml` 生成
+  plain-HTTP `hosts.toml` (`server` + `[host."http://…"]` +
+  pull/resolve/push 三 capability; 显式 scheme 原样保留) —— 内网 h2c
+  姿态 (Q38) + 内嵌 registry (Q40)，v1 无 TLS/auth。
+- T8.1 registry (`client.rs`/`http.rs`/`tarimg.rs`, 新): V2 push 客户端
+  (`POST /v2/<repo>/blobs/uploads/` → `PATCH` → `PUT ?digest=` → `PUT
+  /manifests/<tag>`; `https://` 直接拒绝)；裸 HTTP/1.1 单交换
+  (`Connection: close`, Content-Length 框定, 相对 `Location` 解析)；
+  `docker save` 导入器 (`manifest.json` → config+layers, 魔数识别
+  gzip/zstd —— 复用 Q54 栈, 8 GiB 炸弹护栏)。`tests/push_client.rs`
+  用真 in-process registry + 合成 tar 端到端: digest 形状、tag 可见、
+  manifest 字节一致、重复 push 均 201。
+- T8.2 API (`crates/api/src/traffic.rs`): `TrafficSplit`/
+  `TrafficSplitSpec`/`Backend`/`Status` (plural `trafficsplits`, short
+  `ts`, namespaced, JSON-only Q10)。
+- T8.2 Router (`split.rs`/`traffic_watch.rs` + nodeport/gate/
+  gateway_config): `SplitView::from_api` / `find_split` (ns 限定优先,
+  再裸名) / `plan_for` —— 丢弃 weight<=0、权重 x100 均摊 + `basis % n`
+  确定性余数 + 下限 1、peer 排序去重 (同编辑不触发 reload)；
+  LIST→WATCH→re-LIST reflector 折算 `ResolverState::splits`；每个
+  NodePort listener fold 时重规划, 任一 backend 有 peer 即健康, 加权
+  upstream 热重载。`nodeport_plane` 真实加权切换测试; kubectl `ts`
+  get/apply/delete。
+- T8.3 controller (`controllers/pipeline/` 7 文件): 命名 + 不可变
+  Build 子对象 (每个 tag 跃迁一次)、held-failure (失败 tag 保持, 重试
+  需新 tag)、phase machine、整对象 CAS status (无 `/status` 子资源,
+  Q10; logTail ≤4096)、executor (`tokio::process::Command` seam +
+  `timeout` + `kill_on_drop`; 失败是值)、publish
+  (`registry_and_repo`: host-full / host-less 归一)。
+- T8.3 wiring: `ManagerConfig.pipeline`, caches/queues
+  `servicepipelines` + `builds` (各 1 worker), 2s pipeline resync
+  (等 Deployment rollout), Build 事件回灌 owner ServicePipeline,
+  Build 子对象无 resync (docker build 绝不双启); gc Build 从属
+  ServicePipeline 级联删除 + namespace `DRAIN_KINDS`; kubectl
+  `sp`/`bld` verbs + golden discovery (`agents`/`trafficsplits`/
+  `servicepipelines`/`builds`, 短名 ag/ts/sp/bld)。
+- T8.4 CLI: `--disable-pipeline` (env `INIT_PRO_DISABLE_PIPELINE`, 默认
+  开启) + `--pipeline-dir` (env `INIT_PRO_PIPELINE_DIR`, 默认
+  `<data-dir>/pipeline`); `ServerBind.pipeline → ManagerConfig`;
+  `PipelineConfig{registry_addr, scratch_dir, docker_bin
+  (INIT_PRO_DOCKER||docker), default_timeout_seconds: 900}`;
+  no-op-strip parse 测试 `pipeline_flags_survive_noop_strip_and_parse`
+  + conflicts 字面量 + cli-flag-parity `t83`。
+- T8.4 e2e (`crates/controllers/tests/pipeline.rs`): 真 registry v2
+  (`127.0.0.1:0`) + 假 docker shim (archive 模式复制 tar fixture)
+  驱动 ServicePipeline: Build Succeeded → tag 推进内嵌 registry →
+  Deployment image 被 patch → `Promoted`/`observedTag=v1`; 断言
+  digest 71 字符、logTail、raw `GET /v2/team/web/tags/list`; 另测
+  disabled 面零 Build。
+- SSOT: decisions **Q56/Q57 LOCKED**, **Q58 DRAFT**; 新增
+  `plan/08-delivery.md` (T8.1-T8.5); `index.md` 51 TODO (37 done /
+  2 in-progress / 12 not-started, Layer8=5); `agents.md` 21 crates /
+  9 layers / Q1-Q58; README 计数; 修正 registry/runtime 的
+  Q55→T8.1 注释标签漂移。
+
+**Tests:** `cargo test --workspace --locked` → **1220 passed / 0
+failed** (85 suites; Sprint 44 基线 1140, 净增 **80**)。关键套件:
+api 62 / router 50 / registry 27 + push_client 3 / runtime 57 /
+kubectl 78 / controllers 121 + pipeline e2e 2 / cli 81。clippy
+`--workspace --all-targets -D warnings` 0。
+
+**Gates:** 收口全量复跑 `scripts/all-gates.sh` → **RESULT: PASS**
+(gates=10 rows=24 fails=0 skips=2)——`cargo test --workspace
+--locked` **1220 / 0**（85 suites）；fmt/build/clippy/unsafe-audit/
+engine-singlethread 全 PASS；golden **51 passed / 0 failed**（6
+SKIP：g24 registry 不可达 + G25/G26/G29/G30/G60-G66/G80-G82 宿主
+外来 cni0 共存守卫，S40c/Q25 doctrine）；battery 8.1-8.14 全行绿
+（8.11 service-traffic + 8.12 flannel 因宿主 cni0 持有 10.244.0.1
+自 SKIP，SKIP-not-fail；8.14 builtin-hostroot-e2e H1-H8 279s）；
+cli-flag-parity 23/23。
+
+---
+
+## Sprint 44 — T4.14 done: 内置引擎宿主根文件系统 (host-rootfs 默认, Q55); builtin-hostroot-e2e H1-H8 (2026-11-19)
+
+**Goal:** builtin engine 默认根文件系统从「必须拉镜像」翻转为「宿主目录
+直通」: `--builtin-rootfs host|image` (默认 **host**)——host 模式以宿主
+rootfs 为 `/` (NEWNS 挂载表 = 唯一可见性边界), Q53/Q54 镜像链降为注解
+opt-in; `init-pro.io/host-mounts` 提供宿主目录挂载
+(`container-path=host-path[:ro|:rw]`), `init-pro.io/rootfs: image` 在
+host 引擎下按 Pod 一次性拉镜像。T4.14 转 **done**。
+
+**Changes**
+- `kubelet/src/engine/rootfs.rs` (184, 新): `RootfsMode` +
+  `parse`/`resolve_mode` + staged 解析 (`<data_dir>/engine/images/<name>`
+  → legacy `<data_dir>/images/<name>` 兜底 → 可操作错误列补救);
+  `staged_name_ok` 拒绝 CAS 控制名 ({blobs,refs,layers,views,merged,tmp}/
+  dotfile/多段名)。
+- `kubelet/src/host_mounts.rs` (256, 新): 注解解析/校验 (空项容忍;
+  容器路径重复拒绝; 与 spec volumeMounts 碰撞 = Pod 级拒绝, 该周期
+  阻断所有 create) + `emit_error_events` (CreateContainerConfig
+  Warning)。
+- `engine/backend.rs`: mode 字段 + `with_rootfs_mode`; resolve/present/
+  list 感知 staged 名; host 模式 EnsureImage = presence-only 永不拉;
+  `create_container` 注解翻转一次性拉; `image_config_body` 仅 image
+  模式 (host: pod spec 即启动真源, 无 entrypoint/cmd 融合)。
+- `sync.rs`: plan 级 host-mounts 门控 (同 env_block 形态) +
+  `container_cfg` 追加 `cri_mounts` + `emit_action_error_events`
+  (Failed Warning; EnsureImage 按镜像 ref 回配 pod); `exec.rs`:
+  CreateStartContainer 前挂载源存在性预检 (缺失 = bind 本可裁决,
+  预检只为可操作事件); `runner.rs`: 双事件 pass 去重
+  (`last_host_events`/`last_action_events`)。
+- CLI: `agent --builtin-rootfs` (default `host`, env
+  `INIT_PRO_BUILTIN_ROOTFS`), 贯穿 `runtime.rs` (`run_agent`/
+  `run_supervised`/`run_server` 对齐) + `lib.rs` agent arm +
+  flags/conflicts 测试; `EngineBackend` warn-fallback 应用 mode。
+- nsrun 零代码改动 (Q55 命名空间集 NEWNS|NEWPID|NEWUTS|NEWIPC|
+  NEWCGROUP 锁定): 仅新增 spec 校验单测 (readonly 挂载 × uid/gid
+  正交交叉 + pause uid 锁不变)。
+- e2e `scripts/builtin-hostroot-e2e.sh` (270, battery **8.14**):
+  H1 绝对路径/staged 名双拼法、H2 宿主根标记不可见 (NEWNS)、H3 rw
+  挂载回写宿主可见、H4 `:ro` EROFS exitCode=1、H5 缺失挂载源 →
+  Pending + log + event、H6 缺失 rootfs 名 → Failed event (含
+  stage/annotate 补救文案)、H7 生命周期 + logs + exec + /workspace、
+  H8 `--builtin-rootfs image` 下复跑 builtin-image-e2e I1-I8。
+  `scripts/lib/builtin-image-lib.sh` 增 `BIMG_ROOTFS_MODE` (I 系列
+  保持 image 链); cli-flag-parity `t414`。
+- e2e 净机健壮性 (I4 "回归" 排障收口): Q52 host-netns 下容器 bind 是
+  全局的——I 系列 httpd 固定 18080 与宿主既有监听 (opencoder-serve)
+  相撞 → crash-loop; 且并行 battery 的 agent 都抢 127.0.0.1:10250,
+  kubectl logs/exec 会落到错误 kubelet。修法: `HTTPD_PORT=$(pick_port)`
+  动态端口 (I4/I6/I7/I8 全部改引) + lib `boot_cluster`/`restart_agent`
+  注入动态 `--kubelet-port` (apiserver pod_io 代理按 Node 注解
+  `init-pro.io/kubelet-port` 寻址, 动态端口全链路透明)。
+- 已知限制 (Q55 Consequences 收录): `init-pro.io/rootfs: /` 字面量
+  不支持——nsrun 切根前全新 sysfs 挂载与被复制树冲突 (EBUSY, 干净
+  失败); 只读暴露宿主树改用 fabricated rootfs + host-mounts
+  `/host=/:ro` (MS_BIND|MS_REC 目录绑定树整体只读带出), H7 即此法。
+
+**Tests:** 新增 **8** 单测 (`engine::rootfs` 4 + `host_mounts` 3 +
+nsrun 正交交叉 1; `cargo test --list` 核实); workspace 口径
+1132→**1140 / 0** (两 sprint 同树收口, Sprint 45 终态复跑 **1220/0**
+对账)。
+
+**Gates:** 与 Sprint 45 同一棵树的终态收口跑：`scripts/all-gates.sh`
+**RESULT: PASS (gates=10 rows=24 fails=0)**；
+`builtin-hostroot-e2e.sh` 作为 battery 8.14 **PASS**（H1-H8，
+host-rootfs 默认，279s）；`cargo test --workspace --locked`
+**1220 / 0**（Sprint 44 当轮口径 1140/0，余量为 Sprint 45 增量，
+两 sprint 同树收口）。
+
+---
+
 ## Sprint 43 — T4.13 done: builtin 镜像存储面 M1-M5 (Q53 层共享+overlayfs 视图 / Q54 tar+flate2+zstd); builtin-image-e2e I1-I8 (2026-11-18)
 
 **Goal:** T4.13 镜像存储面按 **Q53/Q54** 定案收口——builtin engine 从

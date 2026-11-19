@@ -17,7 +17,8 @@
 //! (the `cli::discovery::served_schema` registry): the core/v1 set incl.
 //! `events`, the apps/v1 workload set, `coordination.k8s.io/leases`, plus
 //! the served custom groups -- Workflows + CronWorkflows (T7.3, Q30),
-//! Agents (A3, Q35) and LuaRouters + Ingresses (Q32). Missing one of these
+//! Agents (A3, Q35), LuaRouters + Ingresses (Q32) and Builds +
+//! ServicePipelines (T8.3, Q56). Missing one of these
 //! used to orphan the kind at the terminal delete (the ns object vanished
 //! while its contents survived).
 
@@ -35,9 +36,10 @@ use crate::object::{name, resource_version};
 /// not `argoproj.io/v1alpha1`) -- that is how `KeyPrefix`/`Key` scope
 /// storage keys. Order matters mildly: Pods drain before the workload
 /// controllers that would recreate them, CronWorkflows before Workflows
-/// (a live CronWorkflow re-fires children), and leases (leader election)
-/// drain last.
-pub(crate) const DRAIN_KINDS: [(&str, &str); 18] = [
+/// (a live CronWorkflow re-fires children), Builds before ServicePipelines
+/// (a live pipeline would recreate its child, T8.3/Q56), and leases
+/// (leader election) drain last.
+pub(crate) const DRAIN_KINDS: [(&str, &str); 20] = [
     ("", "pods"),
     ("", "services"),
     ("", "endpoints"),
@@ -52,6 +54,8 @@ pub(crate) const DRAIN_KINDS: [(&str, &str); 18] = [
     ("apps", "controllerrevisions"),
     ("argoproj.io", "cronworkflows"),
     ("argoproj.io", "workflows"),
+    ("init-pro.io", "builds"),
+    ("init-pro.io", "servicepipelines"),
     ("init-pro.io", "agents"),
     ("init-pro.io", "luarouters"),
     ("networking.k8s.io", "ingresses"),
@@ -126,7 +130,7 @@ mod tests {
 
     #[test]
     fn drain_kind_table_covers_the_controller_footprint() {
-        assert_eq!(DRAIN_KINDS.len(), 18);
+        assert_eq!(DRAIN_KINDS.len(), 20);
         for kind in [
             ("", "pods"),
             ("", "services"),
@@ -143,6 +147,8 @@ mod tests {
             ("argoproj.io", "cronworkflows"),
             ("argoproj.io", "workflows"),
             ("init-pro.io", "agents"),
+            ("init-pro.io", "builds"),
+            ("init-pro.io", "servicepipelines"),
             ("init-pro.io", "luarouters"),
             ("networking.k8s.io", "ingresses"),
             ("coordination.k8s.io", "leases"),

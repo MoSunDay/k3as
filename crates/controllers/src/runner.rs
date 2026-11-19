@@ -48,6 +48,13 @@
 //! first node InternalIP). `--disable-servicelb`
 //! ([`ManagerConfig::disable_servicelb`]) keeps the worker AND the
 //! enqueues fully off.
+//!
+//! T8.3 / Q56: the M2 CI/CD pipeline plane. [`ManagerConfig::pipeline`]
+//! (`Some` = on) adds `servicepipelines` + `builds` informers/queues and
+//! one worker each; `None` (the `spawn` default) keeps the pre-T8.3
+//! controller set untouched. The pipeline worker resyncs every 2s (its
+//! promotion waits on a Deployment rollout); Build children get no resync
+//! so a docker build is never double-started.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,7 +63,7 @@ use storage::{Key, StorageBackend};
 use tokio::task::JoinHandle;
 
 use crate::client::{Client, StorageClient};
-use crate::controllers::{node_cidr, Caches};
+use crate::controllers::{node_cidr, pipeline, Caches};
 use crate::leaderelection::{LeaderElector, LeaseConfig, NowFn};
 use crate::stop::Stop;
 use crate::workqueue::WorkQueue;
@@ -83,6 +90,12 @@ pub struct ManagerConfig {
     /// (an external LB manager owns `status.loadBalancer.ingress`).
     /// Default `false` (embedded ServiceLB on, k3s parity).
     pub disable_servicelb: bool,
+    /// M2 CI/CD pipeline plane (TODO **T8.3**, decision **Q56**): `Some`
+    /// turns the `ServicePipeline` + `Build` controllers on. `None` (the
+    /// `spawn` default) spawns no pipeline worker and enqueues nothing, so
+    /// an install that never configures a pipeline behaves exactly like
+    /// the pre-T8.3 controller set.
+    pub pipeline: Option<pipeline::PipelineConfig>,
 }
 
 pub(crate) struct Queues {
@@ -98,6 +111,10 @@ pub(crate) struct Queues {
     pub(crate) node_cidrs: Arc<WorkQueue>,
     /// ServiceLB announce (T4.3 Scope B / T5.6, Q41); single worker.
     pub(crate) service_lbs: Arc<WorkQueue>,
+    /// `ServicePipeline` reconciliation (T8.3, Q56); 2s resync.
+    pub(crate) servicepipelines: Arc<WorkQueue>,
+    /// `Build` children (T8.3, Q56): one docker build + push per key.
+    pub(crate) builds: Arc<WorkQueue>,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +131,10 @@ pub(crate) enum Kind {
     Namespace,
     Workflow,
     NodeCidr,
+    /// `ServicePipeline` (T8.3, Q56): tag comparison + promotion.
+    ServicePipeline,
+    /// `Build` (T8.3, Q56): the docker/registry phase machine.
+    Build,
 }
 
 impl ControllerManager {
@@ -147,6 +168,8 @@ impl ControllerManager {
         // announce controller is default-ON; --disable-servicelb keeps both
         // its worker and its enqueues fully off (Q41).
         let disable_servicelb = cfg.disable_servicelb;
+        // M2 CI/CD pipeline plane (T8.3, Q56): `None` keeps it fully off.
+        let pipeline: Arc<Option<pipeline::PipelineConfig>> = Arc::new(cfg.pipeline.clone());
         let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
         let now: NowFn = Arc::new(|| {
             SystemTime::now()
@@ -177,6 +200,8 @@ impl ControllerManager {
             workflows: Arc::new(WorkQueue::new()),
             node_cidrs: Arc::new(WorkQueue::new()),
             service_lbs: Arc::new(WorkQueue::new()),
+            servicepipelines: Arc::new(WorkQueue::new()),
+            builds: Arc::new(WorkQueue::new()),
         });
 
         let supervisor = tokio::spawn(async move {
@@ -203,6 +228,7 @@ impl ControllerManager {
                     cluster_cidr.clone(),
                     workspace_nfs.clone(),
                     disable_servicelb,
+                    pipeline.clone(),
                 );
                 loop {
                     tokio::select! {

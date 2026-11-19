@@ -21,6 +21,10 @@
 //! reach the `service_lbs` queue, and Node events re-enqueue every cached
 //! LB Service (a late node InternalIP still gets announced); both enqueues
 //! and the worker are skipped under `disable_servicelb`.
+//! T8.3/Q56: `servicepipelines` events enqueue their own key, `builds`
+//! events enqueue the child key AND its owning ServicePipeline; both
+//! informers and workers exist only when the pipeline plane is on
+//! (`ManagerConfig::pipeline = Some`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,17 +33,15 @@ use storage::{KeyPrefix, WatchEvent};
 use tokio::task::JoinHandle;
 
 use crate::client::Client;
-use crate::controllers::{gc, node_cidr, service_lb, Caches};
+use crate::controllers::{gc, node_cidr, pipeline, service_lb, Caches};
 use crate::informer::{event_object, event_object_key, EventHandler, Informer};
 use crate::leaderelection::NowFn;
 use crate::object;
 use crate::runner::{Kind, Queues};
-use crate::runner_worker::{
-    enqueue_owner, spawn_gc_on_delete, spawn_worker, spawn_worker_with_cluster_cidr,
-};
+use crate::runner_worker::{enqueue_owner, spawn_gc_on_delete, spawn_worker, WorkerConfig};
 use crate::stop::Stop;
 
-#[allow(clippy::too_many_arguments)] // 8 = over the lint's ceiling; all live config
+#[allow(clippy::too_many_arguments)] // 9 = over the lint's ceiling; all live config
 pub(crate) fn spawn_set(
     client: &Arc<dyn Client>,
     caches: &Arc<Caches>,
@@ -49,8 +51,17 @@ pub(crate) fn spawn_set(
     cluster_cidr: Arc<Option<node_cidr::ClusterCidr>>,
     workspace_nfs: Arc<Option<String>>,
     disable_servicelb: bool,
+    pipeline_cfg: Arc<Option<pipeline::PipelineConfig>>,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
+    // T8.3/Q56: the pipeline plane is fully off (no informers, no workers,
+    // no enqueues) unless `ManagerConfig::pipeline` is Some.
+    let pipeline_enabled = pipeline_cfg.is_some();
+    let worker_cfg = WorkerConfig {
+        cluster_cidr: cluster_cidr.clone(),
+        workspace_nfs: workspace_nfs.clone(),
+        pipeline: pipeline_cfg.clone(),
+    };
 
     // Deployment events -> deployment queue (+ GC handoff on DELETE, Q20).
     let q = queues.deployments.clone();
@@ -204,6 +215,33 @@ pub(crate) fn spawn_set(
         spawn_gc_on_delete(&gc_client, &gc_caches, ev);
     });
 
+    // ServicePipeline events (T8.3, Q56) -> pipeline queue (+ GC handoff:
+    // deleting a pipeline cascades to its Build children).
+    let q_sp = queues.servicepipelines.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
+    let sp_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q_sp.add(k);
+        }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
+    });
+
+    // Build events (T8.3, Q56) -> build queue + owner ServicePipeline queue
+    // (a terminal child is what drives promotion / the failure report) +
+    // GC handoff.
+    let q_build = queues.builds.clone();
+    let q_sp_owner = queues.servicepipelines.clone();
+    let gc_client = client.clone();
+    let gc_caches = caches.clone();
+    let build_handler: EventHandler = Arc::new(move |ev: &WatchEvent| {
+        if let Some(k) = event_object_key(ev) {
+            q_build.add(k);
+            enqueue_owner(&q_sp_owner, ev, "ServicePipeline");
+        }
+        spawn_gc_on_delete(&gc_client, &gc_caches, ev);
+    });
+
     // Node events (T3.1b) -> EVERY cached DaemonSet. Nodes are the
     // DaemonSet placement source of truth, so any node create/delete or
     // label change must re-evaluate each DaemonSet (node -> DS fan-out;
@@ -256,7 +294,7 @@ pub(crate) fn spawn_set(
         enqueue_owner(&q_sts, ev, "StatefulSet");
     });
 
-    let sets: Vec<(KeyPrefix, Arc<crate::informer::ObjectStore>, EventHandler)> = vec![
+    let mut sets: Vec<(KeyPrefix, Arc<crate::informer::ObjectStore>, EventHandler)> = vec![
         (
             KeyPrefix::new("apps", "deployments", None),
             caches.deployments.clone(),
@@ -328,6 +366,21 @@ pub(crate) fn spawn_set(
             cwf_handler,
         ),
     ];
+    // T8.3/Q56: pipeline informers exist ONLY when the plane is on. With
+    // `ManagerConfig::pipeline == None` neither cache is filled and no key
+    // is ever enqueued, so the pre-T8.3 controller set is untouched.
+    if pipeline_enabled {
+        sets.push((
+            KeyPrefix::new("init-pro.io", "servicepipelines", None),
+            caches.servicepipelines.clone(),
+            sp_handler,
+        ));
+        sets.push((
+            KeyPrefix::new("init-pro.io", "builds", None),
+            caches.builds.clone(),
+            build_handler,
+        ));
+    }
     for (prefix, store, handler) in sets {
         let informer = Informer::new(prefix);
         let client = client.clone();
@@ -353,7 +406,27 @@ pub(crate) fn spawn_set(
                 caches,
                 &queue,
                 kind,
-                workspace_nfs.clone(),
+                worker_cfg.clone(),
+                &stop,
+                now.clone(),
+            ));
+        }
+    }
+
+    // CI/CD pipeline (T8.3, Q56): one worker each -- a Build pass can block
+    // for the whole docker budget, and pipeline passes are cheap; both
+    // exist only when the plane is on.
+    if pipeline_enabled {
+        for (queue, kind) in [
+            (queues.servicepipelines.clone(), Kind::ServicePipeline),
+            (queues.builds.clone(), Kind::Build),
+        ] {
+            handles.push(spawn_worker(
+                client,
+                caches,
+                &queue,
+                kind,
+                worker_cfg.clone(),
                 &stop,
                 now.clone(),
             ));
@@ -367,14 +440,12 @@ pub(crate) fn spawn_set(
     // not the inter-node allocation decision).
     {
         let queue = queues.node_cidrs.clone();
-        let cluster_cidr = cluster_cidr.clone();
-        handles.push(spawn_worker_with_cluster_cidr(
+        handles.push(spawn_worker(
             client,
             caches,
             &queue,
             Kind::NodeCidr,
-            cluster_cidr,
-            workspace_nfs.clone(),
+            worker_cfg.clone(),
             &stop,
             now.clone(),
         ));
@@ -391,7 +462,7 @@ pub(crate) fn spawn_set(
             caches,
             &queue,
             Kind::ServiceLb,
-            workspace_nfs.clone(),
+            worker_cfg.clone(),
             &stop,
             now.clone(),
         ));

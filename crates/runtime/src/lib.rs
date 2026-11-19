@@ -77,8 +77,44 @@ pub fn start_agent_runtime(
     data_dir: &Path,
     shutdown: Shutdown,
 ) -> io::Result<tokio::task::JoinHandle<SuperviseStats>> {
+    start_agent_runtime_with(data_dir, None, shutdown)
+}
+
+/// [`start_agent_runtime`] plus the embedded registry face (T8.1, Q40):
+/// when `registry_addr` is set, render `certs.d/<host>/hosts.toml` (plain
+/// HTTP, pull+resolve+push) and point the CRI plugin's `registry.config_path`
+/// at the `certs.d` root. No `/etc/docker/daemon.json` edits.
+pub fn start_agent_runtime_with(
+    data_dir: &Path,
+    registry_addr: Option<&str>,
+    shutdown: Shutdown,
+) -> io::Result<tokio::task::JoinHandle<SuperviseStats>> {
     let paths = AgentRuntimePaths::for_data_dir(data_dir);
-    let vars = ContainerdConfigVars::for_data_dir(data_dir, &config::sandbox_image());
+    let mut vars = ContainerdConfigVars::for_data_dir(data_dir, &config::sandbox_image());
+    let certs_dir = vars.certs_dir();
+    vars.registry_config_path = match registry_addr.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(addr) => {
+            let host = config::registry_host_key(addr);
+            let dir = certs_dir
+                .as_ref()
+                .map(|root| root.join(&host))
+                .unwrap_or_else(|| paths.runtime_dir.join("certs.d").join(&host));
+            if let Err(e) = fs::create_dir_all(&dir) {
+                tracing::warn!(target: "init-pro", dir = %dir.display(),
+                    "registry certs.d dir unavailable: {e}");
+            } else if let Err(e) =
+                fs::write(dir.join("hosts.toml"), config::render_hosts_toml(&host))
+            {
+                tracing::warn!(target: "init-pro", dir = %dir.display(),
+                    "registry hosts.toml write failed: {e}");
+            } else {
+                tracing::info!(target: "init-pro", host = %host,
+                    "containerd registry face rendered (plain HTTP, T8.1, Q38)");
+            }
+            certs_dir
+        }
+        None => None,
+    };
 
     match stage::vendor_bin_root() {
         Some(vendor) => {

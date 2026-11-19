@@ -131,6 +131,23 @@ pub struct ServerCmd {
     )]
     pub registry_keep_tag: Vec<String>,
 
+    /// Disable the embedded CI/CD pipeline controller (T8.3, Q56).
+    /// env `INIT_PRO_DISABLE_PIPELINE`: clap v4 reads the env value through
+    /// the bool value parser (`true`/`false` only); an unset env + no flag
+    /// leaves the pipeline plane enabled.
+    #[arg(long = "disable-pipeline", env = "INIT_PRO_DISABLE_PIPELINE")]
+    pub disable_pipeline: bool,
+
+    /// Scratch directory for ServicePipeline `docker save` tarballs
+    /// (T8.3, Q56); defaults to `<data-dir>/pipeline`.
+    /// env `INIT_PRO_PIPELINE_DIR`.
+    #[arg(
+        long = "pipeline-dir",
+        env = "INIT_PRO_PIPELINE_DIR",
+        value_name = "DIR"
+    )]
+    pub pipeline_dir: Option<std::path::PathBuf>,
+
     /// Disable the network-policy controller.
     #[arg(long = "disable-network-policy")]
     pub disable_network_policy: bool,

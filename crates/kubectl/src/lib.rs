@@ -5,7 +5,8 @@
 //!
 //! v1 surface: `kubectl rollout status (deployment/NAME | deployment NAME)`
 //! plus the argoproj.io verbs (T7.3 Scope A, Q30) and the first-class
-//! `init-pro.io/v1` `Agent` kind (T7.1, Q35). Simplifications are
+//! `init-pro.io/v1` kinds — `Agent` (T7.1, Q35), `TrafficSplit` (T8.2,
+//! Q57), `ServicePipeline` + `Build` (T8.3, Q56). Simplifications are
 //! locked by decision **Q21**:
 //! - transport: plain HTTP/1.1 over a raw `tokio::TcpStream`, no auth, no
 //!   https, no new dependencies (TLS + auth arrive with T1.3);
@@ -234,7 +235,11 @@ fn resolve_positionals(
         },
         [kind, name] => (kind.as_str(), Some(name.clone())),
         [] => {
-            return Err("you must specify a resource type (agent | workflow | cronworkflow)".into())
+            return Err(concat!(
+                "you must specify a resource type (agent | trafficsplit | ",
+                "servicepipeline | build | workflow | cronworkflow)"
+            )
+            .into())
         }
         _ => {
             return Err(format!(
@@ -243,8 +248,9 @@ fn resolve_positionals(
             ))
         }
     };
-    // Kind -> (apiVersion, plural): agents hit init-pro.io/v1, the Workflow
-    // family argoproj.io/v1alpha1 (T7.1/Q35, T7.3/Q30). Qualified path:
+    // Kind -> (apiVersion, plural): Agent/TrafficSplit/ServicePipeline/Build
+    // hit init-pro.io/v1, the Workflow family argoproj.io/v1alpha1
+    // (T7.1/Q35, T8.2/Q57, T8.3/Q56, T7.3/Q30). Qualified path:
     // lib.rs has its own (unrelated) `resolve_target` for rollout.
     let (api_version, plural) = verbs::resolve_target(kind)?;
     match name.as_deref() {
@@ -527,7 +533,8 @@ fn usage() -> String {
         String::new(),
         "v1 surface: rollout status for Deployments (T3.1b, Q21 plain-HTTP transport)".into(),
         "plus argoproj.io/v1alpha1 get/apply/delete (T7.3 Scope A, Q30),".into(),
-        "the init-pro.io/v1 Agent kind for get/apply/delete (T7.1, Q35),".into(),
+        "the init-pro.io/v1 Agent, TrafficSplit, ServicePipeline and Build kinds".into(),
+        "for get/apply/delete (T7.1/Q35, T8.2/Q57, T8.3/Q56),".into(),
         "the discovery listing verbs api-versions / api-resources (T7.3, Q30),".into(),
         "and pod logs / exec over the apiserver relay (T4.2 Scope C, Q31).".into(),
         String::new(),
@@ -543,7 +550,9 @@ fn usage() -> String {
         String::new(),
         "Target forms: deployment/NAME, deployments/NAME, deploy/NAME (deployment only in v1).".into(),
         "argoproj types: workflow (wf), cronworkflow (cwf, cronwf) — argoproj.io/v1alpha1.".into(),
-        "init-pro type: agent (agents, ag) — init-pro.io/v1 (T7.1, Q35).".into(),
+        "init-pro types: agent (agents, ag), trafficsplit (trafficsplits, ts),".into(),
+        "servicepipeline (servicepipelines, sp), build (builds, bld) — init-pro.io/v1".into(),
+        "(T7.1/Q35, T8.2/Q57, T8.3/Q56).".into(),
         String::new(),
         "Flags:".into(),
         "  -h, --help                 help for kubectl".into(),

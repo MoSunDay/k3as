@@ -2636,3 +2636,154 @@ kubelet 依赖二者 + `sha2`（digest 校验）。断点续传 (Range) 明确 o
 crate 需自行处理 whiteout/路径穿越（不可信任镜像内容, M3 落地）；flate2 rust_backend
 比 C zlib 慢（测试镜像量级可忽略）。
 （M3 补注: per-layer whiteout 落地引入 nix 0.30 纯 Rust 安全封装, 仅用 mknod/setxattr, 已在锁内 — 零 C 编译依赖不变。）
+
+## Q55 — T4.14 内置引擎宿主根文件系统: host-rootfs 默认 + host-mounts 注解 (2026-11-19, LOCKED)
+
+**Context.** T4.13 后 builtin 引擎仍以「拉镜像 + overlayfs」为唯一路径, 但 init-pro
+的节点内真实工作负载 (agent/opencoder 子进程、workflow step) 天然要宿主工具链与
+文件系统; 每个系统 Pod 为此造镜像是反生产力的。同时 nsrun 的命名空间集已证明
+kernel 隔离边界成立, 缺的只是「根文件系统从哪来」的默认值。
+
+**Options.** (a) host-rootfs 默认: `--builtin-rootfs host|image` (默认 host), 容器
+以宿主 rootfs 为 `/` (挂载表 NEWNS 是唯一可见性边界), Q53 镜像链降级为注解
+`init-pro.io/rootfs: image` opt-in (代码保留); (b) 保持 image 默认, host 模式做
+旁路注解; (c) 移除镜像链回归纯 host。
+
+**Decision.** 选 (a)。要点:
+- **根解析 (R1)**: host 模式 = 绝对目录 → staged `<data_dir>/engine/images/<name>`
+  → legacy `<data_dir>/images/<name>` 兜底 → 可操作错误 (列明补救); image 模式 =
+  T4.13 链不变。CAS 控制名 ({blobs,refs,layers,views,merged,tmp}/dotfile/多段名)
+  由 `staged_name_ok` 拒绝 (staged 名与 CAS 目录不冲突)。
+- **host 模式 EnsureImage = presence-only, 永不拉**; 注解 `init-pro.io/rootfs:
+  image` 在 host 引擎下触发 create_container 内一次性拉取 —— 注解是显式 opt-in,
+  这是刻意行为 (非缺陷)。image_config_body 合并仅 image 模式; host 模式 pod spec
+  即启动真源 (无 entrypoint/cmd 融合)。
+- **host-mounts (R3)**: `init-pro.io/host-mounts: container-path=host-path[:ro|:rw]`
+  (逗号分隔, Q43 anyhome-mounts 同构; 空项容忍; 容器路径重复拒绝; 与 spec
+  volumeMounts 碰撞 = pod 级拒绝, 该周期所有 create 被阻断)。挂载源存在性在
+  create 前预检 (缺失 → Pending + log + CreateContainerConfig Warning 事件)。
+- **权限姿态 (R2)**: 可见性 = 挂载表 (host-mounts 决定), 可写性 = uid/gid + caps
+  (root 下 DAC 被旁路, 故 E2E 用缺失源而非 chmod-000 造败); caps 收敛非目标 →
+  T4.4。bind 本身即权限裁决, 预检只为可操作事件。
+- **命名空间集不变**: NEWNS|NEWPID|NEWUTS|NEWIPC|NEWCGROUP 锁定 (nsrun 零代码
+  改动; 新增的仅是 spec 校验单测)。PID ns 是最后的 kernel 硬边界 (信号作用域 +
+  /proc 可见性 + ns 树回收), 与 cgroup 限额 (T4.9) 正交。网络面沿用 Q52 host
+  netns 共享姿态。
+
+**Consequences.** (+) 系统 Pod 零镜像成本; 镜像链保留且显式化 (注解 opt-in);
+nsrun 无改动面。 (−) host 默认 = 共享内核攻击面内运行 (与 Q52 姿态一致, 显式
+接受); `--builtin-rootfs image` 成为 I 系列 e2e 的必带旗标; 引擎默认翻转
+(go/no-go) 仍按 Q51 Sprint 43 裁定不变 (默认 containerd, builtin 整体 opt-in)。
+**已知限制**: `init-pro.io/rootfs: /` 字面量不支持 —— nsrun 切根前的全新 sysfs
+挂载与被复制的树冲突 (`engine-run: nsrun: mount sys: Device or resource busy`,
+干净失败非脏挂); 要只读暴露宿主树, 用 fabricated rootfs + host-mounts
+`/host=/:ro` (apply_bind 目录绑定走 MS_BIND|MS_REC, 树整体只读带出)。
+
+## Q56 — T8.3 ServicePipeline/Build: embedded CI/CD build plane (2026-11-19, LOCKED)
+
+**Context.** Layer 8 的交付面要回答「代码怎么变成集群里跑的镜像」。集群内没有
+外部 CI (GitHub Actions/Jenkins), 而 init-pro 已自带镜像面 (T6.3 内嵌 Registry
+v2, Q40) 与 kubelet 拉取链路 (T4.1)。同时宿主机本来就要有容器运行时: 构建面
+若自造一个进程内 image builder (buildkit 等价) 会把 T8 变成另一个 T4, 与 M2
+的收敛目标冲突。因此需要先定「构建在哪个进程、用谁的 docker、推给谁」。
+
+**Options.** (a) controller 驱动宿主 `docker` CLI (build + save), 产物经内嵌
+Registry push client (Q40) 推入, 另留「已构建 `docker save` 归档」的无 docker
+路径; (b) 进程内嵌完整 image builder (Dockerfile 解析 + 层构建); (c) 把 CI 留在
+集群外, init-pro 只提供脚本/文档。
+
+**Decision.** 选 (a)。要点:
+- **对象模型.** 一个 service = 一个 `init-pro.io/v1` `ServicePipeline` (短名
+  `sp`): image repository+tag、source (docker context 或预构建 `docker save`
+  归档)、可选目标 Deployment/container、构建旋钮 (`timeoutSeconds` 等)。
+  `spec.paused` 冻结 `observedTag`。
+- **一次 tag 变迁 = 恰好一个不可变 `Build` 子对象** (`<pipeline>-<tag>-<rand>`,
+  controller ownerReference; GC 随父回收)。`Build.spec` 不可变, 历史即审计
+  记录。
+- **相位机.** `Pending`/`Building`/`Publishing` → `Succeeded` | `Failed`;
+  同一 tag 的 `Failed` 被**按住** (不重建, 无失败重试环) —— 重试 = 换新 tag。
+- **source 两态.** context 模式 = 宿主 `docker build` + `docker save` (经
+  `executor` 有界超时 + `kill_on_drop`, 超时按数据上报而非 `Err`); archive
+  模式 = 直接吃 `docker save` tar (tar + flate2/zstd, Q54), 完全无 docker 依赖
+  (CI/进程内 e2e 路径)。
+- **推送.** 复用内嵌 Registry 的 V2 push client (Q40); `registry_and_repo`
+  区分 host-full (`host:port/repo`) 与 host-less (`repo`) 仓库名, 后者拼上
+  `--registry-addr`。
+- **成功后.** 尽力 patch 目标 Deployment 的容器镜像 (目标/容器缺失 = 告警,
+  **永不**让发布失败), 然后置 `Promoted` + `status.observedTag`。
+- **status 写入.** 全对象 CAS (v1 无 `/status` 子资源, Q10), 冲突交给 worker
+  重排; `logTail` 截断到 4096 字符 (不是日志流)。scratch 在 `<data-dir>/pipeline`。
+- **默认姿态.** 平面默认开 (与 anyhome/Registry 同款); `--disable-pipeline`
+  → `ManagerConfig::pipeline = None` = 不建 informer、不起 worker、不 enqueue,
+  行为与 T8.3 之前逐字节一致。
+
+**Consequences.** (+) `kubectl apply` 一个 ServicePipeline 即完成「构建→推送→
+改 Deployment 镜像」; 构建是一等对象 (可查、可 GC、随父级联); 归档模式让 e2e
+无需 docker daemon; 关闭面零行为差异。 (−) context 模式依赖宿主 docker daemon
+(单节点姿态, 多节点构建分发明确 out); 日志只有有界尾巴, 无流式; v1 无多架构/
+构建缓存旋钮; 失败 tag 被按住, 重试必须换 tag; `Build` 与 `ServicePipeline` 两个
+新 Kind 进入 namespace DRAIN_KINDS 与 GC 依赖表 (面变宽)。
+
+## Q57 — T8.2 TrafficSplit: weighted one-click traffic switching (2026-11-19, LOCKED)
+
+**Context.** NodePort 面的金丝雀/灰度需要把流量按比例分给两个 backend Service
+(stable / canary)。主流做法是引一个 service mesh (SMI `TrafficSplit` CRD +
+sidecar/proxy 数据面), 这与 Q32「Router 是内建数据面, 不是 addon」的教条冲突。
+Router 已经有 resolver (Endpoints/Service reflect) + openrusty `apply_config`
+请求间热重载 (T5.4/Q32), 缺的只是一个「权重从哪来」的对象。
+
+**Options.** (a) 一等公民 `init-pro.io/v1` `TrafficSplit`, 由 Router resolver 折叠、
+折算成 per-endpoint 权重后热重载 openrusty upstream; (b) SMI `TrafficSplit` CRD +
+外部 mesh 数据面; (c) Ingress annotation 写权重 (字符串语义, 无对象、无 status)。
+
+**Decision.** 选 (a)。要点:
+- **形态.** `TrafficSplit` (短名 `ts`): `spec.service` = NodePort 入口 Service
+  (listener owner), `spec.backends[]` 按名字引用 backend Service + 相对权重。
+- **折叠.** `crates/router/src/traffic_watch.rs` 以 LIST→WATCH→re-LIST 折叠每个
+  split 进 resolver 的 `splits` 表 (`SplitView`); 折叠幂等, 重放无害。
+- **权重折算 (纯函数).** 丢弃 `weight <= 0` 的 backend (openrusty 拒收零权重
+  peer); 每个 backend 的权重按端点均分并**放大 100 倍**, 余数确定性地给前
+  `basis % n` 个端点 (首个端点先得), 零基数兜底为 1 —— 于是 `90/10` 在「2 个
+  stable pod + 1 个 canary pod」下仍是 90/10, 与副本数无关。
+- **热重载.** 权重变化 = openrusty upstream 重规划 + `apply_config`; peer 列表
+  排序去重, 完全相同的编辑不触发 reload。零权重 backend 被丢弃, 入口 listener
+  只在**所有** backend 都无 peer 时才 503 (Q28 parity)。
+- **status.** 报 backends/phase; 数据面仍无 header/cookie pinning (v1 明确 out)。
+- **无 mesh、无外部 CRD.** 复用 Q32 内核, 不引第二套数据面。
+
+**Consequences.** (+) 一次 apply 即切流, 比例与副本数解耦; 折算逻辑是纯函数
+(不进 async 调用栈) 可单测; 与 canary 面 (Q58) 是同一个原语; 无需 mesh 依赖。 (−) 只有
+权重粒度: 无 header/cookie 粘滞、无按请求灰度 (需要 openrusty header match,
+未来项); L4 NodePort 面按连接分配, 权重 0 的 backend 是被丢弃而非优雅摘流;
+权重必须显式写在 backend 上 (无默认值推导)。
+
+## Q58 — T8.5 canary release: pipeline-owned canary + stepped TrafficSplit (DRAFT 2026-11-19, M3 not started)
+
+**Context.** Q56 让 ServicePipeline 能「构建 + 推送 + 改 stable Deployment 镜像」,
+但直接改 stable 是 all-or-nothing。Q57 已给出按权重切流的一等原语, 缺的是
+「谁按步骤推动权重、何时 promote/abort」。若交给用户手写 TrafficSplit, 每个
+service 都要手搓一套时序, 且 promote 需要同时改 Deployment 与权重 —— 两步之间
+有中间态。
+
+**Options.** (a) pipeline 拥有 canary 面: 由 `ServicePipeline.spec.release` 驱动
+canary Deployment/Service + 分步权重; (b) 复用 Argo Rollouts 语义 (外部 CRD);
+(c) 只给用户 TrafficSplit, 不做自动 promote。
+
+**Decision (proposed, 未锁定).** 倾向 (a)。要点:
+- `ServicePipeline.spec.release` 驱动 `<deployment>-canary` Deployment 与 canary
+  Service (从 stable 克隆: 同 selector 语义、同端口), 二者由 pipeline 拥有。
+- 有序 `steps[]` = `{weight, pauseSeconds}`: 逐步把 canary 权重写进 TrafficSplit
+  (Q57), 每步 soak `pauseSeconds` 后再进下一步; `status.rollout`
+  (`RolloutStatus`) 报 step index / weight / since; phase `Rolling`。
+- **promote** = stable Deployment 镜像 patch 成新 tag + canary 权重归 0 (canary
+  对象按策略保留或回收), phase `Promoted`。
+- **abort** = 删除 canary 对象 + 权重归 0, phase `Aborted` (stable 永不动)。
+- **现状声明.** API 类型自 M1 起已存在 (`PipelineRelease`/`ReleaseStep`/
+  `RolloutStatus`, `crates/api/src/pipeline.rs`), 但**控制器是 M3**: 当前没有
+  任何 reconciler 消费 `spec.release` (字段被解析、被 discovery 暴露、无行为)。
+
+**Consequences.** (+) 一个对象覆盖「构建→金丝雀→promote」, 中间态对用户可见;
+权重时序建立在 Q57 的纯函数折算式上, 可单测。 (−) 未锁定即可能变: canary 资源
+命名/归属、pause 的时钟来源 (wall clock, 无 cron)、失败自动 abort 的策略、多
+副本 canary 的副本数旋钮都还是开放问题; 依赖 T8.2/T8.3/T8.4 全部落地后才能
+实现; 需要新的 namespace DRAIN/GC 依赖面 (canary Deployment/Service 归属)。

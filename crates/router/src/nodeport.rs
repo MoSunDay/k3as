@@ -21,11 +21,12 @@ use infra::Shutdown;
 use openrusty_server::state::{self as or_state, AppState};
 use tokio::task::JoinHandle;
 
-use crate::endpoints::{resolve_with_state, EndpointsResolver, ResolverState};
+use crate::endpoints::{EndpointsResolver, ResolverState};
 use crate::gate::{GateRoute, GatedRouter};
 use crate::gateway_config;
 use crate::route::{PortRef, UpstreamRef};
 use crate::serve;
+use crate::split::PeerWeight;
 
 /// Bind configuration for the nodePort listeners.
 #[derive(Clone, Copy, Debug)]
@@ -65,8 +66,10 @@ struct Listener {
     upstream: UpstreamRef,
     /// The applied openrusty runtime (hot-reloaded on endpoint changes).
     app: Arc<AppState>,
-    /// The peer set currently baked into `app` (empty = gate 503s).
-    peers: Vec<SocketAddr>,
+    /// The weighted peer set currently baked into `app` (empty = gate 503s).
+    peers: Vec<PeerWeight>,
+    /// The gate's live target set (entry Service, or a split's backends).
+    targets_tx: tokio::sync::watch::Sender<Arc<Vec<UpstreamRef>>>,
     shutdown: Shutdown,
     task: JoinHandle<()>,
 }
@@ -209,28 +212,40 @@ async fn reconcile(
     }
 }
 
-/// Hot-apply the upstream's current peer set (openrusty in-memory reload).
+/// Hot-apply the plan's weighted peer set (openrusty in-memory reload).
 /// An empty set keeps the last applied config — the [`crate::gate`] already
 /// 503s it from the live snapshot, and openrusty rejects zero-peer
-/// upstreams. A changed non-empty set is applied atomically (generation
-/// bump, in-flight requests finish on the old snapshot).
+/// upstreams. A changed non-empty set is re-applied atomically (generation
+/// bump, in-flight requests finish on the old snapshot). The gate's target
+/// set is refreshed on every fold, so a `TrafficSplit` edit that only
+/// changes backends still updates the 503 decision.
 async fn refresh_peers(listener: &mut Listener, resolver: &EndpointsResolver) {
     let state = resolver.snapshot();
-    let peers = resolve_with_state(&state, &listener.upstream);
-    if peers == listener.peers || peers.is_empty() {
+    let plan = crate::split::plan_for(&state, &listener.upstream);
+    if *listener.targets_tx.borrow().as_ref() != plan.targets {
+        let _ = listener
+            .targets_tx
+            .send_replace(Arc::new(plan.targets.clone()));
+    }
+    if plan.peers == listener.peers {
         return;
     }
-    let cfg = gateway_config::nodeport_config(listener.listen, &listener.upstream, &peers);
+    if plan.peers.is_empty() {
+        // Gate 503s from the live snapshot; keep the last valid config.
+        listener.peers.clear();
+        return;
+    }
+    let cfg = gateway_config::nodeport_config(listener.listen, &listener.upstream, &plan.peers);
     match openrusty_server::reload::apply_config(&listener.app, &cfg).await {
         Ok(generation) => {
             tracing::debug!(
                 target: "init-pro",
-                generation,
                 node_port = listener.listen.port(),
-                peers = peers.len(),
-                "nodePort endpoints re-applied"
+                peers = plan.peers.len(),
+                generation,
+                "nodePort upstream peers re-applied"
             );
-            listener.peers = peers;
+            listener.peers = plan.peers;
         }
         Err(e) => {
             tracing::warn!(target: "init-pro", error = %e, "nodePort config reload failed")
@@ -248,7 +263,8 @@ async fn start_listener(
     let listen = SocketAddr::new(addr, node_port);
     let listener = serve::bind(listen).await.ok()?;
     let state = resolver.snapshot();
-    let peers = resolve_with_state(&state, &upstream);
+    let plan = crate::split::plan_for(&state, &upstream);
+    let peers = plan.peers;
     let cfg = gateway_config::nodeport_config(listen, &upstream, &peers);
     let app = match or_state::from_config(
         cfg,
@@ -260,9 +276,10 @@ async fn start_listener(
             return None;
         }
     };
+    let (targets_tx, targets_rx) = tokio::sync::watch::channel(Arc::new(plan.targets));
     let gated = GatedRouter::new(
         openrusty_server::app::router(app.clone()),
-        GateRoute::Fixed(upstream.clone()),
+        GateRoute::Any(Arc::new(targets_rx)),
         resolver.clone(),
     );
     let shutdown = Shutdown::new();
@@ -272,6 +289,7 @@ async fn start_listener(
         upstream,
         app,
         peers,
+        targets_tx,
         shutdown,
         task,
     })

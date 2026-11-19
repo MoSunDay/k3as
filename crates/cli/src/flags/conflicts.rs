@@ -121,6 +121,8 @@ mod tests {
             disable_registry: false,
             registry_tag_retention: 10,
             registry_keep_tag: vec![],
+            disable_pipeline: false,
+            pipeline_dir: None,
         }
     }
 
@@ -138,6 +140,7 @@ mod tests {
             anyhome_addr: "127.0.0.1:11111".to_string(),
             registry_addr: "127.0.0.1:15000".to_string(),
             builtin_image_quota: 0,
+            builtin_rootfs: "host".to_string(),
         }
     }
 

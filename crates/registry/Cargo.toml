@@ -10,14 +10,18 @@ publish.workspace = true
 
 [dependencies]
 axum = { workspace = true }
+# T6.3 M1 push client: `docker save` import (pure-Rust tar + gzip/zstd).
+flate2 = { workspace = true }
 infra = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["io-util"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

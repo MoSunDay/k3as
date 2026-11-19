@@ -73,6 +73,9 @@ pub struct EndpointsView {
 pub struct ResolverState {
     pub services: BTreeMap<String, ServiceView>,
     pub endpoints: BTreeMap<String, EndpointsView>,
+    /// `TrafficSplit` views keyed `ns/name` (T8.2, Q57) — folded by
+    /// [`crate::traffic_watch`], consumed by [`crate::split`].
+    pub splits: BTreeMap<String, crate::split::SplitView>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,6 +298,29 @@ pub fn resolve_with_state(state: &ResolverState, upstream: &UpstreamRef) -> Vec<
         }
     }
     peers
+}
+
+/// Resolve a backend Service for a TrafficSplit (T8.2, Q57): the entry
+/// Service's port first, then a single-port fallback for backend Services
+/// whose port number drifted from the entry's.
+pub fn resolve_backend(state: &ResolverState, upstream: &UpstreamRef) -> Vec<SocketAddr> {
+    let peers = resolve_with_state(state, upstream);
+    if !peers.is_empty() {
+        return peers;
+    }
+    let Some((_, svc)) = find_service(state, &upstream.service) else {
+        return Vec::new();
+    };
+    match svc.ports.as_slice() {
+        [only] => resolve_with_state(
+            state,
+            &UpstreamRef {
+                service: upstream.service.clone(),
+                port: PortRef::Number(only.port),
+            },
+        ),
+        _ => Vec::new(),
+    }
 }
 
 /// Cheaply-clonable live resolver: watch receivers over the folded state —

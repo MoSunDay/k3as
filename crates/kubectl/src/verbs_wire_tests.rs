@@ -1,4 +1,5 @@
-//! Wire-level tests for the T7.3 Scope A argoproj.io verbs (Q30).
+//! Wire-level tests for the T7.3 Scope A argoproj.io verbs (Q30) and the
+//! init-pro.io/v1 kinds (Agent T7.1/Q35, TrafficSplit T8.2/Q57).
 //!
 //! Same canned-server pattern as rollout_poll_tests: a tiny in-process TCP
 //! responder on an ephemeral port captures the real request bytes and
@@ -9,7 +10,7 @@
 use serde_json::json;
 
 use crate::http::HttpClient;
-use crate::verbs::{apply, delete, get, Output};
+use crate::verbs::{apply, delete, get, resolve_target, Output};
 
 const WF_YAML: &str = "apiVersion: argoproj.io/v1alpha1\nkind: Workflow\nmetadata:\n  name: hello-world\n  namespace: argo\nspec:\n  entrypoint: main\n";
 
@@ -319,4 +320,74 @@ async fn get_and_apply_agents_target_initpro_group() {
     );
     assert!(req.contains("init-pro.io/v1"), "{req}");
     std::fs::remove_file(&manifest).ok();
+}
+
+#[tokio::test]
+async fn trafficsplit_get_apply_delete_target_initpro_group() {
+    // T8.2/Q57: the `ts` alias resolves to OUR group and every verb walks
+    // /apis/init-pro.io/v1/namespaces/<ns>/trafficsplits[/<name>].
+    let (api_version, plural) = resolve_target("ts").unwrap();
+    assert_eq!((api_version, plural), ("init-pro.io/v1", "trafficsplits"));
+
+    let list = json!({
+        "kind": "TrafficSplitList",
+        "items": [
+            {"apiVersion": "init-pro.io/v1", "kind": "TrafficSplit",
+             "metadata": {"name": "web-split"}},
+        ],
+    });
+    let (port, captured) = serve_once(http_response("200 OK", &list.to_string())).await;
+    let out = get(
+        &client(port),
+        "default",
+        api_version,
+        plural,
+        None,
+        Output::Table,
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("web-split"), "{out}");
+    let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+    assert!(
+        req.starts_with("GET /apis/init-pro.io/v1/namespaces/default/trafficsplits "),
+        "{req}"
+    );
+
+    // `kubectl apply -f`: SSA PATCH on the item URL (Q10 JSON body).
+    let manifest = temp_manifest("ts");
+    std::fs::write(
+        &manifest,
+        "apiVersion: init-pro.io/v1\nkind: TrafficSplit\nmetadata:\n  name: web-split\n  namespace: default\n",
+    )
+    .unwrap();
+    let (port, captured) = serve_once(http_response("200 OK", r#"{"kind":"TrafficSplit"}"#)).await;
+    let out = apply(&client(port), "default", manifest.to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(out, "TrafficSplit/web-split applied");
+    let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+    assert!(
+        req.starts_with(
+            "PATCH /apis/init-pro.io/v1/namespaces/default/trafficsplits/web-split?fieldManager="
+        ),
+        "{req}"
+    );
+    std::fs::remove_file(&manifest).ok();
+
+    // `kubectl delete ts/web-split` removes the item.
+    let (port, captured) = serve_once(http_response(
+        "200 OK",
+        r#"{"kind":"Status","status":"Success"}"#,
+    ))
+    .await;
+    let out = delete(&client(port), "default", api_version, plural, "web-split")
+        .await
+        .unwrap();
+    assert_eq!(out, "trafficsplits/web-split deleted");
+    let req = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+    assert!(
+        req.starts_with("DELETE /apis/init-pro.io/v1/namespaces/default/trafficsplits/web-split "),
+        "{req}"
+    );
 }

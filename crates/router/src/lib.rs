@@ -37,6 +37,8 @@ mod ingress_watch;
 pub mod nodeport;
 mod route;
 mod serve;
+mod split;
+mod traffic_watch;
 
 pub use endpoints::{
     resolve_with_state, EndpointsResolver, EndpointsView, ResolverState, ServiceView, SvcPort,
@@ -47,3 +49,5 @@ pub use ingress::compile_ingress;
 pub use ingress_watch::{ingresses_prefix, IngressMap};
 pub use nodeport::{spawn as spawn_nodeport_plane, NodePortConfig, NodePortPlane};
 pub use route::{HostMatcher, PathMatcher, PortRef, RouteRule, RouteTable, UpstreamRef};
+pub use split::{endpoint_weights, plan_for, PeerWeight, SplitBackendView, SplitView};
+pub use traffic_watch::trafficsplits_prefix;

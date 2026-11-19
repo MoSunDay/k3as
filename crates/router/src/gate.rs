@@ -27,13 +27,26 @@ use crate::route::{RouteTable, UpstreamRef};
 /// Parity with the Lua-era `conn::error_response(503, ...)` body (Q28).
 const NO_PEERS_BODY: &str = "no upstream peers available";
 
-/// How a request maps onto an upstream *before* proxying.
+/// How a request maps onto the upstreams it may reach *before* proxying.
 #[derive(Clone)]
 pub(crate) enum GateRoute {
-    /// NodePort listener: every request on the port targets one Service port.
-    Fixed(UpstreamRef),
+    /// NodePort listener: every request on the port targets this set of
+    /// Service ports. Plain listeners carry one entry; a `TrafficSplit`
+    /// listener carries the split's backend Services (T8.2, Q57) — the 503
+    /// gate fires only when **every** backend is empty. The receiver lets
+    /// a split edit swap the set without restarting the listener.
+    Any(Arc<tokio::sync::watch::Receiver<Arc<Vec<UpstreamRef>>>>),
     /// Ingress gateway: consult the live compiled route table (host + path).
     Table(Arc<tokio::sync::watch::Receiver<Arc<RouteTable>>>),
+}
+
+impl GateRoute {
+    /// A fixed single-target route (tests / callers without a live set).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fixed(upstream: UpstreamRef) -> Self {
+        let (_tx, rx) = tokio::sync::watch::channel(Arc::new(vec![upstream]));
+        GateRoute::Any(Arc::new(rx))
+    }
 }
 
 /// Router + gate: an openrusty [`axum::Router`] behind the 503 short-circuit.
@@ -53,10 +66,10 @@ impl GatedRouter {
         }
     }
 
-    /// The upstream this request would target, if any.
-    fn target(&self, req: &Request) -> Option<UpstreamRef> {
+    /// The upstreams this request may target (empty = no route match).
+    fn targets(&self, req: &Request) -> Vec<UpstreamRef> {
         match &self.route {
-            GateRoute::Fixed(up) => Some(up.clone()),
+            GateRoute::Any(rx) => rx.borrow().as_ref().clone(),
             GateRoute::Table(rx) => {
                 let table = rx.borrow();
                 let host = req
@@ -67,17 +80,28 @@ impl GatedRouter {
                 let path = req.uri().path();
                 table
                     .lookup(host, path)
-                    .map(|r| r.upstream.clone())
-                    .or_else(|| table.default_upstream().cloned())
+                    .map(|r| vec![r.upstream.clone()])
+                    .or_else(|| table.default_upstream().cloned().map(|u| vec![u]))
+                    .unwrap_or_default()
             }
         }
     }
 
-    /// 503 short-circuit when the target resolves to zero peers.
+    /// 503 short-circuit when every target resolves to zero peers (Q28
+    /// parity; a split is healthy while any backend still has peers).
     fn short_circuit(&self, req: &Request) -> Option<Response> {
-        let target = self.target(req)?;
+        let targets = self.targets(req);
+        // Only a route-table miss means "openrusty owns the 404": an empty
+        // target set on a NodePort listener is a split with every backend
+        // disabled (`weight: 0`, Q57), which must answer the Q28 503.
+        if targets.is_empty() && matches!(self.route, GateRoute::Table(_)) {
+            return None;
+        }
         let state = self.resolver.snapshot();
-        if resolve_with_state(&state, &target).is_empty() {
+        if targets
+            .iter()
+            .all(|t| resolve_with_state(&state, t).is_empty())
+        {
             Some(no_peers_response())
         } else {
             None
@@ -134,7 +158,7 @@ mod tests {
     }
 
     fn fixed(up: UpstreamRef) -> GateRoute {
-        GateRoute::Fixed(up)
+        GateRoute::fixed(up)
     }
 
     fn req(host: &str, path: &str) -> Request {

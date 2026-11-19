@@ -20,6 +20,7 @@ use openrusty_core::config::{
 };
 
 use crate::route::{HostMatcher, PathMatcher, PortRef, RouteTable, UpstreamRef};
+use crate::split::PeerWeight;
 
 /// Passive-health defaults mirrored from openrusty's serde defaults; active
 /// probing stays OFF (documented deviation, Q32): echo/HTTP backends have no
@@ -91,7 +92,7 @@ fn upstream_name(up: &UpstreamRef) -> String {
 
 /// One Service-port upstream: SWRR balancing (k3s endpoints model) with one
 /// retry per request (`retries + 1` attempts, connect/send failures only).
-fn upstream_entry(name: String, peers: Vec<SocketAddr>) -> UpstreamConfig {
+fn upstream_entry(name: String, peers: Vec<PeerWeight>) -> UpstreamConfig {
     UpstreamConfig {
         name,
         balancer: BalancerKind::Swrr,
@@ -104,7 +105,10 @@ fn upstream_entry(name: String, peers: Vec<SocketAddr>) -> UpstreamConfig {
         endpoints: Vec::new(),
         peers: peers
             .into_iter()
-            .map(|addr| PeerConfig { addr, weight: 1 })
+            .map(|p| PeerConfig {
+                addr: p.addr,
+                weight: p.weight,
+            })
             .collect(),
         health: passive_health(),
     }
@@ -116,7 +120,7 @@ fn upstream_entry(name: String, peers: Vec<SocketAddr>) -> UpstreamConfig {
 pub(crate) fn nodeport_config(
     listen: SocketAddr,
     upstream: &UpstreamRef,
-    peers: &[SocketAddr],
+    peers: &[PeerWeight],
 ) -> Config {
     let mut cfg = base_config(listen);
     if peers.is_empty() {
@@ -210,7 +214,8 @@ pub(crate) fn ingress_config(
         }
         let name = upstream_name(up);
         if !emitted.contains(&name) {
-            cfg.upstreams.push(upstream_entry(name.clone(), peers));
+            cfg.upstreams
+                .push(upstream_entry(name.clone(), crate::split::uniform(peers)));
             emitted.push(name.clone());
         }
         Some(name)
@@ -294,11 +299,15 @@ mod tests {
         vec!["127.0.0.1:9001".parse().unwrap()]
     }
 
+    fn weighted_peers(addrs: &[&str]) -> Vec<PeerWeight> {
+        crate::split::uniform(addrs.iter().map(|a| a.parse().unwrap()).collect())
+    }
+
     #[test]
     fn nodeport_config_is_valid_and_catch_all() {
         let listen: SocketAddr = "127.0.0.1:30080".parse().unwrap();
         let up = UpstreamRef::port("default/web", 80);
-        let cfg = nodeport_config(listen, &up, &peers(&up));
+        let cfg = nodeport_config(listen, &up, &weighted_peers(&["127.0.0.1:9001"]));
         validate(&cfg).expect("nodeport config valid");
         assert_eq!(cfg.upstreams.len(), 1);
         assert_eq!(cfg.upstreams[0].name, "svc/default/web:80");
@@ -410,7 +419,7 @@ mod tests {
 
         let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let up = UpstreamRef::port("default/web", 80);
-        let peers = vec!["127.0.0.1:39999".parse().unwrap()];
+        let peers = weighted_peers(&["127.0.0.1:39999"]);
         let cfg = nodeport_config(listen, &up, &peers);
         let app = openrusty_server::state::from_config(cfg, std::path::PathBuf::from("probe"))
             .expect("bootstrap");
@@ -452,5 +461,25 @@ mod tests {
         let kept = expressible(&t);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept.rules()[0].upstream.service, "exact");
+    }
+
+    #[test]
+    fn nodeport_config_carries_weights() {
+        let listen: SocketAddr = "127.0.0.1:30080".parse().unwrap();
+        let up = UpstreamRef::port("default/web", 80);
+        let peers = vec![
+            PeerWeight {
+                addr: "127.0.0.1:9001".parse().unwrap(),
+                weight: 45,
+            },
+            PeerWeight {
+                addr: "127.0.0.1:9002".parse().unwrap(),
+                weight: 10,
+            },
+        ];
+        let cfg = nodeport_config(listen, &up, &peers);
+        validate(&cfg).expect("weighted config valid");
+        let ws: Vec<u32> = cfg.upstreams[0].peers.iter().map(|p| p.weight).collect();
+        assert_eq!(ws, vec![45, 10]);
     }
 }

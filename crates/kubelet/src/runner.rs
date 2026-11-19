@@ -27,7 +27,7 @@ use crate::probes::{
     exec_probe_healthy, run_http_probe, run_tcp_probe, PodProbeState, ProbeHandler, ProbeKind,
 };
 use crate::status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
-use crate::sync::{plan, Snapshot};
+use crate::sync::{self, plan, Snapshot};
 use crate::volumes;
 
 /// Configuration for [`spawn`]. All knobs are public so callers (the
@@ -339,6 +339,9 @@ async fn sync_task(
     // T4.7: dedup state for CreateContainerConfigError events —
     // "pod-key/container" -> last posted reason (one event per failure).
     let mut last_env_events: BTreeMap<String, String> = BTreeMap::new();
+    // T4.14 (Q55): dedup state for host-mounts + action-error events.
+    let mut last_host_events: BTreeMap<String, String> = BTreeMap::new();
+    let mut last_action_events: BTreeMap<String, String> = BTreeMap::new();
     let mut probes = PodProbeState::new();
     loop {
         tokio::select! {
@@ -370,11 +373,14 @@ async fn sync_task(
             &mut probes,
             &mut last_status,
             &mut last_env_events,
+            &mut last_host_events,
+            &mut last_action_events,
         )
         .await;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sync_once(
     client: &HttpJson,
     cri: &dyn CriBackend,
@@ -383,6 +389,8 @@ async fn sync_once(
     probes: &mut PodProbeState,
     last_status: &mut BTreeMap<String, Value>,
     last_env_events: &mut BTreeMap<String, String>,
+    last_host_events: &mut BTreeMap<String, String>,
+    last_action_events: &mut BTreeMap<String, String>,
 ) {
     let snap = match snapshot(cri).await {
         Ok(s) => s,
@@ -439,11 +447,32 @@ async fn sync_once(
         let mut map = desired.lock().await;
         map.retain(|k, v| !v.deleted || actions.iter().any(|a| a.pod_key() == Some(k.as_str())));
     }
-    for (action, res) in execute(cri, actions).await {
+    let outcomes = execute(cri, actions).await;
+    for (action, res) in &outcomes {
         if let Err(e) = res {
             tracing::warn!(target: "init-pro", action = ?action, error = %e, "kubelet: CRI action failed");
         }
     }
+    // T4.14 (Q55): Failed events for errored actions (EnsureImage misses
+    // in host mode carry the stage/annotate remedies) + CreateContainer-
+    // ConfigError events for invalid host-mounts annotations.
+    sync::emit_action_error_events(
+        client,
+        &cfg.node_name,
+        &wanted,
+        &outcomes,
+        last_action_events,
+        &now_str(),
+    )
+    .await;
+    crate::host_mounts::emit_error_events(
+        client,
+        &cfg.node_name,
+        &wanted,
+        last_host_events,
+        &now_str(),
+    )
+    .await;
     // Env event pass (T4.7): POST upstream-parity CreateContainerConfigError
     // events for creates blocked by missing required ConfigMap/Secret refs
     // (deduped by pod/container+reason — one event per failure, not per cycle).

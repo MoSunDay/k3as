@@ -33,6 +33,9 @@ pub struct ContainerdConfigVars {
     pub default_runtime_name: String,
     /// Runtime type of the default runtime.
     pub runtime_type: String,
+    /// `[plugins."io.containerd.grpc.v1.cri".registry] config_path` — the
+    /// `certs.d` root (T8.1, Q40). `None` keeps the block out entirely.
+    pub registry_config_path: Option<PathBuf>,
 }
 
 impl ContainerdConfigVars {
@@ -59,7 +62,14 @@ impl ContainerdConfigVars {
             snapshotter: "overlayfs".to_string(),
             default_runtime_name: "runc".to_string(),
             runtime_type: "io.containerd.runc.v2".to_string(),
+            registry_config_path: Some(runtime_dir.join("certs.d")),
         }
+    }
+
+    /// The `certs.d` root paired with this config (derived from
+    /// [`Self::registry_config_path`]).
+    pub fn certs_dir(&self) -> Option<PathBuf> {
+        self.registry_config_path.clone()
     }
 }
 
@@ -108,7 +118,8 @@ pub fn render(v: &ContainerdConfigVars) -> String {
          \x20 snapshotter = {snap}\n\
          \x20 default_runtime_name = {drn}\n\
          \x20 [{cri}.containerd.runtimes.runc]\n\
-         \x20   runtime_type = {rt}\n",
+         \x20   runtime_type = {rt}\n\
+         {registry}",
         root = quote(&v.root.display().to_string()),
         state = quote(&v.state.display().to_string()),
         socket = quote(&v.socket.display().to_string()),
@@ -119,6 +130,46 @@ pub fn render(v: &ContainerdConfigVars) -> String {
         snap = quote(&v.snapshotter),
         drn = quote(&v.default_runtime_name),
         rt = quote(&v.runtime_type),
+        registry = registry_block(cri, v.registry_config_path.as_deref()),
+    )
+}
+
+/// The `[plugins."io.containerd.grpc.v1.cri".registry]` stanza, or empty
+/// when no `certs.d` root is configured (T8.1, Q40).
+fn registry_block(cri: &str, config_path: Option<&Path>) -> String {
+    match config_path {
+        Some(path) => format!(
+            "[{cri}.registry]\n\x20 config_path = {}\n",
+            quote(&path.display().to_string())
+        ),
+        None => String::new(),
+    }
+}
+
+/// The `certs.d` directory name for a registry address: scheme-free and
+/// slash-free (`http://h:15000/` -> `h:15000`), containerd host-key form.
+pub fn registry_host_key(addr: &str) -> String {
+    addr.trim()
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .to_string()
+}
+
+/// Render a containerd `certs.d/<host>/hosts.toml` for one plain-HTTP
+/// registry host (T8.1, Q38+Q40): the host is used as-is when it already
+/// carries a scheme, else `http://` is assumed (no auth/TLS in v1).
+pub fn render_hosts_toml(host: &str) -> String {
+    let host = host.trim().trim_end_matches('/');
+    let server = if host.contains("://") {
+        host.to_string()
+    } else {
+        format!("http://{host}")
+    };
+    format!(
+        "server = {server_quoted}\n\n         [host.{server_quoted}]\n\
+         \x20 capabilities = [\"pull\", \"resolve\", \"push\"]\n",
+        server_quoted = quote(&server),
     )
 }
 
@@ -196,5 +247,50 @@ mod tests {
     fn quote_escapes_toml_specials_and_drops_controls() {
         assert_eq!(quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
         assert_eq!(quote("x\u{1}y"), "\"xy\"");
+    }
+
+    #[test]
+    fn render_emits_registry_config_path() {
+        let v = vars();
+        let doc: toml::Value = render(&v).parse().expect("rendered config parses");
+        assert_eq!(
+            doc["plugins"]["io.containerd.grpc.v1.cri"]["registry"]["config_path"].as_str(),
+            Some("/dd/agent/containerd/certs.d")
+        );
+    }
+
+    #[test]
+    fn render_omits_registry_block_when_disabled() {
+        let mut v = vars();
+        v.registry_config_path = None;
+        let text = render(&v);
+        assert!(!text.contains(".registry]"));
+        let doc: toml::Value = text.parse().expect("rendered config parses");
+        assert!(doc["plugins"]["io.containerd.grpc.v1.cri"]
+            .get("registry")
+            .is_none());
+    }
+
+    #[test]
+    fn hosts_toml_is_plain_http_and_push_capable() {
+        let text = render_hosts_toml("192.168.31.57:15000");
+        let doc: toml::Value = text.parse().expect("hosts.toml parses");
+        assert_eq!(doc["server"].as_str(), Some("http://192.168.31.57:15000"));
+        let host = &doc["host"]["http://192.168.31.57:15000"];
+        let caps: Vec<&str> = host["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(caps, vec!["pull", "resolve", "push"]);
+    }
+
+    #[test]
+    fn hosts_toml_keeps_an_explicit_scheme() {
+        assert!(render_hosts_toml("https://r.example:443")
+            .contains("server = \"https://r.example:443\""));
+        assert_eq!(registry_host_key("http://h:1/"), "h:1");
+        assert_eq!(registry_host_key(" h:2 "), "h:2");
     }
 }

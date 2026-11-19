@@ -75,10 +75,10 @@ If M1 fails, Q4 is re-evaluated before Layers 1–4 are built on top.
 
 ## 5. Reading order
 
-1. **`index.md`** — the SSOT. All 33 TODOs, 7 fields each, status table, DAG.
-2. **`decisions.md`** — Q1–Q9 ADR-style rationale (Q1–Q5 strategic; Q6–Q9 T0.2/T0.4 implementation-level).
+1. **`index.md`** — the SSOT. All 51 TODOs, 7 fields each, status table, DAG.
+2. **`decisions.md`** — Q1–Q58 ADR-style rationale (Q1–Q5 strategic; the rest are per-layer implementation decisions recorded as each layer landed, e.g. Q56/Q57/Q58 for the Layer 8 delivery plane).
 3. **`template/TODO.md`** — the 7-field schema every TODO obeys.
-4. **`plan/00-foundation.md` … `plan/07-agent-scheduling.md`** — per-layer
+4. **`plan/00-foundation.md` … `plan/08-delivery.md`** — per-layer
    detail (TODO IDs strictly mirror `index.md`; maintain both in lock-step).
 5. **`plan/00-foundation-flag-matrix.md`** — the frozen k3s flag → init-pro v1
    behavior matrix (Q9 baseline for `init-pro server/agent --help`).

@@ -1,5 +1,7 @@
 //! `kubectl get|apply|delete` for `argoproj.io/v1alpha1` (T7.3 Scope A,
-//! **Q30**) and the first-class `init-pro.io/v1` `Agent` (T7.1, **Q35**).
+//! **Q30**) and the first-class `init-pro.io/v1` kinds — `Agent` (T7.1,
+//! **Q35**), `TrafficSplit` (T8.2, **Q57**), `ServicePipeline` + `Build`
+//! (T8.3, **Q56**).
 //!
 //! Three layers, mirroring `rollout.rs`:
 //! - pure helpers ([`resolve_target`], [`resolve_plural`],
@@ -16,8 +18,14 @@ use serde_json::Value;
 
 use crate::http::HttpClient;
 
-/// Group/version for the built-in `Agent` resource (T7.1, **Q35**).
-pub(crate) const AGENT_API_VERSION: &str = "init-pro.io/v1";
+/// Group/version for every built-in `init-pro.io/v1` kind: `Agent` (T7.1,
+/// **Q35**), `TrafficSplit` (T8.2, **Q57**), `ServicePipeline`/`Build`
+/// (T8.3, **Q56**).
+pub(crate) const INITPRO_API_VERSION: &str = "init-pro.io/v1";
+/// Historical name of [`INITPRO_API_VERSION`] (`Agent` landed first, T7.1);
+/// kept as an alias so pre-T8.x readers/callers still compile.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const AGENT_API_VERSION: &str = INITPRO_API_VERSION;
 /// Group/version for the argo Workflow family (T7.3 Scope A, Q30).
 pub(crate) const ARGO_API_VERSION: &str = "argoproj.io/v1alpha1";
 /// SSA field manager identity (mirrors kubectl's `kubectl-client-side-apply`
@@ -28,11 +36,19 @@ const APPLY_CONTENT_TYPE: &str = "application/apply-patch+yaml";
 const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// Map a user-supplied kind/alias to its `(apiVersion, plural)` REST
-/// target — `Agent` lives in **our own** `init-pro.io/v1` group (T7.1,
-/// Q35), the Workflow family stays in `argoproj.io/v1alpha1` (T7.3, Q30).
+/// target — `Agent`, `TrafficSplit`, `ServicePipeline` and `Build` live in
+/// **our own** `init-pro.io/v1` group (T7.1/Q35, T8.2/Q57, T8.3/Q56), the
+/// Workflow family stays in `argoproj.io/v1alpha1` (T7.3, Q30).
 pub(crate) fn resolve_target(kind: &str) -> Result<(&'static str, &'static str), String> {
     match kind.to_ascii_lowercase().as_str() {
-        "agent" | "agents" | "ag" => Ok((AGENT_API_VERSION, "agents")),
+        "agent" | "agents" | "ag" => Ok((INITPRO_API_VERSION, "agents")),
+        // T8.2 (Q57): weighted traffic switching for the entry Service.
+        "trafficsplit" | "trafficsplits" | "ts" => Ok((INITPRO_API_VERSION, "trafficsplits")),
+        // T8.3 (Q56): per-service CI/CD config + its build records.
+        "servicepipeline" | "servicepipelines" | "sp" => {
+            Ok((INITPRO_API_VERSION, "servicepipelines"))
+        }
+        "build" | "builds" | "bld" => Ok((INITPRO_API_VERSION, "builds")),
         "workflow" | "workflows" | "wf" => Ok((ARGO_API_VERSION, "workflows")),
         "cronworkflow" | "cronworkflows" | "cwf" | "cronwf" => {
             Ok((ARGO_API_VERSION, "cronworkflows"))
@@ -41,8 +57,10 @@ pub(crate) fn resolve_target(kind: &str) -> Result<(&'static str, &'static str),
             "unsupported resource kind {other:?}: argoproj.io/v1alpha1 supports \
              workflow (aliases: workflows, wf) and cronworkflow \
              (aliases: cronworkflows, cwf, cronwf) in v1 (T7.3 Scope A); \
-             init-pro.io/v1 supports agent (aliases: agents, ag) in v1 \
-             (T7.1, Q35)"
+             init-pro.io/v1 supports agent (aliases: agents, ag), \
+             trafficsplit (aliases: trafficsplits, ts), \
+             servicepipeline (aliases: servicepipelines, sp) and \
+             build (aliases: builds, bld) in v1 (T7.1/Q35, T8.2/Q57, T8.3/Q56)"
         )),
     }
 }
@@ -235,7 +253,10 @@ pub(crate) fn manifest_target(obj: &Value) -> Result<ManifestTarget, String> {
     let kind = obj["kind"]
         .as_str()
         .filter(|k| !k.is_empty())
-        .ok_or("manifest must set .kind (Workflow or CronWorkflow)")?;
+        .ok_or(concat!(
+            "manifest must set .kind (Agent, TrafficSplit, ServicePipeline, Build, ",
+            "Workflow or CronWorkflow)"
+        ))?;
     let name = obj["metadata"]["name"]
         .as_str()
         .filter(|n| !n.is_empty())

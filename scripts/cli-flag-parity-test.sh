@@ -153,6 +153,19 @@ live_help "t-engine-agent" agent --container-engine
 # ---------------------------------------------------------------------------
 live_help "t413-agent" agent --builtin-image-quota --registry-addr
 
+# ---------------------------------------------------------------------------
+# T4.14 (Q55) live-help surface: the rootfs source selector is wired on
+# `agent` (host-rootfs default; image chain stays opt-in).
+# ---------------------------------------------------------------------------
+live_help "t414-agent" agent --builtin-rootfs
+
+# ---------------------------------------------------------------------------
+# T8.3 (Q56) live-help surface: the embedded CI/CD pipeline plane (default-on,
+# --disable-pipeline opt-out) is wired on `server` (the controller manager
+# lives there).
+# ---------------------------------------------------------------------------
+live_help "t83" server --disable-pipeline --pipeline-dir
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

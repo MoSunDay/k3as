@@ -92,6 +92,15 @@ CNI0_PREEXISTS=0
 ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
 FLANNEL1_PREEXISTS=0
 ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
+# S40c coexistence: flannel needs the host bridge cni0 at 10.42.0.1/24. A
+# foreign cni0 (live cluster with another CIDR) fails every RunPodSandbox,
+# so SKIP with one actionable line instead of a battery of false FAILs.
+if [[ "$CNI0_PREEXISTS" == "1" ]]; then
+  CNI0_IP="$(ip -4 addr show dev cni0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' | head -1 || true)"
+  if [[ -n "$CNI0_IP" && "${CNI0_IP%.*.*}" != "10.42" ]]; then
+    skip "host cni0 holds $CNI0_IP — stale CNI state from another cluster (ip link delete cni0 to recover)"
+  fi
+fi
 
 cleanup() {
   trap - EXIT INT TERM

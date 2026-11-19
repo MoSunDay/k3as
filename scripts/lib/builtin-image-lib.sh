@@ -17,6 +17,14 @@ pick_port() {
   python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
 }
 
+# --- T4.14 (Q55): rootfs mode of the booted agent ---------------------------
+# Historical default here is the IMAGE chain (I-series); host-rootfs scripts
+# (builtin-hostroot-e2e.sh) set BIMG_ROOTFS_MODE=host BEFORE calling
+# boot_cluster/restart_agent to boot on the new host default (no flag).
+bimg_rootfs_args() {
+  [[ "${BIMG_ROOTFS_MODE:-image}" == "host" ]] || printf '%s ' --builtin-rootfs image
+}
+
 # --- cluster lifecycle -----------------------------------------------------
 bimg_init_traps() { # install the EXIT/HUP/INT/TERM teardown (uses DD, PIDs)
   bimg_cleanup() {
@@ -33,6 +41,7 @@ bimg_init_traps() { # install the EXIT/HUP/INT/TERM teardown (uses DD, PIDs)
 }
 
 boot_cluster() { # server (embedded registry) + builtin agent; sets SRV_PID/AGENT_PID
+  KUBELET_PORT="${KUBELET_PORT:-$(pick_port)}"
   "$BIN" server --data-dir "$DD/srv" --bind-address 127.0.0.1 \
     --https-listen-port "$API_PORT" \
     --registry-addr "127.0.0.1:${REG_PORT}" >"$SRV_LOG" 2>&1 &
@@ -48,8 +57,8 @@ boot_cluster() { # server (embedded registry) + builtin agent; sets SRV_PID/AGEN
   [[ "$(curl -s -o /dev/null -w '%{http_code}' "$REG/v2/")" == "200" ]] \
     || bimg_fail "embedded registry never answered at $REG"
   "$BIN" agent --data-dir "$DD/agent" --token dev --server "$BASE" \
-    --node-name "$NODE" --container-engine builtin \
-    --registry-addr "127.0.0.1:${REG_PORT}" >"$AGENT_LOG" 2>&1 &
+    --node-name "$NODE" --container-engine builtin --kubelet-port "$KUBELET_PORT" \
+    --registry-addr "127.0.0.1:${REG_PORT}" $(bimg_rootfs_args)>"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
   for _ in $(seq 1 300); do
     grep -q "kubelet started (T4.12 built-in engine)" "$AGENT_LOG" && break; sleep 0.1
@@ -266,8 +275,8 @@ restart_agent() { # EXTRA_ARGS... : stop the agent, relaunch on the SAME
   AGENT_RESTARTS=$(( ${AGENT_RESTARTS:-0} + 1 ))
   AGENT_LOG="$DD/agent${AGENT_RESTARTS}.log"
   "$BIN" agent --data-dir "$DD/agent" --token dev --server "$BASE" \
-    --node-name "$NODE" --container-engine builtin \
-    --registry-addr "127.0.0.1:${REG_PORT}" "$@" >"$AGENT_LOG" 2>&1 &
+    --node-name "$NODE" --container-engine builtin --kubelet-port "${KUBELET_PORT:-$(pick_port)}" \
+    --registry-addr "127.0.0.1:${REG_PORT}" $(bimg_rootfs_args)"$@" >"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
   for i in $(seq 1 300); do
     grep -q "kubelet started (T4.12 built-in engine)" "$AGENT_LOG" && break; sleep 0.1

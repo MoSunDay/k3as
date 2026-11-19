@@ -119,4 +119,19 @@ pub struct AgentCmd {
         value_name = "BYTES"
     )]
     pub builtin_image_quota: u64,
+
+    /// Rootfs source for the built-in engine (T4.14, Q55 — init-pro
+    /// extension): `host` (DEFAULT) treats the image reference as a host
+    /// directory (an absolute path, or a name staged under
+    /// `<data_dir>/engine/images/<name>`); `image` keeps the T4.13
+    /// registry-pull chain. Per-pod override: the `init-pro.io/rootfs`
+    /// annotation. env `INIT_PRO_BUILTIN_ROOTFS`.
+    #[arg(
+        long = "builtin-rootfs",
+        env = "INIT_PRO_BUILTIN_ROOTFS",
+        default_value = "host",
+        value_name = "MODE",
+        value_parser = ["host", "image"]
+    )]
+    pub builtin_rootfs: String,
 }

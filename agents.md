@@ -13,16 +13,18 @@ Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
 works). It has a first-class built-in Router - an openrusty (h2c gateway,
 Q32) programmable HTTP data plane with Ingress networking.k8s.io/v1 as
 the first-class ingress resource - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (17 crates).
+is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (21 crates).
 
 ## The SSOT (single source of truth)
 
-- `plans/init-pro/index.md` - the TODO status table (37 TODOs across 8
+- `plans/init-pro/index.md` - the TODO status table (51 TODOs across 9
   layers) + the critical-path DAG. Authoritative status of record.
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
-  IDs (`00-foundation.md` ... `07-agent-scheduling.md`); edit in lock-step
+  IDs (`00-foundation.md` ... `08-delivery.md`; Layer 4 is split
+  `04-node.md` T4.1-T4.10 + `04b-builtin-engine.md` T4.11-T4.14; Layer 8
+  is the delivery plane, `08-delivery.md` T8.1-T8.5); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q40
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q58
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -110,7 +112,11 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 | `kubectl` | kubectl-compatible client subset: HTTP transport + `rollout status` polling (T3.1b, Q21). |
 | `router` | Built-in Router riding openrusty (h2c gateway, Q32): Ingress networking.k8s.io/v1 -> route compiler, balancer, reverse proxy, hot reload (T5.1-T5.4 done; TLS = T5.5 not started). |
 | `storage` | `StorageBackend` trait + `EmbeddedStorage` + `RdbStorage` (RocksDB via the rdb crate; durable opt-in `rdb://`) incl. watch replay + compaction (T2.1/T2.2/T2.3, Q33). |
-| `registry` | Embedded Docker Registry HTTP API v2 image plane, default-on in `server`: global blob CAS + per-repo manifests/tags, newest-N tag retention with keep-forever patterns excluded (`--registry-addr` / `--disable-registry` / `--registry-tag-retention` / `--registry-keep-tag`, T6.3, Q40). |
+| `registry` | Embedded Docker Registry HTTP API v2 image plane, default-on in `server`: global blob CAS + per-repo manifests/tags, newest-N tag retention with keep-forever patterns excluded (`--registry-addr` / `--disable-registry` / `--registry-tag-retention` / `--registry-keep-tag`, T6.3, Q40); also hosts the V2 push client + `docker save` importer used by the delivery plane (T8.1). |
+| `nsrun` | The only `unsafe` island: clone3 + six namespaces (NEWNS/NEWPID/NEWUTS/NEWIPC/NEWCGROUP + mount/pivot_root), child credential/cap setup, parent start gate + waitpid (T4.11, Q48). |
+| `engine-proto` | Built-in engine frame protocol types: length-prefixed frames (`u32 LE len`, `u8 kind`, payload) + `ContainerSpec` (T4.11, Q48). |
+| `engine` | `nsrun`-based single-threaded container engine process (`engine serve` / `engine-run`): one container per process, socket per container, pause-sandbox mode (T4.11-T4.13, Q48/Q49). |
+| `engine-client` | Probe/CLI wire client for the engine frame protocol (boot probe used by the builtin-backend selection, T4.12, Q51). |
 
 ## Critical path & current state
 
@@ -128,7 +134,18 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   (Argo Workflows, Q30; model/engine since extracted to the
   link_repos/arust-workflow reference, Q42), T7.4 (anyhome, Q36), and
   T7.5 (anyhome Pod-level annotation mounts, Q43). Phase 1 (M0 + M1) is
-  complete; 26/38 TODOs done.
+  complete; 37/51 TODOs done.
+- Delivery plane (Layer 8, T8.1-T8.4 done in Sprint 45, Q56/Q57): certs.d
+  plain-HTTP image trust (`hosts.toml`, T8.1) + registry V2 push client +
+  `docker save` importer; `TrafficSplit` (`ts`) weighted one-click switching
+  folded into the Router's NodePort plane (T8.2, Q57); `ServicePipeline`/
+  `Build` embedded CI/CD (default-on, `--disable-pipeline` /
+  `--pipeline-dir`, Q56) with full-object CAS status; and an in-process
+  pipeline e2e (real registry v2 + fake docker shim, T8.4). Next on this
+  layer: T8.5 canary release (DRAFT Q58 — API types since M1, controller
+  M3), plus the still-open T4.10 (kubelet volumes), T5.6 (SNI/TLS
+  remainder, blocked on T5.5) and the T4.3 remainder (host-gw/multi-node,
+  netpol = T4.4).
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -185,5 +202,14 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   materializes the 7 path-dep repos before compiling (CI + Dockerfile).
   Release posture: intranet h2c on openrusty `4180ad3`; TLS later = pin
   bump + forward adaptation in `gateway_config.rs` (P2-1, queued).
+- Q56 - T8.3: `ServicePipeline`/`Build` is the embedded CI/CD plane
+  (default-on, `--disable-pipeline`) - one immutable `Build` child per tag
+  transition, controller drives the host `docker` CLI and pushes through the
+  embedded registry (Q40); status is full-object CAS (Q10).
+- Q57 - T8.2: `TrafficSplit` (`ts`) is the weighted-switching primitive - the
+  Router folds splits into per-endpoint openrusty weights (scaled by 100,
+  deterministic remainder, zero-weight backends dropped), no service mesh.
+- Q58 - T8.5 canary release (DRAFT, M3 not started): pipeline-owned canary
+  Deployment/Service + stepped TrafficSplit weights; API types exist since M1.
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q40).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q58).

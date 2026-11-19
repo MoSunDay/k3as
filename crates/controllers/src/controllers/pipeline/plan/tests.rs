@@ -1,0 +1,167 @@
+//! Pure-decision tests for the pipeline controller (TODO **T8.3**, Q56).
+//!
+//! Child module of [`super`] (`plan`), so every helper is reachable through
+//! the `super::*` glob without widening its visibility.
+
+use std::time::Duration;
+
+use super::*;
+
+fn context_build() -> Value {
+    json!({
+        "spec": {
+            "image": {"repository": "reg:5000/team/app", "tag": "b1"},
+            "source": {"context": "/src/app/", "dockerfile": "Dockerfile.prod"},
+            "args": ["A=1", "", "B=2"],
+            "timeoutSeconds": 42,
+        }
+    })
+}
+
+#[test]
+fn join_logs_and_blank_detection() {
+    assert_eq!(join_logs("", "b"), "b");
+    assert_eq!(join_logs("a", ""), "a");
+    assert_eq!(join_logs("a", "b"), "a\nb");
+    assert!(blank(None));
+    assert!(blank(Some(&json!(""))));
+    assert!(!blank(Some(&json!("x"))));
+}
+
+#[test]
+fn timeout_prefers_the_spec_and_falls_back_to_the_config() {
+    assert_eq!(timeout_for(&context_build(), 900), Duration::from_secs(42));
+    assert_eq!(timeout_for(&json!({}), 900), Duration::from_secs(900));
+    assert_eq!(
+        timeout_for(&json!({"spec": {"timeoutSeconds": 0}}), 900),
+        Duration::from_secs(900)
+    );
+}
+
+#[test]
+fn dockerfile_argument_defaults_and_stays_absolute_when_given() {
+    let mut build = context_build();
+    build["spec"]["source"]["dockerfile"] = json!("");
+    assert_eq!(dockerfile_arg(&build), None);
+    build["spec"]["source"]["dockerfile"] = json!("docker/Dev.Dockerfile");
+    assert_eq!(
+        dockerfile_arg(&build),
+        Some("/src/app/docker/Dev.Dockerfile".into())
+    );
+    build["spec"]["source"]["dockerfile"] = json!("/abs/Dockerfile");
+    assert_eq!(dockerfile_arg(&build), Some("/abs/Dockerfile".into()));
+}
+
+#[test]
+fn build_args_render_the_docker_build_invocation() {
+    let args = build_args(&context_build(), "reg:5000/team/app:b1");
+    assert_eq!(
+        args,
+        vec![
+            "build",
+            "-f",
+            "/src/app/Dockerfile.prod",
+            "-t",
+            "reg:5000/team/app:b1",
+            "--build-arg",
+            "A=1",
+            "--build-arg",
+            "B=2",
+            "/src/app/",
+        ]
+    );
+}
+
+#[test]
+fn build_names_are_dns_safe_and_bounded() {
+    assert_eq!(
+        build_name_with("code-grapher", "Build_42/v2", "ab12c"),
+        "code-grapher-build-42-v2-ab12c"
+    );
+    // Slugs collapse runs, trim ends, and fall back on empty input.
+    assert_eq!(build_name_with("a__b", "", "x"), "a-b-build-x");
+    let long = "p".repeat(80);
+    assert_eq!(
+        build_name_with(&long, "t", "x"),
+        format!("{}-t-x", "p".repeat(40))
+    );
+    assert!(build_name_with("", "", "x").starts_with("pipeline-build-"));
+}
+
+#[test]
+fn container_image_patch_selects_by_name_then_first() {
+    let mut dep = json!({"spec": {"template": {"spec": {"containers": [
+        {"name": "app", "image": "old:1"},
+        {"name": "sidecar", "image": "side:1"},
+    ]}}}});
+    assert!(set_container_image(&mut dep, "sidecar", "new:2"));
+    assert_eq!(
+        dep["spec"]["template"]["spec"]["containers"][1]["image"],
+        json!("new:2")
+    );
+    assert_eq!(
+        dep["spec"]["template"]["spec"]["containers"][0]["image"],
+        json!("old:1")
+    );
+    // Empty container name picks the first container.
+    assert!(set_container_image(&mut dep, "", "first:3"));
+    assert_eq!(
+        dep["spec"]["template"]["spec"]["containers"][0]["image"],
+        json!("first:3")
+    );
+    // Unknown container / missing template are reported, not panicked.
+    assert!(!set_container_image(&mut dep, "ghost", "x:1"));
+    assert!(!set_container_image(&mut json!({"spec": {}}), "", "x:1"));
+}
+
+#[test]
+fn owned_build_needs_the_pipeline_controller_owner() {
+    let owner = |kind: &str, ns_name: &str, uid: &str| {
+        json!({"metadata": {"ownerReferences": [
+            {"kind": kind, "name": ns_name, "uid": uid, "controller": true},
+        ]}})
+    };
+    assert!(owned_build(&owner("ServicePipeline", "p", "u1"), "p", "u1"));
+    // uid only compared when BOTH sides carry one.
+    assert!(owned_build(&owner("ServicePipeline", "p", ""), "p", "u1"));
+    assert!(owned_build(&owner("ServicePipeline", "p", "u1"), "p", ""));
+    assert!(!owned_build(
+        &owner("ServicePipeline", "p", "u2"),
+        "p",
+        "u1"
+    ));
+    // Foreign owner kinds / names / non-controlled objects never match.
+    assert!(!owned_build(&owner("Build", "p", "u1"), "p", "u1"));
+    assert!(!owned_build(
+        &owner("ServicePipeline", "other", "u1"),
+        "p",
+        "u1"
+    ));
+    assert!(!owned_build(&json!({"metadata": {}}), "p", "u1"));
+}
+
+#[test]
+fn latest_build_orders_by_creation_timestamp_then_name() {
+    let a = json!({"metadata": {"name": "a", "creationTimestamp": "2026-01-01T00:00:00Z"}});
+    let b = json!({"metadata": {"name": "b", "creationTimestamp": "2026-01-02T00:00:00Z"}});
+    let c = json!({"metadata": {"name": "c"}});
+    let owned = vec![&a, &b, &c];
+    assert_eq!(name(latest_build(&owned).unwrap()), Some("b"));
+    // Without timestamps the name breaks the tie.
+    let d = json!({"metadata": {"name": "d"}});
+    let owned = vec![&c, &d];
+    assert_eq!(name(latest_build(&owned).unwrap()), Some("d"));
+    assert!(latest_build(&[]).is_none());
+}
+
+#[test]
+fn phases_mirror_and_terminate() {
+    let publishing = json!({"status": {"phase": "Publishing"}});
+    let building = json!({"status": {"phase": "Pending"}});
+    assert_eq!(active_phase(&publishing), api::pipeline::PHASE_PUBLISHING);
+    assert_eq!(active_phase(&building), api::pipeline::PHASE_BUILDING);
+    assert!(!is_terminal(&publishing));
+    assert!(!is_terminal(&json!({})));
+    assert!(is_terminal(&json!({"status": {"phase": "Succeeded"}})));
+    assert!(is_terminal(&json!({"status": {"phase": "Failed"}})));
+}

@@ -113,15 +113,20 @@ async fn wait_listen(addr: SocketAddr) {
 /// Poll until the GET response satisfies `f` (eventual consistency window).
 async fn wait_http(addr: SocketAddr, f: impl Fn(&(String, String)) -> bool) -> (String, String) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut last;
     loop {
-        if let Ok(r) = http_get(addr).await {
-            if f(&r) {
-                return r;
+        match http_get(addr).await {
+            Ok(r) => {
+                if f(&r) {
+                    return r;
+                }
+                last = format!("{} | {}", r.0, r.1);
             }
+            Err(e) => last = format!("<connect/proxy error: {e}>"),
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "nodePort never served: {addr}"
+            "nodePort never served {addr}; last: {last}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -144,6 +149,7 @@ async fn wait_closed(addr: SocketAddr) {
 
 struct Plane {
     store: Arc<dyn StorageBackend>,
+    resolver: router::EndpointsResolver,
     shutdown: Shutdown,
     plane: router::NodePortPlane,
     reflectors: Vec<JoinHandle<()>>,
@@ -158,9 +164,10 @@ async fn boot(node_port_bind: std::net::IpAddr) -> Plane {
         addr: node_port_bind,
         ingress_listen: None,
     };
-    let plane = router::spawn_nodeport_plane(resolver, cfg, shutdown.clone());
+    let plane = router::spawn_nodeport_plane(resolver.clone(), cfg, shutdown.clone());
     Plane {
         store,
+        resolver,
         shutdown,
         plane,
         reflectors,
@@ -255,6 +262,92 @@ async fn endpoints_update_switches_backends_live() {
     teardown(p).await;
     a_h.abort();
     b_h.abort();
+}
+
+/// T8.2 (Q57): a TrafficSplit on the entry Service switches traffic by
+/// weight, weight-only edits hot-reload, and an all-zero split 503s.
+#[tokio::test]
+async fn traffic_split_switches_weighted_backends() {
+    let (stable, stable_h) = spawn_echo("stable-v1").await;
+    let (canary, canary_h) = spawn_echo("canary-v2").await;
+    let p = boot(std::net::Ipv4Addr::LOCALHOST.into()).await;
+    // Entry Service: NodePort, selector-less (the Router owns traffic).
+    let entry = Key::new("", "services", "default", "app");
+    p.store
+        .create(&entry, service_doc("app", 31010, 8080))
+        .await
+        .unwrap();
+    for (name, backend) in [("app-stable", stable), ("app-canary", canary)] {
+        let svc = Key::new("", "services", "default", name);
+        let ep = Key::new("", "endpoints", "default", name);
+        p.store
+            .create(&svc, service_doc(name, 0, backend.port()))
+            .await
+            .unwrap();
+        // A NodePort of 0 is not allocated; strip it to keep the entry-only
+        // listener set clean.
+        let mut doc = service_doc(name, 0, backend.port());
+        doc["spec"]["type"] = json!("ClusterIP");
+        doc["spec"]["ports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("nodePort");
+        p.store.update(&svc, doc, None).await.unwrap();
+        p.store
+            .create(&ep, endpoints_doc(name, backend))
+            .await
+            .unwrap();
+    }
+    let split_key = Key::new("init-pro.io", "trafficsplits", "default", "app");
+    let split = |stable_w: i64, canary_w: i64| {
+        json!({
+            "apiVersion": "init-pro.io/v1",
+            "kind": "TrafficSplit",
+            "metadata": {"name": "app", "namespace": "default"},
+            "spec": {"service": "app", "backends": [
+                {"service": "app-stable", "weight": stable_w},
+                {"service": "app-canary", "weight": canary_w}
+            ]}
+        })
+    };
+    p.store.create(&split_key, split(100, 0)).await.unwrap();
+
+    let addr = SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 31010);
+    wait_listen(addr).await;
+    for _ in 0..100 {
+        let st = p.resolver.snapshot();
+        if st.splits.contains_key("default/app") && !st.endpoints.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let st = p.resolver.snapshot();
+    assert!(
+        st.splits.contains_key("default/app"),
+        "split not folded: {:?}",
+        st.splits.keys().collect::<Vec<_>>()
+    );
+    assert!(!st.endpoints.is_empty(), "endpoints not folded");
+    let (_, body) = wait_http(addr, |(_, b)| b.contains("stable-v1")).await;
+    assert_eq!(body, "stable-v1");
+
+    // Weight-only edit: 0/100 -> canary only.
+    p.store
+        .update(&split_key, split(0, 100), None)
+        .await
+        .unwrap();
+    let (_, body) = wait_http(addr, |(_, b)| b.contains("canary-v2")).await;
+    assert_eq!(body, "canary-v2");
+
+    // All zeros: every backend disabled -> the Q28 503.
+    p.store.update(&split_key, split(0, 0), None).await.unwrap();
+    let (status, body) = wait_http(addr, |(s, _)| s.contains("503")).await;
+    assert_eq!(body, "no upstream peers available");
+    assert!(status.contains("503"), "status line: {status}");
+
+    teardown(p).await;
+    stable_h.abort();
+    canary_h.abort();
 }
 
 /// Deleting the Service retires the nodePort listener.

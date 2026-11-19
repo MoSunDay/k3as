@@ -12,6 +12,9 @@
 //! * [`controllers`] -- ReplicaSet / Deployment / Endpoints / StatefulSet
 //!   / DaemonSet reconcilers (T3.1a + T3.1b, done Sprint 14; incl. GC +
 //!   namespace lifecycle, decision Q20);
+//! * [`controllers::pipeline`] -- the M2 CI/CD pipeline controller
+//!   (T8.3, decision **Q56**): `ServicePipeline` -> `Build` -> registry
+//!   push -> Deployment image promotion; [`PipelineConfig`] turns it on;
 //! * [`runner`] -- [`ControllerManager`] wiring the whole set together
 //!   (leadership supervisor); its informer fan-out table lives in
 //!   [`runner_wiring`] and the worker loop + per-kind dispatch in
@@ -41,6 +44,7 @@ pub mod workqueue;
 
 pub use client::{Client, StorageClient};
 pub use controllers::node_cidr;
+pub use controllers::pipeline::PipelineConfig;
 pub use controllers::Caches;
 pub use error::ControllerError;
 pub use informer::{EventHandler, Informer, ObjectStore};

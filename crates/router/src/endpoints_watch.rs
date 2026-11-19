@@ -51,8 +51,16 @@ pub fn supervise(
         store.clone(),
         Resource::Endpoints,
         endpoints_prefix(),
+        state.clone(),
+        tx.clone(),
+        shutdown.clone(),
+    ));
+    // T8.2 (Q57): a fourth reflector folds TrafficSplit objects into the
+    // same resolver state; the NodePort plane re-plans weighted peers.
+    let splits = tokio::spawn(crate::traffic_watch::watch_splits(
+        store.clone(),
         state,
-        tx,
+        tx.clone(),
         shutdown.clone(),
     ));
     // Q32: a third reflector folds Ingress objects for the gateway.
@@ -68,7 +76,7 @@ pub fn supervise(
             rx,
             ingresses: ing_rx,
         },
-        vec![services, endpoints, ingresses],
+        vec![services, endpoints, splits, ingresses],
     )
 }
 

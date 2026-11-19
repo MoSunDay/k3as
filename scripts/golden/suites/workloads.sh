@@ -37,6 +37,10 @@ if [[ -z "$WL_VENDOR_BIN" ]]; then
   echo "SKIP G60-G66 real-workload behavior (no vendored containerd; build with INIT_PRO_VENDOR=1)"
 elif ! command -v cc >/dev/null 2>&1; then
   echo "SKIP G60-G66 real-workload behavior (no cc for the airgap images, Q27)"
+elif [[ "${CNI0_STALE:-0}" -eq 1 ]]; then
+  # S40c coexistence policy (nodes.sh): real sandboxes cannot pass CNI setup
+  # behind a foreign cni0 — one actionable SKIP, not a battery of false FAILs.
+  echo "SKIP G60-G66 real-workload behavior (host cni0 holds ${CNI0_IP:-?} — stale CNI state from another cluster; ip link delete cni0 to recover)"
 else
   WLTMP="$(mktemp -d)"; WLSRV="$(mktemp)"; WLAG="$(mktemp)"
   WL_PORT="$(pick_port)"

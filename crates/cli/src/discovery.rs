@@ -12,7 +12,8 @@
 //! module hands T1.2 a byte-correct registry today and is exercised at startup.
 
 use api::{
-    agent, api_group_list, argoproj, core_api_versions, initpro, networking, SchemaRegistry,
+    agent, api_group_list, argoproj, build, core_api_versions, initpro, networking, pipeline,
+    traffic, SchemaRegistry,
 };
 
 /// The served schema registry: core/v1 + apps/v1 + coordination.k8s.io/v1
@@ -47,6 +48,14 @@ pub fn served_schema() -> SchemaRegistry {
     // init-pro.io/v1 Agent (TODO **A3**, Q35): a schedulable opencoder session,
     // served through the same generic CRUD/watch routes as any CRD.
     agent::register(&mut reg);
+    // T8.2 (Q57): TrafficSplit — weighted traffic switching for the
+    // NodePort entry Service; reflected by the Router's split reflector.
+    traffic::register(&mut reg);
+    // T8.3 (Q56): ServicePipeline + Build — the in-process CI/CD controller
+    // builds, publishes to the embedded registry, and patches the target
+    // Deployment image.
+    pipeline::register(&mut reg);
+    build::register(&mut reg);
     // networking.k8s.io/v1 (Q32): Ingress + IngressClass feed the built-in
     // openrusty gateway (generic CRUD/watch routes; the gateway reflects
     // the same objects through its storage watchers).

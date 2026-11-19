@@ -1,8 +1,11 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 45 TODOs. The
+This file is the **single source of truth** for all 51 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
-grouping for easier editing). **Edit both in lock-step.**
+grouping for easier editing). **Edit both in lock-step.** Layer 4 is split
+across `plan/04-node.md` (T4.1-T4.10) + `plan/04b-builtin-engine.md`
+(T4.11-T4.14, split at T4.14 for the file-size limit); the delivery plane
+is `plan/08-delivery.md` (T8.1-T8.5, M1-M3).
 
 Legend & rules: see `README.md` §6 and `template/TODO.md`.
 
@@ -39,7 +42,8 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
 | T4.11 | 4 | 内置容器引擎内核 P1: clone3/namespace + 单线程 engine + 帧协议 (无 runc/containerd, Q48) | done (P1 kernel+protocol; `engine-run`/`engine serve`) | T4.1 |
 | T4.12 | 4 | 内置引擎 kubelet 接线 P2: `EngineBackend`/exec + `--container-engine=builtin` 真实选择 (Q49 进程池 + Q50 日志/exec 流 + Q51 探针回退) | done (Sprint 41; host-rootfs Pod 生命周期闭环, 镜像/CNI 留 T4.13) | T4.11, T4.2 |
-| T4.13 | 4 | 内置引擎镜像存储 + Pod 网络面 P3 (网络面 = host netns 共享 Q52; 镜像存储 = registry-v2 拉取 + 共享层解包 + per-container overlayfs Q53/Q54) | done (Sprint 42 网络面 Q52; Sprint 43 镜像存储 M1-M5) | T4.12, T4.3, T6.3 |
+| T4.13 | 4 | 内置引擎镜像存储 + Pod 网络面 P3 (网络面 = host netns 共享 Q52; 镜像存储 = registry-v2 拉取 + 共享层解包 + per-container overlayfs Q53/Q54) | done (Sprint 42 网络面 Q52; Sprint 43 镜像存储 M1-M5; Q55 后镜像链降为 host 引擎下注解 opt-in, 代码保留) | T4.12, T4.3, T6.3 |
+| T4.14 | 4 | 内置引擎宿主根文件系统 (host-rootfs 默认 `--builtin-rootfs host\|image` + `init-pro.io/host-mounts`/`init-pro.io/rootfs` 注解, Q55) | done (Sprint 44, Q55) | T4.13 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
@@ -55,13 +59,18 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置; engine+model 抽取为 link_repos/arust-workflow pin, Q42) | done (Scope A+B+C, Sprint 23; Q42 抽取 Sprint 36) | T1.2, T3.1 |
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
+| T8.1 | 8 | 镜像交付信任 + registry push client (M1; certs.d 明文 HTTP 渲染 + docker save 导入, Q38/Q40) | done (Sprint 45) | T6.3, T4.1 |
+| T8.2 | 8 | TrafficSplit 加权一键切流 (init-pro.io/v1, 短名 ts, Q57) | done (Sprint 45, Q57) | T5.4, T1.1 |
+| T8.3 | 8 | ServicePipeline/Build 内嵌 CI/CD 控制器 (M2 core, Q56) | done (Sprint 45, Q56) | T8.1, T6.3, T1.2, T3.1 |
+| T8.4 | 8 | pipeline 面收尾: CLI flags + 进程内 e2e (M2, Q56) | done (Sprint 45, Q56) | T8.3 |
+| T8.5 | 8 | canary 发布控制器 (M3, Q58) | not-started | T8.2, T8.3, T8.4 |
 
-**Counts:** 45 TODOs · 32 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 51 TODOs · 37 done · 2 in-progress (T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
-· 11 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
-Layer4=13 · Layer5=7 · Layer6=3 · Layer7=5.
+· 12 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+Layer4=14 · Layer5=7 · Layer6=3 · Layer7=5 · Layer8=5.
 
 ---
 
@@ -76,7 +85,9 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
       ├─> T7.3 <─ T3.1 <─ T1.2      │   (argo-workflows first-class)
       └─> T4.6 (off T4.2: log date dirs + 100MB copytruncate, Q39)
       └─> T6.3 (off T0.3: embedded registry v2 image plane, Q40)
-      └─> T4.11 (off T4.1: built-in engine P1, Q48) ─> T4.12 ─> T4.13
+      └─> T4.11 (off T4.1: built-in engine P1, Q48) ─> T4.12 ─> T4.13 ─> T4.14
+      └─> T6.3 ─> T8.1 ─> T8.3 ─> T8.4; T5.4 ─> T8.2 ─> T8.5 (Layer 8 delivery
+                plane, T8.3/T8.4 also feed T8.5)
       └─> T0.6 (golden gate,        │
                 every TODO must     T1.1 ─┬─> T1.3
                 keep it green)      T2.3 <─┘
@@ -236,4 +247,4 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
 Each TODO carries 7 fields: **目标 / 核心实现 / 验收手段 / 状态 / 证据 / 卡点 / 依赖**.
 
 Full detail for every TODO lives in `plan/00-foundation.md` …
-`plan/07-agent-scheduling.md` (TODO IDs strictly mirror this file).
+`plan/08-delivery.md` (TODO IDs strictly mirror this file).

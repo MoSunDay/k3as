@@ -8,7 +8,9 @@
 //! per-layer dirs, and each container gets a per-container overlayfs
 //! view (or the whiteout-aware fused-copy fallback when the kernel path
 //! is unavailable). CNI stays never-by-design for builtin pods (Q52:
-//! host netns).
+//! host netns). Since T4.14 (Q55) HOST directories are the DEFAULT
+//! rootfs source: the Q53 pull chain is opt-in (`--builtin-rootfs image`
+//! or the pod annotation `init-pro.io/rootfs: image`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ use super::image::{ConfigBody, ImageStore, PulledImage};
 use super::launch;
 use super::pump::{self, Ctrl};
 use super::registry::{Entry, Pending, Proc, Registry};
+use super::rootfs::{self, RootfsMode};
 use super::spec;
 use engine_client::EngineClient;
 use runtime::{ContainerConfig, PodSandboxConfig};
@@ -36,6 +39,12 @@ const STATE_POLL: Duration = Duration::from_millis(100);
 pub struct EngineBackend {
     engine_dir: PathBuf,
     images_dir: PathBuf,
+    /// T4.14 (Q55): the CAS root `<data_dir>/engine/images` — also the
+    /// staging face for named host rootfs dirs.
+    images_root: PathBuf,
+    /// T4.14 (Q55): engine-level rootfs source; the pod annotation
+    /// `init-pro.io/rootfs` overrides per pod (see `mode_for`).
+    rootfs_mode: RootfsMode,
     sandbox_image: String,
     node_ip: String,
     /// T4.13 M2: the content-addressed image store under
@@ -128,6 +137,9 @@ impl EngineBackend {
         Ok(Self {
             engine_dir,
             images_dir,
+            images_root,
+            // T4.14 (Q55): host directories are the default rootfs source.
+            rootfs_mode: RootfsMode::Host,
             sandbox_image: sandbox_image.to_string(),
             node_ip: node_ip.to_string(),
             store,
@@ -143,6 +155,18 @@ impl EngineBackend {
     pub fn with_image_quota(mut self, bytes: u64) -> Self {
         self.puller = self.puller.with_quota(bytes);
         self
+    }
+
+    /// T4.14 (Q55): engine-level rootfs source from `--builtin-rootfs`.
+    pub fn with_rootfs_mode(mut self, mode: RootfsMode) -> Self {
+        self.rootfs_mode = mode;
+        self
+    }
+
+    /// T4.14 (Q55): the rootfs mode for one pod — the engine default,
+    /// overridden by the `init-pro.io/rootfs: host|image` annotation.
+    fn mode_for(&self, annotations: &BTreeMap<String, String>) -> Result<RootfsMode, String> {
+        rootfs::resolve_mode(self.rootfs_mode, annotations)
     }
 
     /// Restart hygiene (Q49): the agent's death killed the containers
@@ -196,16 +220,28 @@ impl EngineBackend {
         self.engine_dir.join(format!("{id}.sock"))
     }
 
-    /// Image rootfs resolution (T4.13): (1) an absolute host directory,
-    /// (2) a pulled CAS reference (by normalized ref, or by digest for
-    /// `repo@sha256:` spellings) whose shared layers exist — an overlayfs
-    /// view when the kernel path is available (Q53), else the cached
-    /// whiteout-aware fused merge, (3) a name staged under
-    /// `<data_dir>/images/`.
-    fn resolve(&self, image: &str, container_id: &str) -> Result<ResolvedRootfs, String> {
+    /// Image rootfs resolution (T4.14/Q55): host mode = (1) an absolute
+    /// host directory, (2) a name staged under `<data_dir>/engine/images/`
+    /// (legacy `<data_dir>/images/` kept as fallback) — else the
+    /// actionable missing-image error. Image mode keeps the T4.13 chain:
+    /// absolute dir, then the CAS ref (overlayfs view or fused merge),
+    /// then the legacy staging.
+    fn resolve(
+        &self,
+        image: &str,
+        container_id: &str,
+        mode: RootfsMode,
+    ) -> Result<ResolvedRootfs, String> {
         let direct = Path::new(image);
         if direct.is_absolute() && direct.is_dir() {
             return Ok(ResolvedRootfs::Dir(direct.to_path_buf()));
+        }
+        if mode == RootfsMode::Host {
+            // Q55: the mount table, not the CAS, is the rootfs source.
+            return match rootfs::staged_dir(&self.images_root, &self.images_dir, image) {
+                Some(dir) => Ok(ResolvedRootfs::Dir(dir)),
+                None => Err(rootfs::host_mode_missing_image(image, &self.images_root)),
+            };
         }
         if let Some(img) = self.cas_ref(image) {
             self.store.ensure_layers(&img)?;
@@ -236,11 +272,18 @@ impl EngineBackend {
 
     /// Presence-only check for `pull_image` (IfNotPresent semantics): no
     /// side effects, so nothing is created before the pull decision.
+    /// Host mode (Q55) counts ONLY host directories as present — a CAS
+    /// ref is not a host rootfs, so EnsureImage fails with the
+    /// stage-or-annotate remedies instead of silently blocking later.
     fn image_present(&self, image: &str) -> bool {
         let direct = Path::new(image);
-        (direct.is_absolute() && direct.is_dir())
-            || self.cas_ref(image).is_some()
-            || self.images_dir.join(image).is_dir()
+        if direct.is_absolute() && direct.is_dir() {
+            return true;
+        }
+        if self.rootfs_mode == RootfsMode::Host {
+            return rootfs::staged_dir(&self.images_root, &self.images_dir, image).is_some();
+        }
+        self.cas_ref(image).is_some() || self.images_dir.join(image).is_dir()
     }
 
     /// The CAS pull record for `image`, if one exists: exact normalized
@@ -346,6 +389,8 @@ impl CriBackend for EngineBackend {
                 }
             }
         }
+        // T4.14 (Q55): host-rootfs staging face under engine/images.
+        tags.extend(rootfs::staged_names(&self.images_root));
         // T4.13 M2: pulled CAS refs read as present so sync's IfNotPresent
         // short-circuits without a network round-trip.
         tags.extend(self.store.list_refs().into_iter().map(|r| r.reference));
@@ -359,6 +404,12 @@ impl CriBackend for EngineBackend {
         }
         if self.image_present(image) {
             return Ok(());
+        }
+        if self.rootfs_mode == RootfsMode::Host {
+            // T4.14 (Q55/R4): host-mode EnsureImage is a side-effect-free
+            // presence check — never a network pull. The error carries
+            // every remedy (stage a dir / absolute path / annotate).
+            return Err(rootfs::host_mode_missing_image(image, &self.images_root));
         }
         // T4.13 M2 (Q53/Q54): real registry-v2 pull into the CAS.
         self.puller.pull(image).await.map(|_| ())
@@ -495,7 +546,20 @@ impl CriBackend for EngineBackend {
             .registry
             .netns_of(&pending.sandbox_id)
             .ok_or_else(|| format!("sandbox {} is not ready", pending.sandbox_id))?;
-        let (rootfs, overlay, layer_dirs) = match self.resolve(&pending.ccfg.image.image, id)? {
+        // T4.14 (Q55): the pod annotation may flip this container onto the
+        // Q53 pull chain while the engine default stays host.
+        let mode = self.mode_for(&pending.pcfg.annotations)?;
+        let image = pending.ccfg.image.image.clone();
+        if mode == RootfsMode::Image
+            && self.rootfs_mode == RootfsMode::Host
+            && !self.image_present(&image)
+        {
+            // The annotation is an explicit opt-in to the pull chain:
+            // EnsureImage already failed (presence-only in host mode), so
+            // the create pulls once here and surfaces a pull error.
+            self.puller.pull(&image).await?;
+        }
+        let (rootfs, overlay, layer_dirs) = match self.resolve(&image, id, mode)? {
             ResolvedRootfs::Dir(dir) => (dir.clone(), None, vec![dir]),
             ResolvedRootfs::Overlay {
                 mountpoint,
@@ -520,7 +584,13 @@ impl CriBackend for EngineBackend {
         // T4.13 M4 (Q53): the image config is the launch source of truth —
         // entrypoint/cmd/env/user/workingDir merge under the CRI request
         // (explicit pod command overrides; pod env appends last-wins).
-        let img = self.image_config_body(&pending.ccfg.image.image)?;
+        // Host mode (Q55/R1): NO image config — the pod spec is the whole
+        // launch truth (an explicit command is required).
+        let img = if mode == RootfsMode::Image {
+            self.image_config_body(&image)?
+        } else {
+            None
+        };
         let resolve_named_user = named_user_lookup(&layer_dirs);
         let launch = spec::merge_launch(&pending.ccfg, img.as_ref(), Some(&resolve_named_user))?;
         let mut es = spec::container_spec(id, &rootfs, &pending, sandbox_netns, launch)?;

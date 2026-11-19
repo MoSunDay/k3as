@@ -138,12 +138,13 @@ mod tests {
         let listener = bind(listen).await.unwrap();
         let bound = listener.local_addr().unwrap();
         let up = UpstreamRef::port("default/web", 80);
-        let cfg = crate::gateway_config::nodeport_config(bound, &up, &[peer]);
+        let cfg =
+            crate::gateway_config::nodeport_config(bound, &up, &crate::split::uniform(vec![peer]));
         let app = openrusty_server::state::from_config(cfg, std::path::PathBuf::from("probe"))
             .expect("bootstrap");
         let gated = GatedRouter::new(
             openrusty_server::app::router(app),
-            GateRoute::Fixed(up),
+            GateRoute::fixed(up),
             resolver,
         );
         let shutdown = Shutdown::new();

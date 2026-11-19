@@ -594,11 +594,15 @@ checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
 name = "controllers"
 version = "0.2.0"
 dependencies = [
+ "api",
  "async-trait",
+ "axum",
  "common",
+ "registry",
  "serde",
  "serde_json",
  "storage",
+ "tar",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -3162,14 +3166,17 @@ name = "registry"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "flate2",
  "infra",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "zstd",
 ]
 
 [[package]]

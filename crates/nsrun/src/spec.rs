@@ -313,6 +313,33 @@ mod tests {
     }
 
     #[test]
+    fn readonly_mounts_and_nonroot_uid_validate_independently() {
+        // Q55: visibility is the mount table, write is uid/gid + caps — the
+        // two axes are orthogonal, so readonly binds must not constrain the
+        // credential fields and vice versa.
+        let mut s = spec();
+        s.uid = 1000;
+        s.gid = 1000;
+        s.mounts.push(BindMount::new("/data", "/data").readonly());
+        assert!(s.validate().is_ok());
+        // Readonly mount with root credentials is equally fine (host-rootfs
+        // inspection mounts, T4.14).
+        let mut root = spec();
+        root.mounts
+            .push(BindMount::new("/data", "/data").readonly());
+        assert!(root.validate().is_ok());
+        // Pause sandbox keeps its uid!=0 lock (Q49) regardless of mounts.
+        let mut paused = RunSpec::new("/tmp/rootfs", vec!["/pause".into()]);
+        paused.pause = true;
+        paused
+            .mounts
+            .push(BindMount::new("/data", "/data").readonly());
+        assert!(paused.validate().is_ok());
+        paused.uid = 1000;
+        assert!(paused.validate().is_err());
+    }
+
+    #[test]
     fn rejects_bad_cgroup_names() {
         let mut s = spec();
         s.cgroup_name = Some("../escape".into());

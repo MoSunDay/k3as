@@ -24,6 +24,10 @@ if [[ -z "$G24_VENDOR_BIN" ]]; then
   echo "SKIP G80-G82 ns-cascade drain (no vendored containerd)"
 elif ! command -v cc >/dev/null 2>&1; then
   echo "SKIP G80-G82 ns-cascade drain (no cc for the airgap pause image, Q27)"
+elif [[ "${CNI0_STALE:-0}" -eq 1 ]]; then
+  # S40c coexistence policy (nodes.sh): the drain must reach REAL containers,
+  # which cannot start behind a foreign cni0 — SKIP like G25, don't FAIL.
+  echo "SKIP G80-G82 ns-cascade drain (host cni0 holds ${CNI0_IP:-?} — stale CNI state from another cluster; ip link delete cni0 to recover)"
 else
   NSCTMP="$(mktemp -d)"; NSCSRV="$(mktemp)"; NSCAG="$(mktemp)"
   NSC_PORT="$(pick_port)"

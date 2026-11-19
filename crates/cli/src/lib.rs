@@ -138,34 +138,53 @@ where
             match format!("{}:{}", svc.bind_address, svc.https_listen_port)
                 .parse::<std::net::SocketAddr>()
             {
-                Ok(addr) => runtime::run_server(
-                    cfg,
-                    runtime::ServerBind {
-                        addr,
-                        disable_apiserver: svc.disable_apiserver,
-                        disable_controllers: svc.disable_controller_manager,
-                        disable_scheduler: svc.disable_scheduler,
-                        disable_kube_proxy: svc.disable_kube_proxy,
-                        // Q41: `--disable servicelb` (DisableItems whitelist, A4).
-                        disable_servicelb: svc.disable.iter().any(|d| d == "servicelb"),
-                        scheduler_args: svc.kube_scheduler_arg.clone(),
-                        datastore_endpoint: svc.datastore_endpoint.clone(),
-                        cluster_cidr: svc.cluster_cidr.clone(),
-                        // T-anyhome (Q36): None = --disable-anyhome.
-                        anyhome: crate::anyhome::anyhome_endpoint(
-                            svc.disable_anyhome,
-                            &svc.anyhome_addr,
-                        ),
-                        // T6.3 (Q40): None = --disable-registry.
-                        registry: (!svc.disable_registry).then(|| runtime::RegistryBind {
-                            addr: svc.registry_addr.clone(),
-                            cfg: registry::RegistryConfig {
-                                retain: svc.registry_tag_retention,
-                                keep_extra: svc.registry_keep_tag.clone(),
-                            },
-                        }),
-                    },
-                ),
+                Ok(addr) => {
+                    // T8.3 (Q56): the embedded CI/CD pipeline plane is
+                    // default-on (like anyhome/registry); `--disable-pipeline`
+                    // leaves it fully off (no workers, no enqueues). The
+                    // docker CLI comes from INIT_PRO_DOCKER (archive-mode
+                    // builds need no docker at all).
+                    let pipeline = (!svc.disable_pipeline).then(|| controllers::PipelineConfig {
+                        registry_addr: svc.registry_addr.clone(),
+                        scratch_dir: svc
+                            .pipeline_dir
+                            .clone()
+                            .unwrap_or_else(|| cfg.data_dir.join("pipeline")),
+                        docker_bin: std::env::var("INIT_PRO_DOCKER")
+                            .unwrap_or_else(|_| "docker".to_string()),
+                        default_timeout_seconds: 900,
+                    });
+                    runtime::run_server(
+                        cfg,
+                        runtime::ServerBind {
+                            addr,
+                            disable_apiserver: svc.disable_apiserver,
+                            disable_controllers: svc.disable_controller_manager,
+                            disable_scheduler: svc.disable_scheduler,
+                            disable_kube_proxy: svc.disable_kube_proxy,
+                            // Q41: `--disable servicelb` (DisableItems whitelist, A4).
+                            disable_servicelb: svc.disable.iter().any(|d| d == "servicelb"),
+                            scheduler_args: svc.kube_scheduler_arg.clone(),
+                            datastore_endpoint: svc.datastore_endpoint.clone(),
+                            cluster_cidr: svc.cluster_cidr.clone(),
+                            // T-anyhome (Q36): None = --disable-anyhome.
+                            anyhome: crate::anyhome::anyhome_endpoint(
+                                svc.disable_anyhome,
+                                &svc.anyhome_addr,
+                            ),
+                            // T6.3 (Q40): None = --disable-registry.
+                            registry: (!svc.disable_registry).then(|| runtime::RegistryBind {
+                                addr: svc.registry_addr.clone(),
+                                cfg: registry::RegistryConfig {
+                                    retain: svc.registry_tag_retention,
+                                    keep_extra: svc.registry_keep_tag.clone(),
+                                },
+                            }),
+                            // T8.3 (Q56): None = --disable-pipeline.
+                            pipeline,
+                        },
+                    )
+                }
                 Err(e) => {
                     eprintln!(
                         "init-pro server: invalid --bind-address/--https-listen-port ({}:{}): {e}",
@@ -203,6 +222,8 @@ where
                 ag.registry_addr.clone(),
                 // T4.13 M5 (Q53): soft builtin image-store quota (0 = off).
                 ag.builtin_image_quota,
+                // T4.14 (Q55): rootfs source for the built-in engine.
+                ag.builtin_rootfs,
             )
         }
         Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),
@@ -400,6 +421,29 @@ mod tests {
                 assert_eq!(s.registry_tag_retention, 3);
                 assert_eq!(s.registry_keep_tag, vec!["app:stable*".to_string()]);
                 assert!(s.disable_registry);
+            }
+            _ => panic!("expected Server"),
+        }
+    }
+
+    /// T8.3 (Q56): `--pipeline-dir`/`--disable-pipeline` are init-pro (not
+    /// k3s) flags, so they must NOT be in the T0.4 noop-strip table -- this
+    /// parse proves they survive `strip_noop` and reach clap end-to-end
+    /// (a registration mistake would silently drop them from argv).
+    #[test]
+    fn pipeline_flags_survive_noop_strip_and_parse() {
+        let cli = Cli::try_parse_from([
+            "init-pro",
+            "server",
+            "--pipeline-dir",
+            "/tmp/pl",
+            "--disable-pipeline",
+        ])
+        .expect("pipeline flags accepted");
+        match cli.command {
+            Some(Command::Server(s)) => {
+                assert_eq!(s.pipeline_dir, Some(std::path::PathBuf::from("/tmp/pl")));
+                assert!(s.disable_pipeline);
             }
             _ => panic!("expected Server"),
         }

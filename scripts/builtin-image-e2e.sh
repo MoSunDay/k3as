@@ -18,16 +18,18 @@
 #      fused-copy fallback when the kernel path is out).
 #   I4 no-command Pod (M4): image Entrypoint = busybox httpd serving /www
 #      — the image config is the launch source of truth. Asserts pod
-#      Running, `curl 127.0.0.1:18080` (Q52 host netns) returns the
-#      image's index.html, and `kubectl logs` shows the httpd request
-#      line (-v). Pod deleted afterwards (port freed).
+#      Running, `curl 127.0.0.1:$HTTPD_PORT` returns the image's
+#      index.html, `kubectl logs` shows the httpd request line (-v), and
+#      the port frees after pod delete. The port is DYNAMIC (Q52 host
+#      netns: any fixed port can collide with an unrelated host listener).
+#      Pod deleted afterwards (port freed).
 #   I5 image env vs pod env (M4): image Env IMG_ENV + Entrypoint echoing
 #      ENVPOD-UP; pod adds MERGED_FROM with NO command. Asserts logs
 #      show the marker and `kubectl exec ... env` sees BOTH vars
 #      (image env survived, pod env appended last-wins).
 #   I6 NodePort (M5, Q41/Q52): Pod img-svc (test/httpd:v1, containerPort
-#      18080) + Service (selector app=img-svc, port 80 -> targetPort
-#      18080); the router's nodePort plane must serve the pod through the
+#      $HTTPD_PORT) + Service (port 80 -> targetPort $HTTPD_PORT); the
+#      router's nodePort plane must serve the pod through the
 #      auto-allocated nodePort. Then the host-port conflict rule: a second
 #      pod on the same port never reaches Running (host-netns bind fails)
 #      while the first pod keeps serving.
@@ -79,6 +81,9 @@ bimg_init_traps
 
 API_PORT="$(pick_port)"
 REG_PORT="$(pick_port)"
+# Q52: builtin containers share the HOST netns, so the I4 httpd bind is
+# global — any fixed port may collide with an unrelated host listener.
+HTTPD_PORT="$(pick_port)"
 BASE="http://127.0.0.1:${API_PORT}"
 REG="http://127.0.0.1:${REG_PORT}"
 NODE="img-node"
@@ -165,10 +170,10 @@ cat > "$IMG3_DIR/spec.json" <<'SPEC'
   ["bin/sh", "symlink", "busybox"],
   ["www/index.html", "file", "IMG-ENTRYPOINT", "0644"]
 ]], "config": {
-  "Entrypoint": ["/bin/busybox", "httpd", "-f", "-v", "-p", "18080", "-h", "/www"],
+  "Entrypoint": ["/bin/busybox", "httpd", "-f", "-v", "-p", "HTTPDPORT", "-h", "/www"],
   "Cmd": []}}
 SPEC
-sed -i "s#IMGDIR#$IMG3_DIR#" "$IMG3_DIR/spec.json"
+sed -i -e "s#IMGDIR#$IMG3_DIR#" -e "s#HTTPDPORT#$HTTPD_PORT#" "$IMG3_DIR/spec.json"
 REPO3="test/httpd"
 push_image "$IMG3_DIR" "$REPO3" v1 "$IMG3_DIR/spec.json"
 bimg_ok "entrypoint-only image pushed to $REG/v2/$REPO3:v1"
@@ -182,7 +187,7 @@ PHASE="$(wait_phase img-entry Running 120)"
   || bimg_fail "I4 no-command pod never reached Running (phase=${PHASE:-none}; agent log: $(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
 BODY=""
 for _ in $(seq 1 40); do
-  BODY="$(curl -fsS http://127.0.0.1:18080/index.html 2>/dev/null || true)"
+  BODY="$(curl -fsS "http://127.0.0.1:${HTTPD_PORT}/index.html" 2>/dev/null || true)"
   [[ -n "$BODY" ]] && break
   sleep 0.5
 done
@@ -199,11 +204,11 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
   "$BASE/api/v1/namespaces/default/pods/img-entry")"
 [[ "$code" == "200" || "$code" == "404" ]] || bimg_fail "I4 pod DELETE -> $code"
 for _ in $(seq 1 60); do
-  curl -fsS -m 1 http://127.0.0.1:18080/ >/dev/null 2>&1 || break
+  curl -fsS -m 1 "http://127.0.0.1:${HTTPD_PORT}/" >/dev/null 2>&1 || break
   sleep 0.5
 done
-curl -fsS -m 1 http://127.0.0.1:18080/ >/dev/null 2>&1 \
-  && bimg_fail "I4 port 18080 still open after pod delete"
+curl -fsS -m 1 "http://127.0.0.1:${HTTPD_PORT}/" >/dev/null 2>&1 \
+  && bimg_fail "I4 port $HTTPD_PORT still open after pod delete"
 
 # --- I5: image env + pod env merge; logs + exec assertions (M4, Q53) -----
 IMG4_DIR="$DD/img4"; mkdir -p "$IMG4_DIR"
@@ -245,9 +250,9 @@ grep -q "MERGED_FROM=pod-value" <<<"$EXEC2" \
 bimg_ok "I5 image env survives, pod env appends (logs + kubectl exec env)"
 
 # --- I6: NodePort through the router plane + host-port conflict (M5) -------
-code="$(post_pod_json img-svc '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc","namespace":"default","labels":{"app":"img-svc"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":18080}]}]}}')"
+code="$(post_pod_json img-svc '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc","namespace":"default","labels":{"app":"img-svc"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":'"$HTTPD_PORT"'}]}]}}')"
 [[ "$code" == "201" ]] || bimg_fail "I6 pod POST -> $code"
-code="$(api_post_json api/v1/namespaces/default/services '{"apiVersion":"v1","kind":"Service","metadata":{"name":"img-svc","namespace":"default"},"spec":{"type":"NodePort","selector":{"app":"img-svc"},"ports":[{"name":"web","port":80,"targetPort":18080,"protocol":"TCP"}]}}')"
+code="$(api_post_json api/v1/namespaces/default/services '{"apiVersion":"v1","kind":"Service","metadata":{"name":"img-svc","namespace":"default"},"spec":{"type":"NodePort","selector":{"app":"img-svc"},"ports":[{"name":"web","port":80,"targetPort":'"$HTTPD_PORT"',"protocol":"TCP"}]}}')"
 [[ "$code" == "201" ]] || bimg_fail "I6 service POST -> $code"
 PHASE="$(wait_phase img-svc Running 120)"
 [[ "$PHASE" == "Running" ]] \
@@ -267,11 +272,11 @@ for _ in $(seq 1 60); do
 done
 [[ "$BODY" == "IMG-ENTRYPOINT" ]] \
   || bimg_fail "I6 nodePort :${NODEPORT} never served the pod (got: ${BODY:-<empty>})"
-bimg_ok "I6 NodePort ${NODEPORT} -> 127.0.0.1:18080 pod (Q41 router, Q52 host netns)"
+bimg_ok "I6 NodePort ${NODEPORT} -> 127.0.0.1:${HTTPD_PORT} pod (Q41 router, Q52 host netns)"
 
 # Host-port conflict (Q52: builtin pods share the host netns): a second
-# pod on 18080 must crash-loop (never stably Running) while the first serves.
-code="$(post_pod_json img-svc2 '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc2","namespace":"default","labels":{"app":"img-svc2"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":18080}]}]}}')"
+# pod on ${HTTPD_PORT} must crash-loop (never stably Running) while the first serves.
+code="$(post_pod_json img-svc2 '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-svc2","namespace":"default","labels":{"app":"img-svc2"}},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1","ports":[{"name":"http","containerPort":'"$HTTPD_PORT"'}]}]}}')"
 [[ "$code" == "201" ]] || bimg_fail "I6 conflicting pod POST -> $code"
 STABLE=0
 for _ in $(seq 1 60); do # 30s: transient Running between start and bind-fail is tolerated
@@ -288,8 +293,8 @@ bimg_ok "I6 host-port conflict: second pod crash-loops, first pod keeps serving"
 delete_pod img-svc2; delete_pod img-svc
 code="$(api_delete api/v1/namespaces/default/services/img-svc)"
 [[ "$code" == "200" || "$code" == "404" ]] || bimg_fail "I6 service DELETE -> $code"
-wait_port_free 18080
-bimg_ok "I6 cleanup: pods + service gone, port 18080 freed"
+wait_port_free "$HTTPD_PORT"
+bimg_ok "I6 cleanup: pods + service gone, port $HTTPD_PORT freed"
 
 # --- I7: startup GC sweeps unreferenced layers; shared layers survive ------
 # test/shared:v1 layer[0] is byte-identical to whtwo's layer[0] (same busybox
@@ -346,13 +351,13 @@ PHASE="$(wait_phase img-cas Running 120)"
   || bimg_fail "I8a pod never ran from the CAS (phase=${PHASE:-none}; a re-pull would 404 the deleted layer)"
 BODY=""
 for _ in $(seq 1 40); do
-  BODY="$(curl -fsS http://127.0.0.1:18080/index.html 2>/dev/null || true)"
+  BODY="$(curl -fsS "http://127.0.0.1:${HTTPD_PORT}/index.html" 2>/dev/null || true)"
   [[ -n "$BODY" ]] && break
   sleep 0.5
 done
 [[ "$BODY" == "IMG-ENTRYPOINT" ]] || bimg_fail "I8a CAS pod never served (got: ${BODY:-<empty>})"
 bimg_ok "I8a CAS hit: pod ran with the registry blob deleted (no re-pull)"
-delete_pod img-cas; wait_port_free 18080
+delete_pod img-cas; wait_port_free "$HTTPD_PORT"
 
 # --- I8b: quota soft cap -> clean pull failure, agent survives -------------
 delete_pod img-bad # keep the quota error attributable to img-big

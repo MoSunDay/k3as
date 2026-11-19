@@ -1,4 +1,6 @@
-//! Unit tests for the T7.3 Scope A argoproj.io verbs (Q30).
+//! Unit tests for the T7.3 Scope A argoproj.io verbs (Q30) plus the
+//! init-pro.io/v1 kinds — Agent (T7.1/Q35), TrafficSplit (T8.2/Q57),
+//! ServicePipeline + Build (T8.3/Q56).
 //!
 //! Pure helpers (plural/path/output/age/table/manifest) plus the lib.rs
 //! flag parsing, all with no server. The wire-level cases live in
@@ -8,7 +10,7 @@ use serde_json::json;
 
 use crate::verbs::{
     age_between, manifest_target, parse_manifest, parse_output, render_table, resolve_plural,
-    resolve_target, resource_path, Output,
+    resolve_target, resource_path, Output, AGENT_API_VERSION, INITPRO_API_VERSION,
 };
 
 // ---------- pure helpers ----------
@@ -48,6 +50,47 @@ fn resolve_target_maps_agent_to_initpro_group() {
 }
 
 #[test]
+fn resolve_target_maps_traffic_pipeline_and_build_to_initpro_group() {
+    // T8.2/Q57 + T8.3/Q56: TrafficSplit / ServicePipeline / Build live in
+    // the SAME init-pro.io/v1 group as Agent, with short names ts/sp/bld.
+    for (kind, plural) in [
+        ("trafficsplit", "trafficsplits"),
+        ("trafficsplits", "trafficsplits"),
+        ("ts", "trafficsplits"),
+        ("TS", "trafficsplits"),
+        ("servicepipeline", "servicepipelines"),
+        ("servicepipelines", "servicepipelines"),
+        ("sp", "servicepipelines"),
+        ("build", "builds"),
+        ("builds", "builds"),
+        ("bld", "builds"),
+    ] {
+        assert_eq!(
+            resolve_target(kind).unwrap(),
+            (INITPRO_API_VERSION, plural),
+            "{kind}"
+        );
+        assert_eq!(resolve_plural(kind).unwrap(), plural, "{kind}");
+    }
+    // CamelCase spellings resolve too (the match lowercases first).
+    assert_eq!(
+        resolve_target("TrafficSplit").unwrap(),
+        ("init-pro.io/v1", "trafficsplits")
+    );
+    assert_eq!(
+        resolve_target("ServicePipeline").unwrap(),
+        ("init-pro.io/v1", "servicepipelines")
+    );
+    assert_eq!(
+        resolve_target("Build").unwrap(),
+        ("init-pro.io/v1", "builds")
+    );
+    // The pre-T8 constant name survives as an alias of the shared one.
+    assert_eq!(AGENT_API_VERSION, INITPRO_API_VERSION);
+    assert_eq!(AGENT_API_VERSION, "init-pro.io/v1");
+}
+
+#[test]
 fn resolve_target_rejects_agent_lookalikes_and_empty() {
     for kind in ["agentrun", "agentset", ""] {
         let err = resolve_target(kind).unwrap_err();
@@ -64,6 +107,18 @@ fn resolve_plural_rejects_out_of_scope_kinds() {
         assert!(err.contains("argoproj.io/v1alpha1"), "{kind}: {err}");
         assert!(err.contains("workflow"), "{kind}: {err}");
         assert!(err.contains("cronworkflow"), "{kind}: {err}");
+        // The init-pro.io/v1 spellings (incl. the T8.x short names) are
+        // listed so the message stays discoverable.
+        for needle in [
+            "agent",
+            "trafficsplits",
+            "ts",
+            "servicepipelines",
+            "sp",
+            "builds",
+        ] {
+            assert!(err.contains(needle), "{kind}: missing {needle:?} in {err}");
+        }
     }
 }
 

@@ -52,10 +52,17 @@ echo "$body" | grep -q '"pods"' || bad "/api/v1 missing pods: $body"
 echo "$body" | grep -q '"namespaces"' || bad "/api/v1 missing namespaces: $body"
 ok "/api/v1 serves core/v1 APIResourceList (pods, namespaces)"
 
-# /apis/init-pro.io/v1 -> the CRD resource index, must list luarouters.
+# /apis/init-pro.io/v1 -> the CRD resource index, must list luarouters plus the
+# T8.x built-ins: trafficsplits (ts), servicepipelines (sp), builds (bld).
 body="$(curl -fsS "$BASE/apis/init-pro.io/v1")"
 echo "$body" | grep -q '"luarouters"' || bad "/apis/init-pro.io/v1 missing luarouters: $body"
-ok "/apis/init-pro.io/v1 serves APIResourceList (luarouters)"
+echo "$body" | grep -q '"trafficsplits"' || bad "/apis/init-pro.io/v1 missing trafficsplits: $body"
+echo "$body" | grep -q '"shortNames":\["ts"\]' || bad "/apis/init-pro.io/v1 missing ts shortName: $body"
+echo "$body" | grep -q '"servicepipelines"' || bad "/apis/init-pro.io/v1 missing servicepipelines: $body"
+echo "$body" | grep -q '"shortNames":\["sp"\]' || bad "/apis/init-pro.io/v1 missing sp shortName: $body"
+echo "$body" | grep -q '"builds"' || bad "/apis/init-pro.io/v1 missing builds: $body"
+echo "$body" | grep -q '"shortNames":\["bld"\]' || bad "/apis/init-pro.io/v1 missing bld shortName: $body"
+ok "/apis/init-pro.io/v1 serves APIResourceList (luarouters, trafficsplits, servicepipelines, builds)"
 
 # /apis must also include the built-in argoproj.io group (T7.3 Scope A).
 body="$(curl -fsS "$BASE/apis")"

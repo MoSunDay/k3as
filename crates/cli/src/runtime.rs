@@ -55,6 +55,11 @@ pub struct ServerBind {
     /// Embedded image registry (T6.3, Q40): `Some` = serve the Docker
     /// Registry HTTP API v2; `None` = disabled (`--disable-registry`).
     pub registry: Option<RegistryBind>,
+    /// Embedded CI/CD pipeline controller plane (**T8.3**, **Q56**):
+    /// `Some` = the controller manager runs the `ServicePipeline`/`Build`
+    /// workers (docker build -> registry push -> Deployment image patch);
+    /// `None` = `--disable-pipeline` (no workers, no enqueues).
+    pub pipeline: Option<controllers::PipelineConfig>,
 }
 
 /// Embedded image-registry wiring (T6.3, Q40): the listen address plus the
@@ -69,7 +74,7 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
     // Servers never run the node runtime (the `bind.is_none()` blocks are
     // agent-only), so the engine choice and registry addr are inert here;
     // pass containerd + the default registry to keep the signature honest
-    // (T4.12/Q51, T4.13).
+    // (T4.12/Q51, T4.13; Q55's default rootfs mode is host anyway).
     run_supervised(
         "server",
         cfg,
@@ -82,6 +87,7 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
         "containerd".to_string(),
         registry::DEFAULT_ADDR.to_string(),
         0,
+        "host".to_string(),
     )
 }
 
@@ -107,6 +113,8 @@ pub fn run_agent(
     registry_addr: String,
     // T4.13 M5 (Q53): soft builtin image-store quota in bytes (0 = off).
     builtin_image_quota: u64,
+    // T4.14 (Q55): rootfs source for the built-in engine (host|image).
+    builtin_rootfs: String,
 ) -> ExitCode {
     run_supervised(
         "agent",
@@ -120,6 +128,7 @@ pub fn run_agent(
         container_engine,
         registry_addr,
         builtin_image_quota,
+        builtin_rootfs,
     )
 }
 
@@ -186,6 +195,8 @@ fn run_supervised(
     // T4.13 M5 (Q53): soft builtin image-store quota (0 = off; builtin
     // engine only — the staged containerd path ignores it).
     builtin_image_quota: u64,
+    // T4.14 (Q55): rootfs source for the built-in engine (host|image).
+    builtin_rootfs: String,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -261,7 +272,13 @@ fn run_supervised(
             false
         };
         if bind.is_none() && !builtin {
-            match node_runtime::start_agent_runtime(&cfg.data_dir, runtime_shutdown.clone()) {
+            // T8.1 (Q38/Q40): the agent's `--registry-addr` becomes the
+            // containerd `certs.d/<host>/hosts.toml` plain-HTTP face.
+            match node_runtime::start_agent_runtime_with(
+                &cfg.data_dir,
+                Some(registry_addr.as_str()),
+                runtime_shutdown.clone(),
+            ) {
                 Ok(task) => {
                     runtime_drain = Some(tokio::spawn(async move {
                         let _ = task.await;
@@ -310,6 +327,16 @@ fn run_supervised(
                         &registry_addr,
                     )
                     .map(|b| b.with_image_quota(builtin_image_quota))
+                    // T4.14 (Q55): engine-level rootfs source (host dirs
+                    // by default; the pod annotation can flip per pod).
+                    .map(|b| match kubelet::engine::RootfsMode::parse(&builtin_rootfs) {
+                        Ok(mode) => b.with_rootfs_mode(mode),
+                        Err(e) => {
+                            tracing::warn!(target: "init-pro", role, error = %e,
+                                "bad --builtin-rootfs value; defaulting to host (Q55)");
+                            b.with_rootfs_mode(kubelet::engine::RootfsMode::Host)
+                        }
+                    })
                     {
                         Ok(backend) => {
                             // Q49: adopt-or-clean leftover engine sockets.
@@ -479,6 +506,9 @@ fn run_supervised(
                             workspace_nfs: b.anyhome.clone(),
                             // T4.3 Scope B (Q41): --disable servicelb.
                             disable_servicelb: b.disable_servicelb,
+                            // T8.3 (Q56): --disable-pipeline leaves the plane
+                            // fully off (no workers, no enqueues).
+                            pipeline: b.pipeline.clone(),
                         },
                     );
                     tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");

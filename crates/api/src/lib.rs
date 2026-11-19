@@ -13,6 +13,10 @@
 //! - [`apply`] — Server-Side Apply field-manager (T1.2c).
 //! - [`agent`] — the `init-pro.io/v1` `Agent` resource (T7.1 rewrite, Q35).
 //! - [`initpro`] — the `init-pro.io/v1` CRD types (e.g. `LuaRouter`).
+//! - [`traffic`] — `TrafficSplit`: weighted one-click traffic switching
+//!   consumed by the Router's NodePort plane (T8.2, Q57).
+//! - [`pipeline`] / [`build`] — `ServicePipeline` + `Build`: per-service
+//!   CI/CD config and immutable build records (T8.3, Q56).
 //! - [`networking`] — the `networking.k8s.io/v1` group (Ingress/IngressClass;
 //!   consumed by the openrusty Ingress gateway, decision Q32).
 #![forbid(unsafe_code)]
@@ -20,13 +24,16 @@
 pub mod agent;
 pub mod apply;
 pub mod argoproj;
+pub mod build;
 pub mod discovery;
 pub mod gvk;
 pub mod initpro;
 pub mod networking;
 pub mod patch;
+pub mod pipeline;
 pub mod schema;
 pub mod serde_ext;
+pub mod traffic;
 
 // Convenience re-exports so consumers depend on `api` only.
 pub use agent::{
@@ -34,6 +41,7 @@ pub use agent::{
     PLURAL as AGENT_PLURAL,
 };
 pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldEntry, Operation};
+pub use build::{Build, BuildList, BuildSpec, BuildStatus};
 pub use discovery::{api_group_list, api_resource_list, core_api_versions};
 pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use initpro::{LuaRouter, LuaRouterSpec};
@@ -45,5 +53,13 @@ pub use networking::{
     VERSION as NETWORKING_VERSION,
 };
 pub use patch::{strategic_merge, PatchStrategy};
+pub use pipeline::{
+    BuildOptions, BuildRef, PipelineImage, PipelineRelease, PipelineSource, PipelineTarget,
+    ReleaseStep, RolloutStatus, ServicePipeline, ServicePipelineList, ServicePipelineSpec,
+    ServicePipelineStatus,
+};
 pub use schema::{SchemaRegistry, Scope, TypeInfo};
 pub use serde_ext::{from_json, to_json, to_json_pretty};
+pub use traffic::{
+    SplitBackend, TrafficSplit, TrafficSplitList, TrafficSplitSpec, TrafficSplitStatus,
+};

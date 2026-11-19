@@ -21,6 +21,10 @@ pub mod namespace;
 /// CAS-written onto `spec.podCIDR`/`spec.podCIDRs`.
 pub mod node_cidr;
 pub mod ordinal;
+/// M2 CI/CD pipeline controller (TODO **T8.3**, decision **Q56**):
+/// `ServicePipeline` -> `Build` children -> registry push -> Deployment
+/// image promotion.
+pub mod pipeline;
 pub mod replicaset;
 pub mod rollout;
 /// ServiceLB announce controller (T4.3 Scope B / T5.6, Q41): the embedded
@@ -67,6 +71,13 @@ pub struct Caches {
     /// the scheduler owns binding, and the Workflow's 5s resync drives
     /// phase aggregation. The GC sweeps the kind for orphaned children.
     pub agents: Arc<ObjectStore>,
+    /// `init-pro.io/servicepipelines` (T8.3, Q56): the CI/CD pipeline
+    /// controller reads its own kind + owned Build children through these
+    /// caches; Build events fan out to the owning pipeline.
+    pub servicepipelines: Arc<ObjectStore>,
+    /// `init-pro.io/builds` (T8.3, Q56): the build worker drives one
+    /// `docker build` + registry push per child.
+    pub builds: Arc<ObjectStore>,
 }
 
 impl Default for Caches {
@@ -89,6 +100,8 @@ impl Caches {
             workflows: Arc::new(ObjectStore::new()),
             cronworkflows: Arc::new(ObjectStore::new()),
             agents: Arc::new(ObjectStore::new()),
+            servicepipelines: Arc::new(ObjectStore::new()),
+            builds: Arc::new(ObjectStore::new()),
         }
     }
 }

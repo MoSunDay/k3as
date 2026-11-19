@@ -75,6 +75,11 @@ if [[ -z "$G24_VENDOR_BIN" ]]; then
   echo "SKIP G29 workflow end-to-end (no vendored containerd)"
 elif ! command -v cc >/dev/null 2>&1; then
   echo "SKIP G29 workflow end-to-end (no cc for the airgap step image, Q27)"
+elif [[ "${CNI0_STALE:-0}" -eq 1 ]]; then
+  # S40c coexistence policy (nodes.sh): a foreign cni0 makes every sandbox
+  # fail CNI setup, so the real-stack leg SKIPs like G25/G26/G30 rather than
+  # reporting misleading Pending pods.
+  echo "SKIP G29 workflow end-to-end (host cni0 holds ${CNI0_IP:-?} — stale CNI state from another cluster; ip link delete cni0 to recover)"
 else
   G29TMP="$(mktemp -d)"; G29SRV="$(mktemp)"; G29AG="$(mktemp)"
   G29_PORT="$(pick_port)"
