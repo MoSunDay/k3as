@@ -3,9 +3,9 @@
 Mirrors `index.md` TODO IDs **T0.1–T0.6**. Edit in lock-step with `index.md`.
 
 This layer establishes the **single-binary contract (Q1)**, the build/bundle
-pipeline, shared infrastructure, the k3s-compatible CLI surface (Q2), the
-planning system itself (T0.5), and the **conformance golden gate (T0.6)**
-that every later TODO must keep green.
+pipeline, shared infrastructure, the supported k3s-compatible CLI surface
+(Q59), the planning system itself (T0.5), and the **supported-subset
+conformance golden gate (T0.6, Q59)** that every later TODO must keep green.
 
 ---
 
@@ -290,15 +290,17 @@ that every later TODO must keep green.
 
 ---
 
-## T0.6 — 协议兼容性测试基线 (golden conformance)
+## T0.6 — 协议兼容性测试基线 (supported-subset golden conformance)
 
 - **目标 / Goal**
-  An immutable **golden set** of k3s/k8s conformance + e2e cases that
-  becomes the merge gate for every later TODO (Q2).
+  An immutable **golden set** of conformance + e2e cases for the supported
+  k3s/k8s subset (Q59) that becomes the merge gate for every later TODO.
+  This gate does not claim 100%/full upstream Kubernetes conformance.
 
 - **核心实现 / Core implementation**
   - Vendor a curated subset of upstream `kubernetes/e2e` + k3s acceptance
-    tests as fixtures/scenarios (not the whole suite).
+    tests covering only declared-supported behavior as fixtures/scenarios
+    (not the whole suite).
   - Driver harness boots `init-pro server` (+agent), runs real `kubectl`/
     `helm`/`kube-rs` clients, asserts wire-level results.
   - Categories: API round-trip, watch, etcd storage, scheduling, CRI,
@@ -310,6 +312,20 @@ that every later TODO must keep green.
   - Empty-cluster golden suite passes against a stub `init-pro` today (the
     harness itself is the deliverable); suite grows as layers land.
   - CI job `golden` is a required check.
+
+- **Forward Phase 3 golden addendum (Q59-Q62; not as-built):** at implementation,
+  append versioned `phase3-v1` cases; never renumber or rewrite historical IDs.
+  Add: strict host-direct triple positives and missing/wrong/nonliteral-`/` negatives;
+  no containerd fallback; omitted/defaulted and valid Always/IfNotPresent/Never
+  policies all yielding zero workload/pause image actions on create/restart/reconcile,
+  plus invalid explicit policy rejection; compatible GPU publication/accounting/
+  exclusivity/restart/release positives and incompatible-backend, insufficient-resource,
+  invalid-resource and stale-nonzero-publication negatives; Recreate runtime/GPU
+  completion ordering plus stalled teardown/release; invalid Deployment strategy
+  rejection; inference NodePort reachability and empty endpoints. Use real kubectl/
+  kube-rs for API/client assertions and privileged/runtime traces where needed.
+  Existing G70/G71/ST1-ST6 remain generic data-plane evidence; T7.6 must separately
+  prove inference Pod Service/Endpoints lifecycle rather than duplicate proxy tests.
 
 - **状态 / Status** — done
 - **证据 / Evidence** — `golden/` (4 byte-stable discovery fixtures: GET `/api`, `/apis`, `/api/v1`, `/apis/init-pro.io/v1`) + `golden/README.md` (documents the 6 cases and the `@@PORT@@` normalization of the only volatile field, `APIVersions.serverAddress`); `scripts/golden-conformance.sh` boots a real `init-pro server` on a free loopback port and diffs live responses against the fixtures — **6/6 green** (G01–G04 byte-exact body matches, G05/G06 assert 404 for unknown group/version and not-yet-existing collection endpoints). The empty-cluster baseline is delivered: *the harness itself is the deliverable*; cases are appended as CRUD/watch/storage/scheduling layers land. `.github/workflows/ci.yml` runs it on every change as a required `golden` check (DoD #3).

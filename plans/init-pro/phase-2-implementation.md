@@ -1,13 +1,19 @@
 # Phase 2 实施计划（控制面 + 节点 → M3 端到端集群）
 
-> Status of this file: **active**. Tracks the Phase 2 execution plan derived
-> from `index.md` / `README.md`. Created at Sprint 19 close: Sprints 10–19
-> predate this file and are recorded retrospectively in `CHANGELOG.md` + the
-> `index.md` sprint log; from Sprint 20 on, this file is the forward-looking
-> plan — the current sprint is fully specified, later sprints are sketches
-> detailed one sprint ahead. Sprint outcomes are annotated inline as they
-> land. TODO IDs strictly mirror `index.md`. Phase 1 (M0 + M1) closed at
-> Sprint 9 — see `phase-1-implementation.md` (archived).
+> Status of this file: **historical / archived**. This document retains the
+> Phase 2 execution plan and its inline Sprint outcomes without rewriting that
+> history. Created at Sprint 19 close: Sprints 10–19 predate this file and are
+> recorded retrospectively in `CHANGELOG.md` + the `index.md` sprint log;
+> Sprint 20 onward is preserved below as written. TODO IDs remain historical
+> mirrors of `index.md`; Phase 1 (M0 + M1) closed at Sprint 9 — see
+> `phase-1-implementation.md` (archived).
+>
+> **Active forward planning now lives in `phase-3-host-ai.md`** (Q59–Q63:
+> supported Kubernetes profile; P0 T7.7 Agent action interception + Linux
+> sandbox; independent P1–P3 inference track T4.15 host-direct → T7.2 direct
+> host GPU → T7.6 llama.cpp inference). k3as remains a multi-tenant Agent
+> sandbox platform deployed one tenant per dedicated-node cluster. Do not
+> treat the old “current sprint” wording below as a live commitment.
 
 ## Goal（目标）
 Phase 2 自 Sprint 10 起步，已按平台关键路径交付存储层（T2.1–T2.3，Q17/Q29）、

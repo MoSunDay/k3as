@@ -1,8 +1,10 @@
 # Layer 1 — API
 
-Mirrors `index.md` TODO IDs **T1.1–T1.3**. Q2 (full protocol conformance) is
-the governing constraint: every resource, serialization, and auth path must
-be wire-compatible with upstream kubectl/kube-rs.
+Mirrors `index.md` TODO IDs **T1.1–T1.3**. Q59 (supported-subset protocol
+compatibility) is the forward governing constraint; Q2's full-conformance
+goal is historical. Every supported resource, serialization, and auth path
+must be wire-compatible with upstream kubectl/kube-rs, without implying
+complete Kubernetes API coverage.
 
 ---
 
@@ -10,7 +12,7 @@ be wire-compatible with upstream kubectl/kube-rs.
 
 - **目标 / Goal**
   A Rust resource model faithful to Kubernetes API machinery: `TypeMeta`,
-  `ObjectMeta`, `ListMeta`, GVK↔GVR, and byte-faithful JSON/protobuf +
+  `ObjectMeta`, `ListMeta`, GVK↔GVR, and byte-faithful JSON +
   StrategicMergePatch semantics.
 
 - **核心实现 / Core implementation**
@@ -52,9 +54,9 @@ be wire-compatible with upstream kubectl/kube-rs.
 ## T1.2 — APIServer 核心 (REST + kubectl 真实交互)
 
 - **目标 / Goal**
-  A working API server: etcd-backed REST handlers for core resources,
-  supporting `kubectl get/apply/watch` and `kube-rs` clients (Q2
-  protocol-level acceptance).
+  A working API server: etcd-backed REST handlers for supported core resources,
+  supporting `kubectl get/apply/watch` and `kube-rs` clients (Q59
+  supported-subset, protocol-level acceptance).
 
 - **核心实现 / Core implementation**
   - `axum`/`hyper` front-end exposing `/api`, `/apis/*`, `/api/v1/...`.
