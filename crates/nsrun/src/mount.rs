@@ -105,6 +105,24 @@ fn ensure_dir(name: &std::ffi::CStr) -> io::Result<()> {
     }
 }
 
+/// Q60/HD3 (T4.15): the ONLY filesystem the host-root child remounts is
+/// a fresh `/proc`, so the new PID namespace sees its own process tree.
+/// Absolute paths: the child keeps the host root (no enter/pivot). The
+/// child's mount namespace is already a private copy (see
+/// [`crate::child`]), so this mount cannot propagate back to the host;
+/// `/sys` and `/dev` are deliberately untouched — host `/dev` stays
+/// fully visible (no minimal /dev on this path) and `/sys` keeps the
+/// host view.
+pub fn fresh_host_proc() -> io::Result<()> {
+    sys::mount(
+        c"proc",
+        c"/proc",
+        c"proc",
+        (libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as libc::c_ulong,
+        None,
+    )
+}
+
 /// `/proc`, `/sys`, `/dev`, devpts, shm, mqueue and a read-only cgroup view.
 /// Relative paths: the current directory is the container root.
 pub fn container_filesystems() -> io::Result<()> {

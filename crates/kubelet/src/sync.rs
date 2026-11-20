@@ -89,6 +89,37 @@ pub fn plan(
     probes: &PodProbeState,
     envs: &crate::env_fetch::EnvTable,
 ) -> Vec<Action> {
+    plan_with_gpu(
+        desired,
+        snap,
+        sandbox_image,
+        log_root,
+        date,
+        probes,
+        envs,
+        None,
+    )
+}
+
+/// GPU-aware plan (T7.2, Q61): identical to [`plan`] plus the per-cycle
+/// [`crate::gpu::GpuPrepared`] view — containers with pinned GPU devices
+/// get their vendor visibility env (`CUDA_VISIBLE_DEVICES` /
+/// `HIP_VISIBLE_DEVICES`, via [`crate::env::upsert_gpu_env`]) upserted
+/// into the resolved pairs at the create call site (last-write-wins over
+/// any user value of the same name, upstream device-manager parity).
+/// `gpu = None` (the plain [`plan`] path) behaves byte-identically to
+/// the pre-T7.2 planner.
+#[allow(clippy::too_many_arguments)] // keeps the 7-arg `plan` delegate stable
+pub fn plan_with_gpu(
+    desired: &BTreeMap<String, PodView>,
+    snap: &Snapshot,
+    sandbox_image: &str,
+    log_root: &Path,
+    date: &str,
+    probes: &PodProbeState,
+    envs: &crate::env_fetch::EnvTable,
+    gpu: Option<&crate::gpu::GpuPrepared>,
+) -> Vec<Action> {
     let mut actions = Vec::new();
     // Index observations: sandboxes by "ns/name" (garbage labels skipped),
     // containers by (pod key, container name).
@@ -260,7 +291,7 @@ pub fn plan(
                     spec,
                     attempt,
                     log_root,
-                    resolved_env(envs, key, &spec.name),
+                    resolved_env_with_gpu(envs, key, &spec.name, gpu),
                     hosts.as_deref().unwrap_or_default(),
                 )),
                 pcfg: sandbox_cfg(view, log_root, date),
@@ -330,6 +361,94 @@ fn resolved_env(
         .and_then(|m| m.get(container))
         .map(|o| o.envs.clone())
         .unwrap_or_default()
+}
+
+/// The resolved env pairs for one container with the pinned GPU devices'
+/// vendor visibility env upserted LAST (T7.2, Q61): last-write-wins over
+/// any user value of the same name (upstream device-manager parity — on
+/// a GPU-capable node the device plane owns `CUDA_VISIBLE_DEVICES`).
+/// `gpu = None` is the plain [`resolved_env`] view.
+fn resolved_env_with_gpu(
+    envs: &crate::env_fetch::EnvTable,
+    key: &str,
+    container: &str,
+    gpu: Option<&crate::gpu::GpuPrepared>,
+) -> Vec<(String, String)> {
+    let mut pairs = resolved_env(envs, key, container);
+    if let Some((resource, devices)) = gpu.and_then(|g| g.devices_for(key, container)) {
+        crate::env::upsert_gpu_env(&mut pairs, resource, devices);
+    }
+    pairs
+}
+
+/// The single GPU/host-direct backend guard (T7.2, Q61; Q60 parity).
+/// `None` when the pod needs nothing from the GPU plane. Otherwise an
+/// actionable create-blocking reason:
+/// - a GPU or `/` host-direct pod under the containerd backend (both
+///   demand the builtin engine — NO containerd fallback, Q60/Q61);
+/// - a GPU pod on a node that is not GPU-capable (builtin engine + host
+///   rootfs + healthy host-direct probe, GPU5);
+/// - a GPU pod without the literal `init-pro.io/rootfs: "/"` annotation
+///   (ordinary inference rides host-direct, Q61).
+pub(crate) fn gpu_backend_guard(
+    view: &PodView,
+    engine_builtin: bool,
+    gpu_capable: bool,
+) -> Option<String> {
+    let host_direct = crate::gpu::view_is_host_direct(view);
+    let uses_gpu = crate::gpu::view_uses_gpu(view);
+    if !uses_gpu && !host_direct {
+        return None;
+    }
+    if !engine_builtin {
+        return Some(
+            "GPU/host-direct pods require the builtin engine; \
+             containerd execution is forbidden (Q60/Q61, no fallback)"
+                .to_string(),
+        );
+    }
+    if uses_gpu {
+        if !gpu_capable {
+            return Some(
+                "node is not GPU-capable (builtin engine with host \
+                 rootfs and a healthy host-direct probe required; GPU5/Q61)"
+                    .to_string(),
+            );
+        }
+        if !host_direct {
+            return Some(format!(
+                "GPU pods must set the annotation {}: \"/\" \
+                 (host-direct ordinary inference; Q61)",
+                crate::engine::ROOTFS_ANNOTATION
+            ));
+        }
+    }
+    None
+}
+
+/// Pod UIDs whose ledger entries are safe to release (GPU4): absent from
+/// the desired set AND no observed sandbox carries the uid — teardown
+/// fully finished. Callers pass the PRE-execute snapshot deliberately
+/// (the same race-free one-cycle-later contract as the volume cleanup
+/// pass): a sandbox removed by THIS cycle's execute is released next
+/// cycle, never mid-flight.
+pub(crate) fn completed_gpu_teardowns(
+    ledger_uids: &[String],
+    desired: &BTreeMap<String, PodView>,
+    snap: &Snapshot,
+) -> Vec<String> {
+    let live: BTreeSet<&str> = desired
+        .values()
+        .filter(|v| !v.deleted)
+        .map(|v| v.uid.as_str())
+        .collect();
+    ledger_uids
+        .iter()
+        .filter(|uid| {
+            !live.contains(uid.as_str()) && !snap.sandboxes.iter().any(|sb| sb.uid == **uid)
+        })
+        .cloned()
+        .collect()
 }
 
 fn container_cfg(

@@ -210,6 +210,7 @@ source "$SCRIPT_DIR/golden/suites/cronworkflows.sh"
 source "$SCRIPT_DIR/golden/suites/realtraffic.sh"
 source "$SCRIPT_DIR/golden/suites/nscascade.sh"
 source "$SCRIPT_DIR/golden/suites/negative.sh"
+source "$SCRIPT_DIR/golden/suites/phase3.sh"
 
 echo
 echo "golden: $PASS passed, $FAIL failed"

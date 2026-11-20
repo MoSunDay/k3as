@@ -50,7 +50,7 @@ pub fn poll_writable(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> io
 }
 pub use handle::{Child, Output};
 pub use signal::{install_shutdown_flag, shutdown_requested};
-pub use spec::{BindMount, CgroupLimits, Overlay, RunSpec};
+pub use spec::{root_plan, BindMount, CgroupLimits, Overlay, RootPlan, RunSpec};
 
 /// The caller must be single-threaded for the fork-like clone3.
 pub fn ensure_single_threaded() -> io::Result<()> {
@@ -220,11 +220,12 @@ pub fn spawn(spec: &RunSpec) -> io::Result<Child> {
     Ok(child)
 }
 
-fn clone_container(
-    spec: &RunSpec,
-    io: child::ChildIo,
-    cgroup_fd: Option<libc::c_int>,
-) -> io::Result<(libc::pid_t, bool)> {
+/// Pure clone3 flag computation (T4.11 T4.15, Q48/Q60): every container
+/// gets NEWNS/NEWPID/NEWUTS/NEWIPC/NEWCGROUP; `CLONE_NEWNET` is added
+/// ONLY for a fresh netns (`new_net` with no netns to join). A Q60
+/// host-root spec never sets either, so the flag word proves HD3's "no
+/// NEWNET" claim without running clone3.
+pub fn clone_flags(spec: &RunSpec) -> u64 {
     let mut flags = (libc::CLONE_NEWNS
         | libc::CLONE_NEWPID
         | libc::CLONE_NEWUTS
@@ -235,6 +236,15 @@ fn clone_container(
     if spec.new_net && spec.netns.is_none() {
         flags |= libc::CLONE_NEWNET as u64;
     }
+    flags
+}
+
+fn clone_container(
+    spec: &RunSpec,
+    io: child::ChildIo,
+    cgroup_fd: Option<libc::c_int>,
+) -> io::Result<(libc::pid_t, bool)> {
+    let flags = clone_flags(spec);
     let with_cgroup = cgroup_fd.is_some();
     let args = sys::CloneArgs {
         flags: flags
@@ -372,6 +382,35 @@ mod tests {
         assert_eq!(spec.caps, caps::DEFAULT_CAPS);
         assert!(spec.no_new_privs);
         assert!(!spec.new_net);
+    }
+
+    #[test]
+    fn clone_flags_add_newnet_only_for_a_fresh_netns() {
+        // Q60/HD3: the host-root flag word carries the five namespaces and
+        // never CLONE_NEWNET (host network stays, even for a pause child).
+        let mut hd = RunSpec::new("/", vec!["/bin/true".into()]);
+        hd.host_root = true;
+        hd.pause = true;
+        let base = (libc::CLONE_NEWNS
+            | libc::CLONE_NEWPID
+            | libc::CLONE_NEWUTS
+            | libc::CLONE_NEWIPC
+            | libc::CLONE_NEWCGROUP) as u64;
+        assert_eq!(clone_flags(&hd), base);
+        assert_eq!(clone_flags(&hd) & libc::CLONE_NEWNET as u64, 0);
+        // The pre-T4.15 shapes are unchanged: plain specs stay base, a
+        // fresh netns adds NEWNET, a netns join does not.
+        assert_eq!(
+            clone_flags(&RunSpec::new("/r", vec!["/bin/true".into()])),
+            base
+        );
+        let mut fresh = RunSpec::new("/r", vec!["/bin/true".into()]);
+        fresh.new_net = true;
+        assert_eq!(clone_flags(&fresh), base | libc::CLONE_NEWNET as u64);
+        let mut join = RunSpec::new("/r", vec!["/bin/true".into()]);
+        join.new_net = true;
+        join.netns = Some(std::path::PathBuf::from("/proc/7/ns/net"));
+        assert_eq!(clone_flags(&join), base);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Deployment rollout math (TODO **T3.1b**): strategy parsing,
 //! maxSurge/maxUnavailable resolution with upstream rounding (surge ceil,
 //! unavailable floor), and the spec-replica-level target computation for
-//! RollingUpdate pacing and Recreate gating. JSON-only wire (decision
+//! RollingUpdate pacing and Recreate gating. The INF4 (T7.6/Q62) Recreate
+//! runtime-teardown hold lives in [`super::teardown_hold`]; this module
+//! stays pure replica-count math. JSON-only wire (decision
 //! **Q10**): strategies are read off raw `serde_json::Value` Deployment
 //! specs and garbage falls back to upstream defaults (25%/25%).
 //!

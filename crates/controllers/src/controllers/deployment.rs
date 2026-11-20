@@ -26,11 +26,19 @@ use crate::controllers::rollout::{
     parse_strategy, recreate_targets, resolve_surge, resolve_unavailable, rolling_targets, RsView,
     Strategy,
 };
+use crate::controllers::teardown_hold::{
+    evaluate_recreate_hold, hold_message, teardown_watch_from_annotation, teardown_watch_from_pods,
+    teardown_watch_to_annotation, RecreateHold, TeardownWatch, TEARDOWN_PENDING_ANNOTATION,
+    TEARDOWN_SINCE_ANNOTATION,
+};
 use crate::controllers::{is_terminating, owned_by};
 use crate::error::ControllerError;
 use crate::id::{add_label, template_hash};
 use crate::object::{name, namespace, owner_reference, resource_version, semantic_eq};
 use crate::time::now_rfc3339;
+
+#[cfg(test)]
+mod tests;
 
 const GROUP: &str = "apps";
 const DEFAULT_PROGRESS_DEADLINE_SECS: u64 = 600;
@@ -132,6 +140,155 @@ async fn create_target_rs(
     }
 }
 
+/// INF4 (T7.6, Q62): evaluate + persist the Recreate runtime-teardown
+/// hold. Returns the pure verdict, the post-write object (when the
+/// Deployment annotations changed; the caller reuses it so the later
+/// status write CASes against the fresh resourceVersion), and the hold
+/// context the caller's Waiting message needs (S47 review F3): the
+/// FRESH hosting-node objects (observed release-ack source) plus the
+/// raw teardown-since string.
+///
+/// All node reads are LIVE (explicit GETs of the distinct hosting nodes
+/// for the release acks, one LIST for the gpuLedger sweep) — never cached
+/// informer state, so a stale ack or ledger entry cannot slip through on
+/// a resync with a quiet event stream. Pods still owned by the old RSs
+/// are listed fresh as well; the surviving watch set rides the
+/// `init-pro.io/teardown-pending` annotation once the Pod objects are
+/// gone. `teardown-since` is written ONCE at Begin and cleared at
+/// Complete; `pending` is refreshed only when the union grows.
+async fn recreate_hold(
+    client: &Arc<dyn Client>,
+    dep: &Value,
+    ns: &str,
+    olds: &[Value],
+    now: &str,
+) -> Result<(RecreateHold, Option<Value>, Vec<Value>, Option<String>), ControllerError> {
+    let dep_name = name(dep).unwrap_or_default();
+    let pods = client
+        .list(&KeyPrefix::new("", "pods", Some(ns.to_string())))
+        .await?;
+    let live = teardown_watch_from_pods(olds, &pods);
+    let pending = teardown_watch_from_annotation(dep);
+    let since = dep
+        .pointer("/metadata/annotations")
+        .and_then(|a| a.get(TEARDOWN_SINCE_ANNOTATION))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if live.is_empty() && pending.is_empty() && since.is_none() {
+        // Fast path (INF4): ordinary Pods keep upstream Recreate semantics
+        // with zero extra reads — no regression to Recreate/canary tests.
+        return Ok((RecreateHold::FastPath, None, Vec::new(), None));
+    }
+    let all_nodes = client.list(&KeyPrefix::new("", "nodes", None)).await?;
+    // Fresh GET per distinct hosting node (the release-ack source).
+    let mut hosting: Vec<Value> = Vec::new();
+    for w in pending.iter().chain(live.iter()) {
+        if !w.node.is_empty() && !hosting.iter().any(|n| name(n) == Some(w.node.as_str())) {
+            if let Some(n) = client.get(&Key::new("", "nodes", "", &w.node)).await? {
+                hosting.push(n);
+            }
+        }
+    }
+    let verdict = evaluate_recreate_hold(&pending, &live, &hosting, &all_nodes, since.as_deref());
+    match &verdict {
+        RecreateHold::FastPath => Ok((verdict, None, hosting, since)),
+        RecreateHold::Begin(watch) => {
+            let pending_raw = Value::String(teardown_watch_to_annotation(watch));
+            let next = dep_with_annotations(dep, |a| {
+                a.insert(TEARDOWN_SINCE_ANNOTATION.into(), json!(now));
+                a.insert(TEARDOWN_PENDING_ANNOTATION.into(), pending_raw);
+            });
+            let written = write_dep(client, dep, ns, dep_name, next).await?;
+            if written.is_some() {
+                tracing::info!(deployment = dep_name, "recreate teardown hold began");
+            }
+            Ok((verdict, written, hosting, since))
+        }
+        RecreateHold::Waiting(_) => {
+            // Refresh pending only when the union grew (since stays frozen).
+            let mut union = pending.clone();
+            for l in &live {
+                if !union.iter().any(|w| w.pod_uid == l.pod_uid) {
+                    union.push(l.clone());
+                }
+            }
+            if union == pending {
+                return Ok((verdict, None, hosting, since));
+            }
+            union.sort_by(|a, b| a.pod_uid.cmp(&b.pod_uid));
+            let pending_raw = Value::String(teardown_watch_to_annotation(&union));
+            let next = dep_with_annotations(dep, |a| {
+                a.insert(TEARDOWN_PENDING_ANNOTATION.into(), pending_raw);
+            });
+            Ok((
+                verdict,
+                write_dep(client, dep, ns, dep_name, next).await?,
+                hosting,
+                since,
+            ))
+        }
+        RecreateHold::Complete => {
+            let next = dep_with_annotations(dep, |a| {
+                a.remove(TEARDOWN_SINCE_ANNOTATION);
+                a.remove(TEARDOWN_PENDING_ANNOTATION);
+            });
+            let written = write_dep(client, dep, ns, dep_name, next).await?;
+            if written.is_some() {
+                tracing::info!(deployment = dep_name, "recreate teardown confirmed");
+            }
+            Ok((verdict, written, hosting, since))
+        }
+    }
+}
+
+/// CAS-write a mutation of `dep`'s annotations; `None` on a lost CAS race
+/// (the verdict still governs the current pass; the 1s resync re-records
+/// idempotently), errors otherwise.
+async fn write_dep(
+    client: &Arc<dyn Client>,
+    dep: &Value,
+    ns: &str,
+    dep_name: &str,
+    next: Value,
+) -> Result<Option<Value>, ControllerError> {
+    let key = Key::new(GROUP, "deployments", ns, dep_name);
+    match client.update(&key, next, resource_version(dep)).await {
+        Ok(updated) => Ok(Some(updated)),
+        Err(e) if e.is_conflict() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `dep` with `metadata.annotations` mutated by `f` (pure clone-then-edit;
+/// an absent annotations object is created).
+fn dep_with_annotations(dep: &Value, f: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Value {
+    let mut next = dep.clone();
+    if !next.get("metadata").map(Value::is_object).unwrap_or(false) {
+        return next;
+    }
+    let metadata = next.get_mut("metadata").and_then(Value::as_object_mut);
+    if let Some(metadata) = metadata {
+        let entry = metadata.entry("annotations").or_insert_with(|| json!({}));
+        if let Some(map) = entry.as_object_mut() {
+            f(map);
+        }
+    }
+    next
+}
+
+/// The Progressing=False message while the hold is active (INF4): the
+/// waiting podUIDs/nodes, actionable per-entry.
+fn begin_message(watch: &[TeardownWatch]) -> String {
+    let entries: Vec<String> = watch
+        .iter()
+        .map(|w| format!("{}@{}", w.pod_uid, w.node))
+        .collect();
+    format!(
+        "Recreate hold: recording runtime teardown of host-direct/GPU pods: {}",
+        entries.join(", ")
+    )
+}
+
 /// Reconcile one Deployment: create/scale the target RS per the rollout
 /// strategy, drain old RSs, write aggregate status + conditions
 /// (write-if-changed both).
@@ -187,6 +344,10 @@ pub async fn reconcile(
 
     // Paused: no RS mutations at all; status + conditions below still
     // reflect reality (Progressing is carried through unchanged).
+    // May be replaced by a teardown-hold annotation write below (the
+    // status section then CASes against the fresh resourceVersion).
+    let mut dep_obj = dep.clone();
+    let mut teardown_msg: Option<String> = None;
     if !paused {
         // Fresh Deployments (no superseded capacity) start the target RS at
         // `desired`; rollouts start at 0 so the surge cap holds from the
@@ -202,7 +363,34 @@ pub async fn reconcile(
         let old_views: Vec<RsView> = olds.iter().map(rs_view).collect();
         let spec = dep.get("spec").unwrap_or(&Value::Null);
         let (new_target, old_targets) = match parse_strategy(spec) {
-            Strategy::Recreate => recreate_targets(desired, &new_view, &old_views),
+            Strategy::Recreate => {
+                let (new_target, old_targets) = recreate_targets(desired, &new_view, &old_views);
+                // INF4 (T7.6, Q62): hold the new RS at 0 until the runtime
+                // teardown of every old host-direct/GPU pod is confirmed
+                // by fresh node status (see rollout's hold docs). Only
+                // teardown-relevant pods ever engage this — ordinary
+                // Recreate rollouts take the zero-read FastPath.
+                let (verdict, written, hold_nodes, hold_since) =
+                    recreate_hold(client, dep, ns, &olds, &now_rfc3339(now_secs)).await?;
+                if let Some(updated) = written {
+                    dep_obj = updated;
+                }
+                let held = match &verdict {
+                    RecreateHold::FastPath | RecreateHold::Complete => None,
+                    RecreateHold::Begin(watch) => Some(begin_message(watch)),
+                    RecreateHold::Waiting(unconfirmed) => Some(hold_message(
+                        unconfirmed,
+                        &hold_nodes,
+                        hold_since.as_deref(),
+                    )),
+                };
+                if let Some(msg) = held {
+                    teardown_msg = Some(msg);
+                    (0, old_targets) // new RS pinned at 0 while held
+                } else {
+                    (new_target, old_targets)
+                }
+            }
             Strategy::RollingUpdate {
                 max_surge,
                 max_unavailable,
@@ -289,6 +477,9 @@ pub async fn reconcile(
     let complete = updated == desired && avail == desired && generation <= observed;
 
     // Conditions (anti-churn merge: converged Deployments never rewrite).
+    // `dep` may be the annotation-write result above (fresh rv for the
+    // status CAS).
+    let dep = &dep_obj;
     let now = now_rfc3339(now_secs);
     let existing: Vec<Value> = dep
         .pointer("/status/conditions")
@@ -315,6 +506,13 @@ pub async fn reconcile(
         if let Some(p) = find_condition(&existing, "Progressing") {
             desired_conditions.push(p.clone());
         }
+    } else if let Some(msg) = &teardown_msg {
+        // INF4 (T7.6, Q62): actionable stall while the new RS is held at
+        // 0 — the waiting podUIDs/nodes are in the message. Takes priority
+        // over ProgressDeadlineExceeded (the specific reason beats the
+        // generic one) and over NewReplicaSetAvailable (a held rollout is
+        // NOT complete even at desired=0).
+        desired_conditions.push(progressing(&now, false, "OldRuntimeTeardownPending", msg));
     } else if complete {
         desired_conditions.push(progressing(
             &now,

@@ -174,7 +174,9 @@ fn poll_bounded(
 
 /// Serve-level defaults: explicit spec values always win (Q49/Q50).
 fn apply_defaults(spec: &mut ContainerSpec, ctx: &SessionCtx) {
-    if spec.netns.is_none() && !spec.new_net {
+    // T4.15 (Q60): a host-root container never joins the serve-level
+    // netns default either — the host network stays.
+    if !spec.host_root && spec.netns.is_none() && !spec.new_net {
         spec.netns = ctx.netns_default.clone();
     }
     if spec.log_path.is_none() {

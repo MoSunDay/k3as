@@ -36,6 +36,21 @@
 #      the copied tree — clean EBUSY failure, Q55.)
 #   H8 regression: builtin-image-e2e.sh reruns green under
 #      `--builtin-rootfs image` (I1-I8 unchanged on the opt-in chain).
+#   T4.15 (Q60) host-direct pods — the literal `init-pro.io/rootfs: /`
+#   annotation rides the strict triple (builtin engine + host rootfs
+#   mode + `/`): the image is pure wire metadata (a BOGUS reference with
+#      imagePullPolicy: Never — no image action may run):
+#   HD1/HD2 selection + direct root: the host marker on the REAL / is
+#      VISIBLE through the host root (the H2 inverse) and the pod runs.
+#   HD3 namespaces: host netns stays (no NEWNET), fresh PID ns through
+#      /proc, private mount propagation (no shared: tags).
+#   HD4 existing controls: a precreated fake device under host /dev is
+#      visible; :ro host-mounts still refuse writes (EROFS -> Failed);
+#      a memory limit lands in the container cgroup (init-pro/<id>/
+#      memory.max — /sys stays the TRUE host view, Q60).
+#   HD5 explicit failure: agent restarted `--builtin-rootfs image` breaks
+#      the triple — the `/` pod NEVER runs (Failed/Pending + the
+#      "host-direct refused" text), no containerd fallback, agent alive.
 #
 # Preconditions: PRE-BUILT binary, real root, static busybox, curl +
 # python3. Missing inputs => "SKIP builtin-hostroot-e2e:" + exit 0 (Q25);
@@ -66,13 +81,20 @@ source "$SCRIPT_DIR/lib/builtin-image-lib.sh"
 # T4.14 (Q55): boot the agent on the HOST default (no --builtin-rootfs).
 export BIMG_ROOTFS_MODE=host
 
-DD="$(mktemp -d /tmp/init-pro-builtin-hostroot-e2e.XXXXXX)"
+DD=/tmp/hdfix; rm -rf /tmp/hdfix; mkdir -p /tmp/hdfix
 KUBECTL="$DD/kubectl"; ln -sf "$BIN" "$KUBECTL"
 SRV_PID=""; AGENT_PID=""
 bimg_init_traps
-# H2 puts a marker on the REAL host / — chained teardown removes it.
+# H2 + HD1 put markers on the REAL host / and /dev — chained teardown
+# removes them (the device node is the HD4 fixture, T4.15/Q60).
 h2_marker=/h2t414-marker
-h_cleanup() { rm -rf "$h2_marker" 2>/dev/null || true; bimg_cleanup; }
+hd_marker=/hdt415-marker
+hd_dev=/dev/k3as-hd4
+h_cleanup() {
+  rm -rf "$h2_marker" "$hd_marker" 2>/dev/null || true
+  rm -f "$hd_dev" 2>/dev/null || true
+  bimg_cleanup
+}
 trap h_cleanup EXIT
 
 API_PORT="$(pick_port)"
@@ -258,6 +280,130 @@ grep -q "H7-EXEC" "$H7WS/exec.txt" 2>/dev/null \
 delete_pod h7-host
 bimg_ok "H7 host-access pod: Running + logs + exec + /workspace ($H7WS) + /host tree, clean delete"
 
+# --- HD1-HD5 (T4.15, Q60): host-direct pods on the literal host root -------
+# Helpers: the host-direct pod body (bogus image = pure wire metadata,
+# imagePullPolicy Never so NO image action runs) and a busybox argv whose
+# binary lives on the HOST root ($BUSYBOX is the host path — no rootfs is
+# fabricated for these pods).
+hd_cmd() { # SH_SCRIPT -> JSON argv ["<host busybox>", "sh", "-c", SCRIPT]
+  python3 -c 'import json,sys; print(json.dumps([sys.argv[1], "sh", "-c", sys.argv[2]]))' \
+    "$BUSYBOX" "$1"
+}
+
+hd_pod_json() { # NAME CMD_JSON [HOST_MOUNTS_SPEC] [LIMITS_JSON] -> pod body
+  python3 - "$1" "$2" "${3:-}" "${4:-}" <<'PY'
+import json, sys
+name, cmd, hm, limits = sys.argv[1:5]
+container = {
+    "name": "c",
+    "image": "registry.invalid/no-such/image:never",
+    "imagePullPolicy": "Never",
+    "command": json.loads(cmd),
+}
+if limits:
+    container["resources"] = {"limits": json.loads(limits)}
+ann = {"init-pro.io/rootfs": "/"}
+if hm:
+    ann["init-pro.io/host-mounts"] = hm
+print(json.dumps({
+    "apiVersion": "v1", "kind": "Pod",
+    "metadata": {"name": name, "namespace": "default", "annotations": ann},
+    "spec": {"restartPolicy": "Never", "containers": [container]},
+}))
+PY
+}
+
+# hd_run_pod NAME MARKER [HOST_MOUNTS_SPEC] [LIMITS_JSON] [CMD_JSON]:
+# post, wait Succeeded, wait logs; leaves the logs in HD_LOGS.
+hd_run_pod() {
+  local code cmd="${5:-$(hd_cmd "echo $2")}"
+  code="$(post_pod_full "$1" "$(hd_pod_json "$1" "$cmd" "${3:-}" "${4:-}")")"
+  [[ "$code" == "201" ]] || bimg_fail "$1 pod POST -> $code"
+  local phase; phase="$(wait_phase "$1" Succeeded 120)"
+  [[ "$phase" == "Succeeded" ]] \
+    || bimg_fail "$1 never Succeeded (phase=${phase:-none}; agent log: $(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
+  HD_LOGS="$(wait_logs "$1" "$2" 60)"
+  grep -q "$2" <<<"$HD_LOGS" || bimg_fail "$1 logs missing '$2' (got: ${HD_LOGS:-<empty>})"
+}
+
+# HD1/HD2: the strict triple selects host-direct; the host marker on the
+# REAL / is VISIBLE (H2's inverse: staged-rootfs pods cannot see it) and
+# the bogus image never mattered (no image action ran).
+mkdir -p "$hd_marker"; echo hd-root-secret >"$hd_marker/secret"
+hd_run_pod hd1-host "HD1-UP" "" "" \
+  "$(hd_cmd 'echo HD1-UP; echo M=$(cat /hdt415-marker/secret)')"
+grep -q "M=hd-root-secret" <<<"$HD_LOGS" \
+  || bimg_fail "HD1 host marker invisible through the host root (got: ${HD_LOGS:-<empty>})"
+bimg_ok "HD1/HD2 host-direct pod runs; bogus image + Never => no image action; host / marker visible"
+
+# HD3: namespaces — the HOST netns stays (no NEWNET, no join), the PID
+# namespace is fresh (visible through the fresh /proc), and the private
+# NEWNS copy has no shared: propagation tags.
+HOST_NET_NS="$(readlink /proc/self/ns/net)"
+HOST_PID_NS="$(readlink /proc/self/ns/pid)"
+hd_run_pod hd3-ns "N=" "" "" \
+  "$(hd_cmd "echo N=\$(readlink /proc/self/ns/net); echo P=\$(readlink /proc/self/ns/pid); echo S=\$(grep -c 'shared:' /proc/self/mountinfo)")"
+HD3_NET="$(grep -o 'N=net:\[[0-9]*\]' <<<"$HD_LOGS" | head -1 | cut -d= -f2)"
+HD3_PID="$(grep -o 'P=pid:\[[0-9]*\]' <<<"$HD_LOGS" | head -1 | cut -d= -f2)"
+[[ "$HD3_NET" == "$HOST_NET_NS" ]] \
+  || bimg_fail "HD3 must stay in the host netns (host [$HOST_NET_NS] pod [$HD3_NET])"
+[[ -n "$HD3_PID" && "$HD3_PID" != "$HOST_PID_NS" ]] \
+  || bimg_fail "HD3 needs a fresh PID ns (host [$HOST_PID_NS] pod [$HD3_PID])"
+grep -q "S=0" <<<"$HD_LOGS" || bimg_fail "HD3 mountinfo still has shared: tags (${HD_LOGS})"
+bimg_ok "HD3 host netns kept, fresh PID ns, private mount tree"
+
+# HD4: the existing controls hold on the host root — a precreated fake
+# device node under the host /dev is visible; :ro host-mounts still
+# refuse writes; a memory limit lands in the container cgroup.
+if ! command -v mknod >/dev/null; then
+  bimg_ok "HD4a SKIP (no mknod on this host)"
+else
+  rm -f "$hd_dev"; mknod "$hd_dev" c 1 3 || bimg_fail "HD4 mknod $hd_dev failed"
+  hd_run_pod hd4-dev "HD4-DEV-OK" "" "" \
+    "$(hd_cmd "test -c $hd_dev && echo HD4-DEV-OK")"
+  bimg_ok "HD4a precreated device $hd_dev visible through host /dev"
+fi
+mkdir -p "$DD/hddata"; echo seed >"$DD/hddata/seed"
+code="$(post_pod_full hd4-ro "$(hd_pod_json hd4-ro "$(hd_cmd 'echo x > /data/w')" "/data=$DD/hddata:ro")")"
+[[ "$code" == "201" ]] || bimg_fail "HD4b pod POST -> $code"
+PHASE="$(wait_phase hd4-ro Failed 120)"
+[[ "$PHASE" == "Failed" ]] || bimg_fail "HD4b :ro write should go Failed, got ${PHASE:-none}"
+[[ "$(exit_code hd4-ro)" == "1" ]] || bimg_fail "HD4b exitCode expected 1, got '$(exit_code hd4-ro)'"
+HD4B_LOGS="$("$KUBECTL" logs hd4-ro --server "$BASE" 2>/dev/null || true)"
+grep -q "Read-only file system" <<<"$HD4B_LOGS" \
+  || bimg_fail "HD4b logs lack the EROFS marker (got: ${HD4B_LOGS:-<empty>})"
+# HD4c memory limit: Q60 keeps host /sys untouched, so the host root shows
+# the TRUE host cgroupfs — whose v2 ROOT has no memory.max (ENOENT; the
+# pivot path differs because nsrun mounts a fresh cgroupfs there). The
+# container's own cgroup is a CHILD of nsrun's init-pro parent, named
+# after the container id (engine convert.rs sanitize) — read it from the
+# pod's view of the host tree.
+hd_run_pod hd4-mem "MEM=" "" '{"memory":"16Mi"}' \
+  "$(hd_cmd 'for f in /sys/fs/cgroup/init-pro/*/memory.max; do echo MEM=$(cat $f 2>/dev/null)@$f; done')"
+grep -q "MEM=16777216" <<<"$HD_LOGS" \
+  || bimg_fail "HD4c the 16Mi cap must land in the init-pro container cgroup (got: ${HD_LOGS})"
+bimg_ok "HD4 host /dev visible; :ro bind EROFS -> Failed; memory limit applied"
+
+# HD5: break the triple (agent on --builtin-rootfs image) — the `/` pod
+# must NEVER run: no containerd fallback, an actionable refusal surfaced,
+# and the agent stays alive. Restore the host default afterwards.
+restart_agent --builtin-rootfs image
+code="$(post_pod_full hd5-refused "$(hd_pod_json hd5-refused "$(hd_cmd 'echo never')")")"
+[[ "$code" == "201" ]] || bimg_fail "HD5 pod POST -> $code"
+sleep 8
+PHASE="$(pod_phase hd5-refused)"
+[[ "$PHASE" != "Running" && "$PHASE" != "Succeeded" ]] \
+  || bimg_fail "HD5 broken-triple pod must never run (phase=$PHASE)"
+HD5_EV="$(wait_pod_events hd5-refused "host-direct" 40)"
+if ! grep -q "host-direct" <<<"$HD5_EV"; then
+  grep -q "host-direct refused" "$AGENT_LOG" \
+    || bimg_fail "HD5 neither events nor agent log carry the refusal (phase=$PHASE; log: $(tail -5 "$AGENT_LOG" | tr '\n' ' '))"
+fi
+kill -0 "$AGENT_PID" 2>/dev/null || bimg_fail "HD5 agent died on the refused pod"
+delete_pod hd5-refused
+restart_agent
+bimg_ok "HD5 broken triple: pod refused (never runs), actionable text, agent alive, no fallback"
+
 # --- H8: the image chain regresses green under --builtin-rootfs image --------
 # The child sources the same lib and would inherit our exported
 # BIMG_ROOTFS_MODE=host — force the image-chain boot for the regression.
@@ -267,4 +413,4 @@ else
   bimg_fail "H8 builtin-image-e2e regressed under --builtin-rootfs image"
 fi
 
-echo "builtin-hostroot-e2e: H1-H8 passed (host-rootfs default, Q55)"
+echo "builtin-hostroot-e2e: H1-H8 + HD1-HD5 passed (host-rootfs default Q55; host-direct Q60)"

@@ -32,6 +32,11 @@ pub mod rollout;
 /// `type=LoadBalancer` Services (explicit IP or first node InternalIP).
 pub mod service_lb;
 pub mod statefulset;
+/// Recreate runtime-teardown hold (INF4, TODO **T7.6**, decision **Q62**):
+/// pure predicates + verdict math holding the new RS at 0 until old
+/// host-direct/GPU pods' teardown is node-acknowledged; wired in
+/// [`deployment`].
+pub(crate) mod teardown_hold;
 pub mod workflow;
 pub mod workflow_bridge;
 

@@ -11,7 +11,8 @@
 #   B4 cgroup limits over the wire  B11 live-socket refusal (Q49)
 #   B5 raw non-UTF8 stdout        B12 malformed request -> error, survives
 #   B6 exec: PID 1 visible in ns  B13 shutdown -> bye + process exit 0
-#   B7 exec: merged streams + code
+#   B7 exec: merged streams + code  B14 host_root wire run (Q60: host root,
+#                                    host netns, fresh /proc, private mounts)
 #   N1 host-net pause == host netns (Q52)   N2 worker join stays host netns
 #   N3-N5 builtin cluster (Q52): shared-netns pod serves a host port,
 #   podIP==hostIP==node IP via REST, port released on delete.
@@ -461,6 +462,48 @@ hsock.close()
 assert hn.wait(timeout=15) == 0, "N1 host-net pause engine did not exit 0"
 print("OK   N1 pause --host-net: pong pid alive, sandbox netns == host netns (Q52)")
 print("OK   N2 worker joins host-net pause: readlink == host netns (Q52)")
+
+# B14 (T4.15, Q60): wire-level host_root — rootfs "/" + host_root: true
+# over the frame protocol keeps the HOST root (host marker visible, host
+# /dev populated) and the HOST network namespace (no NEWNET, no setns),
+# with a FRESH /proc for the new PID namespace and private mount
+# propagation (no shared: tags in mountinfo).
+b14_marker = os.path.join("/tmp", f"b14-q60-{os.getpid()}")
+with open(b14_marker, "w") as f:
+    f.write("hd-wire-secret")
+try:
+    events, out, err = run(
+        s,
+        {
+            "id": "b14",
+            "rootfs": "/",
+            "host_root": True,
+            "argv": [
+                busybox,
+                "sh",
+                "-c",
+                "echo M=$(cat " + b14_marker + "); "
+                "echo D=$(test -c /dev/null && echo char); "
+                "echo P=$(readlink /proc/self/ns/pid); "
+                "echo N=$(readlink /proc/self/ns/net); "
+                "echo S=$(grep -c 'shared:' /proc/self/mountinfo)",
+            ],
+        },
+    )
+finally:
+    os.unlink(b14_marker)
+assert events[-1] == {"event": "exited", "id": "b14", "code": 0}, events
+wire = dict(
+    line.split("=", 1) for line in out.decode().splitlines() if "=" in line
+)
+assert wire.get("M") == "hd-wire-secret", f"B14 host marker missing: {wire!r}"
+assert wire.get("D") == "char", f"B14 host /dev not visible: {wire!r}"
+assert wire.get("P") and wire["P"] != os.readlink(
+    "/proc/self/ns/pid"
+), f"B14 fresh PID ns expected: {wire!r}"
+assert wire.get("N") == host_netns, f"B14 must stay in the host netns: {wire!r}"
+assert wire.get("S") == "0", f"B14 mount tree must be private: {wire!r}"
+print("OK   B14 host_root over the wire: host root + /dev, host netns, fresh /proc, private mounts")
 
 # B11: a second engine must refuse a live engine's socket (Q49) and the
 # live engine keeps answering.

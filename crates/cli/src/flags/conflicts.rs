@@ -141,6 +141,7 @@ mod tests {
             registry_addr: "127.0.0.1:15000".to_string(),
             builtin_image_quota: 0,
             builtin_rootfs: "host".to_string(),
+            gpu_inventory: "auto".to_string(),
         }
     }
 

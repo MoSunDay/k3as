@@ -153,6 +153,7 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
     let mut limits = CgroupLimits::default();
     let mut new_net = false;
     let mut netns: Option<PathBuf> = None;
+    let mut host_root = false;
     let mut command = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -199,11 +200,30 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
                 }
             }
             "--new-net" => new_net = true,
+            // T4.15 (Q60): run with the literal host root — no rootfs dir,
+            // no pivot; only a fresh /proc for the new PID namespace.
+            "--host-root" => host_root = true,
             other => return Err(format!("unknown flag {other:?}")),
         }
         i += 1;
     }
-    let rootfs = rootfs.ok_or_else(|| "--rootfs DIR is required".to_string())?;
+    if host_root && (new_net || netns.is_some()) {
+        return Err("engine-run: --host-root keeps the host network (Q60); \
+             --new-net/--netns are incompatible with it"
+            .to_string());
+    }
+    // Q60: --host-root runs on the literal host root — no directory to
+    // enter, so --rootfs is optional there (and ignored).
+    let rootfs = rootfs.unwrap_or_else(|| {
+        if host_root {
+            PathBuf::from("/")
+        } else {
+            PathBuf::new()
+        }
+    });
+    if !host_root && rootfs.as_os_str().is_empty() {
+        return Err("--rootfs DIR is required".to_string());
+    }
     if command.is_empty() {
         return Err("no command (use `-- COMMAND [ARG]...`)".to_string());
     }
@@ -215,6 +235,7 @@ fn parse(args: &[String]) -> Result<(RunSpec, Vec<String>), String> {
     spec.mounts = mounts;
     spec.new_net = new_net;
     spec.netns = netns;
+    spec.host_root = host_root;
     let has_limits = !limits.is_empty();
     // `cgroup_name` is only meaningful as the home of limits: `nsrun::spawn`
     // skips the cgroup entirely without them, so accepting the flag would be
@@ -269,6 +290,30 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn host_root_flag_needs_no_rootfs_and_rejects_net_flags() {
+        // Q60: --host-root runs on the literal host root.
+        let (spec, argv) = parse(&args(&["--host-root", "--", "/usr/bin/true"])).unwrap();
+        assert!(spec.host_root);
+        assert_eq!(spec.rootfs, PathBuf::from("/"));
+        assert!(!spec.new_net && spec.netns.is_none());
+        assert_eq!(argv, ["/usr/bin/true"]);
+        // Network flags are a hard CLI error on this path (HD5).
+        let err = parse(&args(&["--host-root", "--new-net", "--", "/bin/true"])).unwrap_err();
+        assert!(err.contains("host network"), "{err}");
+        let err = parse(&args(&[
+            "--host-root",
+            "--netns",
+            "/proc/1/ns/net",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("host network"), "{err}");
+        // Without --host-root the rootfs dir is still required.
+        assert!(parse(&args(&["--", "/bin/true"])).is_err());
     }
 
     #[test]

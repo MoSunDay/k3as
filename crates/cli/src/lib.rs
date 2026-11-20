@@ -224,6 +224,9 @@ where
                 ag.builtin_image_quota,
                 // T4.14 (Q55): rootfs source for the built-in engine.
                 ag.builtin_rootfs,
+                // T7.2 (Q61): whole-GPU inventory source (auto|none|
+                // fake:<resource>:<count>) — parsed fail-fast in run_agent.
+                ag.gpu_inventory,
             )
         }
         Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),

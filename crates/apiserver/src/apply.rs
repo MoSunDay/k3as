@@ -67,6 +67,17 @@ pub(crate) async fn do_apply(
     }
     set_type_meta(&mut body, &res.api_version, &res.kind);
 
+    // Phase 3 admission (T4.15/T7.2, Q60/Q61): the same validation seam as
+    // create (`crate::collection::do_create`) runs on every apply so SSA
+    // cannot bypass it.
+    if let Err(message) = api::validate::admit(&loc.group, &res.kind, &body) {
+        return ApiError::Invalid {
+            kind: res.kind.clone(),
+            message,
+        }
+        .into_response();
+    }
+
     // T7.5 (Q43): per-Pod anyhome defaulting runs on EVERY apply, not just
     // the created branch — SSA deletes fields a field-manager owns but omits
     // from its new config, so injecting only at creation would strip the

@@ -93,6 +93,15 @@ pub struct RunSpec {
     /// Overlayfs lowers/upper mounted over `rootfs` before it is entered
     /// (T4.13 M3, Q53). None keeps `rootfs` a plain directory.
     pub overlay: Option<Overlay>,
+    /// T4.15 (Q60): run with the literal HOST root. The child keeps the
+    /// private NEWNS copy of the host mount table as `/`: NO
+    /// enter_rootfs/pivot_root, no overlay, no fresh `/sys`/`/dev` —
+    /// only a fresh `/proc` for the new PID namespace is mounted over
+    /// the host `/proc` (inside the private copy, so the host mount
+    /// table is untouched). Mutually exclusive with `new_net`/`netns`
+    /// (Q60: no NEWNET even for the sandbox/pause) and `overlay`.
+    /// `rootfs` must be the literal `/`.
+    pub host_root: bool,
     /// Pause mode (T4.12, Q49): after the start gate the child parks
     /// forever instead of exec'ing — the pod-sandbox PID 1 whose only job
     /// is holding the namespaces open. Signals use their default
@@ -120,6 +129,7 @@ impl RunSpec {
             new_net: false,
             netns: None,
             overlay: None,
+            host_root: false,
             pause: false,
             no_new_privs: true,
             caps: crate::caps::DEFAULT_CAPS,
@@ -163,6 +173,7 @@ impl RunSpec {
                 "netns and new_net are mutually exclusive (Q49)",
             ));
         }
+        self.validate_host_root()?;
         if let Some(netns) = &self.netns {
             if !netns.is_absolute() {
                 return Err(io::Error::new(
@@ -216,6 +227,68 @@ impl RunSpec {
         }
         Ok(())
     }
+
+    /// T4.15 (Q60) invariants for the host-root mode, split out so the
+    /// truth table stays testable: the literal host root admits NO
+    /// network-namespace work (no NEWNET even for the sandbox/pause),
+    /// no overlay, and no rootfs directory other than the literal `/`
+    /// (the request is the host root itself, not a directory to enter).
+    fn validate_host_root(&self) -> io::Result<()> {
+        if !self.host_root {
+            return Ok(());
+        }
+        if self.rootfs != Path::new("/") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "host_root (Q60) requires the literal rootfs \"/\", got {}",
+                    self.rootfs.display()
+                ),
+            ));
+        }
+        if self.new_net || self.netns.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "host_root (Q60) never creates or joins a network namespace: \
+                 new_net/netns are forbidden (host network stays)",
+            ));
+        }
+        if self.overlay.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "host_root (Q60) mounts no overlay: there is no image rootfs",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// What the child does with its root (T4.15, Q60) — the pure planning
+/// seam for [`crate::child`]: either the T4.11 pivot sequence into a
+/// rootfs directory, or the host-root sequence (keep the host root, a
+/// fresh `/proc`, no pivot/chroot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootPlan {
+    /// Bind-mount `rootfs` onto itself, enter it, mount the fresh
+    /// container filesystems, apply user binds, `pivot_root` + detach.
+    Pivot { rootfs: PathBuf },
+    /// Q60 host-direct: the child KEEPS the host root (the private NEWNS
+    /// copy of the mount table). No enter/pivot/chroot; a fresh `/proc`
+    /// is mounted for the new PID namespace before the user binds, and
+    /// host `/dev` stays fully visible (no minimal /dev on this path).
+    HostRoot,
+}
+
+/// Pure mount-plan derivation: exactly one branch per spec, decidable
+/// without root or namespaces (HD3 seam).
+pub fn root_plan(spec: &RunSpec) -> RootPlan {
+    if spec.host_root {
+        RootPlan::HostRoot
+    } else {
+        RootPlan::Pivot {
+            rootfs: spec.rootfs.clone(),
+        }
+    }
 }
 
 fn validate_target(target: &Path) -> io::Result<()> {
@@ -248,6 +321,49 @@ mod tests {
     #[test]
     fn accepts_a_normal_spec() {
         assert!(spec().validate().is_ok());
+    }
+
+    #[test]
+    fn host_root_keeps_the_literal_root_and_forbids_net_and_overlay() {
+        // Q60/HD3: the whole valid shape on one line.
+        let mut s = RunSpec::new("/", vec!["/bin/true".into()]);
+        s.host_root = true;
+        assert!(s.validate().is_ok());
+        assert_eq!(root_plan(&s), RootPlan::HostRoot);
+        // Every network/overlay/rootfs escape is rejected.
+        let mut netns = s.clone();
+        netns.netns = Some(PathBuf::from("/proc/1/ns/net"));
+        assert!(netns.validate().is_err());
+        let mut fresh = s.clone();
+        fresh.new_net = true;
+        assert!(fresh.validate().is_err());
+        let mut ov = s.clone();
+        ov.overlay = Some(Overlay {
+            lower: vec![PathBuf::from("/layers/l1")],
+            upper: PathBuf::from("/views/c/upper"),
+            work: PathBuf::from("/views/c/work"),
+        });
+        assert!(ov.validate().is_err());
+        let mut dir = s.clone();
+        dir.rootfs = PathBuf::from("/tmp/rootfs");
+        assert!(dir.validate().is_err());
+        // Host-mounts (T4.14) and cgroup limits (T4.9) ride along untouched.
+        let mut mounts = s.clone();
+        mounts
+            .mounts
+            .push(BindMount::new("/data", "/data").readonly());
+        mounts.cgroup.memory_max = Some(1 << 20);
+        assert!(mounts.validate().is_ok());
+    }
+
+    #[test]
+    fn root_plan_pivots_for_every_non_host_spec() {
+        assert_eq!(
+            root_plan(&spec()),
+            RootPlan::Pivot {
+                rootfs: PathBuf::from("/tmp/rootfs")
+            }
+        );
     }
 
     #[test]

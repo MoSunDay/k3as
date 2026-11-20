@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use storage::{Key, KeyPrefix};
 
 use crate::client::Client;
@@ -227,6 +227,16 @@ fn pod_body(
     {
         meta["labels"] = labels.clone();
     }
+    // Template annotations propagate into created pods (upstream parity;
+    // the host-direct `init-pro.io/rootfs: /` request, T4.15/Q60). Only the
+    // annotations key is copied, so the controller-owned metadata above
+    // (name/labels/ownerReferences) is never clobbered.
+    if let Some(annotations) = template
+        .pointer("/metadata/annotations")
+        .filter(|v| v.is_object() && !v.as_object().is_some_and(Map::is_empty))
+    {
+        meta["annotations"] = annotations.clone();
+    }
     let mut spec = template
         .pointer("/spec")
         .filter(|v| v.is_object())
@@ -359,5 +369,32 @@ mod tests {
         assert_eq!(pod["spec"]["containers"][0]["image"], "nginx");
         assert_eq!(pod["metadata"]["ownerReferences"][0]["kind"], "StatefulSet");
         assert_eq!(pod["metadata"]["ownerReferences"][0]["controller"], true);
+    }
+
+    #[test]
+    fn pod_body_propagates_template_annotations_without_clobbering() {
+        // Upstream parity + the host-direct request shape (T4.15, Q60):
+        // template annotations reach the pod; controller-owned metadata
+        // (name/labels/hostname/ownerReferences) is never overwritten.
+        let template = json!({
+            "metadata": {
+                "labels": {"app": "web"},
+                "annotations": {"init-pro.io/rootfs": "/", "team": "ai"},
+            },
+            "spec": {"containers": [{"name": "c", "image": "nginx"}]},
+        });
+        let pod = pod_body(&template, "default", "web", "u1", 0, "abcd1234ef", None);
+        assert_eq!(pod["metadata"]["annotations"]["init-pro.io/rootfs"], "/");
+        assert_eq!(pod["metadata"]["annotations"]["team"], "ai");
+        assert_eq!(pod["metadata"]["name"], "web-0");
+        assert_eq!(pod["metadata"]["labels"]["app"], "web");
+        assert_eq!(pod["metadata"]["labels"][REVISION_HASH_LABEL], "abcd1234ef");
+        assert_eq!(pod["spec"]["hostname"], "web-0");
+        assert_eq!(pod["metadata"]["ownerReferences"][0]["kind"], "StatefulSet");
+
+        // A template without annotations creates an unannotated pod.
+        let bare = json!({"metadata": {"labels": {"app": "web"}}, "spec": {}});
+        let pod = pod_body(&bare, "default", "web", "u1", 1, "abcd1234ef", None);
+        assert!(pod["metadata"].get("annotations").is_none());
     }
 }

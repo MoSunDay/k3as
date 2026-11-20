@@ -106,6 +106,18 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
     }
     // T4.2 Scope C: upstream assigns metadata.uid on every create.
     super::state::ensure_object_uid(&mut body);
+    // Phase 3 admission (T4.15/T7.2, Q60/Q61): Pod specs and apps/v1 Pod
+    // templates are validated by the pure seam in `api::validate` — an
+    // invalid EXPLICIT imagePullPolicy, a fractional/negative whole-GPU
+    // quantity, or a host-direct Deployment on RollingUpdate is a 422
+    // Invalid here, never a silent default. Same contract on apply/replace.
+    if let Err(message) = api::validate::admit(&loc.group, &res.kind, &body) {
+        return ApiError::Invalid {
+            kind: res.kind.clone(),
+            message,
+        }
+        .into_response();
+    }
     // Upstream apiserver parity (T3.1b, Q20): every Namespace is created with
     // the `kubernetes` finalizer so deletion is gated on the namespace
     // controller draining all namespaced content first.

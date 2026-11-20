@@ -11,7 +11,9 @@
 #   E3 exec a directory  -> 126          E7 cgroup v2 limits visible + cleaned
 #   E4 uid/gid/env/hostname              E8 --new-net gives a fresh netns
 #   E9 --netns joins a live netns        E10 signal death: SIGKILL -> 137
-#   E11 SIGTERM runs the trapping init
+#   E11 SIGTERM runs the trapping init   E12 --host-root: host root stays
+#                                         (T4.15, Q60: fresh PID ns + /proc,
+#                                          host netns + /dev, private mounts)
 #
 # SKIP semantics (Q25): no root, no static busybox, or a kernel without
 # mount_setattr => one "SKIP engine-selftest:" line and exit 0. Any other
@@ -186,6 +188,47 @@ if [[ -n "$CHILD_NET" && "$CHILD_NET" != "$HOST_NET" && "$CHILD_NET" == net:* ]]
   ok "E8 --new-net ($HOST_NET -> $CHILD_NET)"
 else
   bad "E8 --new-net (host [$HOST_NET] child [$CHILD_NET])"
+fi
+
+# --- E12: --host-root keeps the HOST root (T4.15, Q60) --------------------
+# No --rootfs, no pivot_root, no overlay, no NEWNET: the child runs on
+# the private NEWNS copy of the host mount table (fresh /proc for the new
+# PID ns; host /dev and /sys untouched), and the HOST network namespace
+# stays. The marker on the real host / is VISIBLE (the opposite of the
+# E2/H2 pivot isolation).
+E12_MARKER=/e12t415-marker
+mkdir -p "$E12_MARKER"; echo hd-secret >"$E12_MARKER/secret"
+HOST_PID_NS="$(readlink /proc/self/ns/pid)"
+run_engine "$TMP/e12.out" "$TMP/e12.err" \
+  --host-root -- \
+  "$BUSYBOX" sh -c "echo M=\$(cat $E12_MARKER/secret); \
+echo D=\$(test -c /dev/null && echo char); \
+echo P=\$(readlink /proc/self/ns/pid); \
+echo N=\$(readlink /proc/self/ns/net); \
+echo S=\$(grep -c 'shared:' /proc/self/mountinfo)"
+rm -rf "$E12_MARKER"
+check_rc "E12 host-root run" 0 "$RC"
+check_has "E12 host marker visible through the host root" "M=hd-secret" "$TMP/e12.out"
+check_has "E12 host /dev visible" "D=char" "$TMP/e12.out"
+E12_PID_NS="$(sed -n 's/^P=//p' "$TMP/e12.out" | tr -d '[:space:]')"
+if [[ -n "$E12_PID_NS" && "$E12_PID_NS" != "$HOST_PID_NS" ]]; then
+  ok "E12 fresh PID namespace ($HOST_PID_NS -> $E12_PID_NS)"
+else
+  bad "E12 PID namespace (host [$HOST_PID_NS] child [$E12_PID_NS])"
+fi
+E12_NET="$(sed -n 's/^N=//p' "$TMP/e12.out" | tr -d '[:space:]')"
+if [[ -n "$E12_NET" && "$E12_NET" == "$HOST_NET" ]]; then
+  ok "E12 stays in the host network namespace (no NEWNET)"
+else
+  bad "E12 host netns (host [$HOST_NET] child [$E12_NET])"
+fi
+check_has "E12 mount tree is private (no shared: tags)" "S=0" "$TMP/e12.out"
+# Q60 strictness: --host-root refuses net flags — the host network stays.
+run_engine "$TMP/e12b.out" "$TMP/e12b.err" --host-root --new-net -- true
+if [[ "$RC" -ne 0 ]] && grep -q "host network" "$TMP/e12b.err"; then
+  ok "E12b --host-root rejects --new-net"
+else
+  bad "E12b --host-root + --new-net (rc=$RC, err: $(head -1 "$TMP/e12b.err"))"
 fi
 
 # --- E9-E11: netns join + signal-death exits -------------------------------

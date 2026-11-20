@@ -102,6 +102,16 @@ pub(crate) async fn do_replace(st: &AppState, loc: &Loc, name: &str, mut body: V
     // a stale manifest) previously bypassed prepare(), silently stripping
     // the injected volumes; re-defaulting here keeps the contract uniform
     // across all three write paths (idempotent by construction).
+    // Phase 3 admission (T4.15/T7.2, Q60/Q61) keeps the same uniformity:
+    // the create-time validation seam rejects invalid explicit values on
+    // replace too.
+    if let Err(message) = api::validate::admit(&loc.group, &res.kind, &body) {
+        return ApiError::Invalid {
+            kind: res.kind.clone(),
+            message,
+        }
+        .into_response();
+    }
     if res.kind == "Pod" {
         if let Err(message) = pod_workspace::prepare(st.workspace_nfs.as_deref(), &mut body) {
             return ApiError::Invalid {

@@ -6,18 +6,44 @@
 //! forced argv[0] — the same mechanism a `ln -s init-pro ctr` symlink uses.
 //! (`kubectl` no longer routes to the stub since T3.1b; it gets its own
 //! assertion below.)
+//!
+//! Isolation (S47 review F4): the host `/var/lib/init-pro` may hold staged
+//! peers (`agent/containerd/…`) and a `run/engine/mode` marker left behind
+//! by prior e2e runs; those would make the child exec a real peer (or
+//! refuse as a built-in-engine node) instead of answering as the stub. Each
+//! `run_as` invocation therefore pins `INIT_PRO_DATA_DIR` — the documented
+//! resolution seam the multicall itself honors — at a fresh empty temp dir,
+//! so the child resolves no staged peer and the stub branch is exercised
+//! deterministically.
 
 #![cfg(unix)]
 
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Per-invocation sequence so every spawned child gets its own unique
+/// isolated data dir (see `run_as`).
+static CALL_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Run the built binary as if invoked through a symlink named `alias`.
+///
+/// `INIT_PRO_DATA_DIR` points at a fresh empty temp dir so the child finds
+/// no staged peers and no engine-mode file, keeping the stub branch
+/// deterministic regardless of host state (S47 review F4).
 fn run_as(alias: &str, args: &[&str]) -> std::process::Output {
     // `CARGO_BIN_EXE_init-pro` is provided by cargo for bin-crate integration
     // tests; `arg0` overrides argv[0] so resolve() sees the alias.
+    let seq = CALL_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("init-pro-stub-{}-{}", std::process::id(), seq));
+    std::fs::create_dir_all(&dir).expect("create isolated peer data dir");
+    // The dir is deliberately leaked for the child's lifetime: the child
+    // resolves peers under it while running, and the OS reclaims /tmp
+    // entries. Multicall semantics are unchanged — only exec staged peers —
+    // the test just removes every staged peer the child can see.
     Command::new(env!("CARGO_BIN_EXE_init-pro"))
         .arg0(alias)
+        .env("INIT_PRO_DATA_DIR", &dir)
         .args(args)
         .output()
         .expect("spawn init-pro")

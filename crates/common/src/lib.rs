@@ -4,6 +4,7 @@
 //! layers can depend on it without pulling the world.
 
 pub mod embed;
+pub mod gpu;
 pub mod quantity;
 pub mod time;
 pub mod workspace;

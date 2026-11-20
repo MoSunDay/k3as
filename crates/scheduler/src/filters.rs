@@ -131,7 +131,9 @@ impl Filter for PodAntiAffinityFilter {
 }
 
 /// `ResourceFit`: pod requests must fit the node's remaining allocatable.
-/// A logical node (no capacity) is unbounded (**Q23**).
+/// A logical node (no capacity) is unbounded (**Q23**). T7.2 (**Q61**):
+/// whole-GPU extended resources check FIRST with strict (absent = 0)
+/// capacity — a GPU pod never fits a node that did not publish GPUs.
 pub struct ResourceFitFilter;
 
 impl Filter for ResourceFitFilter {
@@ -139,6 +141,9 @@ impl Filter for ResourceFitFilter {
         "ResourceFit"
     }
     fn filter(&self, pod: &Value, info: &NodeInfo, _snap: &Snapshot) -> Verdict {
+        if let Some(reason) = resources::gpu_fit_reason(pod, info) {
+            return Verdict::reject(self.name(), &reason);
+        }
         if resources::fits(pod, info) {
             Verdict::Pass
         } else {

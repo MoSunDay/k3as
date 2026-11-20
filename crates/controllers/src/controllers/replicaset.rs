@@ -9,7 +9,7 @@
 //! default without kubelet (T4.2), so an explicit not-Ready condition is
 //! the only way a pod drops out of the counts.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use storage::{Key, KeyPrefix};
 
 use crate::client::Client;
@@ -59,6 +59,18 @@ pub async fn reconcile(
             });
             if let Some(labels) = template.pointer("/metadata/labels") {
                 meta["labels"] = labels.clone();
+            }
+            // Template annotations propagate into created pods (upstream
+            // parity): the workload author's annotations — e.g. the
+            // host-direct request `init-pro.io/rootfs: /` (T4.15, Q60) —
+            // must reach the pod the controller materializes. Only the
+            // annotations key is copied, so controller-owned metadata
+            // (name/labels/ownerReferences above) is never clobbered.
+            if let Some(annotations) = template
+                .pointer("/metadata/annotations")
+                .filter(|v| v.is_object() && !v.as_object().is_some_and(Map::is_empty))
+            {
+                meta["annotations"] = annotations.clone();
             }
             let pod = json!({
                 "apiVersion": "v1",
@@ -121,4 +133,88 @@ pub async fn reconcile(
         tracing::debug!(rs = rs_name, replicas = count, "rs status updated");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::StorageClient;
+    use std::sync::Arc;
+    use storage::EmbeddedStorage;
+
+    /// One RS whose template carries labels AND annotations (the host-direct
+    /// request shape, T4.15/Q60).
+    fn rs_with_template(annotations: Value) -> Value {
+        json!({
+            "apiVersion": "apps/v1",
+            "kind": "ReplicaSet",
+            "metadata": {"name": "web", "namespace": "default", "uid": "u1"},
+            "spec": {
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": "web"}},
+                "template": {
+                    "metadata": {"labels": {"app": "web"}, "annotations": annotations},
+                    "spec": {"containers": [{"name": "c", "image": "nginx"}]},
+                },
+            },
+        })
+    }
+
+    async fn created_pods(client: &Arc<dyn Client>) -> Vec<Value> {
+        client
+            .list(&KeyPrefix::new("", "pods", Some("default".into())))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn template_annotations_propagate_into_created_pods() {
+        let store = Arc::new(EmbeddedStorage::new());
+        let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
+        let rs = rs_with_template(json!({"init-pro.io/rootfs": "/", "team": "ai"}));
+        client
+            .create(
+                &Key::new("apps", "replicasets", "default", "web"),
+                rs.clone(),
+            )
+            .await
+            .unwrap();
+        reconcile(&client, &rs).await.unwrap();
+
+        let pods = created_pods(&client).await;
+        assert_eq!(pods.len(), 1);
+        let pod = &pods[0];
+        // Annotations copied verbatim from the template.
+        assert_eq!(pod["metadata"]["annotations"]["init-pro.io/rootfs"], "/");
+        assert_eq!(pod["metadata"]["annotations"]["team"], "ai");
+        // Controller-owned metadata is intact and never clobbered.
+        assert_eq!(pod["metadata"]["namespace"], "default");
+        assert!(pod["metadata"]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("web-"));
+        assert_eq!(pod["metadata"]["labels"]["app"], "web");
+        assert_eq!(pod["metadata"]["ownerReferences"][0]["kind"], "ReplicaSet");
+        assert_eq!(pod["spec"]["containers"][0]["image"], "nginx");
+    }
+
+    #[tokio::test]
+    async fn templates_without_annotations_create_unannotated_pods() {
+        let store = Arc::new(EmbeddedStorage::new());
+        let client: Arc<dyn Client> = Arc::new(StorageClient::new(store));
+        let rs = rs_with_template(json!({}));
+        client
+            .create(
+                &Key::new("apps", "replicasets", "default", "web"),
+                rs.clone(),
+            )
+            .await
+            .unwrap();
+        reconcile(&client, &rs).await.unwrap();
+
+        let pods = created_pods(&client).await;
+        assert_eq!(pods.len(), 1);
+        assert!(pods[0]["metadata"].get("annotations").is_none());
+        assert_eq!(pods[0]["metadata"]["labels"]["app"], "web");
+    }
 }

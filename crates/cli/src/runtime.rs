@@ -88,6 +88,8 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
         registry::DEFAULT_ADDR.to_string(),
         0,
         "host".to_string(),
+        // T7.2 (Q61): servers never run the node runtime — auto inventory.
+        kubelet::GpuInventorySource::Auto,
     )
 }
 
@@ -115,7 +117,18 @@ pub fn run_agent(
     builtin_image_quota: u64,
     // T4.14 (Q55): rootfs source for the built-in engine (host|image).
     builtin_rootfs: String,
+    // T7.2 (Q61): whole-GPU inventory source (auto|none|fake:<r>:<n>).
+    gpu_inventory: String,
 ) -> ExitCode {
+    // T7.2 (Q61): fail fast on a bad --gpu-inventory value — the GPU
+    // plane's ledger/publication contract must never boot half-parsed.
+    let gpu_inventory = match kubelet::parse_inventory(&gpu_inventory) {
+        Ok(src) => src,
+        Err(e) => {
+            eprintln!("init-pro agent: invalid --gpu-inventory value: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     run_supervised(
         "agent",
         cfg,
@@ -129,6 +142,7 @@ pub fn run_agent(
         registry_addr,
         builtin_image_quota,
         builtin_rootfs,
+        gpu_inventory,
     )
 }
 
@@ -197,6 +211,8 @@ fn run_supervised(
     builtin_image_quota: u64,
     // T4.14 (Q55): rootfs source for the built-in engine (host|image).
     builtin_rootfs: String,
+    // T7.2 (Q61): whole-GPU inventory source (parsed by the caller).
+    gpu_inventory: kubelet::GpuInventorySource,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -318,8 +334,22 @@ fn run_supervised(
                     // T4.12 (Q49): the kubelet rides the built-in engine —
                     // no containerd, no staged crictl tree. The Node object
                     // reports engine://<version> so describe tells the truth.
-                    let kc = kubelet_config(&url, &node, &kubelet_addr, &cfg)
+                    // T4.14 (Q55): engine-level rootfs source (host dirs
+                    // by default; the pod annotation can flip per pod).
+                    let rootfs = kubelet::engine::RootfsMode::parse(&builtin_rootfs)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(target: "init-pro", role, error = %e,
+                                "bad --builtin-rootfs value; defaulting to host (Q55)");
+                            kubelet::engine::RootfsMode::Host
+                        });
+                    // T7.2 (Q61): the GPU plane's backend inputs — the
+                    // builtin engine (probe already passed, hence `builtin`)
+                    // under the resolved rootfs mode + the inventory source.
+                    let mut kc = kubelet_config(&url, &node, &kubelet_addr, &cfg)
                         .with_runtime_version(format!("engine://{}", common::version()));
+                    kc.engine_builtin = true;
+                    kc.builtin_rootfs = rootfs;
+                    kc.gpu_inventory = gpu_inventory.clone();
                     match kubelet::engine::EngineBackend::new(
                         &cfg.data_dir,
                         &kc.sandbox_image,
@@ -327,16 +357,7 @@ fn run_supervised(
                         &registry_addr,
                     )
                     .map(|b| b.with_image_quota(builtin_image_quota))
-                    // T4.14 (Q55): engine-level rootfs source (host dirs
-                    // by default; the pod annotation can flip per pod).
-                    .map(|b| match kubelet::engine::RootfsMode::parse(&builtin_rootfs) {
-                        Ok(mode) => b.with_rootfs_mode(mode),
-                        Err(e) => {
-                            tracing::warn!(target: "init-pro", role, error = %e,
-                                "bad --builtin-rootfs value; defaulting to host (Q55)");
-                            b.with_rootfs_mode(kubelet::engine::RootfsMode::Host)
-                        }
-                    })
+                    .map(|b| b.with_rootfs_mode(rootfs))
                     {
                         Ok(backend) => {
                             // Q49: adopt-or-clean leftover engine sockets.

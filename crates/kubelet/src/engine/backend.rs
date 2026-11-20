@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
 
+use super::host_direct_run;
 use super::image::pull::Puller;
 use super::image::{ConfigBody, ImageStore, PulledImage};
 use super::launch;
@@ -374,6 +375,75 @@ impl EngineBackend {
             .map(|s| Duration::from_secs(s.clamp(1, 600)))
             .unwrap_or(STOP_GRACE)
     }
+
+    /// The Q53/Q55 launch plan for a NOT-selected container (T4.15,
+    /// Q60): sandbox netns join, per-mode image chain (opt-in pull,
+    /// rootfs resolve, image config merge) and the CRI->engine spec
+    /// mapping with the overlay view. Byte-compatible with the
+    /// pre-T4.15 behavior; the host-direct path never reaches it.
+    async fn launch_plan(
+        &self,
+        id: &str,
+        pending: &Pending,
+    ) -> Result<engine_proto::ContainerSpec, String> {
+        let sandbox_netns = self
+            .registry
+            .netns_of(&pending.sandbox_id)
+            .ok_or_else(|| format!("sandbox {} is not ready", pending.sandbox_id))?;
+        // T4.14 (Q55): the pod annotation may flip this container onto the
+        // Q53 pull chain while the engine default stays host.
+        let mode = self.mode_for(&pending.pcfg.annotations)?;
+        let image = pending.ccfg.image.image.clone();
+        if mode == RootfsMode::Image
+            && self.rootfs_mode == RootfsMode::Host
+            && !self.image_present(&image)
+        {
+            // The annotation is an explicit opt-in to the pull chain:
+            // EnsureImage already failed (presence-only in host mode), so
+            // the create pulls once here and surfaces a pull error.
+            self.puller.pull(&image).await?;
+        }
+        let (rootfs, overlay, layer_dirs) = match self.resolve(&image, id, mode)? {
+            ResolvedRootfs::Dir(dir) => (dir.clone(), None, vec![dir]),
+            ResolvedRootfs::Overlay {
+                mountpoint,
+                lower,
+                upper,
+                work,
+            } => (
+                mountpoint,
+                Some(engine_proto::OverlaySpec {
+                    lower: lower
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    upper: upper.to_string_lossy().into_owned(),
+                    work: work.to_string_lossy().into_owned(),
+                }),
+                // `/etc/passwd` reads happen per-layer (the view itself is
+                // only mounted inside the engine child).
+                lower,
+            ),
+        };
+        // T4.13 M4 (Q53): the image config is the launch source of truth —
+        // entrypoint/cmd/env/user/workingDir merge under the CRI request
+        // (explicit pod command overrides; pod env appends last-wins).
+        // Host mode (Q55/R1): NO image config — the pod spec is the whole
+        // launch truth (an explicit command is required).
+        let img = if mode == RootfsMode::Image {
+            self.image_config_body(&image)?
+        } else {
+            None
+        };
+        let resolve_named_user = named_user_lookup(&layer_dirs);
+        let launch = spec::merge_launch(&pending.ccfg, img.as_ref(), Some(&resolve_named_user))?;
+        let mut es =
+            spec::container_spec(id, &rootfs, pending, Some(sandbox_netns), launch, false)?;
+        // T4.13 M3 (Q53): the engine child mounts the overlay view over
+        // `rootfs` before entering it; plain dirs keep `overlay: None`.
+        es.overlay = overlay;
+        Ok(es)
+    }
 }
 
 #[async_trait::async_trait]
@@ -467,6 +537,13 @@ impl CriBackend for EngineBackend {
     }
 
     async fn run_pod_sandbox(&self, cfg: &PodSandboxConfig) -> Result<String, String> {
+        // T4.15 (Q60): the host-direct triple is evaluated BEFORE any
+        // image or engine work. An invalid selection fails the sandbox
+        // create with the actionable reason — no pause engine spawns, no
+        // container is ever created (never-containerd, never-fallback).
+        // A SELECTED pod keeps the Q52 pause shape below (host netns,
+        // start gate, waitpid teardown) unchanged.
+        host_direct_run::selected(self.rootfs_mode, &cfg.annotations)?;
         let id = new_id("sb-");
         let socket = self.socket_for(&id);
         // Q52: builtin pause sandbox = host netns (no fresh netns, no CNI).
@@ -510,6 +587,10 @@ impl CriBackend for EngineBackend {
         pcfg: &PodSandboxConfig,
     ) -> Result<String, String> {
         let id = new_id("c-");
+        // T4.15 (Q60): same gate as the sandbox — an invalid selection
+        // registers nothing (no partial container creation, no image
+        // work, no containerd fallback).
+        host_direct_run::selected(self.rootfs_mode, &pcfg.annotations)?;
         self.registry.insert(Entry {
             id: id.clone(),
             socket: self.socket_for(&id),
@@ -542,73 +623,31 @@ impl CriBackend for EngineBackend {
             .registry
             .pending(id)
             .ok_or_else(|| format!("start: container {id} has nothing pending"))?;
-        let sandbox_netns = self
-            .registry
-            .netns_of(&pending.sandbox_id)
-            .ok_or_else(|| format!("sandbox {} is not ready", pending.sandbox_id))?;
-        // T4.14 (Q55): the pod annotation may flip this container onto the
-        // Q53 pull chain while the engine default stays host.
-        let mode = self.mode_for(&pending.pcfg.annotations)?;
-        let image = pending.ccfg.image.image.clone();
-        if mode == RootfsMode::Image
-            && self.rootfs_mode == RootfsMode::Host
-            && !self.image_present(&image)
-        {
-            // The annotation is an explicit opt-in to the pull chain:
-            // EnsureImage already failed (presence-only in host mode), so
-            // the create pulls once here and surfaces a pull error.
-            self.puller.pull(&image).await?;
-        }
-        let (rootfs, overlay, layer_dirs) = match self.resolve(&image, id, mode)? {
-            ResolvedRootfs::Dir(dir) => (dir.clone(), None, vec![dir]),
-            ResolvedRootfs::Overlay {
-                mountpoint,
-                lower,
-                upper,
-                work,
-            } => (
-                mountpoint,
-                Some(engine_proto::OverlaySpec {
-                    lower: lower
-                        .iter()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .collect(),
-                    upper: upper.to_string_lossy().into_owned(),
-                    work: work.to_string_lossy().into_owned(),
-                }),
-                // `/etc/passwd` reads happen per-layer (the view itself is
-                // only mounted inside the engine child).
-                lower,
-            ),
-        };
-        // T4.13 M4 (Q53): the image config is the launch source of truth —
-        // entrypoint/cmd/env/user/workingDir merge under the CRI request
-        // (explicit pod command overrides; pod env appends last-wins).
-        // Host mode (Q55/R1): NO image config — the pod spec is the whole
-        // launch truth (an explicit command is required).
-        let img = if mode == RootfsMode::Image {
-            self.image_config_body(&image)?
+        // T4.15 (Q60): evaluate the strict triple ONCE, before ANY image
+        // planning. `Selected` takes the pure host-direct launch plan
+        // (no resolve/pull/presence/image-config step is reachable);
+        // `Err` (a broken triple behind a literal `/`) fails the start
+        // with the HD5 refusal and NOTHING executes — never a containerd
+        // fallback, never an image rootfs.
+        let host_direct = host_direct_run::selected(self.rootfs_mode, &pending.pcfg.annotations)?;
+        let es = if host_direct {
+            host_direct_run::launch_spec(id, &pending)?
         } else {
-            None
+            self.launch_plan(id, &pending).await?
         };
-        let resolve_named_user = named_user_lookup(&layer_dirs);
-        let launch = spec::merge_launch(&pending.ccfg, img.as_ref(), Some(&resolve_named_user))?;
-        let mut es = spec::container_spec(id, &rootfs, &pending, sandbox_netns, launch)?;
-        // T4.13 M3 (Q53): the engine child mounts the overlay view over
-        // `rootfs` before entering it; plain dirs keep `overlay: None`.
-        es.overlay = overlay;
+        let wrap = |stage: &str, e: String| host_direct_run::maybe_failure(host_direct, stage, &e);
         let child = launch::spawn_engine(&socket, false, false)
-            .map_err(|e| format!("spawn engine: {e}"))?;
+            .map_err(|e| wrap("engine spawn", format!("spawn engine: {e}")))?;
         launch::wait_socket(&socket)
             .await
-            .map_err(|e| format!("engine never came up: {e}"))?;
+            .map_err(|e| wrap("engine boot", format!("engine never came up: {e}")))?;
         let client = EngineClient::connect(&socket)
             .await
-            .map_err(|e| format!("connect engine: {e}"))?;
+            .map_err(|e| wrap("engine connect", format!("connect engine: {e}")))?;
         let stream = client
             .run(es)
             .await
-            .map_err(|e| format!("engine refused run: {e}"))?;
+            .map_err(|e| wrap("engine run", format!("engine refused run: {e}")))?;
         let ctrl = pump::spawn_pump(self.registry.clone(), id.to_string(), socket, stream, child);
         self.registry.set_ctrl(id, ctrl);
         Ok(())
@@ -746,3 +785,8 @@ mod tests {
 /// of backend.rs at the 800-line rule, same shape as `image/unpack.rs`.
 #[cfg(test)]
 mod rm_image_tests;
+
+/// T4.15 (Q60) host-direct routing tests: the selection gates create
+/// and start BEFORE any image planning, with HD5 error strings.
+#[cfg(test)]
+mod launch_plan_tests;

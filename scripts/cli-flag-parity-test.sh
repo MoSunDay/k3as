@@ -160,6 +160,12 @@ live_help "t413-agent" agent --builtin-image-quota --registry-addr
 live_help "t414-agent" agent --builtin-rootfs
 
 # ---------------------------------------------------------------------------
+# T7.2 (Q61) live-help surface: the whole-GPU inventory source selector is
+# wired on `agent` (auto default; fake:<resource>:<count> for fake scope).
+# ---------------------------------------------------------------------------
+live_help "t72-agent" agent --gpu-inventory
+
+# ---------------------------------------------------------------------------
 # T8.3 (Q56) live-help surface: the embedded CI/CD pipeline plane (default-on,
 # --disable-pipeline opt-out) is wired on `server` (the controller manager
 # lives there).

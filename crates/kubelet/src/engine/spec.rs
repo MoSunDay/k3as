@@ -135,12 +135,16 @@ pub(crate) fn parse_passwd_uids(content: &str) -> BTreeMap<String, (u32, u32)> {
 /// Build the engine spec for a created container. The launch half of the
 /// spec comes from [`MergedLaunch`] (image config merged under the CRI
 /// request, T4.13 M4); everything else is the plain T4.12 mapping.
+/// `sandbox_netns` is `None` ONLY on the T4.15 (Q60) host-direct path,
+/// where the container stays in the host network namespace and runs with
+/// `host_root: true` (the caller passes the literal `/` as `rootfs`).
 pub(crate) fn container_spec(
     id: &str,
     rootfs: &Path,
     pending: &Pending,
-    sandbox_netns: String,
+    sandbox_netns: Option<String>,
     launch: MergedLaunch,
+    host_root: bool,
 ) -> Result<ContainerSpec, String> {
     let log = logs::log_file(&pending.pcfg.log_directory, &pending.ccfg.log_path);
     logs::ensure_parents(&log).map_err(|e| format!("create log dir {}: {e}", log.display()))?;
@@ -165,10 +169,13 @@ pub(crate) fn container_spec(
             })
             .collect(),
         new_net: false,
-        netns: Some(sandbox_netns),
+        netns: sandbox_netns,
         // T4.13 M3 (Q53): set by the backend when the image resolves to a
         // per-container overlayfs view (plain dirs keep None).
         overlay: None,
+        // T4.15 (Q60): host-direct is a dedicated variant — never a
+        // rootfs spelling; the engine child keeps the host root.
+        host_root,
         pause: false,
         log_path: Some(log.to_string_lossy().into_owned()),
         no_new_privs: true,
@@ -263,8 +270,9 @@ mod tests {
             "c-1",
             Path::new("/tmp/rootfs"),
             &p,
-            "/proc/9/ns/net".into(),
+            Some("/proc/9/ns/net".into()),
             launch,
+            false,
         )
         .expect("spec");
         assert_eq!(spec.argv, vec!["/bin/echo", "-v"]);
@@ -274,6 +282,22 @@ mod tests {
         assert_eq!((spec.uid, spec.gid), (0, 0));
         assert_eq!(spec.cwd, "/");
         assert!(!spec.new_net && !spec.pause);
+    }
+
+    #[test]
+    fn host_direct_spec_carries_the_host_root_and_no_netns() {
+        // Q60: the "/" annotation path builds rootfs "/", host_root: true,
+        // no netns (host network stays — no NEWNET and no setns), and the
+        // same T4.9 limit / T4.14 mount / Q50 log mapping as any pod.
+        let p = pending(vec!["/usr/bin/true".into()]);
+        let launch = merge_launch(&p.ccfg, None, None).expect("launch");
+        let spec = container_spec("c-hd", Path::new("/"), &p, None, launch, true).expect("spec");
+        assert!(spec.host_root);
+        assert_eq!(spec.rootfs, "/");
+        assert!(spec.netns.is_none());
+        assert!(!spec.new_net);
+        assert!(spec.overlay.is_none());
+        assert_eq!(spec.log_path.as_deref(), Some("/tmp/logs/pod/web.0.log"));
     }
 
     #[test]

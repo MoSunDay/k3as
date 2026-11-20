@@ -20,6 +20,27 @@ pub fn to_run_spec(spec: &ContainerSpec) -> Result<RunSpec, String> {
     run.gid = spec.gid;
     run.new_net = spec.new_net;
     run.netns = spec.netns.as_deref().map(std::path::PathBuf::from);
+    // T4.15 (Q60): the host-root mode is a dedicated variant, not a
+    // rootfs spelling — contradictory network/overlay requests fail with
+    // an actionable host-direct error instead of being silently dropped
+    // (HD5), and the rootfs normalizes to the literal `/`.
+    run.host_root = spec.host_root;
+    if spec.host_root {
+        if spec.new_net || spec.netns.is_some() {
+            return Err(
+                "host-direct: new_net/netns are incompatible with the host root \
+                 (Q60 keeps the host network; no netns is created or joined)"
+                    .to_string(),
+            );
+        }
+        if spec.overlay.is_some() {
+            return Err("host-direct: overlay is incompatible with the host root \
+                 (Q60 mounts no image rootfs)"
+                .to_string());
+        }
+        run.rootfs = PathBuf::from("/");
+        run.netns = None;
+    }
     // T4.13 M3 (Q53): per-container overlayfs view passthrough.
     run.overlay = spec.overlay.as_ref().map(|ov| nsrun::Overlay {
         lower: ov.lower.iter().map(PathBuf::from).collect(),
@@ -142,6 +163,34 @@ mod tests {
                 .overlay
                 .is_none()
         );
+    }
+
+    #[test]
+    fn maps_host_root_as_a_dedicated_variant() {
+        // Q60/HD2: rootfs "/" + host_root carries no image meaning; the
+        // child keeps the host root, joins no netns, mounts no overlay.
+        let spec = ContainerSpec::new("c1", "/", vec!["/usr/bin/true".into()]);
+        let mut spec = spec;
+        spec.host_root = true;
+        let run = to_run_spec(&spec).unwrap();
+        assert!(run.host_root);
+        assert_eq!(run.rootfs, PathBuf::from("/"));
+        assert!(run.netns.is_none());
+        assert!(!run.new_net);
+        assert!(run.overlay.is_none());
+        // Contradictions fail with actionable host-direct text (HD5).
+        let mut net = ContainerSpec::new("c1", "/", vec!["/bin/true".into()]);
+        net.host_root = true;
+        net.netns = Some("/proc/7/ns/net".into());
+        assert!(to_run_spec(&net).unwrap_err().contains("host-direct"));
+        let mut ov = ContainerSpec::new("c1", "/", vec!["/bin/true".into()]);
+        ov.host_root = true;
+        ov.overlay = Some(engine_proto::OverlaySpec {
+            lower: vec!["/layers/l1".into()],
+            upper: "/views/c/upper".into(),
+            work: "/views/c/work".into(),
+        });
+        assert!(to_run_spec(&ov).unwrap_err().contains("host-direct"));
     }
 
     #[test]

@@ -19,6 +19,9 @@
 //!   CI/CD config and immutable build records (T8.3, Q56).
 //! - [`networking`] — the `networking.k8s.io/v1` group (Ingress/IngressClass;
 //!   consumed by the openrusty Ingress gateway, decision Q32).
+//! - [`validate`] — admission validation for Pod specs/templates: explicit
+//!   `imagePullPolicy`, whole-GPU quantities, GPU visibility-env conflict,
+//!   and the shared host-direct rules (T4.15/T7.2, Q60/Q61).
 #![forbid(unsafe_code)]
 
 pub mod agent;
@@ -34,6 +37,8 @@ pub mod pipeline;
 pub mod schema;
 pub mod serde_ext;
 pub mod traffic;
+pub mod validate;
+pub mod validate_host_direct;
 
 // Convenience re-exports so consumers depend on `api` only.
 pub use agent::{
@@ -63,3 +68,4 @@ pub use serde_ext::{from_json, to_json, to_json_pretty};
 pub use traffic::{
     SplitBackend, TrafficSplit, TrafficSplitList, TrafficSplitSpec, TrafficSplitStatus,
 };
+pub use validate::{admit, HOST_DIRECT_ROOT, ROOTFS_ANNOTATION};

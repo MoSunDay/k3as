@@ -61,22 +61,47 @@ pub fn run_child(spec: &RunSpec, io: ChildIo) -> ! {
         drop(fd);
     }
 
-    let rootfs = sys::cstr(&spec.rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
-    // T4.13 M3 (Q53): the overlayfs view must be mounted over the rootfs
-    // BEFORE enter_rootfs — its bind mount would bury the overlay. The
-    // child's mount ns is already private, so the mount cannot leak.
-    if let Some(ov) = &spec.overlay {
-        mount::overlay_rootfs(&rootfs, ov).unwrap_or_else(|e| fail("overlay rootfs", e));
+    // T4.15 (Q60): the mount plan is decided by the pure `root_plan`
+    // seam — the host-root child KEEPS the host root (the private NEWNS
+    // copy of the mount table IS its `/`): no overlay, no enter_rootfs,
+    // no container_filesystems, no pivot_root; only a fresh `/proc` for
+    // the new PID namespace (the copy is already private, so the host
+    // mount table is untouched) and the T4.14 host binds on top. cwd
+    // moves to `/` so the relative reopen in `apply_bind` resolves
+    // against the host root exactly like the pivot path resolves against
+    // the container root.
+    match crate::spec::root_plan(spec) {
+        crate::spec::RootPlan::HostRoot => {
+            sys::chdir(c"/").unwrap_or_else(|e| fail("host root", e));
+            mount::fresh_host_proc().unwrap_or_else(|e| fail("mount /proc", e));
+            let root = inroot::open_root(Path::new("/")).unwrap_or_else(|e| fail("host root", e));
+            for m in &spec.mounts {
+                mount::apply_bind(root.as_fd(), m)
+                    .unwrap_or_else(|e| fail(&format!("mount {}", m.target.display()), e));
+            }
+            drop(root);
+        }
+        crate::spec::RootPlan::Pivot { rootfs } => {
+            let dir = sys::cstr(&rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
+            // T4.13 M3 (Q53): the overlayfs view must be mounted over the
+            // rootfs BEFORE enter_rootfs — its bind mount would bury the
+            // overlay. The child's mount ns is already private, so the
+            // mount cannot leak.
+            if let Some(ov) = &spec.overlay {
+                mount::overlay_rootfs(&dir, ov).unwrap_or_else(|e| fail("overlay rootfs", e));
+            }
+            mount::enter_rootfs(&dir).unwrap_or_else(|e| fail("enter rootfs", e));
+            let root =
+                inroot::open_root(Path::new(".")).unwrap_or_else(|e| fail("enter rootfs", e));
+            mount::container_filesystems().unwrap_or_else(|e| fail("mount", e));
+            for m in &spec.mounts {
+                mount::apply_bind(root.as_fd(), m)
+                    .unwrap_or_else(|e| fail(&format!("mount {}", m.target.display()), e));
+            }
+            drop(root);
+            mount::switch_root().unwrap_or_else(|e| fail("pivot_root", e));
+        }
     }
-    mount::enter_rootfs(&rootfs).unwrap_or_else(|e| fail("enter rootfs", e));
-    let root = inroot::open_root(Path::new(".")).unwrap_or_else(|e| fail("enter rootfs", e));
-    mount::container_filesystems().unwrap_or_else(|e| fail("mount", e));
-    for m in &spec.mounts {
-        mount::apply_bind(root.as_fd(), m)
-            .unwrap_or_else(|e| fail(&format!("mount {}", m.target.display()), e));
-    }
-    drop(root);
-    mount::switch_root().unwrap_or_else(|e| fail("pivot_root", e));
 
     if let Some(h) = &spec.hostname {
         sys::sethostname(h.as_bytes()).unwrap_or_else(|e| fail("hostname", e));

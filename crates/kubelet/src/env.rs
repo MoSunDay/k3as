@@ -319,6 +319,40 @@ fn is_env_name(k: &str) -> bool {
     !k.is_empty() && !k.contains('=') && !k.contains('\0')
 }
 
+/// Comma-joined device indices for a visibility env value (T7.2, Q61):
+/// `[0, 1]` -> `"0,1"` (the upstream device-plugin convention).
+pub fn gpu_env_value(devices: &[u64]) -> String {
+    devices
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Upsert the vendor visibility env (`CUDA_VISIBLE_DEVICES` /
+/// `HIP_VISIBLE_DEVICES` per [`common::gpu::visible_env`]) for one
+/// container's pinned devices (T7.2, Q61). Admission (`api::validate`,
+/// S47 review F1) now rejects explicit user values of these vars on
+/// GPU-requesting containers, so a conflict is unreachable through the
+/// apiserver; the last-write-wins override below is retained as
+/// defense-in-depth (pods created before the rule, or non-admission
+/// writers) — on a GPU-capable node the device plane owns visibility
+/// (upstream device-manager parity). Returns false (and writes nothing)
+/// for an unknown vendor resource; empty device lists are never injected.
+pub fn upsert_gpu_env(envs: &mut Vec<(String, String)>, resource: &str, devices: &[u64]) -> bool {
+    if devices.is_empty() {
+        return false;
+    }
+    match common::gpu::visible_env(resource) {
+        Some(name) => {
+            let value = gpu_env_value(devices);
+            upsert(envs, name.to_string(), value);
+            true
+        }
+        None => false,
+    }
+}
+
 /// A core/v1 Warning event for a container create blocked by env
 /// resolution (upstream reason `CreateContainerConfigError`), ready to
 /// POST to the apiserver events REST; `generateName` lets the apiserver
@@ -354,4 +388,47 @@ pub fn config_error_event(
         "lastTimestamp": now,
         "source": {"component": "kubelet", "host": node},
     })
+}
+
+#[cfg(test)]
+mod gpu_env_tests {
+    use super::*;
+
+    /// GPU2/GPU5 wiring: injection uses the vendor env name and joins
+    /// indices. The pre-seeded user value below is a conflict that is
+    /// unreachable via admission (api::validate rejects it, S47 review
+    /// F1); the runtime last-write-wins override remains as
+    /// defense-in-depth.
+    #[test]
+    fn gpu_t72_upsert_nvidia_and_amd_visibility() {
+        let mut envs = vec![("CUDA_VISIBLE_DEVICES".to_string(), "all".to_string())];
+        assert!(upsert_gpu_env(&mut envs, "nvidia.com/gpu", &[0, 1]));
+        assert_eq!(
+            envs,
+            vec![("CUDA_VISIBLE_DEVICES".to_string(), "0,1".to_string())]
+        );
+
+        let mut amd = Vec::new();
+        assert!(upsert_gpu_env(&mut amd, "amd.com/gpu", &[3]));
+        assert_eq!(
+            amd,
+            vec![("HIP_VISIBLE_DEVICES".to_string(), "3".to_string())]
+        );
+    }
+
+    /// Unknown resources and empty bookings never inject anything.
+    #[test]
+    fn gpu_t72_unknown_resource_and_empty_are_noops() {
+        let mut envs = Vec::new();
+        assert!(!upsert_gpu_env(&mut envs, "cpu", &[0]));
+        assert!(!upsert_gpu_env(&mut envs, "nvidia.com/gpu", &[]));
+        assert!(envs.is_empty());
+    }
+
+    #[test]
+    fn gpu_t72_env_value_format() {
+        assert_eq!(gpu_env_value(&[]), "");
+        assert_eq!(gpu_env_value(&[7]), "7");
+        assert_eq!(gpu_env_value(&[0, 2, 5]), "0,2,5");
+    }
 }

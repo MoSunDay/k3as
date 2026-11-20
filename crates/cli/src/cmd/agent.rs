@@ -134,4 +134,17 @@ pub struct AgentCmd {
         value_parser = ["host", "image"]
     )]
     pub builtin_rootfs: String,
+
+    /// Whole-GPU inventory source (T7.2, Q61 — init-pro extension):
+    /// `auto` (DEFAULT) probes nvidia-smi / rocm-smi / sysfs once per
+    /// heartbeat; `none` turns the GPU plane off; `fake:<resource>:<count>`
+    /// publishes a fixed device count for fake-scope evidence (e.g.
+    /// `fake:nvidia.com/gpu:2`). env `INIT_PRO_GPU_INVENTORY`.
+    #[arg(
+        long = "gpu-inventory",
+        env = "INIT_PRO_GPU_INVENTORY",
+        default_value = "auto",
+        value_name = "SOURCE"
+    )]
+    pub gpu_inventory: String,
 }

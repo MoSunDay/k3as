@@ -16,6 +16,8 @@
 
 pub mod backend;
 pub mod exec;
+pub mod host_direct;
+pub mod host_direct_run;
 pub mod image;
 pub mod launch;
 pub mod logs;
@@ -25,4 +27,8 @@ pub mod rootfs;
 pub mod spec;
 
 pub use backend::EngineBackend;
+pub use host_direct::{
+    host_direct_requested, pod_gpu_requests, pod_uses_gpu, select_host_direct, HostDirectSelection,
+    HOST_DIRECT_ROOT,
+};
 pub use rootfs::{resolve_mode, RootfsMode, ROOTFS_ANNOTATION};

@@ -29,6 +29,8 @@
 //! - [`host_mounts`] — the `init-pro.io/host-mounts` pod annotation
 //!   (T4.14/Q55): host-dir bind mounts parsed and validated purely;
 //!   bind failure is the permission verdict (node creds decide).
+//! - [`gpu`] — whole-GPU inventory/ledger/publication + env injection
+//!   (T7.2, Q61; fake-scope, real-hardware closure stays OPEN).
 //! - [`runner`] — the four loops (watch, sync, node/lease, local API) +
 //!   [`spawn`].
 #![forbid(unsafe_code)]
@@ -42,6 +44,7 @@ pub mod env;
 pub mod env_fetch;
 pub mod exec;
 pub mod framing;
+pub mod gpu;
 pub mod host_mounts;
 pub mod http;
 pub mod log_rotate;
@@ -68,6 +71,7 @@ pub use env::{
 };
 pub use env_fetch::{resolve_table, EnvOutcome, EnvTable};
 pub use exec::{execute, snapshot};
+pub use gpu::{parse_inventory, GpuInventorySource, GpuRuntime};
 pub use host_mounts::{collect, HostMount, HOST_MOUNTS_ANNOTATION};
 pub use http::{HttpError, HttpJson};
 pub use objects::{

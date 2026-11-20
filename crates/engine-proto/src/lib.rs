@@ -152,6 +152,15 @@ pub struct ContainerSpec {
     /// order). None keeps `rootfs` a plain directory.
     #[serde(default)]
     pub overlay: Option<OverlaySpec>,
+    /// T4.15 (Q60): run with the literal HOST root. The child keeps the
+    /// private NEWNS copy of the host mount table as `/` — NO
+    /// pivot_root/chroot, no overlay, and no image actions anywhere
+    /// upstream; only a fresh `/proc` for the new PID namespace is
+    /// mounted. Mutually exclusive with `new_net`/`netns`/`overlay`
+    /// (Q60: no NEWNET even for the sandbox). `rootfs` must be the
+    /// literal `"/"` (metadata only).
+    #[serde(default)]
+    pub host_root: bool,
     /// Pause mode (T4.12, Q49): the engine child parks forever as PID 1
     /// holding the namespaces — the pod sandbox. Signals keep default
     /// dispositions so the engine parent reaps `128+WTERMSIG`.
@@ -188,6 +197,7 @@ impl ContainerSpec {
             new_net: false,
             netns: None,
             overlay: None,
+            host_root: false,
             pause: false,
             log_path: None,
             no_new_privs: true,
@@ -273,6 +283,19 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_root_is_opt_in_and_defaults_false_on_old_wire() {
+        let spec = ContainerSpec::new("c1", "/r", vec!["/bin/true".into()]);
+        assert!(!spec.host_root);
+        // The field is `#[serde(default)]`: peers that never send it (the
+        // whole pre-T4.15 fleet) keep parsing byte-identically.
+        let raw = br#"{"id":"c1","rootfs":"/r","argv":["/bin/true"]}"#;
+        assert!(!decode_json::<ContainerSpec>(raw).unwrap().host_root);
+        let raw = br#"{"id":"c1","rootfs":"/","argv":["/bin/true"],"host_root":true}"#;
+        assert!(decode_json::<ContainerSpec>(raw).unwrap().host_root);
+    }
+
     use std::io::Cursor;
 
     #[test]

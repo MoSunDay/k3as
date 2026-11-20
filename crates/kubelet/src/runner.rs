@@ -27,7 +27,7 @@ use crate::probes::{
     exec_probe_healthy, run_http_probe, run_tcp_probe, PodProbeState, ProbeHandler, ProbeKind,
 };
 use crate::status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
-use crate::sync::{self, plan, Snapshot};
+use crate::sync::{self, Snapshot};
 use crate::volumes;
 
 /// Configuration for [`spawn`]. All knobs are public so callers (the
@@ -53,6 +53,15 @@ pub struct KubeletConfig {
     /// (**T4.12**, Q49) overrides via [`Self::with_runtime_version`] with
     /// `engine://<version>` so `kubectl describe node` tells the truth.
     pub runtime_version: String,
+    /// True when the kubelet runs the BUILT-IN engine backend (T4.12) —
+    /// the GPU/host-direct guard input (T7.2, Q61: no containerd fallback).
+    pub engine_builtin: bool,
+    /// Rootfs mode the agent was started with (Q60): the GPU plane is
+    /// eligible only under the literal host rootfs mode.
+    pub builtin_rootfs: crate::engine::RootfsMode,
+    /// `--gpu-inventory` source (T7.2, Q61): `auto` (detect, default),
+    /// `none`, or `fake:<resource>:<count>` for fake-scope evidence.
+    pub gpu_inventory: crate::gpu::GpuInventorySource,
 }
 
 impl KubeletConfig {
@@ -73,6 +82,10 @@ impl KubeletConfig {
             node_ip: "127.0.0.1".to_string(),
             kubelet_port: 10250,
             runtime_version: "containerd://1.7.20".to_string(),
+            // T7.2/Q61 defaults: containerd backend, non-GPU node, auto inventory.
+            engine_builtin: false,
+            builtin_rootfs: crate::engine::RootfsMode::Host,
+            gpu_inventory: crate::gpu::GpuInventorySource::Auto,
         }
     }
 
@@ -139,6 +152,12 @@ pub fn spawn(
         }
     };
     let desired: Arc<Mutex<BTreeMap<String, PodView>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    // T7.2 (Q61): the shared GPU plane (durable ledger + inventory cache)
+    // behind a std Mutex — critical sections never span an await.
+    let gpu: crate::gpu::GpuHandle = Arc::new(std::sync::Mutex::new(crate::gpu::GpuRuntime::open(
+        &cfg.data_dir,
+        cfg.gpu_inventory.clone(),
+    )));
     tracing::info!(
         target: "init-pro",
         node = %cfg.node_name, server = %cfg.server_url,
@@ -157,9 +176,10 @@ pub fn spawn(
             cri.clone(),
             cfg.clone(),
             desired,
+            gpu.clone(),
             shutdown.clone(),
         )),
-        tokio::spawn(node_task(client, cfg.clone(), shutdown.clone())),
+        tokio::spawn(node_task(client, cfg.clone(), gpu, shutdown.clone())),
         // Task 4 (T4.2 Scope C / Q31): plain-HTTP container logs + exec for
         // the apiserver relay. Same `CriCtl`-backed seam as the sync loop;
         // a bind failure must not take the whole kubelet down, so the error
@@ -331,6 +351,7 @@ async fn sync_task(
     cri: Arc<dyn CriBackend>,
     cfg: KubeletConfig,
     desired: Desired,
+    gpu: crate::gpu::GpuHandle,
     shutdown: infra::Shutdown,
 ) {
     let mut tick = tokio::time::interval(cfg.sync_period);
@@ -370,6 +391,7 @@ async fn sync_task(
             cri.as_ref(),
             &cfg,
             &desired,
+            &gpu,
             &mut probes,
             &mut last_status,
             &mut last_env_events,
@@ -386,6 +408,7 @@ async fn sync_once(
     cri: &dyn CriBackend,
     cfg: &KubeletConfig,
     desired: &Desired,
+    gpu: &crate::gpu::GpuHandle,
     probes: &mut PodProbeState,
     last_status: &mut BTreeMap<String, Value>,
     last_env_events: &mut BTreeMap<String, String>,
@@ -427,13 +450,16 @@ async fn sync_once(
     // so `plan` (pure) sees the same objects the CRI config will carry.
     // A resolution error blocks the create; `plan` skips it and the
     // event pass below reports why. Env is never hot-updated (k8s parity).
-    let env_table = env_fetch::resolve_table(client, &wanted).await;
+    let mut env_table = env_fetch::resolve_table(client, &wanted).await;
+    // GPU pass (T7.2, Q61): reconcile + guard + allocate whole devices;
+    // failures fold into the env table (create-blocking, reported below).
+    let gpu_prepared = crate::gpu::prepare_cycle(gpu, cfg, &wanted, &mut env_table, now);
     // T4.6 (Q39): the UTC date pinned into every sandbox log_directory
     // this cycle. Fixed per plan call: a container created before a
     // midnight rollover keeps writing into its own (older) date dir via
     // the fd containerd already holds open.
     let date = crate::log_rotate::today(SystemTime::now());
-    let actions = plan(
+    let actions = sync::plan_with_gpu(
         &wanted,
         &snap,
         &cfg.sandbox_image,
@@ -441,6 +467,7 @@ async fn sync_once(
         &date,
         probes,
         &env_table,
+        Some(&gpu_prepared),
     );
     // Deleted pods needing no further teardown drop out of the desired map.
     {
@@ -448,6 +475,9 @@ async fn sync_once(
         map.retain(|k, v| !v.deleted || actions.iter().any(|a| a.pod_key() == Some(k.as_str())));
     }
     let outcomes = execute(cri, actions).await;
+    // GPU4 (Q61): release ledgers of finished teardowns against the
+    // PRE-execute snapshot (one cycle later, cleanup_candidates parity).
+    let _ = crate::gpu::release_finished_cycle(gpu, &wanted, &snap, now);
     for (action, res) in &outcomes {
         if let Err(e) = res {
             tracing::warn!(target: "init-pro", action = ?action, error = %e, "kubelet: CRI action failed");

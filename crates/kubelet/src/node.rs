@@ -34,6 +34,7 @@ const KUBELET_PORT_ANNOTATION: &str = "init-pro.io/kubelet-port";
 pub(crate) async fn node_task(
     client: Arc<HttpJson>,
     cfg: KubeletConfig,
+    gpu: crate::gpu::GpuHandle,
     shutdown: infra::Shutdown,
 ) {
     loop {
@@ -54,7 +55,7 @@ pub(crate) async fn node_task(
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {}
         }
-        heartbeat(&client, &cfg).await;
+        heartbeat(&client, &cfg, &gpu).await;
     }
 }
 
@@ -84,7 +85,7 @@ async fn ensure_node(client: &HttpJson, cfg: &KubeletConfig) -> Result<(), Strin
 }
 
 /// One heartbeat: renew (or create) the node lease, refresh node status.
-async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig) {
+async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig, gpu: &crate::gpu::GpuHandle) {
     let name = cfg.node_name.as_str();
     let now = now_str();
     let lease_path =
@@ -124,19 +125,24 @@ async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig) {
         }
         Err(e) => tracing::warn!(target: "init-pro", error = %e, "kubelet: lease write failed"),
     }
-    refresh_node_status(client, cfg, &now).await;
+    refresh_node_status(client, cfg, gpu, &now).await;
 }
 
 /// GET the node, replace `.status` with fresh Ready/capacity, full PUT back
 /// (resourceVersion preserved -> CAS; a 409 just retries next tick). The
 /// same PUT also converges a stale kubelet-port annotation (T4.2 hardening).
-async fn refresh_node_status(client: &HttpJson, cfg: &KubeletConfig, now: &str) {
+async fn refresh_node_status(
+    client: &HttpJson,
+    cfg: &KubeletConfig,
+    gpu: &crate::gpu::GpuHandle,
+    now: &str,
+) {
     let name = cfg.node_name.as_str();
     let path = format!("/api/v1/nodes/{name}");
     let Ok((200, mut node)) = client.get_json(&path).await else {
         return;
     };
-    let Some(status) = objects::node_object(
+    let Some(mut status) = objects::node_object(
         name,
         &cfg.node_ip,
         cfg.kubelet_port,
@@ -147,6 +153,11 @@ async fn refresh_node_status(client: &HttpJson, cfg: &KubeletConfig, now: &str) 
     .cloned() else {
         return;
     };
+    // GPU publication (T7.2, Q61): auto mode detects once per heartbeat
+    // (cache TTL = the heartbeat period), then the plane decorates
+    // capacity/allocatable + the frozen initProRuntime extension in place.
+    let _ = crate::gpu::refresh_totals(gpu, cfg.heartbeat_period).await;
+    crate::gpu::publish_snapshot(&mut crate::gpu::lock(gpu), cfg, &mut status, unix_now());
     if let Some(annotations) = reconciled_kubelet_port_annotation(&node, cfg.kubelet_port) {
         tracing::info!(
             target: "init-pro",
