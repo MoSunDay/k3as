@@ -255,6 +255,24 @@ format.
   遗留发现见仓库根 `验收报告.md` (同名 Agent 重建不 re-reconcile = F4、
   agent 重启 ~12 s 中继竞态 = F3、sandbox 不收养 = F2)。
 
+- **Forward Phase 3 notes (Q60/T4.15, Q61/T7.2; not as-built, T4.2 stays done):**
+  - Strict host-direct selection precedes sync image planning. `image` is retained
+    wire metadata only; literal `init-pro.io/rootfs: /` selects host rootfs. On
+    create/restart/reconcile emit no `Action::EnsureImage` for workload or pause/
+    sandbox and perform no pull, presence/ref/CAS/layer resolution/materialization,
+    image-config merge, layer copy/merge, or `pivot_root` for `/`. Omitted/defaulted
+    and valid explicit pull policies are accepted but irrelevant; invalid explicit
+    policy gets Kubernetes-style validation rejection, not silent defaulting. Q55
+    ordinary host-directory presence-only behavior stays unchanged; host-direct/GPU
+    never falls back to containerd.
+  - Canonical Node status construction always receives current eligible GPU
+    inventory and serves registration, every heartbeat, agent restart, and every
+    full status rebuild; the current heartbeat replaces full status. Capacity/
+    allocatable expose total eligible inventory only on compatible builtin host-
+    direct nodes; incapable/backend-transitioned nodes must not retain stale nonzero
+    values. Assigned-Pod accounting stays in the scheduler/allocation ledger. Test
+    all construction paths and inventory/capability/backend transitions.
+
 ---
 
 ## T4.3 — CNI/网络 (flannel 等价 + ServiceLB L4)

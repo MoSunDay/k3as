@@ -54,6 +54,14 @@ build-configuration state is not a conformance break.
 | G28 | argoproj | Workflow + CronWorkflow CRUD/SSA lifecycle + generateName minting | T7.3 Scope A |
 | G29 | argoproj | two-step Workflow runs to Succeeded over the agent/containerd stack; status reports Steps root + Succeeded Pod nodes (wfstep one-shot image, Q27). SKIP: no vendor bundle, no cc, or a foreign host cni0 (S40c) | T7.3 Scope B |
 
+| G90 | phase3 | invalid explicit imagePullPolicy (Pod and apps/v1 templates) rejected 422 on create; template PUT replace + SSA apply also rejected (uniform admission seam) | T4.15, Q60 |
+| G91 | phase3 | whole-GPU quantities must be non-negative integers: `0.5` and `"250m"` (nvidia.com/gpu) rejected 422 | T7.2, Q61 |
+| G92 | phase3 | GPU request > limit per container rejected 422 with both values in the message | T7.2, Q61 |
+| G93 | phase3 | GPU-requesting template without the literal `init-pro.io/rootfs: "/"` annotation rejected (incl. non-literal `"host"`), 422 Required value | T7.2/Q60 |
+| G94 | phase3 | host-direct template (`init-pro.io/rootfs: /`) + RollingUpdate (default and explicit) rejected 422 — Recreate required | T4.15, Q60 |
+| G95 | phase3 | positive: `/` + Recreate + `nvidia.com/gpu: 1` Deployment created 201; RS-materialized pod carries the template annotations verbatim (S47 annotation-propagation fix) | T4.15/T3.1 |
+| G96 | phase3 | bad imagePullPolicy through Deployment template POST, pod PUT replace, and pod SSA apply -> 422 all three (uniform admission seam) | T4.15, Q60 |
+
 ## Growing the suite
 
 This baseline started as the empty-cluster discovery-only contract (G01-G06)
@@ -61,8 +69,9 @@ and now spans CRUD/watch/SSA over the embedded store (T1.2b/T1.2c), watch
 history replay (T2.2), the in-process controller manager (T3.1a/T3.1b), the
 scheduler (T3.2), the node layer (T4.1 containerd supervision, T4.2 kubelet
 end-to-end incl. probes/volumes/hostname/exec/logs), the networking.k8s.io
-group (Q32 Ingress discovery), and the argoproj.io group (T7.3
+group (Q32 Ingress discovery), the argoproj.io group (T7.3
 Scope A discovery/CRUD, Scope B a two-step Workflow reaching Succeeded on real
-step pods). When a layer adds a wire-visible behavior, append its golden case
+step pods), and the phase3 admission plane (S47: pull-policy/GPU-quantity/
+host-direct-strategy validation + template-annotation propagation). When a layer adds a wire-visible behavior, append its golden case
 here and to the matching suite file, then commit the new fixture. Flaky cases
 are quarantined, never deleted.

@@ -7,24 +7,31 @@ then the feature cards in features/.
 ## Project at a glance
 
 init-pro is a from-scratch Rust reimplementation of a k3s-compatible
-Kubernetes distribution, shipped as ONE multicall binary called `init-pro`.
+Kubernetes distribution and the runtime for k3as, a multi-tenant Agent
+sandbox platform. The supported deployment is one tenant per cluster with
+tenant-dedicated nodes; Kubernetes Namespaces are not the tenant security
+boundary. Agent action containment (Q63) and tenant-per-cluster isolation
+are complementary boundaries. The distribution is shipped as ONE multicall
+binary called `init-pro`.
 `argv[0]` selects behavior: `server` | `agent` | `kubectl` | `ctr` |
 `crictl` | `containerd` | `etcd` | `flannel` (symlink deployment just
 works). It has a first-class built-in Router - an openrusty (h2c gateway,
 Q32) programmable HTTP data plane with Ingress networking.k8s.io/v1 as
 the first-class ingress resource - not a sidecar addon. Phase 1 (M0 + M1)
-is complete; Phase 2 (persistence + control plane) is in progress. The Cargo workspace lives under `crates/` (21 crates).
+is complete; the Phase 2 execution plan is historical and Phase 3
+(Agent sandbox + host-native AI) is active. The Cargo workspace lives under `crates/`
+(21 crates).
 
 ## The SSOT (single source of truth)
 
-- `plans/init-pro/index.md` - the TODO status table (51 TODOs across 9
+- `plans/init-pro/index.md` - the TODO status table (54 TODOs across 9
   layers) + the critical-path DAG. Authoritative status of record.
 - `plans/init-pro/plan/*.md` - per-layer detail mirroring the same TODO
   IDs (`00-foundation.md` ... `08-delivery.md`; Layer 4 is split
-  `04-node.md` T4.1-T4.10 + `04b-builtin-engine.md` T4.11-T4.14; Layer 8
+  `04-node.md` T4.1-T4.10 + `04b-builtin-engine.md` T4.11-T4.15; Layer 8
   is the delivery plane, `08-delivery.md` T8.1-T8.5); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q58
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q63
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -123,8 +130,8 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 - Critical path (platform): T0.1 -> T0.2 -> T2.1 -> T2.2 -> T1.2 ->
   T3.1/T3.2 -> T4.2 -> end-to-end cluster (M3).
 - De-risk path (Q5): T0.1 -> T0.3 -> T5.1 -> T5.2 -> T5.4 (the M1 spike).
-- T0.6 (golden conformance) is a merge gate, not a node: every TODO must
-  keep `scripts/golden-conformance.sh` green.
+- T0.6 (Q59 supported-subset golden gate) is a merge gate, not a node: every
+  TODO must keep `scripts/golden-conformance.sh` green.
 - Done: Layer 0 (T0.1-T0.6 + T0.2b pin-clone bootstrap, Q38), T1.1/T1.2
   (api + apiserver), Layer 2 (T2.1/T2.2/T2.3 - storage, Q33), T3.1/T3.2
   (controllers + scheduler), T4.1 (containerd bundling), T4.2 Scope A+B+C
@@ -134,7 +141,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   (Argo Workflows, Q30; model/engine since extracted to the
   link_repos/arust-workflow reference, Q42), T7.4 (anyhome, Q36), and
   T7.5 (anyhome Pod-level annotation mounts, Q43). Phase 1 (M0 + M1) is
-  complete; 38/51 TODOs done.
+  complete; 38/54 TODOs done.
 - Delivery plane (Layer 8, T8.1-T8.5 done in Sprints 45-46, Q56/Q57/Q58):
   certs.d plain-HTTP image trust (`hosts.toml`, T8.1) + registry V2 push
   client + `docker save` importer; `TrafficSplit` (`ts`) weighted one-click
@@ -145,9 +152,9 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   pipeline-owned canary release (T8.5, Q58) — `<deployment>-canary` clone +
   canary Service + stepped TrafficSplit weights with wall-clock soak, then
   promote (stable image patch, weights 100/0) or abort (`spec.release.abort`
-  recycles the children). Layer 8 is closed out (M1-M3); remaining on the
-  critical path: T4.10 (kubelet volumes), T5.6 (SNI/TLS remainder, blocked
-  on T5.5) and the T4.3 remainder (host-gw/multi-node, netpol = T4.4).
+  recycles the children). Layer 8 is closed out (M1-M3); other unfinished
+  platform work includes T4.10 (kubelet volumes), T5.6 (SNI/TLS remainder,
+  blocked on T5.5) and the T4.3 remainder (host-gw/multi-node, netpol = T4.4).
 - Storage is closed out: T2.1/T2.2 done (trait + `EmbeddedStorage` with
   etcd revision/CAS semantics, watch historical replay + compaction);
   T2.3 done since Sprint 25 on **rdb/RocksDB** — `RdbStorage`
@@ -158,11 +165,17 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   removed and `sqlite://` now answers `Unsupported`). Leader election is
   Lease-object + CAS, not etcd leases (Q18). The real etcd-gRPC client is
   re-scoped to T3.4 (HA multi-server, its only consumer).
-- Next gate on the critical path: T4.2 is closed (Scope A+B+C, Sprint 24),
-  T4.3 Scope A is done (flannel CNI embedded in the agent, Q34 — F1-F5)
-  and Scope B's ServiceLB (announce + raw-TCP L4, Q41) is done; remaining
-  on the path: the flannel conformance face (host-gw/multi-node), T5.6's
-  SNI/TLS remainder (blocked on T5.5), and T4.4 (netpol).
+- Next gates on the active Phase 3 path (`plans/init-pro/phase-3-host-ai.md`):
+  **P0 T7.7 (Q63)** adds Agent action interception and Linux sandboxing by
+  extending done T7.1 and reusing done T4.14; it is independent of the
+  inference track. The inference track remains **P1 T4.15 -> P2 T7.2 -> P3
+  T7.6** (Q60-Q62): host-direct ordinary-inference performance, direct
+  whole-GPU discovery/allocation, then llama.cpp OpenAI-compatible serving.
+  T4.2 is closed (Scope A+B+C, Sprint 24), T4.3 Scope A is done (flannel CNI
+  embedded in the agent, Q34 — F1-F5) and Scope B's ServiceLB (announce +
+  raw-TCP L4, Q41) is done. The flannel host-gw/multi-node remainder, T5.6's
+  SNI/TLS remainder (blocked on T5.5), and T4.4 (netpol) remain tracked
+  separately from these Phase 3 branches.
 - The server serves real REST CRUD/watch/SSA (kubectl-compatible); with
   T2.3, zero-restart durability arrived as an explicit opt-in
   (`rdb://` endpoint; `scripts/durability-e2e.sh` D1-D4 gates it),
@@ -171,7 +184,8 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 ## Decisions that matter (Q-codes)
 
 - Q1 - single multicall binary (argv[0] dispatch; symlink deployment).
-- Q2 - full k3s/k8s protocol conformance (do not reinvent the API).
+- Q2 - historical full k3s/k8s protocol conformance goal; Q59 narrows only
+  the forward delivery scope (supported APIs remain wire-compatible).
 - Q4 - built-in Router as a first-class platform primitive (realized via
   openrusty as of Q32), not an addon.
 - Q5 - M1 vertical slice de-risks the Router first (Ingress->real
@@ -217,5 +231,39 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   promote (stable image patch + weights 100/0, children retained) or abort
   (`spec.release.abort`, idempotent, recycles the children); no health-gated
   auto-abort in M3.
+- Q59 - forward delivery is a limited/supported Kubernetes protocol subset
+  for ecosystem compatibility, superseding Q2's scope only; supported APIs
+  stay upstream wire-compatible, Q10 JSON-only is unchanged, and T0.6 stays
+  done as the supported-subset golden gate (no 100%/full-conformance claim).
+- Q60 - T4.15 built-in host-direct is a performance profile for ordinary
+  inference inside a tenant-dedicated cluster, not Agent action containment
+  or a cross-tenant boundary. It uses host network/rootfs, clone3 necessary
+  namespaces (NEWNS/NEWPID/NEWUTS/NEWIPC/NEWCGROUP, no NEWNET), literal
+  `init-pro.io/rootfs: /`, no image pull/copy/pivot for `/`, host `/dev`
+  access, and no containerd fallback (silent or explicit); nodes must not be
+  shared across tenants. Agent workloads use Q63 instead. T4.11-T4.14/Q48-Q55 remain done.
+- Q61 - T7.2 discovers and allocates direct host whole GPUs through standard
+  extended resources for ordinary inference inside a tenant-dedicated cluster,
+  builtin first; no device-plugin or fractional-GPU support in the first slice
+  and no containerd fallback (silent or explicit) for GPU requests. Fake tests
+  provide routine, fake-scope evidence only; real-hardware execution may be
+  opt-in for ordinary CI, but recorded real evidence for every claimed GPU
+  vendor is mandatory to close whole T7.2.
+- Q62 - T7.6 serves pre-staged GGUF with llama.cpp through a standard
+  Deployment + NodePort Service and an OpenAI-compatible API; no new CRD or
+  Agent reuse. Fake tests provide routine, fake-scope evidence only;
+  real-hardware execution may be opt-in for ordinary CI, but closing whole
+  T7.6 requires recorded real evidence with pinned real llama-server, local
+  read-only GGUF, and a real GPU.
+- Q63 - T7.7 extends done T7.1/Q35/Q37 with a node/operator-owned default-deny
+  action policy, a central tool/subagent gate, and Linux enforcement through
+  existing nsrun/clone3/cgroups: private non-host rootfs and fresh network
+  namespace, non-root/no_new_privs/empty capabilities, mandatory CPU/memory/
+  PID limits, and descendant cleanup. A node-side allowlisted provider broker
+  uses a per-attempt Unix socket and injects credentials upstream; sandboxed
+  Agent/opencoder/tool/subagent environments receive none. Q63 supersedes
+  child-env credential transport only for this sandboxed path, preserves the
+  Q35/Q37 history, and forbids direct-process/host-root/host-network/
+  containerd fallback when containment is unavailable.
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q58).
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q63).

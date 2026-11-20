@@ -7,6 +7,131 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 47 — node04-llama-k3as: T4.15/T7.2/T7.6 进入 in-progress (fake/offline 全链落地; 真硬件 closure 未满足, 三个 TODO 均保持开放) (2026-11-19)
+
+**Goal:** S47 计划的第一实现切片——为 node04 llama.cpp 迁移到 k3as 调度铺平
+P1/P2/P3 路径：host-direct 执行 (T4.15/Q60)、整卡 GPU 调度 (T7.2/Q61) 与
+llama.cpp-first 推理面 (T7.6/Q62) 的**实现 + fake/offline 证据**，外加
+node04 现场盘点/切换/回滚 runbook 与参数化清单。按 Q60-Q62 的 closure
+规则，fake 全绿**不关闭** TODO：真硬件 recorded evidence (GPU6/INF6/HD 真机
+面) 仍缺，T4.15/T7.2/T7.6 均转 **in-progress** 而非 done。
+
+**Changes**
+- **T4.15 host-direct (Q60)**: `kubelet/src/engine/host_direct.rs` 纯三重
+  选择 (`builtin` + `--builtin-rootfs=host` + 字面量注解 `init-pro.io/rootfs:
+  /`)——破坏三重返回 `Invalid` 拒绝执行而非回退 (HD5)；`host_direct_run.rs`
+  + nsrun/engine host-root 子配置: 保留 NEWNS/NEWPID/NEWUTS/NEWIPC/NEWCGROUP,
+  **无 NEWNET** (Q52, pause `--host-net`)、**无 pivot_root**、宿主 `/dev` 与
+  `/sys` 直通 (真实 cgroupfs 视图, 容器 cgroup 为 `init-pro/<id>` 子级)、新
+  PID ns 的新鲜 `/proc`、private propagation 先行；workload 与 pause 均**零
+  镜像动作** (无 EnsureImage/pull/CAS/layer/pivot, HD2)；T4.9 CPU/mem 限与
+  T4.14 host-mounts 保持。`engine-proto` 增 `host_root` wire 位 (B14)。
+- **T7.2 整卡 GPU (Q61)**: `common/src/gpu.rs` vendor 常量 SSOT;
+  `kubelet/src/gpu{,_/}` (inventory/ledger/status): agent flag
+  `--gpu-inventory auto|none|fake:<res>:<n>` (nvidia-smi/rocm-smi/sysfs
+  best-effort 检测, 仅 host-direct-capable 三重节点发布 capacity/allocatable,
+  无能/回退节点 omit——GPU5); `engine/gpu-ledger.json` 持久账本 (Pod-UID ×
+  container 整卡独占, tmp+rename 原子写, 重启稳定复用 GPU3, teardown 完成
+  才释放 GPU4, grace reconcile 防泄漏); 调度器 assigned-pod 扩展资源核算
+  (GPU2 独占) + 修复嵌套 key 的 `~0/~1` JSON-pointer 转义 (GPU1);
+  `CUDA/HIP_VISIBLE_DEVICES` 稳定注入; 节点心跳发布 `status.initProRuntime`
+  (`gpuLedger` 总量/分配 + `released` 10min 记录) 作为控制面 teardown 合同;
+  sync 层硬拒绝 GPU/host-direct Pod 走 containerd (Q60/Q61 无回退)。
+- **T7.6 llama.cpp 面 (Q62)**: controllers `teardown_hold/` —— Recreate
+  安全机: old RS 缩零后 **new RS 保持 0** 直到每个旧 host-direct/GPU Pod 的
+  runtime teardown + GPU 账本释放被节点**当前** `status.initProRuntime` 确认
+  (`released.at` 晚于 Deployment `init-pro.io/teardown-since` 注解且 gpuLedger
+  无该 UID; stale ack 不可解锁——记录被节点剪枝或时间戳更早即继续 hold),
+  等待期 `Progressing=False/OldRuntimeTeardownPending` (INF4); 普通 Pod
+  Recreate 行为不变, Q58 canary 不受影响。
+- **Admission (跨切)**: `api/src/validate{,_host_direct}.rs` — 非法显式
+  `imagePullPolicy` 拒绝 (K8s 风格 Unsupported value); GPU 数量必须非负整数
+  且 request<=limit; host-direct 模板必须 `strategy.type: Recreate`; GPU
+  模板必须带字面量 `/` 注解; seam 挂入 create/apply/replace 三路
+  (apiserver collection/apply/item)。**修复 RS/DS/STS 建 Pod 丢模板注解的
+  bug** (现按 upstream 传播 template annotations)。Golden `phase3-v1`
+  G90-G96 (负例 422 + `/`+Recreate+GPU 正例 + 注解传播正例)。
+- **e2e**: `scripts/inference-fake-e2e.sh` + `scripts/lib/fake-openai.py`
+  (python3 stdlib, 离线禁下载) — 真集群 (server + builtin host-rootfs agent
+  + fake GPU) 上 INF1/2/3/5 fake 面 **11/11 PASS**: Endpoints 先空后实、
+  `/health` readiness、`/v1/models`+chat+SSE `[DONE]` 过 NodePort、
+  `CUDA_VISIBLE_DEVICES` 注入 (IF7)、零模型感知路由 (IF8)、`imagePullPolicy:
+  Never` 不拉镜像。注意: GPU 数量走 k8s wire 惯例**字符串** `"1"` (IF7 根因
+  是 `parse_requirements` 只读 string quantity, e2e 侧按 wire 惯例修正)。
+- **ops**: `plans/init-pro/ops/` —— node04 只读盘点模板 (服务管理/argv/二进制
+  与 GGUF sha256/GPU/端口/客户端/性能基线, 无凭据)、切换+回滚 runbook
+  (replicas:0 先行、空 Endpoints 检查、停旧不删、账本释放等待进回滚门、
+  双服务不得共享 GPU)、参数化 `@PLACEHOLDER@` Deployment/NodePort 清单。
+- **SSOT**: index.md + plan/04b + plan/07 + phase-3 §0 — T4.15/T7.2/T7.6 →
+  in-progress (fake 落库, 真硬件待 node04 现场), counts 38 done · 5
+  in-progress · 11 not-started。
+
+**Gates (final tree, 本 session 复跑):** `cargo build --workspace --locked` ok;
+`cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets
+--locked -- -D warnings` 0; workspace tests **611 passed / 2 failed**——唯二
+失败是**先于 S47 存在**的宿主环境问题 (`init-pro/tests/external_stub` 两例:
+本机存在 `/usr/bin/ctr`, peer re-exec 抢在 stub 前应答; 已在干净 worktree 于
+HEAD 8298796 复现相同失败, 与 S47 无关); `golden-conformance.sh` **58/58**
+(新增 G90-G96); `cli-flag-parity-test.sh` 26/26 (新增 t72-agent);
+`engine-selftest.sh` 33/33; `engine-singlethread-check` + `unsafe-audit` PASS;
+`builtin-hostroot-e2e.sh` H1-H8 + **HD1-HD5** PASS; `builtin-runtime-e2e.sh`
+B1-B13 + N1-N5 PASS; `builtin-image-e2e.sh` I1-I8 PASS; `resources-e2e.sh`
+12/12; `inference-fake-e2e.sh` **11/11**。文件限额: 全部新增文件 <400 行
+(api validate 拆分 validate+validate_host_direct), 迭代文件 <=800
+(runner.rs 800, backend.rs 792, sync.rs 791)。
+
+**S47 评审修复 (2 缺陷 + 1 风险 + 2 卡点, 同日落地, F1-F6):**
+- **评审自我修正 (缺陷 2)**: 评审所称"GPU Pod 运行时静默执行"不成立——
+  kubelet `sync.rs gpu_backend_guard` 已在 builtin 路径拒绝无字面量
+  `rootfs:/` 注解的 GPU Pod; 实际缺口收窄为 **admission 早期反馈面**
+  (该规则此前仅挂在 Deployment 分支, RS/STS/DS 模板与裸 Pod 只能等
+  运行期才被拒)。
+- **F1 (缺陷 1·env 覆盖)**: admission 新规则——请求 GPU 资源的容器若显式
+  设置 `CUDA_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` -> 422 Forbidden,
+  消息说明该值由平台按 GPU 分配账本注入 (Q61); 非 GPU 容器设该变量仍
+  合法 (如 `none` 隐藏)。kubelet `upsert_gpu_env` 的运行时 last-write-wins
+  覆盖**保留为 defense-in-depth** (冲突经 admission 已不可达)。
+  位置 `api/src/validate.rs` (常量引 `common::gpu`); golden G97。
+- **F2 (缺陷 2·admission 覆盖面)**: "GPU 请求必须字面量 `rootfs:/`"规则
+  从 `validate_host_direct.rs` 的 Deployment 分支上移至共享
+  `validate::validate_pod` 路径——裸 Pod + RS/STS/DS 模板全量生效,
+  Deployment 仅保留 strategy=Recreate 规则; 与运行时 `gpu_backend_guard`
+  双层一致拒绝。消息片段 `GPU requests (...) require host-direct` 保持
+  不变 (G93 兼容); golden G98 (RS 模板无注解 -> 422)。api 单测 94->99。
+- **F3 (风险 3·时钟)**: `teardown_hold` release-ack 确认条件改为
+  `released.at > teardown-since + margin`, margin = max(2×10s 心跳默认,
+  60s) = 60s——节点快钟 (< margin) 不再能以陈旧 ack 提前放行, 慢钟仅
+  有界延迟、不锁死; `OldRuntimeTeardownPending` 等待消息携带两侧观测
+  时间戳 (ack-at / teardown-since / margin) 供现场排障; "控制面与节点
+  NTP 偏差 <= margin"前置假设文档化 (`ops/node04-llama-migration.md` +
+  phase-3 §0)。controllers 单测 205->207 (新增双向 skew 用例; 既有
+  deployment/teardown_hold 用例的临界 ack 时间戳随 strictly-greater
+  语义同步修正)。
+- **F4 (卡点·external_stub)**: 根因确认为**本机数据目录残留**——先前
+  e2e 在 `/var/lib/init-pro/agent/containerd/` staged 了真实 peer
+  (crictl/ctr/containerd), multicall 按 `INIT_PRO_DATA_DIR` 解析后 exec
+  staged peer 抢在 stub 前应答; 早前"本机 /usr/bin/ctr 应答"的诊断
+  **有误** (staged-peer 查找不经过 PATH)。修复取测试侧隔离:
+  `init-pro/tests/external_stub.rs` 以 `INIT_PRO_DATA_DIR` 指向每次调用
+  唯一的空 tempdir, multicall "只 exec staged peer"语义不变; 2 例转绿
+  (HEAD 干净 worktree 同样适用的确定性隔离)。
+- **F5 (回归门禁复跑, 修复后 final tree)**: `cargo build/test/clippy/
+  fmt --workspace --locked` 全绿——tests **1327 ok / 0 failed** (含
+  external_stub 3/3); `golden-conformance.sh` **60/60** (58->60, +G97/G98);
+  `cli-flag-parity` 26/26; `engine-selftest` 33/33; `builtin-hostroot-e2e`
+  H1-H8 + HD1-HD5 (H8 复跑 `builtin-image` I1-I8 绿); `builtin-runtime-e2e`
+  B1-B13 + N1-N5; `inference-fake-e2e` **11/11** (IF7 账本 env 注入不
+  回归); `resources-e2e` 12/12。
+- **F6 (SSOT 纪律)**: T4.15/T7.2/T7.6 状态**不升级** (仍 in-progress,
+  真硬件 GPU6/INF6/HD closure 未满足); phase-3 §0 的 Admission/Gate 段
+  与真值对齐; node04 切流门槛不变 (真硬件证据 + 现场盘点仍为硬前置)。
+  提交拆分建议 (待用户批准后执行, 本 session 未做任何 git 提交):
+  ①S46 文档遗留 ②S47 代码+测试 ③S47 文档+ops。
+
+**NOT done (S47 边界外, 见 phase-3 §0):** node04 现场盘点与资产清单填写
+(需现场, 不可猜); HD/GPU6/INF6 真硬件 recorded evidence; 旧 llama.cpp 服务
+实际停切与客户端切换; T7.7 (Q63) 独立 P0 未动。
+
 ## Sprint 46 — T8.5 done: canary 发布控制器 + stepped TrafficSplit (M3, Q58 LOCKED) (2026-11-19)
 
 **Goal:** Layer 8 交付面收口 (M3)——`ServicePipeline.spec.release` 驱动

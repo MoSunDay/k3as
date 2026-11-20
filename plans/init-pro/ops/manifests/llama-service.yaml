@@ -1,0 +1,28 @@
+# Service for the node04 llama.cpp migration (T7.6, Q62).
+#
+# Parameterized template: substitute @PLACEHOLDER@ tokens (see
+# ../node04-llama-migration.md phase-0 inventory) then render to JSON
+# for the apiserver (Q10 JSON-only wire). Generic NodePort data plane
+# only — no model-aware routing (no Ingress/TrafficSplit involved).
+#
+# @NODE_PORT@  static NodePort 30000-32767 for a stable cut-over address;
+#              DELETE the `nodePort:` line to auto-allocate instead.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama
+  namespace: default
+  labels:
+    app: llama
+spec:
+  type: NodePort
+  selector:
+    app: llama
+  ports:
+    - name: api
+      port: 8080
+      # Q52: host-direct pods share the host network namespace, so
+      # targetPort MUST equal the container's actual listen port @PORT@.
+      targetPort: @PORT@
+      protocol: TCP
+      nodePort: @NODE_PORT@

@@ -1,10 +1,10 @@
 # init-pro — Index (SSOT)
 
-This file is the **single source of truth** for all 51 TODOs. The
+This file is the **single source of truth** for all 54 TODOs. The
 `plan/<layer>.md` files mirror the same TODO IDs (same content, per-layer
 grouping for easier editing). **Edit both in lock-step.** Layer 4 is split
 across `plan/04-node.md` (T4.1-T4.10) + `plan/04b-builtin-engine.md`
-(T4.11-T4.14, split at T4.14 for the file-size limit); the delivery plane
+(T4.11-T4.15, split at T4.14 for the file-size limit); the delivery plane
 is `plan/08-delivery.md` (T8.1-T8.5, M1-M3).
 
 Legend & rules: see `README.md` §6 and `template/TODO.md`.
@@ -44,6 +44,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.12 | 4 | 内置引擎 kubelet 接线 P2: `EngineBackend`/exec + `--container-engine=builtin` 真实选择 (Q49 进程池 + Q50 日志/exec 流 + Q51 探针回退) | done (Sprint 41; host-rootfs Pod 生命周期闭环, 镜像/CNI 留 T4.13) | T4.11, T4.2 |
 | T4.13 | 4 | 内置引擎镜像存储 + Pod 网络面 P3 (网络面 = host netns 共享 Q52; 镜像存储 = registry-v2 拉取 + 共享层解包 + per-container overlayfs Q53/Q54) | done (Sprint 42 网络面 Q52; Sprint 43 镜像存储 M1-M5; Q55 后镜像链降为 host 引擎下注解 opt-in, 代码保留) | T4.12, T4.3, T6.3 |
 | T4.14 | 4 | 内置引擎宿主根文件系统 (host-rootfs 默认 `--builtin-rootfs host\|image` + `init-pro.io/host-mounts`/`init-pro.io/rootfs` 注解, Q55) | done (Sprint 44, Q55) | T4.13 |
+| T4.15 | 4 | 内置引擎 host-direct 字面量 `/` 执行 (tenant-dedicated 集群内普通推理性能画像; builtin + host rootfs + Pod 注解显式选择, 宿主 `/dev` 直通, Q60) | in-progress (S47 实现+fake/本机 root 证据 HD1-HD5 落库: 严格三重选择、无镜像动作、无 pivot/NEWNET、宿主 /dev 直通; node04 真机验收与 HD 真硬件面待现场) | T4.14 |
 | T5.1 | 5 | openrusty h2c 网关嵌入 (进程内库依赖, Q32) | done | T0.3 |
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
@@ -55,22 +56,24 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T6.2 | 6 | 标准 addon (T6.2a 内嵌 Cluster DNS S43/Q45 + T6.2b local-path S44/Q46; metrics-server → S48 backlog) | not-started | T6.1, T4.3 |
 | T6.3 | 6 | 内嵌 Docker Registry v2 镜像仓库（tag 保留策略，默认最近 10 + keep-forever 不计入，Q40） | done (Sprint 33; Sprint 34 hardening) | T0.3 |
 | T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A Sprint 26, Q35 + Phase B 节点执行 Sprint 30, Q37) | T3.2, T1.2 |
-| T7.2 | 7 | GPU/资源调度与策略 | not-started | T7.1, T4.2 |
+| T7.2 | 7 | 宿主 GPU 直调调度 (标准 `nvidia.com/gpu`/`amd.com/gpu` 扩展资源, builtin host-direct 优先, 整卡逻辑独占 + 稳定设备分配, Q61) | in-progress (S47 fake-scope 全链落库: `--gpu-inventory` 清单发布、Pod-UID/container 持久账本、扩展资源调度核算、CUDA/HIP_VISIBLE_DEVICES 注入、teardown 后释放, GPU1-GPU5 单测; 真硬件 per-vendor recorded evidence 未有——GPU6 未满足, 保持开放) | T4.15, T3.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置; engine+model 抽取为 link_repos/arust-workflow pin, Q42) | done (Scope A+B+C, Sprint 23; Q42 抽取 Sprint 36) | T1.2, T3.1 |
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
+| T7.6 | 7 | llama.cpp-first 宿主推理 (普通 Deployment → Pod + NodePort Service, 预置 llama-server/GGUF, OpenAI 兼容 API, Q62) | in-progress (S47: Recreate teardown-hold 状态机 + fake OpenAI 离线 e2e INF1/2/3/5 fake-scope 全绿 + node04 切换/回滚 runbook 与参数化清单; 真 llama-server/GGUF/整卡验收 INF6 未做, 保持开放) | T7.2, T3.1 |
+| T7.7 | 7 | Agent action interception + Linux sandbox (节点/operator default-deny 策略, 中央 tool/subagent gate, nsrun/clone3/cgroup 隔离, per-attempt provider broker, Q63) | not-started | T7.1, T4.14 |
 | T8.1 | 8 | 镜像交付信任 + registry push client (M1; certs.d 明文 HTTP 渲染 + docker save 导入, Q38/Q40) | done (Sprint 45) | T6.3, T4.1 |
 | T8.2 | 8 | TrafficSplit 加权一键切流 (init-pro.io/v1, 短名 ts, Q57) | done (Sprint 45, Q57) | T5.4, T1.1 |
 | T8.3 | 8 | ServicePipeline/Build 内嵌 CI/CD 控制器 (M2 core, Q56) | done (Sprint 45, Q56) | T8.1, T6.3, T1.2, T3.1 |
 | T8.4 | 8 | pipeline 面收尾: CLI flags + 进程内 e2e (M2, Q56) | done (Sprint 45, Q56) | T8.3 |
 | T8.5 | 8 | canary 发布控制器 (M3, Q58) | done (Sprint 46, Q58) | T8.2, T8.3, T8.4 |
 
-**Counts:** 51 TODOs · 38 done · 2 in-progress (T5.6 剩余 SNI/TLS
+**Counts:** 54 TODOs · 38 done · 5 in-progress (S47 起 T4.15/T7.2/T7.6 进入 in-progress——fake/offline 证据已落库, 真硬件 closure 未满足; T5.6 剩余 SNI/TLS
 passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
 已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
 与 Scope B ServiceLB Q41 已 done)
 · 11 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
-Layer4=14 · Layer5=7 · Layer6=3 · Layer7=5 · Layer8=5.
+Layer4=15 · Layer5=7 · Layer6=3 · Layer7=7 · Layer8=5.
 
 ---
 
@@ -78,7 +81,7 @@ Layer4=14 · Layer5=7 · Layer6=3 · Layer7=5 · Layer8=5.
 
 ```
 T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 ─> T6.1 ─> T6.2
-      │         │                 │          ├─> T3.2 ─> T7.1 ─> T7.2
+      │         │                 │          ├─> T3.2 ─> T7.1
       ├─> T0.3 ─┤                 │          ├─> T3.3 ─> T3.4
       │         └─> T4.1 ─> T4.2 ─┼─> T4.3 ─> T4.4
       ├─> T0.4                      │          └─> T4.5
@@ -86,6 +89,10 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
       └─> T4.6 (off T4.2: log date dirs + 100MB copytruncate, Q39)
       └─> T6.3 (off T0.3: embedded registry v2 image plane, Q40)
       └─> T4.11 (off T4.1: built-in engine P1, Q48) ─> T4.12 ─> T4.13 ─> T4.14
+                                                                  ├─> T4.15 ─> T7.2 ─> T7.6
+                                                                  │    (Q60 host-direct → Q61 GPU → Q62 inference)
+      T7.1 (done, Q35/Q37) ───────────────────────────────────────┴─> T7.7
+                                                                       (Q63 Agent action sandbox; independent of inference)
       └─> T6.3 ─> T8.1 ─> T8.3 ─> T8.4; T5.4 ─> T8.2 ─> T8.5 (Layer 8 delivery
                 plane, T8.3/T8.4 also feed T8.5)
       └─> T0.6 (golden gate,        │
@@ -101,6 +108,21 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   → T4.2 → end-to-end cluster (M3).
 - **De-risk path (Q5):** T0.1 → T0.3 → T5.1 → T5.2 → T5.4 (M1 spike).
 - **T0.6** is a gate, not a node: any TODO merging must keep it green.
+- **Next critical path — Phase 3 sandbox + host-native AI (Q59–Q63, active):**
+  Q59 keeps the forward compatibility target discovery-published and
+  golden-tested without weakening supported-resource semantics or Q10.
+  k3as is a multi-tenant Agent sandbox platform deployed **one tenant per
+  cluster**, with nodes dedicated to that tenant; Kubernetes Namespaces are
+  not tenant security boundaries. **P0 T7.7 (Q63)** extends done **T7.1 +
+  T4.14** with Agent action interception and Linux containment; it has no
+  dependency on T4.15/T7.2/T7.6. The independent inference track is **P1
+  T4.14 (done) → T4.15 (Q60 host-direct) → P2 T7.2 (Q61 whole-GPU scheduling;
+  also depends on done T3.2) → P3 T7.6 (Q62 llama.cpp inference; also depends
+  on done T3.1)**. Q60 is an ordinary-inference performance profile inside a
+  tenant-dedicated cluster, not Agent action containment or a cross-tenant
+  boundary; Agent workloads use Q63. The inference slice explicitly selects
+  builtin, while containerd remains the global default (Q51). Forward
+  execution detail lives in `phase-3-host-ai.md`.
 - **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档)。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
 - **Sprint 38b — T4.11 内置容器引擎 P1: kiri clone3/namespace 内核移植 + 单线程 engine + 帧协议 (Q48).**
   4 个新 crate: `nsrun` (唯一 unsafe island；clone3 六 namespace + CLONE_INTO_CGROUP、child 挂载/pivot_root/cap-bounding/no_new_privs/setuid、parent start gate + waitpid、`128+WTERMSIG` + 126/127/255)、`engine-proto` (u32 LE len|kind|payload 帧 + ContainerSpec)、`engine` (`engine-run` 单发 + `engine serve` 单线程 accept loop)、`engine-client` (tokio 事件泵)。`init-pro engine`/`engine-run` pre-clap 派发 + multicall 别名；`--container-engine` 仅接受+告警 (P2/T4.12 接线)。两处根因修复: ① `pivot_root(".", ".")` EBUSY → 先绝对路径 bind 再 chdir；② ro bind 的 `<proc-fd>` remount EINVAL → `mount_setattr(2)` (AT_EMPTY_PATH|AT_RECURSIVE, RDONLY|NOSUID|NODEV|NOEXEC)，并把 mount_setattr 支持纳入 preflight。门禁: `scripts/unsafe-audit.sh` + `scripts/engine-singlethread-check.sh` + `scripts/engine-selftest.sh` E1–E8 (22 断言) + `scripts/builtin-runtime-e2e.sh` B1–B7。S38c 收尾复跑: engine 栈 tests 41/0 (nsrun 22 / engine 12 / engine-proto 5 / engine-client 2)，workspace 1050/0。来源 kiri @ 7846fe0 Apache-2.0，`guest/kernel` GPL 不触碰；`NOTICE` + `LICENSES/Apache-2.0.txt` 落档。

@@ -57,6 +57,18 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
     ordinals + OrderedReady gating (Sprint 29 strict `pod_gate_ready`);
     G80-G82 namespace drain full-footprint live proof (DRAIN_KINDS 18).
 
+- **Forward Phase 3 note (Q62/T7.6; not as-built, T3.1 stays done):** current
+  Recreate is insufficient for single-GPU replacement. Scale the old RS to zero,
+  then hold the new RS at zero until actual runtime teardown of every old
+  container/sandbox and GPU allocation release are explicitly complete/acknowledged.
+  RS spec/status zero, deletionTimestamp, terminating state, or API Pod absence is
+  not proof. The implementation-owned acknowledgement must represent node/runtime
+  and allocation-ledger completion and correlate to old Pods/attempts so a stale
+  ack cannot unblock. A stall leaves the replacement at zero with actionable status
+  and resumes only after completion; acceptance includes stalled teardown/release.
+  Reject an invalid Deployment `strategy.type` with Kubernetes-style validation,
+  never treat it as RollingUpdate.
+
 - **状态 / Status** — done (T3.1a Sprint 13, T3.1b Sprint 14)
 - **证据 / Evidence** — Sprint 13 (T3.1a): `crates/controllers` —
   ReplicaSet/Deployment/Endpoints reconcilers over the informer/

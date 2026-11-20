@@ -1,0 +1,71 @@
+# Deployment for the node04 llama.cpp migration (T7.6, Q62).
+#
+# Parameterized template: substitute @PLACEHOLDER@ tokens from the
+# phase-0 inventory (../node04-llama-migration.md), render to JSON, and
+# POST to the apiserver (Q10 JSON-only wire; this build's `kubectl
+# apply` covers argoproj.io/init-pro.io only, NOT apps/v1 — use curl).
+#
+# Profile (Q60/Q61): host-direct ordinary inference inside a
+# tenant-dedicated cluster. Nodes must never be shared across tenants.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama
+  namespace: default
+  labels:
+    app: llama
+spec:
+  # Start the migration at replicas 0; the runbook scales to 1 only
+  # after the old unit is stopped (GPU hand-over). INF4: Recreate holds
+  # any NEW ReplicaSet at 0 replicas until node runtime teardown AND
+  # gpuLedger release for the old podUID are both acknowledged
+  # (Progressing=False reason OldRuntimeTeardownPending otherwise).
+  replicas: @REPLICAS@
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llama
+  template:
+    metadata:
+      labels:
+        app: llama
+      annotations:
+        # Q60 host-direct: literal "/" rootfs, no image pull/copy.
+        init-pro.io/rootfs: "/"
+        # Q62: immutable, pre-staged GGUF exposed READ-ONLY.
+        init-pro.io/host-mounts: "/models=@GGUF_HOST_DIR@:ro"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: "@NODE_NAME@"
+      containers:
+        - name: server
+          # Never pulled (host-direct); image string is inert metadata.
+          image: init-pro.local/llama:@MODEL_ALIAS@
+          imagePullPolicy: Never
+          # nsrun exec does NO PATH resolution: absolute paths only.
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              exec @LLAMA_SERVER_BIN@ --host 0.0.0.0 --port @PORT@
+              -m /models/@MODEL_ALIAS@.gguf --alias @MODEL_ALIAS@
+          ports:
+            - name: http
+              containerPort: @PORT@
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: @PORT@
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            # Q61 whole-GPU request. Quantities MUST be quoted strings
+            # (k8s wire convention): kubelet parse_requirements drops
+            # non-string rows, silently disabling GPU allocation.
+            requests:
+              @GPU_RESOURCE@: "1"
+            limits:
+              @GPU_RESOURCE@: "1"

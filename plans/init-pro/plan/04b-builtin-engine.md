@@ -1,9 +1,10 @@
 # Layer 4 — Node / Agent (built-in engine track)
 
-Mirrors `index.md` TODO IDs **T4.11–T4.14**: the built-in container
+Mirrors `index.md` TODO IDs **T4.11–T4.15**: the built-in container
 engine (kernel P1 Q48, kubelet wiring P2 Q49-Q51, images + netns P3
-Q52-Q54, host-rootfs default Q55). Split out of `04-node.md` at T4.14
-(file-size limit).
+Q52-Q54, host-rootfs default Q55, literal host-direct execution Q60).
+Split out of `04-node.md` at T4.14 (file-size limit). T4.15 extends the
+completed engine track; it does not reopen T4.11–T4.14.
 
 ---
 
@@ -280,3 +281,64 @@ Q52-Q54, host-rootfs default Q55). Split out of `04-node.md` at T4.14
   H1-H8 + I1-I8 + N1-N5 三套 e2e 全绿。
 - **卡点 / Blockers** — none
 - **依赖 / Depends on** — T4.13
+
+---
+
+## T4.15 — 内置引擎 host-direct 字面量 `/` 执行 (Q60)
+
+- **目标 / Goal**
+  在 T4.11–T4.14 已完成的基础上新增 **tenant-dedicated 集群内普通推理的
+  host-direct 性能画像**，不重开旧卡。k3as 是多租户 Agent sandbox 平台，
+  支持的部署模型是一租户一集群且节点专属该租户，Kubernetes Namespace 不是
+  租户安全边界。仅当节点显式选择 `--container-engine=builtin`、
+  `--builtin-rootfs=host`，且 Pod 带 `init-pro.io/rootfs: /` 时，普通推理容器
+  直接使用字面量宿主 `/`。它消除 Q55 的字面量 `/` 限制，但不改变 Q51 的全局
+  `containerd` 默认值；推理垂直切片必须显式选择 builtin。
+
+- **核心实现 / Core implementation**
+  - rootfs 解析在 **kubelet sync image planning 之前**完成严格三重选择；只有
+    builtin + `--builtin-rootfs=host` + 注解值恰好 `/` 进入 host-direct。此路径的
+    `image` 仅为 retained declarative/wire metadata，literal `/` 而非 image 选择
+    host rootfs。create/restart/reconcile 对 workload 与 pause/sandbox 均不得发出
+    `Action::EnsureImage`，也不得 pull、presence check、ref/CAS/layer resolve 或
+    materialize、merge image config、copy/merge layers，或对 `/` 执行 `pivot_root`。
+    omitted/defaulted 及显式合法的 Always/IfNotPresent/Never 均接受但行为无关；
+    显式非法 policy 以 Kubernetes-style validation 拒绝，不得静默默认化。
+    Q55 普通 host-directory presence-only 行为保持不变；其他错误组合返回可操作
+    Pod event/status，不猜测用户意图。
+  - `clone3` 继续使用 NEWNS、NEWPID、NEWUTS、NEWIPC、NEWCGROUP，且不加
+    NEWNET（Q52）。literal `/` 的 child setup 先做安全 mount propagation 隔离，
+    再在私有挂载命名空间处理新 PID namespace 所需的 `/proc`；不执行 `pivot_root`。
+  - 不换成裁剪的 tmpfs `/dev`：保留宿主 `/dev` 可见性，供 tenant-dedicated
+    节点上的普通 accelerator 推理直接访问设备。T4.14
+    `init-pro.io/host-mounts` 的 `:ro`/`:rw` 语义与 T4.9 CPU/memory cgroup
+    限额继续生效。
+  - host-direct 或 GPU 请求不得回退 containerd（无论是否静默或显式）。Q51 的
+    普通 builtin boot 探针回退保持不变；若节点因此不能提供 host-direct/GPU，请求
+    必须显式失败或保持 Pending 并给出原因，绝不在另一引擎伪成功。
+  - **此画像不是 Agent action containment，也不是跨租户边界。** 一租户一集群、
+    节点不跨租户共享是 hostile multi-tenant support 的必要但非充分条件；还须满足
+    Q60/Phase 3 §7 所列并实测的 per-tenant 网络、存储、端点及凭证隔离，否则该
+    部署不受支持。宿主 `/`、`/dev` 和 host netns 仅用于普通推理。Agent 必须使用
+    Q63 的私有非宿主 rootfs、fresh network namespace 与 action gate。
+
+- **验收手段 / Acceptance**
+  - Q59 `phase3-v1` golden 与单测覆盖严格三重选择正例、缺项/错误组合及非字面量
+    `/` 负例、host-direct/GPU 禁止 containerd fallback；逐一验证 omitted/default
+    与 Always/IfNotPresent/Never 在 create/restart/reconcile 对 workload/pause 均
+    零 `Action::EnsureImage` 和零 image processing，显式非法 policy 被拒绝。
+    同时证明 Q51 默认引擎、Q55 host-directory presence-only 与 Q63 配置边界不变。
+  - 特权 Linux e2e 验证宿主标记从 `/` 可见，以 runtime traces 证明无 image
+    action/pull/presence/ref/CAS/layer/config/copy/merge/pivot；namespace 集合无
+    NEWNET，`/proc` 只呈现新 PID namespace，并可见一个预置伪设备节点；无需真实 GPU。
+  - 回归 host-mounts ro/rw、CPU/memory limits、logs/exec、H1–H8/I1–I8/N1–N5；
+    强制启动失败后断言没有 containerd 容器被创建。T0.6 golden 与常用质量门
+    必须全绿。
+
+- **状态 / Status** — in-progress (S47: 实现全量落地——`kubelet/src/engine/host_direct{,_run}.rs` 严格三重选择 + nsrun/engine host-root 子配置 (NEWNS/NEWPID/NEWUTS/NEWIPC/NEWCGROUP, 无 NEWNET, 无 pivot_root, 宿主 /dev 与 /sys 直通, 新 PID ns 的新鲜 /proc, private propagation 先行), workload+pause 均无 EnsureImage, HD5 破坏三重拒绝; fake/本机 root 证据: `builtin-hostroot-e2e.sh` HD1-HD5 + H1-H8, `engine-selftest.sh` 33/33 (E12/E12b host-root), `builtin-runtime-e2e.sh` B1-B13+N1-N5; 剩余: node04 真机 HD 面)
+- **证据 / Evidence** — S47 gates (fake/offline + 本机 root): builtin-hostroot H1-H8+HD1-HD5 PASS, engine-selftest 33/33, builtin-runtime B/N PASS, golden G90-G96 (含 `/`+Recreate 正例), workspace tests 611 passed。真硬件/hostile 场景与 node04 现场 HD 验收未做——card 未关闭。
+- **卡点 / Blockers** — 需要特权 Linux 测试宿主；真实 accelerator 验证留到
+  T7.2/T7.6。operator 必须保证集群与节点归属单一租户，且不得把该拓扑当作完整
+  hostile multi-tenant 边界；宿主 `/`、`/dev` 和 host netns 暴露只用于普通推理，
+  绝不作为 Agent 或跨租户隔离边界。
+- **依赖 / Depends on** — T4.14

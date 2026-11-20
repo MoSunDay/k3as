@@ -2829,3 +2829,286 @@ canary Deployment/Service + 分步权重; (b) 复用 Argo Rollouts 语义 (外�
 无健康门控的自动 abort —— crash-loop 的 canary 照样 promote; canary 克隆共享
 pod 卷, RWO PVC 会阻塞调度 (已记录的 caveat); 发布活跃期 TrafficSplit 的
 backends 归 pipeline 所有。
+
+## Q59 — Scoped Kubernetes compatibility: discovery + supported golden matrix (2026-11-19, LOCKED)
+
+**Context.** Q2 made full k3s/k8s protocol conformance the forward target. That
+target is broader than the host-native AI vertical slice and includes expensive
+surfaces with no current target workload. We need an honest compatibility
+boundary that keeps existing clients and supported resources wire-compatible
+without claiming unimplemented Kubernetes surfaces work.
+
+**Options.** (a) Keep full conformance as the immediate forward gate and block
+host AI on it; (b) narrow the forward target to an explicitly supported profile
+while preserving upstream semantics within that profile; (c) define a custom,
+loosely compatible API and silently accept unsupported operations.
+
+**Decision.** 选 (b)。Q2 的 full-conformance **forward target 由此 superseded /
+narrowed**；这是一项前向范围决策，不改写已完成工作或历史证据。
+- **支持画像 = discovery + golden matrix。** 一个 API 只有在 discovery 中明确
+  发布且被版本化 golden matrix 覆盖时才属于支持集。优先验证真实 `kubectl`
+  与 `kube-rs`，以及普通 `apps/v1` Deployment 和 `core/v1`
+  Service/Pod/ConfigMap/Secret 工作负载。
+- 支持资源保留上游 **GVK/GVR、JSON representation、CRUD、watch、SSA、status
+  与 error semantics**。范围变窄不意味着允许私有字段名、伪 status、简化
+  conflict/not-found 错误或假 watch。
+- 不支持的 surface 必须在支持矩阵中 documented，并通过 discovery/显式
+  Kubernetes-style error 干净失败；**never fake success**，不得返回无实际效果
+  的 2xx。Q10 不变：v1 transport 仍是 JSON-only，protobuf 不因此获得支持。
+- Dynamic CRD registration、admission、API aggregation、protobuf、full RBAC 及
+  其他广泛控制面能力不是 near-term 目标，除非一个明确的 target ecosystem
+  workload 提出需求并随之扩展 discovery + golden matrix。
+- **不作 full Kubernetes conformance claim。** T0.6 保持 done，并继续作为
+  supported subset 的 merge gate；其绿色结果只证明矩阵内的兼容性。
+- **Phase 3 golden addendum。** 实现时追加版本化 `phase3-v1` 用例，不重编号或
+  改写历史 IDs：host-direct 严格三重选择正例及缺项/错误/非字面量 `/` 负例；
+  禁止 containerd fallback；omitted/default 与 Always/IfNotPresent/Never 均产生
+  零 image actions，显式非法 policy 被 Kubernetes-style validation 拒绝；GPU
+  兼容发布/记账/互斥/restart/release 正例及不兼容后端、资源不足、非法资源和
+  capability/backend 变化后的 stale nonzero publication 负例；Recreate 的
+  runtime/GPU completion ordering 与 stalled teardown/release 负例；非法
+  Deployment strategy 拒绝；inference NodePort 可达及未就绪时 endpoints 为空。
+  API/client 断言使用真实 kubectl/kube-rs，必要时采集 privileged/runtime traces。
+  既有 G70/G71/ST1-ST6 仅作通用数据面证据；T7.6 仍须验收 inference Pod 的
+  Service/Endpoints 生命周期，不得以重复 generic proxy tests 替代。
+
+**Consequences.** (+) 可以把实现投入普通应用与 host AI，同时让 kubectl/kube-rs
+的真实交互保持可预测；支持边界可由 discovery 和测试审计。 (−) 矩阵外工具或
+控制器不能假定为受支持，尤其不能因 server 接受对象就推断 controller 已兑现
+语义。Q2 保留为历史 ADR，但其「所有现有工具/全协议」前向承诺不再成立；Q10
+的 JSON-only 决定完全保留。T0.6 的状态和历史不变，golden matrix 的扩展仍是
+每个新增支持面的必要交付物。
+
+## Q60 — T4.15 builtin host-direct performance profile inside a tenant-dedicated cluster (2026-11-19, LOCKED)
+
+**Context.** k3as 是多租户 Agent sandbox 平台；支持的部署是一租户一集群，
+且集群内所有节点专属该租户，Kubernetes Namespace 不是租户安全边界。Q55 已让
+builtin 默认使用宿主目录 rootfs 和 host-mounts，但明确不支持
+`init-pro.io/rootfs: /` 字面量。Tenant-dedicated 集群内的普通 host AI 推理需要
+直接运行宿主 pinned 工具、读取预置模型并访问 accelerator `/dev`，fabricated
+rootfs + 大棵 bind mount 会带来复制、挂载与设备语义摩擦。T4.11–T4.14 均保持
+done，本决策只增加下一张普通推理性能画像卡；Agent action containment 由 Q63
+独立提供。
+
+**Options.** (a) 在 nsrun/engine 中增加严格选择的 literal-host-root 条件路径；
+(b) 继续要求 fabricated rootfs + `/host=/:ro`； (c) 放弃 builtin host-direct，
+让 AI/GPU 走 containerd + device-plugin。
+
+**Decision.** 选 (a)。T4.15 **extends, does not reopen** T4.11–T4.14。
+- **部署与用途边界。** host-direct 仅是 tenant-dedicated 集群内普通推理的
+  性能画像，不是 Agent action-containment profile，也不是跨租户安全边界。
+  一租户一集群、节点不跨租户共享是 hostile multi-tenant support 的必要但非
+  充分条件；还必须有 audited/tested 的 per-tenant network 与 ingress/egress、
+  storage/NFS/registry/workspace、API/NodePort/Router/kubelet endpoints，以及
+  provider/broker endpoints 和 credential handling 隔离。控制未齐备并验证前，
+  hostile multi-tenant deployment 不受支持。Agent 工作负载必须使用 Q63 的
+  私有非宿主隔离，不得选择此路径。
+- **先于镜像规划的显式选择。** kubelet sync 在任何 image planning 之前完成
+  严格选择；只有 `--container-engine=builtin` + `--builtin-rootfs=host` + Pod
+  annotation `init-pro.io/rootfs: /` 三者同时成立才选择字面量宿主 `/`。此路径的
+  `image` 仅保留为 declarative/wire metadata，literal `/` 而非 image 选择 rootfs。
+  create/restart/reconcile 对 workload 和 pause/sandbox 均不得发出
+  `Action::EnsureImage`，也不得 pull、presence check、ref/CAS/layer resolve 或
+  materialize、merge image config、copy/merge layers，或对 `/` 执行 `pivot_root`。
+  omitted/defaulted 及显式合法的 Always/IfNotPresent/Never 均接受但行为无关；
+  显式非法 policy 必须经 Kubernetes-style validation 拒绝，不得静默默认化。
+  Q55 普通 host-directory 的 presence-only 行为不变。全局 engine 默认仍为 Q51
+  `containerd`；AI/GPU vertical slice 必须显式选择 builtin。
+- **必要 namespace 保留。** clone3 使用 NEWNS/NEWPID/NEWUTS/NEWIPC/NEWCGROUP，
+  不加 NEWNET，网络仍是 Q52 host netns。字面量 `/` 的 child setup 先隔离 mount
+  propagation，再在私有 mount namespace 中正确挂载新 PID namespace 的 `/proc`，
+  避免污染宿主。
+- **直接设备与既有控制。** 不以裁剪 tmpfs 替换 `/dev`，保留宿主 `/dev` 供
+  tenant-dedicated 节点的普通 accelerator 推理访问。Q55 host-mounts 的 ro/rw
+  与 T4.9 CPU/memory cgroup limits 保留；image rootfs 与既有容器路径不因此改变。
+- **无 containerd 回退。** Q51 的普通节点级 boot probe 回退仍存在，但 host-direct
+  或 GPU 请求绝不能转交 containerd，无论是否静默或显式。若选定能力不可用，Pod
+  必须显式失败或 Pending 并给出可操作原因。
+- **Golden 正负证据。** Q59 `phase3-v1` 必须覆盖严格三重选择正例、缺项/错误
+  组合及非字面量 `/` 负例、所有合法 pull policy 在 create/restart/reconcile 对
+  workload/pause 均零 image actions、显式非法 policy 拒绝，以及强制失败后无
+  containerd 执行；同时证明 Q55 普通 host-directory presence-only 不变。
+
+**Consequences.** (+) 预装二进制、本地 GGUF 和 GPU 设备无需镜像封装/复制即可获得；
+Q55 的字面量 `/` 已知限制仅在这条显式路径上被解除，Q52/Q55 其余语义不变。
+(−) 宿主根、宿主设备、host netns 与共享内核不提供 Agent 动作隔离或跨租户
+边界；cgroup 和 ro bind 也不是完整安全隔离。Agent 必须使用 Q63 而非复用此
+性能画像；拓扑隔离本身不构成 hostile multi-tenant 支持，所需 per-tenant 控制
+未验收前该部署不受支持。Q51 默认和通用 probe 行为不变，但特殊请求的回退被禁止，
+以避免用户以为获得 host-direct/GPU 却实际运行在无相应能力的后端。
+
+## Q61 — T7.2 direct host whole-GPU scheduling, builtin host-direct first (2026-11-19, LOCKED)
+
+**Context.** 旧 T7.2 草案把 GPU、Agent extender、分数 GPU/time-slicing 与策略面
+混在一起。Host AI 的首个可交付需求更小：普通 Pod 以标准扩展资源申请一张宿主
+GPU，并在 retry/restart/teardown 中保持正确的设备所有权。当前通用调度器还需
+修正扩展资源容量和 assigned-Pod 记账，才能避免超卖。
+
+**Options.** (a) containerd + 外部 Kubernetes device-plugin；(b) Agent 专属
+scheduler extender；(c) 标准 extended resources + 宿主 inventory + builtin
+host-direct 整卡分配。
+
+**Decision.** 选 (c)，重定 T7.2 的范围与依赖为 **T4.15, T3.2**。
+- **标准资源与发布资格。** 使用 `nvidia.com/gpu` 和 `amd.com/gpu`。只有兼容的
+  builtin host-direct 节点（builtin engine + `--builtin-rootfs=host` + host-direct
+  与 device capability checks 均成功）可发布非零 GPU capacity/allocatable；containerd、image
+  rootfs、probe 失败或 incapable 节点即使有物理设备也必须 omit 或同时报零。
+  GPU Pod 仍须显式携带 literal `init-pro.io/rootfs: /`，节点资格不放松 Q60 三重
+  选择。capacity/allocatable 表示当前 eligible 整卡总量，assigned-Pod 用量只由
+  scheduler/allocation ledger 记账。
+- **唯一 Node status 构造路径。** canonical Node status construction 始终接收当前
+  eligible GPU inventory，并用于 registration、每次 heartbeat、agent restart 和每次
+  full status rebuild；当前 heartbeat 会替换完整 status，不得走丢失 GPU 字段的
+  另一条路径。inventory/capability/backend transitions 后不得遗留 stale nonzero
+  allocatable。
+- **设备分配。** 只支持 whole-GPU logical exclusive allocation，并分别通过
+  `CUDA_VISIBLE_DEVICES`/`HIP_VISIBLE_DEVICES` 选择设备。
+- **通用语义修正。** Node patch 的 JSON Pointer 正确把 `~`/`/` 转义为
+  `~0`/`~1`；absent extended-resource capacity 等于零；快照计入全部仍占用资源
+  的 assigned Pods；request/limit 必须是整数，标准 defaulting 后 request 与 limit
+  相等。无容量或不支持的后端必须显式 Unschedulable/Failed，不能假装可运行。
+- **稳定、不重复。** 节点持久化分配记录以 Pod UID + container name 为键，保存
+  resource/device ID；retry 与 agent restart 恢复同一分配，原子预留避免 double
+  booking，teardown 完成后才 release。恢复已有记录先于接纳新 Pod。
+- **首片边界。** 仅在 Q60 的一租户一集群、tenant-dedicated nodes 部署中用于
+  普通推理；节点不得跨租户共享，GPU 直通不构成 Agent 或跨租户隔离。不做外部
+  device-plugin，不做 containerd GPU/device-plugin，不做
+  fractional/MIG/time-slicing。GPU 请求不得回退 containerd（无论是否静默）；没有兼容的
+  builtin host-direct 节点就明确保持 Pending 或失败。
+- **验证分层与关闭门槛。** fake tests 只能关闭明确标注的 fake subscopes，覆盖
+  registration/每次 heartbeat/restart/full rebuild 及 inventory/capability/backend
+  transitions、记账、互斥和释放。真实硬件在普通 CI 可 opt-in，但 recorded
+  real-hardware evidence 是整个 T7.2 done 的强制条件：每一个声称支持的 vendor
+  都必须有 inventory、独占、restart、release 证据；若同时声称 NVIDIA+AMD 则两者
+  都要，否则必须明确收窄支持范围及 Q59 matrix。全 fake green 而无这些证据时
+  T7.2 保持未完成；hardware-required 模式缺硬件/驱动必须 FAIL。
+
+**Consequences.** (+) 普通 Deployment/Pod 无需新 API 即可申请 GPU，Q60 的设备
+直通有明确且不超卖的分配面；稳定 UID/container 键消除同名重建和重试歧义。
+(−) 这是逻辑独占而非硬件安全分区，`*_VISIBLE_DEVICES` 不是对抗恶意进程的
+隔离边界。Q35/T7.1 的 Agent 资源和执行历史保持 done 且不变；T7.2 不再依赖
+T7.1，Agent 专属 GPU 接入、fractional GPU 与广义无策略/策略调度工作全部
+deferred。T3.2 也保持 done，上述修复是 T7.2 的通用语义补齐，不重开历史卡。
+
+## Q62 — T7.6 llama.cpp-first inference on ordinary Deployment + NodePort (2026-11-19, LOCKED)
+
+**Context.** Tenant-dedicated 集群内的普通推理 host-direct 与整卡调度完成后，需要
+一个可演示、可验收的推理工作负载。
+首片应证明标准 Kubernetes 工作对象能驱动真实 llama.cpp，而不是先创造模型控制面。
+模型和推理服务均可由 operator 预置，网络下载在隔离/离线验收中不可依赖。
+
+**Options.** (a) 新 Model/Inference CRD + 自动部署 controller；(b) 复用 Q35 Agent；
+(c) 普通 Deployment → Pod + NodePort Service，宿主运行 pinned llama.cpp。
+
+**Decision.** 选 (c)。
+- **普通工作负载。** 用户提交 `apps/v1` Deployment 与 `core/v1` NodePort Service；
+  Pod 通过 Q60 host-direct 和 Q61 标准 GPU resources 运行宿主预装、版本钉定的
+  `llama-server`。不创建 Agent，不新增 CRD，不做 model-aware Router。
+- **预置且不可变。** operator 预先将 GGUF 放在宿主文件系统并经只读
+  host-mounts 暴露；binary/model 缺失或校验失败即明确失败。没有隐式模型、
+  工具或运行时下载。
+- **API 与流量。** 验收 `GET /v1/models`、`POST /v1/chat/completions` 的
+  non-streaming JSON 与 streaming SSE，以及 `/health` readiness。现有通用
+  NodePort 承载流量，Q52 host-netns 语义不变，Router 不理解模型身份。验收必须
+  覆盖 inference Pod 的 Service/Endpoints 生命周期：无 ready backend 时 endpoints
+  为空，ready 后经 NodePort 可达；G70/G71/ST1-ST6 仅是通用数据面证据。
+- **Recreate 的 runtime/GPU 顺序。** 当前 Recreate 语义不足以保证单 GPU 安全。
+  前向要求先将 old RS scale-to-zero，再把 new RS 保持在 zero，直到所有旧
+  containers/sandboxes 的 **实际 runtime teardown** 和 GPU allocation release 均被
+  明确 acknowledge/complete。RS spec/status zero、deletionTimestamp、terminating
+  state 或 API Pod absence 都不是完成证明。具体机制由实现决定，但必须表示
+  node/runtime + allocation ledger completion，并与旧 Pods/attempts 关联，stale ack
+  不得解锁。停滞时 replacement 保持 zero 并给出可操作 status，只有 completion
+  后才继续；验收必须包含 stalled teardown/release 负例。非法 Deployment
+  `strategy.type` 必须拒绝，不得当作 RollingUpdate。
+- **测试分层与关闭门槛。** 默认 CI 使用 fake OpenAI server + fake inventory；
+  真实 pinned llama-server、本地只读 GGUF 和真实 GPU e2e 可在普通 CI opt-in、无网络
+  下载，缺前置条件时清楚 SKIP，hardware-required 模式禁止 SKIP。fake green 只能
+  关闭明确标注的 fake subscopes；T7.6 整体 done 必须有 recorded real run，验证
+  health/models/chat/streaming 并证明 actual accelerator execution，否则保持未完成。
+  当前没有此类真机证据。
+
+**Consequences.** (+) 首片只组合已支持的标准对象和 host-native 能力，能分别用
+CPU/fake 与真实 GPU 审计；Q59 的 supported profile 直接覆盖客户端交互，Q35 的
+Agent 不被借用或重开。 (−) operator 负责模型和二进制预置、版本兼容与
+容量；NodePort 是通用 L4 暴露而非模型网关。模型分发/GC、多模型路由、自动部署
+controller、多副本跨卡编排均 deferred，不因本决策暗含实现。
+
+## Q63 — T7.7 Agent action interception + Linux sandbox (2026-11-19, LOCKED)
+
+**Context.** k3as 是多租户 Agent sandbox 平台；一租户一集群且节点专属该租户是
+必要但非充分的部署前提，Kubernetes Namespace 不是租户安全边界。这个拓扑不能替代
+Agent 动作边界：Agent、其工具与 subagent 仍可能执行 operator 明确禁止的动作。
+T7.1/Q35/Q37 已完成 Agent 资源、调度与节点执行，其中 child-env credential
+transport 是必须保留的历史事实；本决策扩展而不重开 T7.1。Q60 则只向
+tenant-dedicated 集群中的普通推理开放宿主 `/`、host netns 与 `/dev`，不能用作
+Agent action containment。T4.14 已有 nsrun/clone3/mount/cgroup 基础，应优先复用
+Linux 能力，而不是创建平行 syscall/container stack。
+
+**Options.** (a) 继续直接运行 opencoder，把凭证放入 child env，并依赖各工具自觉
+遵守提示词；(b) 新建独立 syscall 容器栈和可任意出网的 generic provider proxy；
+(c) 在 done T7.1 上增加中央 default-deny action gate，复用 done T4.14 的 Linux
+隔离，并以 node-side、per-attempt、operation-allowlisted broker 访问 provider。
+
+**Decision.** 选 (c)。T7.7 依赖 **T7.1, T4.14**，独立于 T4.15/T7.2/T7.6。
+- **分阶段但不得伪关闭。** mediation-only central gate/provider broker 只是开发
+  milestone，不是 Q63 containment 或受支持的 hardened mode，不能关闭 T7.7。
+  containment 不可用时 hardened request 必须 Pending/Failed，不得以 mediation-only
+  或任何 fallback 伪装成功。hardened completion 要求 Agent、opencoder、所有
+  ordinary/custom/MCP/ssh tools、所有 subagents 及 descendants 全部处于同一 action
+  gate 和同一 attempt Linux identity/namespaces/cgroups/cleanup 内，无一逃逸。
+- **复用既有运行时。** 按适用边界复用 nsrun/clone3/cgroups/engine lifecycle；
+  不新增第二套 runtime、daemon、syscall 或 container stack。
+- **租户与 Agent 双层边界。** 一租户一集群及 tenant-dedicated nodes 是 hostile
+  multi-tenant support 的必要但非充分条件，不能单独视为完整租户边界。支持还以
+  audited/tested 的 per-tenant network 与 ingress/egress、storage/NFS/registry/
+  workspace、API/NodePort/Router/kubelet endpoints、provider/broker endpoints 及
+  credential handling 隔离为前提；这些控制未齐备并验证前 hostile multi-tenant
+  deployment 不受支持。本决策只负责 Agent 动作边界，Q60 仍只是普通推理性能画像。
+- **operator 所有的 default-deny。** baseline policy 仅由 node/operator 管理。
+  AgentSpec、workspace config、resumed sessions、model/agent changes 与 subagents
+  只能 narrow，不能 broaden、替换或禁用 baseline；每次恢复或变更都重新计算有效
+  策略交集。任何扩权尝试均产生确定性 denial 与 audit event。
+- **唯一中央分拨门。** ordinary tools、最早的 task/subagent dispatch、MCP、ssh
+  与 custom tools 全部经过同一 tool-dispatch gate，early dispatch 不得成为旁路。
+  subagent 继承与父 Agent 完全相同的有效策略，所有后续动作继续过门；拒绝结果
+  必须确定、可测试，并记录不泄露 secret 的 audit event。
+- **Linux 强制隔离。** 每个 Agent attempt 复用 nsrun/clone3，使用私有非宿主
+  rootfs + mount namespace 和 fresh network namespace；以非 root uid/gid 运行，
+  强制 `no_new_privs` 与空 capability sets。仅允许 operator-allowlisted selective
+  host binds；runtime/tool binds 只读，只有指定 workspace/scratch 可写，Agent config
+  不得扩大这些权限。`/dev` 必须是 fresh minimal safe nodes，绝不暴露宿主 `/dev`。
+  sandbox 不得看见 host container/engine/Docker/CRI/其他 runtime-control sockets；
+  per-attempt broker Unix socket 是唯一有意保留的 host IPC exception。禁止 literal
+  host `/`、宿主 network namespace 及 Q60 host-direct，不靠提示词代替内核边界。
+- **强制资源与后代回收。** cgroup v2 CPU、memory、PIDs limits 均为强制有界值，
+  不允许省略为 unlimited。Agent/opencoder/tool/subagent 共享受控 attempt 生命周期；
+  成功、失败、超时或取消都要可靠清理全部 descendants，再回收 cgroup、socket
+  和挂载。
+- **broker 而非通用代理。** provider 访问仅可经 node-side operation-allowlisted
+  broker，每次 attempt 分配独立 Unix socket 并在结束时撤销。broker 只执行配置的
+  provider operations，在上游连接侧注入凭证，不提供任意 egress，也不是 generic
+  proxy。Agent、opencoder、ordinary/custom/MCP/ssh tools 与 subagents 的环境都
+  没有 provider credentials。
+- **有限的 supersede。** Q63 仅对 sandboxed Agent path supersede Q35/Q37 的
+  child-env credential transport；Q35/Q37 的完成状态、历史实现与证据原样保留。
+  sandbox 必需能力不可用时，Agent 保持 Pending/Failed 并给出可操作 reason；
+  禁止 direct-process、host-root、host-network 或 containerd fallback。
+- **可分层验收，不可缺项。** unit/fake tests 必须覆盖 policy inheritance、只能
+  narrow、config/resume/model/agent/subagent override resistance、所有 tool/dispatch
+  入口、确定 denial 与 audit。特权 Linux integration 必须覆盖 filesystem/network/
+  capability/cgroup/descendant containment，逐一验证 allowed/denied binds、
+  workspace/scratch 外写入拒绝、fresh minimal `/dev`、host/runtime sockets 不可见，
+  以及所有 descendants 与 Agent/opencoder/tools/subagents 同 gate/identity/namespaces/
+  cgroups/cleanup。provider 测试只使用 fake local provider 与 Unix-socket broker；
+  secret canaries 不得进入 env、argv、logs/audit；凭证只在 broker 上游侧注入。
+  containment 或 credential confinement 必须 fail closed，现有 gates 保持绿色，
+  且任何验收都不得依赖外部 service。
+
+**Consequences.** (+) Agent 动作在工具与 subagent 边界统一可审计，配置与会话无法
+自行扩权；复用已有 Linux/nsrun/cgroup 工作减少第二套运行时，凭证不进入可被
+Agent 读取的环境，fake 与特权测试分别提供可重复证据。 (−) 节点必须提供私有
+rootfs、fresh netns、非 root 身份、强制 cgroup v2 与 broker 等完整能力，否则只能
+明确 Pending/Failed，不能以 host-direct/containerd 伪成功。operator 负责 baseline
+allowlist 与资源上限；Q63 不把 Namespace 变成租户边界，也不改变 Q60 普通推理
+性能画像的部署约束。
