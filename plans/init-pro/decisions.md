@@ -2453,6 +2453,32 @@ server/CA/token 三字段起步，**完整 parity 显式弃置**入 phase-4-clos
 §6 顺延台账（需求驱动再启，不设自动到期）；定稿时无已落地代码，S50
 开工即受本条约束。
 
+**S50 落地注记 (2026-11-21, T1.3 → done)。** 代码与证据门全量落地:
+- **P1 TLS 栈**: `rcgen 0.13.2` 直依赖 (features crypto/pem/ring) 生成
+  自签 CA + serving cert (SAN: localhost/127.0.0.1 + `--tls-san` 追加);
+  serving 侧 `tokio-rustls` acceptor + axum `TlsListener` 适配; 客户端
+  (kubectl) 同一 rustls 栈 (ring provider, TLS 1.2/1.3), **仅信任
+  kubeconfig `certificate-authority`** (无 CA 的 https 是硬错误, 不落
+  系统 CA); 单请求一握手 = 明文传输同型 profile。CA 落盘
+  `<data-dir>/server/tls/server-ca.crt`。
+- **P2 token 文件**: kubeadm CSV 格式 `token,user,uid,"groups"` (引号内
+  逗号分隔组; 空组 = 空引号串)。`--token-file`/`INIT_PRO_TOKEN_FILE`
+  wired (fail-closed: 文件不可读/畸形 → server 拒绝起播, 绝不退化为无
+  认证服务)。
+- **P3 节点侧透传**: kubelet/Agent 循环/嵌入 flanneld/flannel keeper 全部
+  经 agent `--token`/`INIT_PRO_TOKEN` 携带 Bearer——kubelet `HttpJson`
+  单一 chokepoint 注入 `Authorization`; flanneld 不读 env token, 走生成
+  kubeconfig (`user.token`, `<data-dir>/agent/flannel/kubeconfig.yaml`)
+  注入; server 端 bootstrap `cluster-admin`@`system:masters` +
+  `system:node`(wildcard)@`system:nodes` 使 kubelet token 开箱可用。
+- **G02/G03 字节 pin 保活**: RBAC 组与 ServiceAccount **仅在
+  `--token-file` armed 时**注册进 discovery (`served_schema(auth_armed)`);
+  默认 (未 arm) 姿态字节不变——golden G107-G113 交叉断言。
+- 证据门: `scripts/auth-e2e.sh` A1-A7 (TLS/token/RBAC/discovery/fail-
+  closed 真机) + golden auth.sh G107-G113 + parity t78-auth; Q59 子集
+  边界 (webhook authn/authz、bootstrap token 轮转、x509 客户端证书、
+  `kubectl auth can-i`) 显式留在子集外, 见 plan/01-api.md T1.3 卡。
+
 ## Q48 — 内置容器引擎: kiri 内核移植 + 单线程外部引擎进程 (T4.11–T4.13, 2026-11-16, LOCKED)
 
 **Context.** T4.1 捆绑 containerd/runc 让 M1 按时闭环，但违反 Q1 的单二进制

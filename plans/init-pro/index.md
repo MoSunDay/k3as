@@ -22,7 +22,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | done | T0.1 |
 | T1.1 | 1 | 资源模型与 API group schema | done | T0.3 |
 | T1.2 | 1 | APIServer 核心 (REST + kubectl 真实交互) | done | T1.1, T2.2 |
-| T1.3 | 1 | 认证授权 (kubeconfig/token/RBAC) (T1.3a TLS+静态 token S46/Q47 + T1.3b RBAC S47) | not-started | T1.1 |
+| T1.3 | 1 | 认证授权 (T1.3a TLS+静态 token Q47 + T1.3b RBAC supported-subset, 均落地 S50) | done | T1.1 |
 | T2.1 | 2 | etcd 语义数据面（纯 Rust 实现，Q17） | done | T0.2 |
 | T2.2 | 2 | etcd v3 数据面 = APIServer storage backend | done | T2.1, T1.1 |
 | T2.3 | 2 | rdb/RocksDB 持久化后端 (kine 语义, Q33) | done | T2.2 |
@@ -68,13 +68,13 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T8.4 | 8 | pipeline 面收尾: CLI flags + 进程内 e2e (M2, Q56) | done (Sprint 45, Q56) | T8.3 |
 | T8.5 | 8 | canary 发布控制器 (M3, Q58) | done (Sprint 46, Q58) | T8.2, T8.3, T8.4 |
 
-**Counts:** 54 TODOs · 39 done (S49 起 T7.7/Q63 收口, Phase 4 计划
-`phase-4-closure.md`) · 5 in-progress (T4.15/T7.2/T7.6 fake/offline 证据
+**Counts:** 54 TODOs · 40 done (S50 起 T1.3/Q47 认证链 I 收口, Phase 4
+计划 `phase-4-closure.md`) · 5 in-progress (T4.15/T7.2/T7.6 fake/offline 证据
 已落库、真硬件 closure 未满足; T5.6 剩余 SNI/TLS passthrough——NodePort
 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41 已 done；T4.3 剩余
 host-gw/multi-node/netpol 面——Scope A flannel Q34 与 Scope B ServiceLB
 Q41 已 done)
-· 10 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+· 9 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=15 · Layer5=7 · Layer6=3 · Layer7=7 · Layer8=5.
 
 ---
@@ -125,7 +125,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   boundary; Agent workloads use Q63. The inference slice explicitly selects
   builtin, while containerd remains the global default (Q51). Forward
   execution detail lives in `phase-3-host-ai.md`.
-- **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47, 经批准顺延 S49)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档, 顺延 S49)——S48 实际按 phase-3 计划执行 **T7.7 Stage A+B** (Q63, P0 先行; 状态记录同 S47 型, 见 T7.7 行 + counts)。**S49 (2026-11-21)**: T7.7 D7 收口(agent-runner 进程内分发缝 + --agent-require-sandbox 强制硬化 + Q63 逐条款复核) + S48 审计承接(C 类零无主项、backlog 归档 phase-4 §6、metrics-server 按 Q59 显式弃置) + Q47 定稿 LOCKED(rustls 直依赖); T1.3a 按风险裁决顺延 S50——Phase 4 闭环计划落库 `phase-4-closure.md`。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
+- **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47, 经批准顺延 S49)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档, 顺延 S49)——S48 实际按 phase-3 计划执行 **T7.7 Stage A+B** (Q63, P0 先行; 状态记录同 S47 型, 见 T7.7 行 + counts)。**S49 (2026-11-21)**: T7.7 D7 收口(agent-runner 进程内分发缝 + --agent-require-sandbox 强制硬化 + Q63 逐条款复核) + S48 审计承接(C 类零无主项、backlog 归档 phase-4 §6、metrics-server 按 Q59 显式弃置) + Q47 定稿 LOCKED(rustls 直依赖); T1.3a 按风险裁决顺延 S50——Phase 4 闭环计划落库 `phase-4-closure.md`。**S50 (2026-11-21)**: 认证链 I 收口 **T1.3 done**——T1.3a (rcgen 自签 CA/serving cert + `--tls-san` opt-in TLS + kubeadm CSV `--token-file` 静态 token authn + kubectl kubeconfig(server/CA/token 三字段) + https 单 rustls 栈) + T1.3b (RBAC supported-subset: 四 wire 类型 + 授权中间件 + cluster-admin/system:node bootstrap + auth-armed discovery 条件注册 G02/G03 字节 pin 保活) + P3 节点侧 token 透传 (kubelet `--token` → HttpJson/Agent 循环/flanneld kubeconfig 注入/keeper)。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
 - **Sprint 38b — T4.11 内置容器引擎 P1: kiri clone3/namespace 内核移植 + 单线程 engine + 帧协议 (Q48).**
   4 个新 crate: `nsrun` (唯一 unsafe island；clone3 六 namespace + CLONE_INTO_CGROUP、child 挂载/pivot_root/cap-bounding/no_new_privs/setuid、parent start gate + waitpid、`128+WTERMSIG` + 126/127/255)、`engine-proto` (u32 LE len|kind|payload 帧 + ContainerSpec)、`engine` (`engine-run` 单发 + `engine serve` 单线程 accept loop)、`engine-client` (tokio 事件泵)。`init-pro engine`/`engine-run` pre-clap 派发 + multicall 别名；`--container-engine` 仅接受+告警 (P2/T4.12 接线)。两处根因修复: ① `pivot_root(".", ".")` EBUSY → 先绝对路径 bind 再 chdir；② ro bind 的 `<proc-fd>` remount EINVAL → `mount_setattr(2)` (AT_EMPTY_PATH|AT_RECURSIVE, RDONLY|NOSUID|NODEV|NOEXEC)，并把 mount_setattr 支持纳入 preflight。门禁: `scripts/unsafe-audit.sh` + `scripts/engine-singlethread-check.sh` + `scripts/engine-selftest.sh` E1–E8 (22 断言) + `scripts/builtin-runtime-e2e.sh` B1–B7。S38c 收尾复跑: engine 栈 tests 41/0 (nsrun 22 / engine 12 / engine-proto 5 / engine-client 2)，workspace 1050/0。来源 kiri @ 7846fe0 Apache-2.0，`guest/kernel` GPL 不触碰；`NOTICE` + `LICENSES/Apache-2.0.txt` 落档。
 - **Sprint 36 — workflow 抽取独立仓库 arust-workflow (link_repos 第 8 pin, Q42) + router 热重载真 bug 修复.**

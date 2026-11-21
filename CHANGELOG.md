@@ -7,6 +7,63 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 50 — 认证链 I: T1.3 done (T1.3a TLS+静态 token + T1.3b RBAC supported-subset, Q47/Q59) (2026-11-21)
+
+**Goal:** 认证授权链首个落地 sprint——T1.3a (TLS serving + 静态 token
+authn) + T1.3b (RBAC supported-subset) 双双闭环，Q47 客户端选型 (rustls
+直依赖，单栈 ring provider) 生效; P3 节点侧 token 透传 (kubelet/Agent/
+flanneld) 同 sprint 落地。golden h2c 基线字节不动 (TLS 是 opt-in 旗标，
+G02/G03 pin 保活)。**T1.3 → done** (counts: 40 done · 5 in-progress ·
+9 not-started)。
+
+**Changes**
+- **T1.3a TLS + 静态 token (核心)**: `rcgen 0.13.2` 直依赖 (features
+  crypto/pem/ring) 自签 CA + serving cert (SAN localhost/127.0.0.1 +
+  `--tls-san` 追加)，`tokio-rustls` acceptor 挂 axum;
+  `--token-file`/`INIT_PRO_TOKEN_FILE` 从 noop 转 wired — kubeadm CSV
+  `token,user,uid,"groups"` (引号内逗号分隔组)，**fail-closed**
+  (文件不可读/畸形 → server ~105ms 内自退 rc=1，日志
+  `refusing to serve unauthenticated`)，绝不退化无认证服务; CA 落盘
+  `<data-dir>/server/tls/server-ca.crt`。apiserver `serve.rs` 重构为
+  `ServeOptions` (h2c/TLS 双姿态)，就绪日志行保 `discovery listening`
+  子串 (golden/e2e 起播判据; 一次重写回归由 308965b 修复)。
+- **kubectl https + kubeconfig (Q47)**: 单 rustls 栈 (ring provider，
+  TLS 1.2/1.3)，**仅信任 kubeconfig `certificate-authority`** (无 CA
+  的 https 硬错误，不落系统 CA); kubeconfig server/CA/token 三字段
+  (完整 parity = Q47 显式弃置)，server 优先级 flag >
+  `INIT_PRO_SERVER` > kubeconfig > DEFAULT_SERVER (`server_explicit`
+  追踪 + D5 camelCase rename + pin 测试)。
+- **T1.3b RBAC supported-subset (Q59)**: `crates/api/src/rbac/{mod,
+  tests}` 四 wire 类型 (Role/RoleBinding/ClusterRole/
+  ClusterRoleBinding，为守文件上限拆两文件); `apiserver`
+  `authz.rs`(373L)+`authz_bootstrap.rs`(161L) 授权中间件
+  (verb/resource/group/namespace/name 属性 + 非资源 URL 规则) 与
+  cluster-admin@system:masters + system:node@system:nodes bootstrap;
+  **discovery 条件注册** — RBAC 组与 ServiceAccount 仅在
+  `--token-file` armed 时注册 (`served_schema(auth_armed)`)，默认
+  姿态 golden G02/G03 字节 pin 不变 (G112 交叉断言)。
+- **P3 节点侧 token 透传**: agent `--token`/`INIT_PRO_TOKEN`
+  (WiredShared，server+agent 共有 flag) → run_agent/run_supervised →
+  kubelet `KubeletConfig::with_server_token` (新 `config.rs` 抽取守
+  文件上限) + `HttpJson::with_token` 于 `request_head_ct` 单一
+  chokepoint 注 Authorization (request+watch 全覆盖) +
+  `AgentRunnerConfig.server_token`; flanneld 不读 env token，走生成
+  kubeconfig (`<data-dir>/agent/flannel/kubeconfig.yaml`，
+  `user.token` 白名单校验); flannel_keeper 带 token 起 keeper。
+- **证据门**: `scripts/auth-e2e.sh` (A1-A7: 401/RBAC 链/kubelet 链/
+  非资源 allow/armed discovery/TLS+kubeconfig 三态/fail-closed; 缺
+  curl/python3 自 SKIP); golden `suites/auth.sh` G107-G113 (SRV2
+  `--token-file` 三 token CSV，G112 交叉断言主 server 不含 rbac/SA，
+  G113 teardown); parity t78-auth (`server --token-file --tls-san`);
+  all-gates BATTERY += auth-e2e.sh。
+- **Q59 子集外 (显式留白)**: x509 客户端证书 authn、bootstrap token
+  轮转、webhook authn/authz、`kubectl auth can-i`、kubeconfig 完整
+  parity (Q47 弃置) — 见 decisions.md Q47 S50 落地注记。
+- **门禁**: build ✓; workspace tests **1404/0** (S49: 1375); clippy
+  -D warnings 0; golden **75/75** (68→75，+G107-G113; 6 SKIP = 无
+  vendor bundle/宿主 cni0 预存); auth-e2e **7/7**; sandbox-e2e
+  **23/23**; flag-parity **28/28**; all-gates 全绿。
+
 ## Sprint 49 — T7.7 D7 收口 + 强制硬化开关 + S48 审计承接 + Q47 定稿 (Q63/Q47/Q59) (2026-11-21)
 
 **Goal:** Phase 4 闭环计划 (S49-S60, `plans/init-pro/phase-4-closure.md`) 首个

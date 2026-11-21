@@ -67,7 +67,7 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 | Sprint | 内容 | 出口判据 |
 |---|---|---|
 | ~~S49~~ P0 收口 | ~~T7.7 D7 + 强制硬化 + Q63 复核; S48 审计收口; Q47 定稿; T1.3a 开工~~ **已执行**(§7; T1.3a 按风险裁决 1 顺延 S50) | ~~T7.7 done; Q47 LOCKED; 审计归档~~ ✓ |
-| **S50** 认证链 I | T1.3a TLS+静态 token(auth-e2e A1-A6, golden h2c 基线不动)+ T1.3b RBAC supported-subset(Role/RoleBinding/ClusterRole/ClusterRoleBinding 最小 wire 兼容 + 执行中间件) | T1.3 → done;kubeconfig full parity 弃置记录(Q47) |
+| ~~S50~~ 认证链 I | ~~T1.3a TLS+静态 token + T1.3b RBAC supported-subset~~ **已执行**(§10; 原排 auth-e2e A1-A6 实交付为 A1-A7) | ~~T1.3 → done; kubeconfig full parity 弃置记录(Q47)~~ ✓ |
 | **S51** 网络链 I | Q44 定稿 → T4.3 余量: Scope C ClusterIP 分配 + L4 承载(沿 Q57 折入 Router 权重面模式, 归属面定稿时裁定); flannel host-gw/multi-node F6+ | T4.3 → done; Q44 LOCKED |
 | **S52** 网络链 II | T4.4 netpol(Q59 子集, allow/deny e2e)+ T4.5 代理隧道(Q31 对齐) | T4.4、T4.5 → done(解锁 T5.7) |
 | **S53** 存储/addon 链 | T6.1 HelmChart auto-deploy 最小面; Q45/Q46 定稿 → T6.2a 内嵌 Cluster DNS + T6.2b local-path provisioner/binder(**封 Q22 lazy-binding 洞**) | T6.1、T6.2 → done; Q45/Q46 LOCKED |
@@ -93,7 +93,7 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 |---|---|---|---|
 | metrics-server addon | T6.2/S48 backlog | **显式弃置**: 前向支持子集外(Q59 S49 注记); HPA/`kubectl top` 若成为目标生态负载, 按 Q59 addition path 重入 | **closed (S49)** |
 | kubeconfig 完整 parity | Q47 草案 | 显式弃置: T1.3a 起步仅 server/CA/token 三字段 | closed (随 Q47 定稿) |
-| protobuf wire、动态 CRD 注册、admission、aggregation、全量 RBAC | Q59 | 显式弃置(Q59 原文), 随 S50 T1.3b 落 supported-subset RBAC | standing |
+| protobuf wire、动态 CRD 注册、admission、aggregation、全量 RBAC | Q59 | 显式弃置(Q59 原文); **S50 T1.3b supported-subset RBAC 已落**(四 wire 类型 + 授权中间件 + bootstrap)，全量 RBAC 仍在子集外 | standing |
 | T4.15/T7.2/T7.6 真硬件证据 | Q60/Q61/Q62 | **收口中**: node04 窗口收割(S57, 最晚 S59) | open |
 | T4.8 命名端口、T4.9 capacity/eviction 子项 | done 卡内 deferred | S60 终审: 收口或 Q59 弃置 | open |
 | Router TLS/SNI 余量、netpol、host-gw/multi-node | T5.5/T5.6/T4.3/T4.4 | **收口中**: S51-S56 排程 | open |
@@ -144,8 +144,37 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 
 ## 9. S49 后剩余链状态
 
-- 认证链: Q47✓ → **S50 T1.3a/b** → S58 T3.3 → S59 T3.4。
+- 认证链: Q47✓ → S50 T1.3a/b ✓(**done**) → S58 T3.3 → S59 T3.4。
 - 网络链: S51 Q44+T4.3 → S52 T4.4/T4.5; S55 T5.5 → S56 T5.6/T5.7。
 - 存储链: S53 T6.1/T6.2 → S54 T4.10。
 - 硬件链: S57(浮动) T4.15/T7.2/T7.6。
-- 计数: **39 done / 5 in-progress / 10 not-started**。
+- 计数: **40 done / 5 in-progress / 9 not-started**。
+
+## 10. S50 执行记录 (2026-11-21)
+
+- **T1.3a TLS + 静态 token (Q47)**: rcgen 0.13.2 自签 CA/serving
+  cert (`--tls-san` 追加 SAN); `--token-file` kubeadm CSV
+  (`token,user,uid,"groups"`) wired，**fail-closed** (坏路径/畸形 →
+  server 拒绝起播 rc=1，`refusing to serve unauthenticated`); CA 落盘
+  `<data-dir>/server/tls/server-ca.crt`; kubectl https 单 rustls 栈
+  (ring provider)，仅信任 kubeconfig `certificate-authority` (无 CA
+  的 https 硬错误)，kubeconfig server/CA/token 三字段 + server 优先
+  级链 (flag > env > kubeconfig > default)。
+- **T1.3b RBAC supported-subset (Q59)**: 四 wire 类型 + 授权中间件
+  (verb/resource/group/namespace/name 属性 + 非资源 URL) +
+  cluster-admin/system:node bootstrap; RBAC 组与 ServiceAccount 仅
+  `--token-file` armed 时入 discovery — 默认姿态 G02/G03 字节 pin
+  不变 (G112 交叉断言)。
+- **P3 透传**: agent `--token`/`INIT_PRO_TOKEN` → kubelet
+  `HttpJson` 单一 chokepoint 注 Authorization (request+watch) +
+  AgentRunnerConfig.server_token + flanneld 生成 kubeconfig +
+  flannel_keeper 带 token。
+- **留白记录**: kubeconfig 完整 parity (Q47，§6 closed); x509 客户端
+  证书/bootstrap token 轮转/webhook seam/`auth can-i` = Q59 子集外
+  (§6 standing)。
+- **回归修复**: serve 重写曾丢就绪日志行 `discovery listening` 子串
+  (golden/e2e 起播判据)，308965b 修复 (字段扩充下保子串)。
+- **门禁**: build ✓; workspace tests **1404/0** (S49: 1375); clippy
+  -D warnings 0; golden **75/75** (+G107-G113; 6 SKIP = 无 vendor
+  bundle/宿主 cni0 预存); auth-e2e **7/7**; sandbox-e2e **23/23**;
+  flag-parity **28/28**; all-gates 全绿。

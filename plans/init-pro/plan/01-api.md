@@ -82,40 +82,68 @@ complete Kubernetes API coverage.
 
 ---
 
-## T1.3 — 认证授权 (kubeconfig/token/RBAC) (T1.3a TLS+静态 token + T1.3b RBAC)
+## T1.3 — 认证授权 (T1.3a TLS+静态 token + T1.3b RBAC supported-subset, Q47/Q59; S50 落地)
 
 - **目标 / Goal**
-  Authn/Authz compatible with kubeconfig, bootstrap tokens, bearer tokens,
-  and RBAC (`Role`/`RoleBinding`/`ClusterRole*`).
+  Authn/Authz compatible with kubeconfig, bearer tokens, and RBAC
+  (`Role`/`RoleBinding`/`ClusterRole*`) — delivered as a Q59
+  supported-subset; 子集外项见下方留白清单与 phase-4 §6 台账。
 
-- **核心实现 / Core implementation**
-  - kubeconfig parsing (k3s `clientaccess`, `link_repos/k3s/pkg/clientaccess/`).
-  - x509 + bootstrap-token authn; anonymous off by default.
-  - RBAC authorizer with the upstream attribute builder
-    (`verb/resource/group/namespace/name`) and `system:` built-in roles.
-  - webhook authn/authz seam (no-op default).
-  - **T1.3a — TLS serving + 静态 token 认证 (S46 排期, Q47 草案, 修订
-    Q11)**: server 自签 CA + serving cert（`--tls-san`）；axum `app.rs`
-    插 authn 中间件（Bearer 静态 token，`--token-file` 从 noop 转
-    wired）；kubectl 侧补 https 传输（现为裸 TcpStream，`http.rs` 直接
-    拒 https；TLS 客户端选型 rustls vs 复用 openrusty 由 Q47 定夺）+
-    kubeconfig 读取（server/CA/token 三字段起步）。golden 保持 h2c 明文
-    基线不动（TLS 是 opt-in 旗标，避免全量重基线）；TLS 面由新
-    `scripts/auth-e2e.sh` A1–A6 独立闭环（自签链、token 拒绝 401、
-    kubeconfig 连通）。
-  - **T1.3b — RBAC 授权 (S47 排期)**: Role/RoleBinding/ClusterRole/
-    ClusterRoleBinding 注册 + authz 中间件（verbs×resources 匹配）；
-    ServiceAccount 最小面（default SA + token）。
+- **核心实现 / Core implementation (as delivered, S50)**
+  - **T1.3a — TLS serving + 静态 token 认证 (Q47 LOCKED)**: `rcgen
+    0.13.2` 直依赖 (features crypto/pem/ring) 自签 CA + serving cert
+    (SAN localhost/127.0.0.1 + `--tls-san` 追加), `tokio-rustls`
+    acceptor 挂 axum (`apiserver::tls`); `--token-file`/
+    `INIT_PRO_TOKEN_FILE` wired 为 kubeadm CSV
+    (`token,user,uid,"groups"`，引号内逗号分隔组)，**fail-closed** —
+    文件不可读/畸形 → server 拒绝起播 (rc=1, 日志
+    `refusing to serve unauthenticated`)，绝不退化为无认证服务; CA 落盘
+    `<data-dir>/server/tls/server-ca.crt`。serve.rs 重构为
+    `ServeOptions` (h2c/TLS 双姿态)，就绪日志保 `discovery listening`
+    子串 (golden/e2e 起播判据)。
+  - **kubectl https + kubeconfig (Q47)**: 单 rustls 栈 (ring
+    provider，无双栈)；**仅信任 kubeconfig `certificate-authority`**
+    (无 CA 的 https 是硬错误 `kubeconfig server is https:// but
+    carries no certificate-authority (Q47)`，不落系统 CA); kubeconfig
+    server/CA/token 三字段起步 (完整 parity = Q47 显式弃置)，server
+    优先级 flag > `INIT_PRO_SERVER` > kubeconfig > DEFAULT_SERVER。
+  - **T1.3b — RBAC 授权 (Q59 supported-subset)**: `api::rbac` 四 wire
+    类型 (Role/RoleBinding/ClusterRole/ClusterRoleBinding);
+    `apiserver::authz` 授权中间件 (verb/resource/group/namespace/name
+    属性匹配 + 非资源 URL 规则) + `authz_bootstrap`
+    (cluster-admin@system:masters + system:node@system:nodes，kubelet
+    token 开箱可用)；**discovery 条件注册** — RBAC 组与
+    ServiceAccount 仅在 `--token-file` armed 时注册
+    (`served_schema(auth_armed)`)，默认姿态 golden G02/G03 字节 pin
+    不变 (G112 交叉断言)。
+  - **P3 节点侧 token 透传**: agent `--token`/`INIT_PRO_TOKEN`
+    (WiredShared，server 侧传 None) → run_agent/run_supervised →
+    kubelet (`KubeletConfig::with_server_token`；
+    `HttpJson::with_token` 于 `request_head_ct` 单一 chokepoint 注
+    Authorization，request+watch 全覆盖) +
+    `AgentRunnerConfig.server_token`; flanneld 不读 env token，走生成
+    kubeconfig (`<data-dir>/agent/flannel/kubeconfig.yaml`，
+    `user.token` 白名单校验)；flannel_keeper 带 token 起 keeper。
+  - **Q59 子集外 (显式留白，phase-4 §6 standing)**: x509 客户端证书
+    authn、bootstrap token 动态轮转、webhook authn/authz seam、
+    anonymous 显式关断面、`kubectl auth can-i`。
 
-- **验收手段 / Acceptance**
-  - Golden: a `kube-rs` client with a service-account token can/cannot
-    perform operations per a test ClusterRole.
-  - `kubectl auth can-i` parity cases.
-  - T1.3a/b: 新 `scripts/auth-e2e.sh` —— A1–A6 (TLS/token) + A7–A10
-    (RBAC allow/deny 矩阵)。
+- **验收手段 / Acceptance (as delivered)**
+  - `scripts/auth-e2e.sh` **A1-A7** (真机): authn 401 (匿名/坏
+    token) → RBAC allow/deny 矩阵 (nobody 403 / admin CRUD / kubelet
+    node 写) → 非资源 URL allow → armed discovery
+    (`rbac.authorization.k8s.io` + `serviceaccounts`) → TLS + kubectl
+    kubeconfig 三态 (CA 信/无 CA 硬错/h2c 拒) → fail-closed。
+  - golden `suites/auth.sh` **G107-G113**: SRV2 `--token-file` 三
+    token CSV 的 wire 姿态 + G112 交叉断言主 server (未 arm) 不含
+    RBAC/SA + G113 teardown 稳定性；默认 h2c 基线字节不动。
+  - parity t78-auth (`server --token-file --tls-san`); 单测: rcgen
+    生成/CSV 解析/authz 矩阵/kubeconfig 三态/server 优先级链/flannel
+    kubeconfig 注入/kubelet 每 head 一枚 token stamp。
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none（TLS 客户端选型 rustls vs openrusty 复用
-  留给 Q47 定稿）
+- **状态 / Status** — done (S50, 2026-11-21)
+- **证据 / Evidence** — auth-e2e A1-A7 ✓; golden 75/75 (+G107-G113)
+  ✓; parity 28/28 (t78-auth) ✓; workspace tests 1404/0 ✓;
+  CHANGELOG S50。
+- **卡点 / Blockers** — none
 - **依赖 / Depends on** — T1.1
