@@ -10,8 +10,13 @@
 //! (T4.1, Q25), and runs the kubelet equivalent (T4.2 Scope A) when a join
 //! URL is given. `stage` exposes the T0.2 manifest contract + B5 runtime
 //! staging.
+//!
+//! **T1.3a** pre-split (Sprint 50, decision **Q47**): the server-plane
+//! wiring (`ServerBind`/`RegistryBind`, `run_server`, and the apiserver/
+//! controllers/scheduler/service-plane/anyhome/registry spawn block) lives
+//! in `runtime_server.rs`, re-exported below (file-size limit, the
+//! `storage_dsn.rs` precedent).
 
-use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,79 +24,7 @@ use std::time::Duration;
 use ::runtime as node_runtime;
 use infra::{Config, Shutdown};
 
-use crate::storage_dsn::open_store;
-
-/// Server-only wiring: where to bind the discovery API + which in-process
-/// control-plane components are enabled (Q19).
-pub struct ServerBind {
-    pub addr: SocketAddr,
-    pub disable_apiserver: bool,
-    pub disable_controllers: bool,
-    pub disable_scheduler: bool,
-    /// `--disable-kube-proxy` turns the NodePort service plane OFF
-    /// (Sprint 18 / **S4**, Q28). By default the built-in Router carries
-    /// Service traffic — one reverse-proxy listener per allocated nodePort,
-    /// peers resolved live from Endpoints (the kube-proxy-equivalent).
-    pub disable_kube_proxy: bool,
-    /// `--kube-scheduler-arg KEY=VALUE` passthrough (`config=<path>` wires
-    /// HTTP extenders, T3.2/Q3).
-    pub scheduler_args: Vec<String>,
-    /// DSN selecting the storage backend (**T2.3**, decisions **Q29/Q33**):
-    /// `None`/empty = the embedded default (**Q17**); `rdb://<path>` = the
-    /// RocksDB `RdbStorage` backend; other schemes are fatal (etcd-gRPC is
-    /// deferred to T3.4).
-    pub datastore_endpoint: Option<String>,
-    /// `--cluster-cidr`: the node-cidr controller carves Node `/24`
-    /// podCIDRs from it (T4.3 Scope A, Q34).
-    pub cluster_cidr: String,
-    /// Embedded anyhome NFSv3 workspace plane (T-anyhome, Q36):
-    /// `Some(addr)` = serve on that address; `None` = disabled
-    /// (`--disable-anyhome`).
-    pub anyhome: Option<String>,
-    /// `--disable servicelb` (T4.3 Scope B / T5.6, Q41): skips the
-    /// ServiceLB announce controller and its worker (external LB then owns
-    /// `LoadBalancer`-type Services).
-    pub disable_servicelb: bool,
-    /// Embedded image registry (T6.3, Q40): `Some` = serve the Docker
-    /// Registry HTTP API v2; `None` = disabled (`--disable-registry`).
-    pub registry: Option<RegistryBind>,
-    /// Embedded CI/CD pipeline controller plane (**T8.3**, **Q56**):
-    /// `Some` = the controller manager runs the `ServicePipeline`/`Build`
-    /// workers (docker build -> registry push -> Deployment image patch);
-    /// `None` = `--disable-pipeline` (no workers, no enqueues).
-    pub pipeline: Option<controllers::PipelineConfig>,
-}
-
-/// Embedded image-registry wiring (T6.3, Q40): the listen address plus the
-/// retention/keep-forever policy the push path enforces.
-#[derive(Clone, Debug)]
-pub struct RegistryBind {
-    pub addr: String,
-    pub cfg: registry::RegistryConfig,
-}
-
-pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
-    // Servers never run the node runtime (the `bind.is_none()` blocks are
-    // agent-only), so the engine choice and registry addr are inert here;
-    // pass containerd + the default registry to keep the signature honest
-    // (T4.12/Q51, T4.13; Q55's default rootfs mode is host anyway).
-    run_supervised(
-        "server",
-        cfg,
-        Some(bind),
-        None,
-        None,
-        None,
-        None,
-        None,
-        "containerd".to_string(),
-        registry::DEFAULT_ADDR.to_string(),
-        0,
-        "host".to_string(),
-        // T7.2 (Q61): servers never run the node runtime — auto inventory.
-        kubelet::GpuInventorySource::Auto,
-    )
-}
+pub use crate::runtime_server::{run_server, RegistryBind, ServerBind};
 
 // T4.12 (Q49/Q51): the agent's CLI flag surface is positional by design
 // (k3s parity); bundling it into a struct mid-T4.12 would churn every
@@ -119,6 +52,9 @@ pub fn run_agent(
     builtin_rootfs: String,
     // T7.2 (Q61): whole-GPU inventory source (auto|none|fake:<r>:<n>).
     gpu_inventory: String,
+    // T1.3a (Q47 P3): static bearer token the kubelet/Agent/flannel
+    // loops present to a token-file-authenticated apiserver.
+    server_token: Option<String>,
 ) -> ExitCode {
     // T7.2 (Q61): fail fast on a bad --gpu-inventory value — the GPU
     // plane's ledger/publication contract must never boot half-parsed.
@@ -143,6 +79,7 @@ pub fn run_agent(
         builtin_image_quota,
         builtin_rootfs,
         gpu_inventory,
+        server_token,
     )
 }
 
@@ -190,7 +127,7 @@ async fn wait_sandboxes_gone(cri: &node_runtime::CriCtl, max: Duration) -> bool 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_supervised(
+pub(crate) fn run_supervised(
     role: &'static str,
     cfg: Config,
     bind: Option<ServerBind>,
@@ -213,6 +150,8 @@ fn run_supervised(
     builtin_rootfs: String,
     // T7.2 (Q61): whole-GPU inventory source (parsed by the caller).
     gpu_inventory: kubelet::GpuInventorySource,
+    // T1.3a (Q47 P3): static apiserver bearer token (`--token`/env).
+    server_token: Option<String>,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -238,21 +177,6 @@ fn run_supervised(
         // T3.1a (decision Q19): the controller manager runs in-process,
         // sharing the apiserver's storage Arc, so controller reads/writes hit
         // the same store the API surface serves (no loopback HTTP hop).
-        let mut controllers_drain: Option<(
-            Vec<tokio::task::JoinHandle<()>>,
-            controllers::Stop,
-        )> = None;
-        let mut scheduler_drain: Option<(
-            Vec<tokio::task::JoinHandle<()>>,
-            controllers::Stop,
-        )> = None;
-        // Sprint 18 / S4 (Q28): the Router NodePort service plane — the
-        // kube-proxy-equivalent, on by default; `--disable-kube-proxy` turns
-        // it off. Drained after the agent runtime, before the API surface.
-        let mut service_plane_drain: Option<(
-            router::NodePortPlane,
-            Vec<tokio::task::JoinHandle<()>>,
-        )> = None;
         // T4.1 (Q25): the agent supervises the bundled containerd (stage ->
         // render config -> supervise with backoff). The server keeps the
         // runtime off by default (single-node UX arrives with T4.5/e2e).
@@ -266,12 +190,6 @@ fn run_supervised(
         // T4.3 Scope A (Q34): embedded flanneld (kube subnet-mgr). Drained
         // after the kubelet, before the containerd runtime.
         let mut flannel_drain: Option<tokio::task::JoinHandle<()>> = None;
-        // T-anyhome (Q36): embedded anyhome NFSv3 workspace plane
-        // (server-only). Drained after flanneld, before the API surface.
-        let mut anyhome_drain: Option<tokio::task::JoinHandle<()>> = None;
-        // T6.3 (Q40): embedded image registry (server-only). Drained right
-        // after anyhome, before the API surface.
-        let mut registry_drain: Option<tokio::task::JoinHandle<()>> = None;
         // T4.12 (Q49/Q51): engine selection for this boot. `builtin` runs
         // the node on the built-in engine once the Q51 boot probe passes;
         // any probe failure falls back to the staged containerd with a
@@ -345,7 +263,7 @@ fn run_supervised(
                     // T7.2 (Q61): the GPU plane's backend inputs — the
                     // builtin engine (probe already passed, hence `builtin`)
                     // under the resolved rootfs mode + the inventory source.
-                    let mut kc = kubelet_config(&url, &node, &kubelet_addr, &cfg)
+                    let mut kc = kubelet_config(&url, &node, &kubelet_addr, &cfg, &server_token)
                         .with_runtime_version(format!("engine://{}", common::version()));
                     kc.engine_builtin = true;
                     kc.builtin_rootfs = rootfs;
@@ -383,7 +301,7 @@ fn run_supervised(
                     let paths = node_runtime::AgentRuntimePaths::for_data_dir(&cfg.data_dir);
                     match node_runtime::CriCtl::for_paths(&paths) {
                         Some(cri) => {
-                            let kc = kubelet_config(&url, &node, &kubelet_addr, &cfg);
+                            let kc = kubelet_config(&url, &node, &kubelet_addr, &cfg, &server_token);
                             let handles = kubelet::spawn(
                                 kc,
                                 Arc::new(kubelet::CriCtlBackend::new(cri.clone())),
@@ -459,6 +377,8 @@ fn run_supervised(
                     // T7.7 (Q63): node-side sandbox config; absent keeps
                     // hardened Agents Pending (fail-closed).
                     ac.sandbox = kubelet::agent_sandbox::SandboxNodeConfig::from_env();
+                    // T1.3a (Q47 P3): the Agent loops authenticate too.
+                    ac.server_token = server_token.clone();
                     let handles = kubelet::spawn_agent_runner(ac, shutdown.clone());
                     let mut drain = kubelet_drain.take().unwrap_or_default();
                     drain.extend(handles);
@@ -484,6 +404,7 @@ fn run_supervised(
                         &url,
                         &node,
                         &net,
+                        server_token.as_deref(),
                         shutdown.clone(),
                     ) {
                         Ok(handle) => flannel_drain = Some(handle),
@@ -502,167 +423,44 @@ fn run_supervised(
                 }
             }
         }
-        let server_join = match &bind {
+        // T1.3a (Q47): the server plane spawns in
+        // `runtime_server::spawn_server_plane` (split out of here for the
+        // file-size limit) — one storage Arc (Q19), identical spawn order
+        // and error paths; the `?` keeps the open_store failure fatal.
+        let server_plane = match &bind {
             Some(b) if !b.disable_apiserver => {
-                let reg = crate::discovery::served_schema();
-                let advertised = b.addr.to_string();
-                let summary = crate::discovery::served_groups_summary(&reg, &advertised);
-                tracing::info!(target: "init-pro", role, "T1.1 {summary}");
-                // T1.2b: default backend = the zero-dependency embedded store
-                // (Q17); `rdb://` opts into RdbStorage (T2.3, Q33) —
-                // etcd-gRPC remains deferred to T3.4.
-                let store = match open_store(b.datastore_endpoint.as_deref()).await {
-                    Ok(store) => store,
-                    Err(e) => {
-                        tracing::error!(target: "init-pro", role, "{e}");
-                        return Err(e);
-                    }
-                };
-                // T3.1a: spawn the controller manager against the same
-                // storage Arc (Q19); leader-elected via a Lease + CAS (Q18).
-                // Only the full apiserver path runs controllers —
-                // `--disable-apiserver` keeps single-process server semantics.
-                if !b.disable_controllers {
-                    let cm_stop = controllers::Stop::new();
-                    let cm_handles = controllers::ControllerManager::spawn_with(
-                        store.clone(),
-                        cm_stop.clone(),
-                        controllers::ManagerConfig {
-                            // T4.3 Scope A (Q34): allocate Node podCIDRs
-                            // from --cluster-cidr.
-                            cluster_cidr: Some(b.cluster_cidr.clone()),
-                            // T-anyhome (Q36): Workflow step pods + Agent
-                            // children get the /workspace contract from the
-                            // anyhome endpoint (None = --disable-anyhome).
-                            workspace_nfs: b.anyhome.clone(),
-                            // T4.3 Scope B (Q41): --disable servicelb.
-                            disable_servicelb: b.disable_servicelb,
-                            // T8.3 (Q56): --disable-pipeline leaves the plane
-                            // fully off (no workers, no enqueues).
-                            pipeline: b.pipeline.clone(),
-                        },
-                    );
-                    tracing::info!(target: "init-pro", role, "controller manager started (leader-elected via Lease, Q18)");
-                    controllers_drain = Some((cm_handles, cm_stop));
-                }
-                // T-anyhome (Q36): the NFSv3 workspace plane rides the SAME
-                // storage Arc (Q19) right after the controllers spawn.
-                // Degraded-but-booting (flannel precedent): a bind/fs failure
-                // is a warn, the API surface still comes up.
-                if let Some(addr) = &b.anyhome {
-                    match crate::anyhome::spawn_anyhome(
-                        &cfg.data_dir,
-                        addr,
-                        store.clone(),
-                        shutdown.clone(),
-                    ) {
-                        Ok(handle) => anyhome_drain = Some(handle),
-                        Err(e) => tracing::warn!(
-                            target: "init-pro",
-                            role,
-                            "anyhome disabled (fs root unreadable): {e}"
-                        ),
-                    }
-                }
-                // T6.3 (Q40): the image registry is a standalone data plane
-                // (blob CAS + tag retention under `<data_dir>/registry/`).
-                // Degraded-but-booting, same as anyhome: a bind/fs failure
-                // is a warn, the API surface still comes up.
-                if let Some(rb) = &b.registry {
-                    match registry::spawn_registry(
-                        &cfg.data_dir,
-                        &rb.addr,
-                        rb.cfg.clone(),
-                        shutdown.clone(),
-                    ) {
-                        Ok(handle) => registry_drain = Some(handle),
-                        Err(e) => tracing::warn!(
-                            target: "init-pro",
-                            error = %e,
-                            "registry spawn failed (image plane degraded)"
-                        ),
-                    }
-                }
-                // T3.2 (Q23): the scheduler reuses the controllers framework
-                // (informer/workqueue/leader-election) over the same storage
-                // Arc — one more in-process component, no loopback HTTP.
-                if !b.disable_scheduler {
-                    let mut sched_cfg = scheduler::SchedulerConfig::new();
-                    for arg in &b.scheduler_args {
-                        match arg.split_once('=') {
-                            Some(("config", value)) => {
-                                match scheduler::SchedulerConfig::load_extenders(
-                                    std::path::Path::new(value),
-                                ) {
-                                    Ok(loaded) => {
-                                        let count = loaded.extenders.len();
-                                        sched_cfg.extenders = loaded.extenders;
-                                        tracing::info!(target: "init-pro", role,
-                                            count,
-                                            "scheduler extenders loaded from {value}");
-                                    }
-                                    Err(e) => {
-                                        return Err(std::io::Error::other(format!(
-                                            "--kube-scheduler-arg config={value}: {e}"
-                                        )));
-                                    }
-                                }
-                            }
-                            _ => tracing::warn!(target: "init-pro", role,
-                                arg = %arg,
-                                "--kube-scheduler-arg accepted but not implemented for this key; no-op"),
-                        }
-                    }
-                    let sched_stop = controllers::Stop::new();
-                    let sched_handles = scheduler::SchedulerManager::spawn(
-                        store.clone(),
-                        sched_cfg,
-                        sched_stop.clone(),
-                    );
-                    tracing::info!(target: "init-pro", role, "scheduler started (leader-elected via Lease, Q18)");
-                    scheduler_drain = Some((sched_handles, sched_stop));
-                }
-                // Sprint 18 / S4 (Q28): the NodePort service plane runs by
-                // default — LIST->WATCH reflectors over the SAME storage Arc
-                // plus one reverse-proxy listener per allocated nodePort
-                // (the kube-proxy-equivalent; `--disable-kube-proxy` is the
-                // k3s-parity escape hatch that turns it off).
-                if !b.disable_kube_proxy {
-                    let (resolver, reflectors) =
-                        router::supervise(store.clone(), shutdown.clone());
-                    service_plane_drain = Some((
-                        router::spawn_nodeport_plane(
-                            resolver,
-                            router::NodePortConfig::default(),
-                            shutdown.clone(),
-                        ),
-                        reflectors,
-                    ));
-                    tracing::info!(target: "init-pro", role,
-                        "service plane started: Router carries nodePort traffic (Sprint 18 / S4, Q28)");
-                }
-                let server_shutdown = shutdown.clone();
-                let addr = b.addr;
-                // T7.5 (Q43): thread the anyhome endpoint into the
-                // apiserver so the per-Pod anyhome defaulting is armed iff
-                // the NFS plane is on (None = --disable-anyhome: inert).
-                let workspace_nfs = b.anyhome.clone();
-                Some(tokio::spawn(async move {
-                    if let Err(e) =
-                        apiserver::serve(reg, store, addr, advertised, workspace_nfs, async move {
-                            server_shutdown.cancelled().await;
-                        })
-                    .await
-                    {
-                        tracing::error!(target: "init-pro", role, "apiserver exited: {e}");
-                    }
-                }))
+                Some(crate::runtime_server::spawn_server_plane(role, &cfg, b, &shutdown).await?)
             }
             Some(_) => {
                 tracing::info!(target: "init-pro", role, "apiserver disabled by flag");
                 None
             }
             None => None,
+        };
+        // T1.2a/T3.1a (Q19): controller-manager + scheduler + apiserver
+        // drain handles; Sprint 18/S4 (Q28): the Router NodePort service
+        // plane — the kube-proxy-equivalent, on by default
+        // (`--disable-kube-proxy` turns it off), drained after the agent
+        // runtime, before the API surface. T-anyhome (Q36): embedded NFSv3
+        // workspace plane (server-only), drained after flanneld; T6.3
+        // (Q40): embedded image registry, drained right after anyhome.
+        let (
+            server_join,
+            controllers_drain,
+            scheduler_drain,
+            service_plane_drain,
+            anyhome_drain,
+            registry_drain,
+        ) = match server_plane {
+            Some(p) => (
+                p.server_join,
+                p.controllers,
+                p.scheduler,
+                p.service_plane,
+                p.anyhome,
+                p.registry,
+            ),
+            None => (None, None, None, None, None, None),
         };
 
         tracing::info!(
@@ -787,11 +585,16 @@ fn kubelet_config(
     node: &str,
     kubelet_addr: &Option<(String, u16)>,
     cfg: &Config,
+    token: &Option<String>,
 ) -> kubelet::KubeletConfig {
+    // T1.3a (Q47 P3): the bearer token rides the config; `None` keeps
+    // the v1 default (anonymous plain HTTP).
     match kubelet_addr {
         Some((ip, port)) => kubelet::KubeletConfig::new(url, node, cfg.data_dir.clone())
             .with_node_ip(ip.clone())
-            .with_kubelet_port(*port),
-        None => kubelet::KubeletConfig::new(url, node, cfg.data_dir.clone()),
+            .with_kubelet_port(*port)
+            .with_server_token(token.clone()),
+        None => kubelet::KubeletConfig::new(url, node, cfg.data_dir.clone())
+            .with_server_token(token.clone()),
     }
 }

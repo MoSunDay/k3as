@@ -15,6 +15,11 @@
 
 mod app;
 mod apply;
+#[cfg(test)]
+mod auth_tests;
+mod authn;
+mod authz;
+pub mod authz_bootstrap;
 pub(crate) mod binding;
 mod collection;
 mod discovery_handlers;
@@ -36,9 +41,13 @@ mod pod_workspace;
 mod serve;
 mod service;
 mod state;
+mod tls;
 
 pub use app::{api_app, api_app_with_workspace_nfs};
-pub use serve::serve;
+pub use authn::{Identity, TokenAuth};
+pub use authz_bootstrap::bootstrap_rbac;
+pub use serve::{serve, ServeOptions};
+pub use tls::{acceptor, generate_self_signed, TlsListener, TlsMaterial};
 
 /// Discovery-only router kept for backward compatibility with the T1.2a tests:
 /// builds the full app over a throwaway embedded store. Prefer [`api_app`].

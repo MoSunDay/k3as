@@ -32,6 +32,14 @@ fn wired_for_agent(long: &str) -> bool {
     )
 }
 
+/// Server-wired noop-table flags (T1.3a, Q47): kept for clap when the
+/// subcommand is `server`, still stripped (and warned) everywhere else —
+/// `--tls-san` mints the serving cert SANs, `--token-file` loads the
+/// static-token CSV; both default off (plain h2c, no authn).
+fn wired_for_server(long: &str) -> bool {
+    matches!(long, "tls-san" | "token-file")
+}
+
 /// Strip accept-no-op-warn flags from `argv` (argv[0] is preserved as-is).
 ///
 /// Stops stripping at `--` (end of options); everything after is passed
@@ -70,7 +78,9 @@ pub fn strip_noop(argv: &[String]) -> StripResult {
                 // T4.2: `--node-name`, and since Scope C `--node-ip`, are
                 // wired for `agent` — keep them so clap sees them; both stay
                 // accept-no-op-warn for `server`/`stage`.
-                if !(sub == Some("agent") && wired_for_agent(f.long)) {
+                if !(sub == Some("agent") && wired_for_agent(f.long))
+                    && !(sub == Some("server") && wired_for_server(f.long))
+                {
                     record_seen(&mut seen, f.long);
                     if f.takes_value && !tok.contains('=') {
                         // Consume the separate value token (if present).
@@ -88,7 +98,9 @@ pub fn strip_noop(argv: &[String]) -> StripResult {
             if let Some(f) = find_short(c) {
                 // Same agent wiring for the short form: k3s spells
                 // `--node-ip` as `-i` (only node-ip has an agent-wired short).
-                if !(sub == Some("agent") && wired_for_agent(f.long)) {
+                if !(sub == Some("agent") && wired_for_agent(f.long))
+                    && !(sub == Some("server") && wired_for_server(f.long))
+                {
                     record_seen(&mut seen, f.long);
                     let after = &tok[2..];
                     if f.takes_value {
@@ -370,6 +382,37 @@ mod tests {
         let r = strip_noop(&argv(&["init-pro", "server", "--flannel-backend", "vxlan"]));
         assert_eq!(r.argv, argv(&["init-pro", "server"]));
         assert_eq!(r.seen, vec!["flannel-backend".to_string()]);
+    }
+
+    #[test]
+    fn auth_flags_wired_for_server_stripped_elsewhere() {
+        // T1.3a (Q47): `--tls-san` + `--token-file` reach clap on `server`
+        // (serving-cert SANs + the static-token authn CSV); they stay
+        // accept-no-op-warn on agent/stage.
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "server",
+            "--tls-san",
+            "k3as.internal",
+            "--token-file=/etc/init-pro/tokens.csv",
+        ]));
+        assert_eq!(
+            r.argv,
+            argv(&[
+                "init-pro",
+                "server",
+                "--tls-san",
+                "k3as.internal",
+                "--token-file=/etc/init-pro/tokens.csv"
+            ])
+        );
+        assert!(r.seen.is_empty());
+
+        for sub in ["agent", "stage"] {
+            let r = strip_noop(&argv(&["init-pro", sub, "--tls-san", "x.internal"]));
+            assert_eq!(r.argv, argv(&["init-pro", sub]), "{sub} argv");
+            assert_eq!(r.seen, vec!["tls-san".to_string()], "{sub} seen");
+        }
     }
 
     #[test]

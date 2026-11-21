@@ -13,6 +13,11 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
+# T1.3a (Q47): the kubectl transport gains optional TLS + Bearer auth over
+# the same single rustls stack the apiserver serves (Q47 LOCKED).
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -123,6 +123,8 @@ mod tests {
             registry_keep_tag: vec![],
             disable_pipeline: false,
             pipeline_dir: None,
+            token_file: None,
+            tls_san: vec![],
         }
     }
 

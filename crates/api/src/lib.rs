@@ -38,6 +38,7 @@ pub mod initpro;
 pub mod networking;
 pub mod patch;
 pub mod pipeline;
+pub mod rbac;
 pub mod schema;
 pub mod serde_ext;
 pub mod traffic;
@@ -72,6 +73,10 @@ pub use pipeline::{
     BuildOptions, BuildRef, PipelineImage, PipelineRelease, PipelineSource, PipelineTarget,
     ReleaseStep, RolloutStatus, ServicePipeline, ServicePipelineList, ServicePipelineSpec,
     ServicePipelineStatus,
+};
+pub use rbac::{
+    ClusterRole, ClusterRoleBinding, ClusterRoleBindingList, ClusterRoleList, PolicyRule, Role,
+    RoleBinding, RoleBindingList, RoleRef, Subject,
 };
 pub use schema::{SchemaRegistry, Scope, TypeInfo};
 pub use serde_ext::{from_json, to_json, to_json_pretty};

@@ -3,18 +3,27 @@
 //! Q21 deliberately keeps the v1 kubectl transport dependency-free: the
 //! apiserver serves plain HTTP/1.1 (axum http1), so one small
 //! request/response exchange is all the verbs need (`rollout status` poll,
-//! T7.3 Scope A argoproj get/apply/delete). https is rejected (auth + TLS
-//! arrive with T1.3). The chunked decoder exists so a future watch-stream
-//! surface (T3.4) can reuse this module unchanged.
+//! T7.3 Scope A argoproj get/apply/delete). The chunked decoder exists so a
+//! future watch-stream surface (T3.4) can reuse this module unchanged.
+//!
+//! T1.3a (**Q47**) adds the optional auth plane WITHOUT changing the Q21
+//! default: [`HttpClient::parse`] keeps rejecting `https://` exactly as
+//! before (the G53 pin), while [`HttpClient::connect`] additionally honors
+//! an https server that comes from the kubeconfig itself — with its
+//! `certificate-authority` as the only trust root — and attaches the
+//! kubeconfig `token` as a `Bearer` credential (http and https alike).
 //!
 //! One connection per request (`Connection: close`): the poll loop is 4 qps
 //! at most, so connection churn is irrelevant and the code stays trivial.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use crate::kubeconfig::{Kubeconfig, Resolved};
 
 /// Connect timeout — a refused/unroutable server must fail fast (2s).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -28,13 +37,23 @@ const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) struct HttpClient {
     pub(crate) host: String,
     pub(crate) port: u16,
+    /// CA bundle (PEM bytes) for the https branch (Q47): `None` = the
+    /// plain-h2c Q21 transport. Only ever set from the kubeconfig's
+    /// `certificate-authority` via [`HttpClient::connect`].
+    tls_ca_pem: Option<Vec<u8>>,
+    /// Bearer token attached to every request when present (Q47): loaded
+    /// from the kubeconfig; sent over http and https alike (the h2c
+    /// posture is trusted-loopback by construction, Q47 default).
+    token: Option<String>,
 }
 
 impl HttpClient {
     /// Parse a `--server` value: `http://host:port` or bare `host:port`.
     ///
-    /// `https://` is a hard error until T1.3 lands TLS (Q21); any other
-    /// scheme is rejected too. A port-less host defaults to 80.
+    /// `https://` stays a hard error here forever (Q21, pinned by golden
+    /// G53) — the ONLY https path is [`Self::connect`] with a kubeconfig
+    /// server. Any other scheme is rejected too. A port-less host
+    /// defaults to 80.
     pub(crate) fn parse(server_url: &str) -> Result<Self, String> {
         let url = server_url.trim();
         if url.is_empty() {
@@ -56,18 +75,57 @@ impl HttpClient {
                 "server address {server_url:?} must not contain a path"
             ));
         }
-        let (host, port) = match hostport.rsplit_once(':') {
-            Some((h, p)) => (
-                h.to_string(),
-                p.parse::<u16>()
-                    .map_err(|_| format!("invalid port in server address {server_url:?}"))?,
-            ),
-            None => (hostport.to_string(), 80),
-        };
-        if host.is_empty() {
-            return Err(format!("server address {server_url:?} has an empty host"));
+        let (host, port) = split_host_port(hostport, 80)
+            .map_err(|e| format!("{e} (server address {server_url:?})"))?;
+        Ok(HttpClient {
+            host,
+            port,
+            tls_ca_pem: None,
+            token: None,
+        })
+    }
+
+    /// Full transport resolution (T1.3a, Q47): see [`Resolved`].
+    ///
+    /// - [`Resolved::Explicit`] (flag/env/default URL): plain-HTTP-only —
+    ///   `https://` hits [`Self::parse`]'s historical hard error (G53).
+    /// - [`Resolved::Kubeconfig`]: an `https://` server is honored with its
+    ///   `certificate-authority` file as the mandatory trust root; an http
+    ///   kubeconfig server parses like an explicit one.
+    ///
+    /// A kubeconfig `token` rides along in every case (Bearer).
+    pub(crate) fn connect(resolved: &Resolved, kc: Option<&Kubeconfig>) -> Result<Self, String> {
+        match resolved {
+            Resolved::Explicit(url) => {
+                let mut c = Self::parse(url)?;
+                c.token = kc.and_then(|k| k.token.clone());
+                Ok(c)
+            }
+            Resolved::Kubeconfig(k) => {
+                let url = k.server.trim();
+                if let Some(rest) = url.strip_prefix("https://") {
+                    let rest = rest.strip_suffix('/').unwrap_or(rest);
+                    let ca_path = k.certificate_authority.as_deref().ok_or_else(|| {
+                        "kubeconfig server is https:// but carries no certificate-authority (Q47)"
+                            .to_string()
+                    })?;
+                    let pem = std::fs::read(ca_path)
+                        .map_err(|e| format!("read certificate-authority {ca_path}: {e}"))?;
+                    let (host, port) = split_host_port(rest, 443)
+                        .map_err(|e| format!("{e} (kubeconfig server)"))?;
+                    Ok(HttpClient {
+                        host,
+                        port,
+                        tls_ca_pem: Some(pem),
+                        token: k.token.clone(),
+                    })
+                } else {
+                    let mut c = Self::parse(url)?;
+                    c.token = k.token.clone();
+                    Ok(c)
+                }
+            }
         }
-        Ok(HttpClient { host, port })
     }
 
     /// Issue one HTTP/1.1 request, return `(status_code, json_body)`
@@ -107,7 +165,9 @@ impl HttpClient {
         ))
     }
 
-    /// The one-and-only request engine (one `Connection: close` TCP session).
+    /// The one-and-only request engine (one `Connection: close` session):
+    /// a plain TCP stream, or a rustls stream when the kubeconfig armed
+    /// https (Q47). The request/response exchange itself is identical.
     async fn exchange(
         &self,
         method: &str,
@@ -115,17 +175,46 @@ impl HttpClient {
         content_type: Option<&str>,
         body: Option<&str>,
     ) -> Result<Vec<u8>, String> {
-        let addr = (self.host.as_str(), self.port);
-        let connect = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .map_err(|_| format!("connection to {}:{} timed out", self.host, self.port))?
-            .map_err(|e| format!("connection to {}:{} failed: {e}", self.host, self.port))?;
-        let mut stream = connect;
+        match &self.tls_ca_pem {
+            Some(pem) => {
+                let stream = tls_connect(pem, &self.host, self.port).await?;
+                self.exchange_over(stream, method, path, content_type, body)
+                    .await
+            }
+            None => {
+                let addr = (self.host.as_str(), self.port);
+                let connect = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+                    .await
+                    .map_err(|_| format!("connection to {}:{} timed out", self.host, self.port))?
+                    .map_err(|e| {
+                        format!("connection to {}:{} failed: {e}", self.host, self.port)
+                    })?;
+                self.exchange_over(connect, method, path, content_type, body)
+                    .await
+            }
+        }
+    }
 
+    /// The wire exchange over an established stream (shared by the plain
+    /// and TLS branches).
+    async fn exchange_over<S>(
+        &self,
+        mut stream: S,
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<Vec<u8>, String>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    {
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: application/json\r\n",
             self.host
         );
+        if let Some(tok) = &self.token {
+            request.push_str(&format!("Authorization: Bearer {tok}\r\n"));
+        }
         if let (Some(ct), Some(payload)) = (content_type, body) {
             request.push_str(&format!(
                 "Content-Type: {ct}\r\nContent-Length: {}\r\n",
@@ -317,6 +406,63 @@ fn decode_chunked(body: &[u8]) -> Result<Vec<u8>, String> {
             return Err("malformed chunked body: missing CRLF after chunk".to_string());
         }
     }
+}
+
+/// Split `host[:port]` (default `default_port`). Pure; shared by the
+/// explicit-URL and kubeconfig-https parsers.
+fn split_host_port(hostport: &str, default_port: u16) -> Result<(String, u16), String> {
+    let hostport = hostport.trim();
+    match hostport.rsplit_once(':') {
+        Some((h, p)) => {
+            if h.is_empty() {
+                return Err("empty host in server address".to_string());
+            }
+            let port = p.parse::<u16>().map_err(|_| "invalid port".to_string())?;
+            Ok((h.to_string(), port))
+        }
+        None if hostport.is_empty() => Err("empty host in server address".to_string()),
+        None => Ok((hostport.to_string(), default_port)),
+    }
+}
+
+/// TLS branch of the connect step (Q47): trust ONLY the kubeconfig CA
+/// bundle; rustls + ring, TLS 1.2/1.3, no client cert (the bearer token
+/// is the credential). One handshake per request — same profile as the
+/// plain transport (Connection: close).
+async fn tls_connect(
+    ca_pem: &[u8],
+    host: &str,
+    port: u16,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    let certs: Vec<_> = rustls_pemfile::certs(&mut &ca_pem[..])
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("parse CA PEM: {e}"))?;
+    roots.add_parsable_certificates(certs);
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls protocol versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+
+    let addr = (host, port);
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .map_err(|_| format!("connection to {host}:{port} timed out"))?
+        .map_err(|e| format!("connection to {host}:{port} failed: {e}"))?;
+
+    // SNI: DNS name when possible, else a literal IP (rustls accepts both).
+    let server_name = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
+        Err(_) => rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|_| format!("tls server name {host:?} is not a valid DNS name"))?,
+    };
+    connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| format!("tls handshake with {host}:{port} failed: {e}"))
 }
 
 #[cfg(test)]

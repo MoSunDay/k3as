@@ -22,7 +22,8 @@ pub struct ServerCmd {
     pub bind_address: String,
 
     /// Secure port the API server listens on (k3s `--https-listen-port` parity).
-    /// Plain HTTP for v1 (TLS is T1.3, ADR Q11); this is the discovery port.
+    /// h2c by default (Q47: cleartext stays the default; TLS is opt-in via
+    /// `--tls-san`); this is the discovery port.
     /// env `INIT_PRO_HTTPS_LISTEN_PORT`.
     #[arg(
         long = "https-listen-port",
@@ -165,6 +166,23 @@ pub struct ServerCmd {
     /// env `INIT_PRO_CLUSTER_INIT`.
     #[arg(long = "cluster-init", env = "INIT_PRO_CLUSTER_INIT")]
     pub cluster_init: bool,
+
+    /// Static-token authentication CSV (T1.3a, Q47): one identity per
+    /// line, `token,user,uid,"groups"` (kubeadm format; the quoted groups
+    /// field is a comma-separated list). Loading it arms authn + the RBAC
+    /// authz subset and registers the rbac.authorization.k8s.io group —
+    /// without it the API stays anonymous h2c (golden G02/G03 posture).
+    /// env `INIT_PRO_TOKEN_FILE`.
+    #[arg(long = "token-file", env = "INIT_PRO_TOKEN_FILE", value_name = "FILE")]
+    pub token_file: Option<std::path::PathBuf>,
+
+    /// Serving-certificate SAN entries (T1.3a, Q47): repeatable; each is an
+    /// IP or DNS name. ANY entry opts the API surface into TLS (a self-
+    /// signed CA + serving cert are minted at startup; no `--tls-san` =
+    /// the default h2c listener, byte-identical to before).
+    /// env `INIT_PRO_TLS_SAN` (repeatable).
+    #[arg(long = "tls-san", env = "INIT_PRO_TLS_SAN", value_name = "SAN")]
+    pub tls_san: Vec<String>,
 
     /// IPv4 CIDR range for pod IPs. The node-cidr controller carves each
     /// Node a `/24` out of it (`spec.podCIDR`, flanneld's lease source) —

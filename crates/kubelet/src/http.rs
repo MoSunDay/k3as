@@ -52,6 +52,10 @@ pub struct HttpJson {
     host: String,
     port: u16,
     base_path: String,
+    /// Static bearer token (T1.3a, Q47): `Some` stamps
+    /// `Authorization: Bearer <t>` on every request/watch the kubelet
+    /// loops issue — inert when the server runs auth-open (v1 default).
+    token: Option<String>,
 }
 
 impl HttpJson {
@@ -88,7 +92,15 @@ impl HttpJson {
             host,
             port,
             base_path: base.to_string(),
+            token: None,
         })
+    }
+
+    /// Attach the static bearer token (T1.3a, Q47, P3): kubelet-side
+    /// `--token` passthrough for token-file-authenticated servers.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 
     pub fn host(&self) -> &str {
@@ -125,6 +137,9 @@ impl HttpJson {
             target = self.target(path),
             host = self.host,
         );
+        if let Some(t) = &self.token {
+            req.push_str(&format!("Authorization: Bearer {t}\r\n"));
+        }
         if let Some(p) = payload {
             req.push_str(&format!(
                 "Content-Type: {content_type}\r\nContent-Length: {}\r\n",
@@ -634,6 +649,27 @@ mod tests {
         assert_eq!((c.host(), c.port()), ("example", 80u16));
         let c = HttpJson::parse_url("http://h:1/base/").unwrap();
         assert_eq!(c.target("/x"), "/base/x");
+    }
+
+    #[test]
+    fn token_stamps_authorization_on_every_head() {
+        // T1.3a (Q47 P3): `--token` passthrough — the header lands on both
+        // the request and the watch face (both funnel through
+        // `request_head_ct`), and stays absent when no token is set.
+        let plain = HttpJson::parse_url("http://127.0.0.1:6443").unwrap();
+        assert!(!plain
+            .request_head("GET", "/api/v1/pods", None)
+            .contains("Authorization:"));
+        let authed = plain.with_token(Some("s3cr3t".to_string()));
+        let req = authed.request_head("GET", "/api/v1/nodes/n1", None);
+        assert!(req.contains("Authorization: Bearer s3cr3t\r\n"));
+        let put = authed.request_head_ct(
+            "PATCH",
+            "/api/v1/pods/p",
+            Some("{}"),
+            "application/merge-patch+json",
+        );
+        assert!(put.contains("Authorization: Bearer s3cr3t\r\n"));
     }
 
     #[test]

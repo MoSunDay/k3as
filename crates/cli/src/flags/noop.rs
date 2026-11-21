@@ -32,6 +32,8 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("apiserver-bind-address", None, true),
     nf("advertise-address", None, true),
     nf("advertise-port", None, true),
+    // (`tls-san` is clap-wired for `server` since T1.3a/Q47 — mints the
+    // serving-cert SANs; still no-op-warned on `agent`/`stage`.)
     nf("tls-san", None, true),
     nf("tls-san-security", None, false),
     // C.3 Cluster networking
@@ -53,6 +55,8 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("write-kubeconfig", Some('o'), true),
     nf("write-kubeconfig-mode", None, true),
     nf("write-kubeconfig-group", None, true),
+    // (`token-file` is clap-wired for `server` since T1.3a/Q47 — the
+    // static-token authn CSV; still no-op-warned on `agent`/`stage`.)
     nf("token-file", None, true),
     nf("agent-token", None, true),
     nf("agent-token-file", None, true),

@@ -46,6 +46,7 @@ pub mod agent_sandbox_plan;
 #[cfg(test)] // T7.7 (Q63) hardened-sandbox spec/tamper cases
 mod agent_sandbox_tests;
 pub mod agents;
+pub mod config;
 pub mod cri_backend;
 pub mod engine;
 pub mod env;
@@ -73,6 +74,7 @@ pub mod watch;
 pub use agent_sandbox::{select_sandbox, SandboxNodeConfig, SandboxSelection};
 pub use agents::spawn_agent_runner;
 pub use agents::AgentRunnerConfig;
+pub use config::KubeletConfig;
 pub use cri_backend::{ContainerView, CriBackend, CriCtlBackend, SandboxView};
 pub use env::{
     config_error_event, parse_env, parse_env_from, resolve_env, EnvFromSource, EnvSources,
@@ -88,7 +90,7 @@ pub use objects::{
 };
 pub use probes::{HttpGetSpec, PodProbeState, ProbeHandler, ProbeSpec};
 pub use resources::{linux_resources, parse_requirements, qos_class, QoS, ResourceRequirements};
-pub use runner::{default_node_name, spawn, KubeletConfig};
+pub use runner::{default_node_name, spawn};
 pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 pub use sync::{plan, Action, Snapshot};

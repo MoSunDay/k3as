@@ -18,7 +18,13 @@ use api::{
 
 /// The served schema registry: core/v1 + apps/v1 + coordination.k8s.io/v1
 /// native types + init-pro.io/v1 CRDs.
-pub fn served_schema() -> SchemaRegistry {
+///
+/// `auth_armed` (T1.3a/b, **Q47**): with `--token-file` the registry ALSO
+/// carries `rbac.authorization.k8s.io/v1` (Role/ClusterRole/RoleBinding/
+/// ClusterRoleBinding) and core ServiceAccount — the auth plane's storage
+/// types. Without it the schema stays byte-identical to the pre-T1.3
+/// surface (golden G02/G03 pin the default posture).
+pub fn served_schema(auth_armed: bool) -> SchemaRegistry {
     let mut reg = SchemaRegistry::with_core_v1();
     // Endpoints is core/v1: the endpoints controller (T3.1a) reflects Service
     // selector membership into it.
@@ -60,6 +66,14 @@ pub fn served_schema() -> SchemaRegistry {
     // openrusty gateway (generic CRUD/watch routes; the gateway reflects
     // the same objects through its storage watchers).
     networking::register(&mut reg);
+    if auth_armed {
+        // T1.3b (Q47): the RBAC group rides the same generic CRUD/watch
+        // routes; ServiceAccount (D7 subset) is the namespaced identity
+        // face (no token controller — static tokens carry SA identity
+        // as a group).
+        api::rbac::register(&mut reg);
+        reg.register_native::<k8s_openapi::api::core::v1::ServiceAccount>();
+    }
     reg
 }
 
@@ -85,7 +99,7 @@ mod tests {
 
     #[test]
     fn served_schema_has_core_and_initpro() {
-        let reg = served_schema();
+        let reg = served_schema(false);
         assert!(reg.len() >= 21); // 9 core/v1 + 5 apps/v1 + coordination + 2 argoproj + 2 networking + 1 init-pro.io + agents
         let summary = served_groups_summary(&reg, "127.0.0.1:6443");
         assert!(summary.contains("(core)"));
@@ -161,7 +175,7 @@ mod tests {
 
     #[test]
     fn served_schema_has_agents() {
-        let reg = served_schema();
+        let reg = served_schema(false);
         // TODO **A3** (Q35): `agents` rides the generic routes as-is, so the
         // GVK<->GVR join must exist with the exact kubectl-facing metadata.
         let info = reg
@@ -182,5 +196,47 @@ mod tests {
         assert_eq!(agents.kind, "Agent");
         assert_eq!(agents.short_names, Some(vec!["ag".to_string()]));
         assert!(agents.namespaced);
+    }
+
+    #[test]
+    fn auth_armed_schema_adds_rbac_and_serviceaccount_only() {
+        // T1.3a/b (Q47): --token-file adds rbac.authorization.k8s.io/v1
+        // (4 kinds) + core ServiceAccount; the default (no-auth) schema
+        // must stay byte-identical (golden G02/G03).
+        let plain = served_schema(false);
+        let armed = served_schema(true);
+        assert!(armed.len() > plain.len(), "armed schema is strictly larger");
+        let diff = armed.len() - plain.len();
+        assert_eq!(diff, 5, "4 rbac kinds + serviceaccounts");
+
+        let core = api_resource_list(&armed, "", "v1").expect("core/v1");
+        assert!(
+            core.resources.iter().any(|r| r.name == "serviceaccounts"),
+            "ServiceAccount rides core/v1 when armed"
+        );
+        let plain_core = api_resource_list(&plain, "", "v1").expect("core/v1");
+        assert!(
+            !plain_core
+                .resources
+                .iter()
+                .any(|r| r.name == "serviceaccounts"),
+            "no ServiceAccount in the default posture"
+        );
+
+        let rbac = api_resource_list(&armed, "rbac.authorization.k8s.io", "v1")
+            .expect("rbac group served when armed");
+        let names: Vec<&str> = rbac.resources.iter().map(|r| r.name.as_str()).collect();
+        for want in [
+            "roles",
+            "clusterroles",
+            "rolebindings",
+            "clusterrolebindings",
+        ] {
+            assert!(names.contains(&want), "rbac {want} served");
+        }
+        assert!(
+            api_resource_list(&plain, "rbac.authorization.k8s.io", "v1").is_none(),
+            "no rbac group in the default posture"
+        );
     }
 }

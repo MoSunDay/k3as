@@ -16,6 +16,7 @@ fn client(port: u16) -> HttpClient {
 fn invocation(port: u16, ns: &str, name: &str, container: Option<&str>) -> ExecInvocation {
     ExecInvocation {
         server: format!("http://127.0.0.1:{port}"),
+        server_explicit: true,
         namespace: ns.to_string(),
         name: name.to_string(),
         container: container.map(str::to_string),

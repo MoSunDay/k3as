@@ -63,6 +63,55 @@ pub fn subnet_env_path(data_dir: &Path) -> PathBuf {
     data_dir.join("agent/flannel/subnet.env")
 }
 
+/// `<data-dir>/agent/flannel/kubeconfig.yaml` (T1.3a, Q47 P3): the
+/// token-carrying kubeconfig handed to the embedded flanneld. Only
+/// written when the agent runs with `--token`; absent = anonymous v1.
+pub fn kubeconfig_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("agent/flannel/kubeconfig.yaml")
+}
+
+/// Render the minimal kubeconfig flannel-rust's `from_kubeconfig` accepts:
+/// one context/cluster/user, `token` auth ONLY (client certs error there).
+/// The explicit `--kube-api-url` still overrides the server field, so the
+/// token is the only thing this file actually contributes.
+pub fn kubeconfig_body(api_url: &str, token: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Config\ncurrent-context: init-pro\nclusters:\n- \
+         name: init-pro\n  cluster:\n    server: {api_url}\ncontexts:\n- \
+         name: init-pro\n  context:\n    cluster: init-pro\n    user: init-pro\nusers:\n- \
+         name: init-pro\n  user:\n    token: {token}\n"
+    )
+}
+
+/// Write the flanneld kubeconfig when a token is present (idempotent,
+/// content-compared like [`ensure_net_conf`]). Tokens containing YAML/
+/// header-hostile bytes (whitespace, quotes, control chars) are rejected
+/// so the file can never parse into an unintended credential.
+pub fn ensure_kubeconfig(data_dir: &Path, api_url: &str, token: &str) -> io::Result<PathBuf> {
+    if token.is_empty()
+        || token
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\'')
+    {
+        return Err(io::Error::other(
+            "flannel kubeconfig: token contains unsupported characters",
+        ));
+    }
+    let path = kubeconfig_path(data_dir);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = kubeconfig_body(api_url, token);
+    let needs_write = match std::fs::read_to_string(&path) {
+        Ok(existing) => existing != body,
+        Err(_) => true,
+    };
+    if needs_write {
+        std::fs::write(&path, body)?;
+    }
+    Ok(path)
+}
+
 /// net-conf.json body synthesized from the wired flags (k3s defaults:
 /// vxlan backend, no IPv6). Backend.Type drives flanneld's data plane.
 pub fn net_conf_body(net: &FlannelNet) -> String {
@@ -114,6 +163,10 @@ pub fn spawn_flannel(
     api_url: &str,
     node_name: &str,
     net: &FlannelNet,
+    // T1.3a (Q47 P3): bearer token for the kube subnet-mgr API calls —
+    // injected through a generated kubeconfig (flannel-rust reads
+    // `user.token`, never env tokens); `None` keeps anonymous v1.
+    token: Option<&str>,
     shutdown: infra::Shutdown,
 ) -> io::Result<JoinHandle<()>> {
     let net_conf = ensure_net_conf(data_dir, net)?;
@@ -133,15 +186,30 @@ pub fn spawn_flannel(
     // subnet manager reads NODE_NAME on startup, Q34).
     std::env::set_var("NODE_NAME", node_name);
 
+    // T1.3a (Q47 P3): with a token, flanneld reads server+credentials
+    // from the generated kubeconfig (the explicit kube_api_url still
+    // wins for the server); without one, anonymous plain HTTP (Q21).
+    let kubeconfig_file = match token {
+        Some(t) => match ensure_kubeconfig(data_dir, api_url, t) {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "init-pro",
+                    error = %e,
+                    "flannel: token kubeconfig unavailable; running unauthenticated"
+                );
+                String::new()
+            }
+        },
+        None => String::new(),
+    };
     let opts = flanneld::Options {
         kube_subnet_mgr: true,
-        // Plain HTTP, no auth in v1 (Q21) — flannel's kube client is
-        // unauthenticated by design here; kubeconfig_file stays empty.
         kube_api_url: api_url.to_string(),
         // Upstream Go default (flannel.alpha.coreos.com): the prefix is
         // regex-validated, an empty string would abort SubnetManager setup.
         kube_annotation_prefix: "flannel.alpha.coreos.com".to_string(),
-        kubeconfig_file: String::new(),
+        kubeconfig_file,
         iface: net.iface.iter().cloned().collect(),
         iface_regex: Vec::new(),
         // k3s parity: masquerade pod -> off-node traffic by default.
@@ -195,7 +263,7 @@ pub fn spawn_flannel(
         }
         alive_for_daemon.store(false, std::sync::atomic::Ordering::Relaxed);
     });
-    crate::flannel_keeper::spawn_condition_keeper(api_url, node_name, alive);
+    crate::flannel_keeper::spawn_condition_keeper(api_url, node_name, token, alive);
     Ok(daemon)
 }
 
@@ -208,6 +276,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn kubeconfig_body_and_validation() {
+        // T1.3a (Q47 P3): token lands in `user.token`, server in the
+        // cluster; hostile tokens are rejected before any file write.
+        let body = kubeconfig_body("http://127.0.0.1:6443", "abc123");
+        assert!(body.contains("server: http://127.0.0.1:6443"));
+        assert!(body.contains("token: abc123"));
+        assert!(body.contains("current-context: init-pro"));
+
+        let d = tmp_dir("kc");
+        let p = ensure_kubeconfig(&d, "http://127.0.0.1:6443", "abc123").unwrap();
+        assert_eq!(p, kubeconfig_path(&d));
+        // Idempotent rewrite with the same content.
+        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "abc123").is_ok());
+        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "bad token").is_err());
+        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "").is_err());
+        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "quote\"tok").is_err());
     }
 
     #[test]

@@ -28,7 +28,7 @@ async fn serve_returns_with_an_open_watch_stream_after_shutdown() {
         store,
         addr,
         format!("127.0.0.1:{port}"),
-        None,
+        apiserver::ServeOptions::default(),
         async move {
             let _ = rx.await;
         },

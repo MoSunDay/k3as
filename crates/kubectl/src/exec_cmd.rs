@@ -21,6 +21,9 @@ pub(crate) const MISSING_COMMAND: &str = "you must specify at least one command 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecInvocation {
     pub(crate) server: String,
+    /// T1.3a (Q47): `--server`/env provenance — explicit URLs stay
+    /// plain-HTTP-only (Q21), else the kubeconfig server slots in.
+    pub(crate) server_explicit: bool,
     pub(crate) namespace: String,
     pub(crate) name: String,
     pub(crate) container: Option<String>,
@@ -41,6 +44,7 @@ pub(crate) fn parse_exec_args(args: &[String]) -> Result<ExecInvocation, String>
     }
 
     let mut server = crate::default_server();
+    let mut server_explicit = crate::default_server_is_explicit();
     let mut namespace = "default".to_string();
     let mut container: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
@@ -65,7 +69,10 @@ pub(crate) fn parse_exec_args(args: &[String]) -> Result<ExecInvocation, String>
                     }
                 };
                 match name {
-                    "--server" => server = value,
+                    "--server" => {
+                        server = value;
+                        server_explicit = true;
+                    }
                     "--namespace" | "-n" => namespace = value,
                     _ => container = Some(value),
                 }
@@ -87,6 +94,7 @@ pub(crate) fn parse_exec_args(args: &[String]) -> Result<ExecInvocation, String>
     let name = positional.first().ok_or("pod name is required")?;
     Ok(ExecInvocation {
         server,
+        server_explicit,
         namespace,
         name: crate::logs::resolve_pod_name(name)?,
         container,
@@ -171,7 +179,7 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
         Ok(inv) => inv,
         Err(msg) => return exit_usage_error(&msg),
     };
-    let http = match HttpClient::parse(&inv.server) {
+    let http = match crate::connect_transport(&inv.server, inv.server_explicit) {
         Ok(http) => http,
         Err(msg) => return crate::verb_error(msg),
     };

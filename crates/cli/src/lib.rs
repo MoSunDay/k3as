@@ -18,6 +18,7 @@ mod flags;
 mod flannel;
 mod flannel_keeper;
 mod runtime;
+mod runtime_server;
 mod stage;
 mod stage_cmd;
 mod storage_dsn;
@@ -164,6 +165,9 @@ where
                             disable_kube_proxy: svc.disable_kube_proxy,
                             // Q41: `--disable servicelb` (DisableItems whitelist, A4).
                             disable_servicelb: svc.disable.iter().any(|d| d == "servicelb"),
+                            // T1.3a (Q47): auth + TLS opt-ins.
+                            token_file: svc.token_file.clone(),
+                            tls_san: svc.tls_san.clone(),
                             scheduler_args: svc.kube_scheduler_arg.clone(),
                             datastore_endpoint: svc.datastore_endpoint.clone(),
                             cluster_cidr: svc.cluster_cidr.clone(),
@@ -233,6 +237,9 @@ where
                 // T7.2 (Q61): whole-GPU inventory source (auto|none|
                 // fake:<resource>:<count>) — parsed fail-fast in run_agent.
                 ag.gpu_inventory,
+                // T1.3a (Q47 P3): bearer token the node-side loops
+                // present to a token-file-authenticated apiserver.
+                ag.shared.token.clone(),
             )
         }
         Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),

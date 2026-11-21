@@ -55,6 +55,9 @@ pub struct AgentRunnerConfig {
     /// T7.7 (Q63) node-side sandbox config; `None` keeps hardened Agents
     /// Pending (fail-closed) — never the legacy subprocess path.
     pub sandbox: Option<crate::agent_sandbox::SandboxNodeConfig>,
+    /// Static apiserver bearer token (T1.3a, Q47 P3): the Agent watch and
+    /// status merge-patches authenticate like the kubelet loops.
+    pub server_token: Option<String>,
 }
 
 impl AgentRunnerConfig {
@@ -67,6 +70,7 @@ impl AgentRunnerConfig {
             hardened_runner_bin: None,
             anyhome_addr: None,
             exec_timeout: exec_timeout_from_env().unwrap_or(DEFAULT_EXEC_TIMEOUT),
+            server_token: None,
             sandbox: None,
         }
     }
@@ -99,7 +103,7 @@ pub fn spawn_agent_runner(
     shutdown: infra::Shutdown,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let client = match HttpJson::parse_url(&cfg.server_url) {
-        Ok(c) => Arc::new(c),
+        Ok(c) => Arc::new(c.with_token(cfg.server_token.clone())),
         Err(e) => {
             tracing::error!(target: "init-pro", error = %e, "agent runner: bad server URL; not starting");
             return Vec::new();

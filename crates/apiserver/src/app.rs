@@ -44,17 +44,38 @@ pub fn api_app_with_workspace_nfs(
     server_address: String,
     workspace_nfs: Option<String>,
 ) -> Router {
-    router(AppState {
+    api_app_full(registry, store, server_address, workspace_nfs, None)
+}
+
+/// [`api_app_with_workspace_nfs`] + static-token auth (T1.3a, Q47):
+/// `Some(auth)` layers `authn` -> `authz` middleware (the anonymous default
+/// stays layer-free so the pre-T1.3 wire behavior is byte-identical).
+pub fn api_app_full(
+    registry: Arc<SchemaRegistry>,
+    store: Arc<dyn StorageBackend>,
+    server_address: String,
+    workspace_nfs: Option<String>,
+    auth: Option<Arc<crate::authn::TokenAuth>>,
+) -> Router {
+    let state = AppState {
         registry,
         store,
         server_address,
         workspace_nfs,
-    })
+        auth,
+    };
+    router(state)
 }
 
 /// Assemble the router over a ready [`AppState`] (shared with [`crate::serve`]).
+///
+/// T1.3a/b (Q47): when `state.auth` is armed the `authn` -> `authz`
+/// middleware pair wraps every route (axum layers added later run earlier,
+/// so authz is added first and authn runs first on the wire). The default
+/// anonymous plane stays layer-free — identical bytes to pre-T1.3.
 pub(crate) fn router(state: AppState) -> Router {
-    Router::new()
+    let auth_armed = state.auth.is_some();
+    let routes = Router::new()
         .merge(discovery_routes())
         // --- core group (`""`) ---
         .route(
@@ -131,5 +152,19 @@ pub(crate) fn router(state: AppState) -> Router {
                 .delete(item::grp_delete_ns)
                 .patch(item::grp_patch_ns),
         )
-        .with_state(state)
+        .with_state(state.clone());
+
+    if auth_armed {
+        routes
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::authz::middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::authn::middleware,
+            ))
+    } else {
+        routes
+    }
 }

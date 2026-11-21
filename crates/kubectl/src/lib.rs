@@ -23,6 +23,7 @@ mod exec_cmd;
 #[cfg(test)] // canned-apiserver cases for the exec verb (file size limit)
 mod exec_wire_tests;
 mod http;
+mod kubeconfig;
 mod logs;
 #[cfg(test)] // pure follow/parser cases split out of logs.rs (file size limit)
 mod logs_tests;
@@ -64,10 +65,33 @@ fn default_server() -> String {
     default_server_from(std::env::var("INIT_PRO_SERVER").ok())
 }
 
+/// True when `INIT_PRO_SERVER` provided the default (explicit source):
+/// an env-provided URL gets the same plain-HTTP-only treatment as a
+/// `--server` flag value (T1.3a, Q47 — https stays the Q21 hard error).
+fn default_server_is_explicit() -> bool {
+    std::env::var("INIT_PRO_SERVER")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Resolve + connect the transport for one command (T1.3a, Q47):
+/// `server` is the flag/env/default URL, `explicit` marks it user-provided
+/// (flag or env) — otherwise the kubeconfig server (https + CA allowed)
+/// slots in between the env and the built-in default.
+fn connect_transport(server: &str, explicit: bool) -> Result<HttpClient, String> {
+    let kc = kubeconfig::load_from_env();
+    let resolved = kubeconfig::resolve(explicit.then(|| server.to_string()), kc.clone());
+    HttpClient::connect(&resolved, kc.as_ref())
+}
+
 /// Parsed `kubectl rollout status` invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
     server: String,
+    /// `true` when the server URL came from `--server`/`INIT_PRO_SERVER`
+    /// (plain-HTTP-only, Q21) rather than the default (kubeconfig may
+    /// slot in, T1.3a/Q47).
+    server_explicit: bool,
     namespace: String,
     name: String,
     timeout: Option<Duration>,
@@ -109,7 +133,7 @@ pub fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let http = match HttpClient::parse(&config.server) {
+    let http = match connect_transport(&config.server, config.server_explicit) {
         Ok(h) => h,
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -148,6 +172,7 @@ pub fn run(args: &[String]) -> ExitCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct VerbFlags {
     server: String,
+    server_explicit: bool,
     namespace: String,
     output: Output,
     /// `apply -f FILE`.
@@ -165,6 +190,7 @@ fn parse_verb_flags(
 ) -> Result<(VerbFlags, Vec<String>), String> {
     let mut flags = VerbFlags {
         server: default_server(),
+        server_explicit: default_server_is_explicit(),
         namespace: DEFAULT_NAMESPACE.to_string(),
         output: Output::Table,
         file: None,
@@ -207,7 +233,10 @@ fn parse_verb_flags(
         }
         let value = value.ok_or_else(|| format!("flag needs an argument: {name}"))?;
         match name {
-            "--server" => flags.server = value,
+            "--server" => {
+                flags.server = value;
+                flags.server_explicit = true;
+            }
             "--namespace" | "-n" => flags.namespace = value,
             "-o" | "--output" => flags.output = parse_output(&value)?,
             "-f" | "--filename" => flags.file = Some(value),
@@ -269,7 +298,7 @@ fn run_get(args: &[String]) -> ExitCode {
             Ok(v) => v,
             Err(msg) => return verb_error(msg),
         };
-    let http = match HttpClient::parse(&flags.server) {
+    let http = match connect_transport(&flags.server, flags.server_explicit) {
         Ok(h) => h,
         Err(msg) => return verb_error(msg),
     };
@@ -312,7 +341,7 @@ fn run_apply(args: &[String]) -> ExitCode {
             },
             Err(msg) => return verb_error(msg),
         };
-    let http = match HttpClient::parse(&flags.server) {
+    let http = match connect_transport(&flags.server, flags.server_explicit) {
         Ok(h) => h,
         Err(msg) => return verb_error(msg),
     };
@@ -342,7 +371,7 @@ fn run_delete(args: &[String]) -> ExitCode {
     let Some(name) = name else {
         return verb_error("resource must be specified as TYPE/NAME or TYPE NAME".to_string());
     };
-    let http = match HttpClient::parse(&flags.server) {
+    let http = match connect_transport(&flags.server, flags.server_explicit) {
         Ok(h) => h,
         Err(msg) => return verb_error(msg),
     };
@@ -373,7 +402,7 @@ fn run_discovery(args: &[String], verb: &str) -> ExitCode {
         }
         Err(msg) => return verb_error(msg),
     };
-    let http = match HttpClient::parse(&flags.server) {
+    let http = match connect_transport(&flags.server, flags.server_explicit) {
         Ok(h) => h,
         Err(msg) => return verb_error(msg),
     };
@@ -427,6 +456,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     }
 
     let mut server = default_server();
+    let mut server_explicit = default_server_is_explicit();
     let mut namespace = DEFAULT_NAMESPACE.to_string();
     let mut timeout: Option<Duration> = None;
     let mut positional: Vec<&str> = Vec::new();
@@ -443,7 +473,10 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             _ => None,
         };
         match arg {
-            "--server" => server = value.ok_or("flag needs an argument: --server")?.to_string(),
+            "--server" => {
+                server = value.ok_or("flag needs an argument: --server")?.to_string();
+                server_explicit = true;
+            }
             "--namespace" | "-n" => {
                 namespace = value
                     .ok_or("flag needs an argument: --namespace")?
@@ -471,6 +504,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let name = resolve_target(&positional)?;
     Ok(Config {
         server,
+        server_explicit,
         namespace,
         name,
         timeout,

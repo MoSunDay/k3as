@@ -24,6 +24,9 @@ pub(crate) struct AppState {
     /// defaulting (T7.5, Q43); `None` = `--disable-anyhome` -> the
     /// annotations are inert and Pod bytes are untouched.
     pub workspace_nfs: Option<String>,
+    /// Static-token authentication (T1.3a, Q47); `None` = the default
+    /// h2c posture — anonymous, every request passes through unauthenticated.
+    pub auth: Option<Arc<crate::authn::TokenAuth>>,
 }
 
 /// A resource resolved from the schema for one REST request.

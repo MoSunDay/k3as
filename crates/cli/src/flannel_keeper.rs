@@ -27,10 +27,12 @@ use std::time::Duration;
 pub(crate) fn spawn_condition_keeper(
     api_url: &str,
     node_name: &str,
+    // T1.3a (Q47 P3): the keeper's GET/PUT authenticate like the kubelet.
+    token: Option<&str>,
     daemon_alive: Arc<AtomicBool>,
 ) {
     let client = match kubelet::HttpJson::parse_url(api_url) {
-        Ok(c) => std::sync::Arc::new(c),
+        Ok(c) => std::sync::Arc::new(c.with_token(token.map(str::to_string))),
         Err(e) => {
             tracing::warn!(target: "init-pro", error = %e, "flannel condition keeper: bad api url");
             return;
