@@ -116,10 +116,16 @@ can never close the card:
   tool-dispatch seam (S48 plan D7) moves to S49 — S48 ships
   wrapper/mediation-level gating (policy gate + broker operation allowlist
   + closed env). No opencoder pin bump in S48 (Q38 pin SSOT respected).
+  **S49 update: D7 CLOSED** — staged `agent-runner` binary embeds
+  opencoder-session in-process with a fully gate-wrapped tool registry
+  (subagents inherit the wrapped map verbatim) + node-level mandatory
+  hardening `--agent-require-sandbox`; T7.7 → done. See
+  `phase-4-closure.md` §7-§8.
 
 ## 1. Current baseline
 
-- The SSOT contains **54 TODOs: 38 done, 6 in-progress, 10 not-started**.
+- The SSOT contains **54 TODOs: 39 done (T7.7 closed S49), 5 in-progress,
+  10 not-started**; the Phase 4 closure plan is `phase-4-closure.md`.
   Layer 4 has 15 cards (T4.1–T4.15); Layer 7 has 7 cards (T7.1–T7.7).
 - k3as is a **multi-tenant Agent sandbox platform**. One tenant per cluster with
   tenant-dedicated nodes is **necessary but not sufficient** for hostile

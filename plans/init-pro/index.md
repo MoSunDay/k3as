@@ -53,7 +53,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane Q28/Q32 + announce/L4 数据面 Q41 done; 剩余 SNI/TLS passthrough, 依赖 T5.5) | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
-| T6.2 | 6 | 标准 addon (T6.2a 内嵌 Cluster DNS S43/Q45 + T6.2b local-path S44/Q46; metrics-server → S48 backlog) | not-started | T6.1, T4.3 |
+| T6.2 | 6 | 标准 addon (T6.2a 内嵌 Cluster DNS S43/Q45 + T6.2b local-path S44/Q46; metrics-server 按 Q59 S49 决策**显式弃置**于前向支持子集外) | not-started | T6.1, T4.3 |
 | T6.3 | 6 | 内嵌 Docker Registry v2 镜像仓库（tag 保留策略，默认最近 10 + keep-forever 不计入，Q40） | done (Sprint 33; Sprint 34 hardening) | T0.3 |
 | T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A Sprint 26, Q35 + Phase B 节点执行 Sprint 30, Q37) | T3.2, T1.2 |
 | T7.2 | 7 | 宿主 GPU 直调调度 (标准 `nvidia.com/gpu`/`amd.com/gpu` 扩展资源, builtin host-direct 优先, 整卡逻辑独占 + 稳定设备分配, Q61) | in-progress (S47 fake-scope 全链落库: `--gpu-inventory` 清单发布、Pod-UID/container 持久账本、扩展资源调度核算、CUDA/HIP_VISIBLE_DEVICES 注入、teardown 后释放, GPU1-GPU5 单测; 真硬件 per-vendor recorded evidence 未有——GPU6 未满足, 保持开放) | T4.15, T3.2 |
@@ -61,18 +61,20 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36) | done (Sprint 27, Q36) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43) | T7.4, T1.2 |
 | T7.6 | 7 | llama.cpp-first 宿主推理 (普通 Deployment → Pod + NodePort Service, 预置 llama-server/GGUF, OpenAI 兼容 API, Q62) | in-progress (S47: Recreate teardown-hold 状态机 + fake OpenAI 离线 e2e INF1/2/3/5 fake-scope 全绿 + node04 切换/回滚 runbook 与参数化清单; 真 llama-server/GGUF/整卡验收 INF6 未做, 保持开放) | T7.2, T3.1 |
-| T7.7 | 7 | Agent action interception + Linux sandbox (节点/operator default-deny 策略, 中央 tool/subagent gate, nsrun/clone3/cgroup 隔离, per-attempt provider broker, Q63) | in-progress (S48: Stage A 全量 + Stage B 执行面——policy 模型/准入臂 G99-G106、nsrun/engine 硬化执行 + 四路清理、per-attempt broker; AS1-AS6 脚本化证据 sandbox-e2e 16/16 + golden 68/68 + workspace 1364 tests; opencoder 进程内 tool-dispatch seam 移交 S49, 卡保持开放) | T7.1, T4.14 |
+| T7.7 | 7 | Agent action interception + Linux sandbox (节点/operator default-deny 策略, 中央 tool/subagent gate, nsrun/clone3/cgroup 隔离, per-attempt provider broker, Q63) | done (S48 Stage A+B + **S49 D7 收口**: staged binary `agent-runner` 进程内 gated-registry 分发缝——wrap_registry 全量包裹(含 hallucinated/mcp__ 名)、子代理 registry 逐字继承同一 gate、广告面强制 ToolFilter::Allow、denial_audit JSONL; 节点级强制硬化开关 `--agent-require-sandbox` 封掉无 spec.sandbox 即 legacy 直跑敞口 (RequiredRefused→Pending/SandboxRequired); Q63 逐条款复核 phase-4-closure.md §8; 证据 sandbox-e2e 23/23 SA1-SA8 + workspace 1375 tests + golden 68/68; 注记: 真 provider 流量桥 broker op↔HTTP 仍 stub 级, fresh netns 下直接出网不可能——缺口为可用性非遏制) | T7.1, T4.14 |
 | T8.1 | 8 | 镜像交付信任 + registry push client (M1; certs.d 明文 HTTP 渲染 + docker save 导入, Q38/Q40) | done (Sprint 45) | T6.3, T4.1 |
 | T8.2 | 8 | TrafficSplit 加权一键切流 (init-pro.io/v1, 短名 ts, Q57) | done (Sprint 45, Q57) | T5.4, T1.1 |
 | T8.3 | 8 | ServicePipeline/Build 内嵌 CI/CD 控制器 (M2 core, Q56) | done (Sprint 45, Q56) | T8.1, T6.3, T1.2, T3.1 |
 | T8.4 | 8 | pipeline 面收尾: CLI flags + 进程内 e2e (M2, Q56) | done (Sprint 45, Q56) | T8.3 |
 | T8.5 | 8 | canary 发布控制器 (M3, Q58) | done (Sprint 46, Q58) | T8.2, T8.3, T8.4 |
 
-**Counts:** 54 TODOs · 38 done · 5 in-progress (S47 起 T4.15/T7.2/T7.6 进入 in-progress——fake/offline 证据已落库, 真硬件 closure 未满足; T5.6 剩余 SNI/TLS
-passthrough——NodePort 面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41
-已 done；T4.3 剩余 host-gw/multi-node/netpol 面——Scope A flannel Q34
-与 Scope B ServiceLB Q41 已 done)
-· 11 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
+**Counts:** 54 TODOs · 39 done (S49 起 T7.7/Q63 收口, Phase 4 计划
+`phase-4-closure.md`) · 5 in-progress (T4.15/T7.2/T7.6 fake/offline 证据
+已落库、真硬件 closure 未满足; T5.6 剩余 SNI/TLS passthrough——NodePort
+面 Q28/Q32 与 ServiceLB announce/L4 数据面 Q41 已 done；T4.3 剩余
+host-gw/multi-node/netpol 面——Scope A flannel Q34 与 Scope B ServiceLB
+Q41 已 done)
+· 10 not-started · Layer0=7 · Layer1=3 · Layer2=3 · Layer3=4 ·
 Layer4=15 · Layer5=7 · Layer6=3 · Layer7=7 · Layer8=5.
 
 ---
@@ -91,8 +93,8 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
       └─> T4.11 (off T4.1: built-in engine P1, Q48) ─> T4.12 ─> T4.13 ─> T4.14
                                                                   ├─> T4.15 ─> T7.2 ─> T7.6
                                                                   │    (Q60 host-direct → Q61 GPU → Q62 inference)
-      T7.1 (done, Q35/Q37) ───────────────────────────────────────┴─> T7.7
-                                                                       (Q63 Agent action sandbox; independent of inference)
+      T7.1 (done, Q35/Q37) ───────────────────────────────────────┴─> T7.7 (done, Q63)
+                                                                       (Agent action sandbox; independent of inference)
       └─> T6.3 ─> T8.1 ─> T8.3 ─> T8.4; T5.4 ─> T8.2 ─> T8.5 (Layer 8 delivery
                 plane, T8.3/T8.4 also feed T8.5)
       └─> T0.6 (golden gate,        │
@@ -123,7 +125,7 @@ T0.1 ─┬─> T0.2 ─┬─> T2.1 ─> T2.2 ─┬─> T1.2 ─┬─> T3.1 �
   boundary; Agent workloads use Q63. The inference slice explicitly selects
   builtin, while containerd remains the global default (Q51). Forward
   execution detail lives in `phase-3-host-ai.md`.
-- **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47, 经批准顺延 S49)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档, 顺延 S49)——S48 实际按 phase-3 计划执行 **T7.7 Stage A+B** (Q63, P0 先行; 状态记录同 S47 型, 见 T7.7 行 + counts)。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
+- **语义补齐迭代 (S38–S48, 规划落库 2026-11-15):** T4.7 env/envFrom (S38) → T4.8 探针补全 (S39) → T4.9 资源限制+QoS (S40) 并行 T5.5 slice ingress_listen (S41)；T4.3 Scope C ClusterIP+L4 数据面 (S42, Q44) → T6.2a 内嵌 Cluster DNS (S43, Q45)；T6.2b local-path (S44, Q46) → T4.10 hostPath/PVC 卷消费 (S45)；T1.3a TLS+静态 token (S46, Q47) → T1.3b RBAC (S47, 经批准顺延 S49)；S48 审计收口 (差距清单 C 类零无主项 + backlog 归档, 顺延 S49)——S48 实际按 phase-3 计划执行 **T7.7 Stage A+B** (Q63, P0 先行; 状态记录同 S47 型, 见 T7.7 行 + counts)。**S49 (2026-11-21)**: T7.7 D7 收口(agent-runner 进程内分发缝 + --agent-require-sandbox 强制硬化 + Q63 逐条款复核) + S48 审计承接(C 类零无主项、backlog 归档 phase-4 §6、metrics-server 按 Q59 显式弃置) + Q47 定稿 LOCKED(rustls 直依赖); T1.3a 按风险裁决顺延 S50——Phase 4 闭环计划落库 `phase-4-closure.md`。每 sprint DoD 由 scripts/all-gates.sh 一键承载 (fmt/build/test 计数/clippy/golden/领域 e2e/parity 快照；SSOT lock-step 为人工行)。
 - **Sprint 38b — T4.11 内置容器引擎 P1: kiri clone3/namespace 内核移植 + 单线程 engine + 帧协议 (Q48).**
   4 个新 crate: `nsrun` (唯一 unsafe island；clone3 六 namespace + CLONE_INTO_CGROUP、child 挂载/pivot_root/cap-bounding/no_new_privs/setuid、parent start gate + waitpid、`128+WTERMSIG` + 126/127/255)、`engine-proto` (u32 LE len|kind|payload 帧 + ContainerSpec)、`engine` (`engine-run` 单发 + `engine serve` 单线程 accept loop)、`engine-client` (tokio 事件泵)。`init-pro engine`/`engine-run` pre-clap 派发 + multicall 别名；`--container-engine` 仅接受+告警 (P2/T4.12 接线)。两处根因修复: ① `pivot_root(".", ".")` EBUSY → 先绝对路径 bind 再 chdir；② ro bind 的 `<proc-fd>` remount EINVAL → `mount_setattr(2)` (AT_EMPTY_PATH|AT_RECURSIVE, RDONLY|NOSUID|NODEV|NOEXEC)，并把 mount_setattr 支持纳入 preflight。门禁: `scripts/unsafe-audit.sh` + `scripts/engine-singlethread-check.sh` + `scripts/engine-selftest.sh` E1–E8 (22 断言) + `scripts/builtin-runtime-e2e.sh` B1–B7。S38c 收尾复跑: engine 栈 tests 41/0 (nsrun 22 / engine 12 / engine-proto 5 / engine-client 2)，workspace 1050/0。来源 kiri @ 7846fe0 Apache-2.0，`guest/kernel` GPL 不触碰；`NOTICE` + `LICENSES/Apache-2.0.txt` 落档。
 - **Sprint 36 — workflow 抽取独立仓库 arust-workflow (link_repos 第 8 pin, Q42) + router 热重载真 bug 修复.**

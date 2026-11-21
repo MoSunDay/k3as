@@ -30,12 +30,13 @@ k3s `pkg/deploy/` auto-deploy machinery.
 
 ---
 
-## T6.2 — 标准 addon (T6.2a 内嵌 Cluster DNS + T6.2b local-path; metrics-server backlog)
+## T6.2 — 标准 addon (T6.2a 内嵌 Cluster DNS + T6.2b local-path; metrics-server 弃置)
 
 - **目标 / Goal**
   The k3s default addon stack, toggle-able via `--disable` (T0.4):
   内嵌 Cluster DNS + local-path 供给（`servicelb`/`traefik` 已由
-  Layers 5/4.3 取代; metrics-server → S48 backlog 归档）。
+  Layers 5/4.3 取代; metrics-server 按 Q59 S49 决策显式弃置于前向支持子集外——HPA/`kubectl top`
+  若成为目标生态负载, 按 Q59 addition path 重入; 台账 phase-4-closure.md §6）。
 
 - **核心实现 / Core implementation**
   - **T6.2a — 内嵌 Cluster DNS (S43 排期, Q45 草案)**:
@@ -52,7 +53,8 @@ k3s `pkg/deploy/` auto-deploy machinery.
     provisioner+binder 控制器（PVC Pending → 在 data-dir 下造
     hostPath PV → Bound；默认 StorageClass 注解）。明确 out: 多节点
     亲和调度、VolumeBindingMode 延迟绑定。
-  - metrics-server: 不在本迭代，S48 backlog 归档。
+  - metrics-server: **显式弃置** (S49, Q59 注记)——前向支持子集外,
+    addition path 重入; 不再排队。
 
 - **验收手段 / Acceptance**
   - T6.2a: wire 格式/压缩单测 + 新 `scripts/dns-e2e.sh` D1–D5（pod 内

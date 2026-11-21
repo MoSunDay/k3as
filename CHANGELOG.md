@@ -7,6 +7,63 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 49 — T7.7 D7 收口 + 强制硬化开关 + S48 审计承接 + Q47 定稿 (Q63/Q47/Q59) (2026-11-21)
+
+**Goal:** Phase 4 闭环计划 (S49-S60, `plans/init-pro/phase-4-closure.md`) 首个
+执行 sprint——P0 收口: T7.7 D7 (opencode 进程内 tool-dispatch seam) 落地 +
+节点级强制沙箱硬化开关；承接 S48 顺延的审计收口 (C 类零无主项 + backlog
+归档 + metrics-server 按 Q59 显式弃置)；Q47 定稿 LOCKED (客户端 = rustls
+直依赖)。T1.3a 按风险裁决规则 1 顺延 S50 (S49 容量让位 P0)。**T7.7 →
+done** (counts: 39 done · 5 in-progress · 10 not-started)。
+
+**Changes**
+- **D7 进程内分发缝 (核心)**: `crates/agent` 新增 `runner_gate.rs` (+tests
+  拆分 225L) — opencode `Tool` trait 的 GatedTool 包裹器: 默认拒绝策略在
+  **native 分发点**复核每次调用 (含 hallucinated 与 `mcp__` 名——
+  `Agent.tools` 广告过滤不再是唯一闸门)、denial 写 per-attempt audit 文件、
+  `EffectivePolicy` serde camelCase 线格式; `SANDBOX_POLICY_FILE`/
+  `SANDBOX_AUDIT_FILE` 常量落 `api` (与 kubelet 契约共享)。**agent-runner
+  独立 staged 二进制** (`crates/agent/src/bin/agent-runner.rs`, `[[bin]]`)——
+  绝不链接进 init-pro 多调用二进制, 保住 Q36/D1 libsql 不变式 (双 libsql:
+  opencoder 0.9.30 vs anyhome 0.10.0-pre.4): runner 从策略文件 + 封闭 argv
+  起 opencode session (`run_with_registry` + 包裹后的 `tools::registry()`
+  注入), 父 registry 逐字传入子会话 (subagent 同样受限), `task` spawn 在
+  广告层拦截 (被强制 spawn 的子会话整体处于已门控 cgroup 约束内)。
+- **staging + kubelet 硬化接线**: `runtime/src/opencoder.rs`
+  `stage_agent_runner` (release 优先、build-tree 候选回退); kubelet hardened
+  分支写策略文件 + 传 `SANDBOX_*` argv + attempt 结束 harvest audit;
+  `select_sandbox` 新增 `RequiredRefused`——节点级 `--agent-require-sandbox`
+  开启时, 无沙箱承载能力的 Agent 被 fail-closed 拒为 Pending +
+  `SandboxRequired` 条件, 禁 host-direct/containerd 伪成功。
+- **证据门**: `scripts/sandbox-e2e.sh` 扩至 **SA1-SA8 23/23 PASS**——新增
+  SA7 (require-sandbox 拒绝面 + legacy-stub tripwire: 断言旧 T7.1 路径在
+  require 模式不会被静默回退) 与 SA8a-f (真实 agent-runner probe: gated
+  分发默认拒绝/allowlist 放行、子会话 registry 继承、策略文件透传、audit
+  落盘); `cli-flag-parity-test.sh` 新增 t77-agent
+  (`--agent-require-sandbox`) → **27/27**。
+- **SSOT 锁步**: `phase-4-closure.md` NEW (§0 100% 定义 6 条款 + §4
+  S49-S60 sprint 表 + §6 顺延台账 + §7 S49 执行记录 + §8 Q63 逐条款复核);
+  index.md T7.7 → done + counts 39/5/10 + sprint 史行; phase-3-host-ai.md
+  §9 链状态; plan/06 metrics-server 弃置、plan/07 T7.7 卡收口; decisions.md
+  Q47 DRAFT→LOCKED (客户端 = rustls 直依赖, 控制面 (apiserver + kubectl)
+  单一 rustls TLS 栈, 与 openrusty/Q38 P2-1 解耦顺延 S55) + Q11 修订注记 +
+  Q59 metrics-server 弃置注记 + Q63 S49 落地注记。
+
+**Gates (final tree):** `cargo build --workspace --locked` ok; workspace
+tests **1375 passed / 0 failed** (+11); `cargo clippy --workspace
+--all-targets --locked -- -D warnings` 0; `golden-conformance.sh`
+**68/68** (无回归); `sandbox-e2e.sh` **23/23** (SA1-SA8 特权真跑无 SKIP);
+`cli-flag-parity-test.sh` **27/27**; **D1 guard**: `cargo tree -p init-pro`
+仅 anyhome libsql 0.10.0-pre.4 链, 零 opencoder/libsql 0.9.30 (agent-runner
+为独立 staged 二进制)。
+
+**顺延/遗留 (入 phase-4-closure §6 台账):** T1.3a TLS+静态 token → S50
+(风险裁决规则 1); provider broker op-protocol ↔ OpenAI HTTP 真实桥接仍为
+stub——fresh netns 下无 egress, 属可用性差距而非遏制差距 (Q63 S49 注记);
+agent-runner 的 release/embed 打包 (build.rs 资产面) S50+ 处理 (当前
+build-tree 候选回退覆盖 dev/e2e)。本 sprint 按三笔提交落地: 3513747
+(code) → 1f90c04 (e2e 证据) → docs(ssot) 本条锁步。
+
 ## Sprint 48 — T7.7 Stage A 全量 + Stage B 执行面: Agent 动作拦截 + Linux 沙箱落地 (Q63) (2026-11-21)
 
 **Goal:** Phase 3 P0 按计划先行——T7.7/Q63 落地 Stage A 全量 (策略模型 +

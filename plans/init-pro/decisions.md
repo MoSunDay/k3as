@@ -404,6 +404,11 @@ kubectl refuses plain HTTP, and certificate management is the natural neighbor
 of the T1.3 identity/auth work. Real kubectl interop (TLS + persistence + watch)
 is the deferred acceptance gate of **T1.2b**.
 
+**修订注记 (Q47 定稿, S49 2026-11-21):** h2c 明文仅为默认姿态，TLS 为
+opt-in（`--tls-san` + `--token-file`，Q47）；控制面 (apiserver + kubectl)
+采用单一 rustls TLS 栈。golden h2c 基线不动；kubectl 真实 interop 验收门
+随 T1.3a 兑现（S50 开工）。
+
 **Consequences.**
 - `+` One HTTP stack for two paths; the Router (T5.2) reuses axum's hyper body
   streaming instead of pulling in a second framework.
@@ -2421,28 +2426,32 @@ Q22: 原 "PVC Pending forever" 语义废弃，Bound 生命周期落地)。
 前置)。(−) out: 多节点亲和调度、VolumeBindingMode 延迟绑定 (upstream
 parity 顺延)；自写面需 V1–V3 e2e 钉住生命周期语义。
 
-## Q47 — T1.3a TLS serving + 静态 token 认证 (T1.3a / S46) (DRAFT 2026-11-15, S46 开工前定稿)
+## Q47 — T1.3a TLS serving + 静态 token 认证 (T1.3a / S50) (LOCKED 2026-11-21, S49 定稿, 代码 S50 开工)
 
 **Context.** Q11 locked the API server as h2c/cleartext-only for v1
-(intranet posture, Q38). The S46 slice (T1.3a) adds opt-in TLS serving +
-static bearer-token authn, revising that posture. This is a DRAFT —
-定稿前不动代码.
+(intranet posture, Q38). The T1.3a slice adds opt-in TLS serving + static
+bearer-token authn, revising that posture. 草案形成于 S46 开工前；S48 审计
+把客户端选型列为待定项，S49 (2026-11-21) 定稿。T1.3a 代码按 S49 风险裁决
+顺延 S50 开工（phase-4-closure §5 风险 1）。
 
 **Options.** (a) TLS 客户端: rustls 直接依赖 vs 复用 openrusty TLS 面
 (其 pin 前置了 forward adaptation 点 `gateway_config.rs`, Q38 P2-1)。
-(b) serving 侧: axum-rustls vs openrusty listener 复用. 草案倾向
-server 侧 rustls (axum 生态直接)；客户端选型定稿时拍板.
+(b) serving 侧: axum-rustls vs openrusty listener 复用。
 
-**Decision (草案).** server 侧自签 CA + serving cert (`--tls-san`) +
-axum authn 中间件 (Bearer 静态 token, `--token-file` 转 wired)；
-客户端选型 (rustls vs openrusty 复用) 在 S46 开工前定稿时拍板。必须
-在 S46 开工前定稿；定稿时 Q11 原文加修订注记 (Q47 修订 Q11: h2c 明文
-仅为默认，TLS opt-in；golden h2c 基线不动)。
+**Decision (LOCKED S49).** server 侧自签 CA + serving cert (`--tls-san`) +
+axum authn 中间件 (Bearer 静态 token, `--token-file` 转 wired)。客户端 =
+**rustls 直接依赖**：控制面 (apiserver + kubectl) 单一 rustls TLS 栈，与
+openrusty 解耦——Q38 P2-1 的 `gateway_config.rs` 前置适配点留给 Router
+数据面自身，不承担控制面 TLS（S55 再议）。Q11 原文修订注记随本定稿落库
+(Q47 修订 Q11: h2c 明文仅为默认，TLS opt-in；golden h2c 基线不动)。
 
-**Consequences.** (+) TLS 面 + token 认证独立闭环 (`scripts/auth-e2e.sh`
-A1–A6)，T1.3b RBAC (S47) 有 authn 地基。(−) golden 保持 h2c 明文基线
-(TLS opt-in 旗标, 避免全量重基线)；kubeconfig 读取起步仅
-server/CA/token 三字段 (完整 parity 顺延)。
+**Consequences.** (+) 控制面单 rustls 栈，避免双 TLS 实现的维护分叉；
+TLS 面 + token 认证独立闭环规划为 S50 验收门 (`scripts/auth-e2e.sh`
+A1–A6)，为 T1.3b RBAC (S50 认证链 I) 提供 authn 地基。 (−) golden 保持
+h2c 明文基线 (TLS opt-in 旗标, 避免全量重基线)；kubeconfig 读取仅
+server/CA/token 三字段起步，**完整 parity 显式弃置**入 phase-4-closure
+§6 顺延台账（需求驱动再启，不设自动到期）；定稿时无已落地代码，S50
+开工即受本条约束。
 
 ## Q48 — 内置容器引擎: kiri 内核移植 + 单线程外部引擎进程 (T4.11–T4.13, 2026-11-16, LOCKED)
 
@@ -2879,6 +2888,12 @@ narrowed**；这是一项前向范围决策，不改写已完成工作或历史�
 的 JSON-only 决定完全保留。T0.6 的状态和历史不变，golden matrix 的扩展仍是
 每个新增支持面的必要交付物。
 
+**S49 注记 (metrics-server 显式弃置):** metrics-server (metrics.k8s.io/
+v1beta1) 经 S48 审计 + S49 复核显式弃置于前向支持集之外——无当前目标
+工作负载 (HPA / kubectl top) 依赖它；若未来出现目标需求，按本决策的
+addition 路径重新纳入（discovery 发布 + 版本化 golden matrix 交付物），
+不作默认承诺。
+
 ## Q60 — T4.15 builtin host-direct performance profile inside a tenant-dedicated cluster (2026-11-19, LOCKED)
 
 **Context.** k3as 是多租户 Agent sandbox 平台；支持的部署是一租户一集群，
@@ -3112,3 +3127,16 @@ rootfs、fresh netns、非 root 身份、强制 cgroup v2 与 broker 等完整�
 明确 Pending/Failed，不能以 host-direct/containerd 伪成功。operator 负责 baseline
 allowlist 与资源上限；Q63 不把 Namespace 变成租户边界，也不改变 Q60 普通推理
 性能画像的部署约束。
+
+**S49 落地注记 (D7 收口):** T7.7 D7 已落地——opencode 以进程内 tool-dispatch
+seam 运行于独立 staged 二进制 `agent-runner`（`crates/agent` `[[bin]]`，绝不
+链接进 init-pro 多调用二进制，保住 Q36/D1 libsql 不变式）：默认拒绝策略经
+`runner_gate` 在 native 分发点包裹 tool registry（GatedTool 复核含 hallucinated
+与 `mcp__` 名的每次分发，`Agent.tools` 广告过滤不再是唯一闸门），父会话
+registry 原样传入子会话，subagent 继承同样受限；`task` spawn 绕过 registry
+map 的路径在广告层拦截，被强制 spawn 的子会话整体处于已门控 cgroup 约束内。
+节点级强制硬化开关 `--agent-require-sandbox` 到位：无沙箱承载能力的 Agent
+被拒绝为 Pending + `SandboxRequired` 条件（fail closed），禁止 host-direct/
+containerd 伪成功。遗留（可用性差距，非遏制差距）：provider broker 的
+op-protocol ↔ OpenAI HTTP 真实桥接仍为 stub——fresh netns 下无 egress，
+沙箱化 Agent 的真实上游调用待 provider 桥接兑现（phase-4-closure 台账）。
