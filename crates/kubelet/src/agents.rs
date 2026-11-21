@@ -47,6 +47,9 @@ pub struct AgentRunnerConfig {
     pub anyhome_addr: Option<String>,
     /// One attempt budget (`INIT_PRO_AGENT_EXEC_TIMEOUT_SECS`).
     pub exec_timeout: Duration,
+    /// T7.7 (Q63) node-side sandbox config; `None` keeps hardened Agents
+    /// Pending (fail-closed) — never the legacy subprocess path.
+    pub sandbox: Option<crate::agent_sandbox::SandboxNodeConfig>,
 }
 
 impl AgentRunnerConfig {
@@ -58,6 +61,7 @@ impl AgentRunnerConfig {
             runner_bin: None,
             anyhome_addr: None,
             exec_timeout: exec_timeout_from_env().unwrap_or(DEFAULT_EXEC_TIMEOUT),
+            sandbox: None,
         }
     }
 }

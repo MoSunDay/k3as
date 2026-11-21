@@ -83,6 +83,14 @@ pub struct AgentSpec {
     /// here: API keys / base URLs travel via environment only (Q35).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Action-policy narrowing overlay (T7.7, Q63): may only narrow the
+    /// operator baseline; widening is deterministically rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<crate::agent_policy::AgentPolicySpec>,
+    /// Hardened sandbox containment request (T7.7, Q63). Absent = legacy
+    /// Q37 path. Present mode must be "hardened"; limits are mandatory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<crate::agent_policy::AgentSandboxSpec>,
 }
 
 /// Observed Agent state.
@@ -228,6 +236,8 @@ mod tests {
                 prompt: "fix the failing test".to_string(),
                 model: Some("claude-sonnet-4-5".to_string()),
                 provider: Some("anthropic".to_string()),
+                policy: None,
+                sandbox: None,
             },
         );
         agent.status = Some(AgentStatus {

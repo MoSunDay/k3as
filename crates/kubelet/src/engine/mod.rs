@@ -14,6 +14,7 @@
 //! once into shared per-layer dirs and containers run on per-container
 //! overlayfs views (fused-copy fallback when the kernel path is out).
 
+pub mod agent_stream;
 pub mod backend;
 pub mod exec;
 pub mod host_direct;

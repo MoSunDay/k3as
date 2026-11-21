@@ -12,6 +12,9 @@
 //! - [`patch`] — Strategic Merge Patch (core/v1 strategies) + JSON Patch fallback.
 //! - [`apply`] — Server-Side Apply field-manager (T1.2c).
 //! - [`agent`] — the `init-pro.io/v1` `Agent` resource (T7.1 rewrite, Q35).
+//! - [`agent_policy`] — T7.7/Q63 Agent action policy + hardened sandbox:
+//!   wire types, admission validation, and the node-side narrowing-only
+//!   effective-policy/gate engine.
 //! - [`initpro`] — the `init-pro.io/v1` CRD types (e.g. `LuaRouter`).
 //! - [`traffic`] — `TrafficSplit`: weighted one-click traffic switching
 //!   consumed by the Router's NodePort plane (T8.2, Q57).
@@ -25,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod agent_policy;
 pub mod apply;
 pub mod argoproj;
 pub mod build;
@@ -40,11 +44,17 @@ pub mod traffic;
 pub mod validate;
 pub mod validate_host_direct;
 
+// T7.7/Q63 unit evidence (AS1) — split out of `agent_policy` to respect the
+// file-size limit.
+#[cfg(test)]
+mod agent_policy_tests;
+
 // Convenience re-exports so consumers depend on `api` only.
 pub use agent::{
     Agent, AgentCondition, AgentList, AgentSpec, AgentStatus, KIND as AGENT_KIND,
     PLURAL as AGENT_PLURAL,
 };
+pub use agent_policy::{AgentPolicySpec, AgentSandboxSpec, BindRule, SandboxLimits, ToolClass};
 pub use apply::{apply_object, ApplyOptions, ApplyResult, Conflict, ManagedFieldEntry, Operation};
 pub use build::{Build, BuildList, BuildSpec, BuildStatus};
 pub use discovery::{api_group_list, api_resource_list, core_api_versions};

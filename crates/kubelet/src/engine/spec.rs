@@ -179,6 +179,9 @@ pub(crate) fn container_spec(
         pause: false,
         log_path: Some(log.to_string_lossy().into_owned()),
         no_new_privs: true,
+        // T7.7 (Q63): pod containers keep Docker's default cap set;
+        // only the Agent sandbox sends an explicit 0 mask.
+        caps: engine_proto::DEFAULT_CAPS,
         cgroup_name: None,
         memory_max: (r.memory_limit_in_bytes > 0).then_some(r.memory_limit_in_bytes as u64),
         cpu_max: (r.cpu_quota > 0 && r.cpu_period > 0)

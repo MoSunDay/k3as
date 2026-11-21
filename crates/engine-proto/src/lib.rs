@@ -118,6 +118,25 @@ pub struct OverlaySpec {
     pub work: String,
 }
 
+/// Docker's default capability set (14 caps) as a bit mask; mirror of
+/// `nsrun::caps::DEFAULT_CAPS` (Q63 D2 lock-step note — nsrun cannot
+/// depend on this crate, so the two constants are kept identical by
+/// test).
+pub const DEFAULT_CAPS: u64 = (1 << 0)   // CHOWN
+    | (1 << 1)   // DAC_OVERRIDE
+    | (1 << 3)   // FOWNER
+    | (1 << 4)   // FSETID
+    | (1 << 5)   // KILL
+    | (1 << 6)   // SETGID
+    | (1 << 7)   // SETUID
+    | (1 << 8)   // SETPCAP
+    | (1 << 10)  // NET_BIND_SERVICE
+    | (1 << 13)  // NET_RAW
+    | (1 << 18)  // SYS_CHROOT
+    | (1 << 27)  // MKNOD
+    | (1 << 29)  // AUDIT_WRITE
+    | (1 << 31); // SETFCAP
+
 /// What to run. Mirrors the CRI fields the kubelet already carries, minus
 /// the P2+ fields (labels, log path, CNI result).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +191,13 @@ pub struct ContainerSpec {
     pub log_path: Option<String>,
     #[serde(default = "default_true")]
     pub no_new_privs: bool,
+    /// Capability bounding-set mask applied by the engine child
+    /// (T4.11/T7.7). Default is Docker's classic 14-cap set — the same
+    /// mask as `nsrun::caps::DEFAULT_CAPS` (kept in lock-step; nsrun
+    /// cannot depend on this crate). The Q63 sandbox sends an explicit
+    /// `0` for an empty capability set.
+    #[serde(default = "default_caps")]
+    pub caps: u64,
     #[serde(default)]
     pub cgroup_name: Option<String>,
     #[serde(default)]
@@ -201,6 +227,7 @@ impl ContainerSpec {
             pause: false,
             log_path: None,
             no_new_privs: true,
+            caps: DEFAULT_CAPS,
             cgroup_name: None,
             memory_max: None,
             cpu_max: None,
@@ -215,6 +242,10 @@ fn default_cwd() -> String {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_caps() -> u64 {
+    DEFAULT_CAPS
 }
 
 // One request per session: the extra stack bytes are cheaper than a Box.
@@ -326,11 +357,29 @@ mod tests {
         };
         assert_eq!(spec.cwd, "/");
         assert!(spec.no_new_privs);
+        assert_eq!(spec.caps, DEFAULT_CAPS);
         assert!(spec.mounts.is_empty());
         assert!(spec.netns.is_none());
         assert!(spec.overlay.is_none());
         assert!(!spec.pause);
         assert!(spec.log_path.is_none());
+    }
+
+    #[test]
+    fn caps_default_to_docker_set_and_zero_round_trips() {
+        // Old peers that never send `caps` keep Docker's classic set.
+        assert_eq!(DEFAULT_CAPS.count_ones(), 14);
+        let raw = br#"{"id":"c1","rootfs":"/r","argv":["/bin/true"]}"#;
+        assert_eq!(
+            decode_json::<ContainerSpec>(raw).unwrap().caps,
+            DEFAULT_CAPS
+        );
+        // The Q63 sandbox sends an explicit 0 (empty capability set).
+        let raw = br#"{"id":"c1","rootfs":"/r","argv":["/bin/true"],"caps":0}"#;
+        let spec = decode_json::<ContainerSpec>(raw).unwrap();
+        assert_eq!(spec.caps, 0);
+        let raw = encode_json(&spec).unwrap();
+        assert_eq!(decode_json::<ContainerSpec>(&raw).unwrap().caps, 0);
     }
 
     #[test]

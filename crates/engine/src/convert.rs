@@ -49,6 +49,9 @@ pub fn to_run_spec(spec: &ContainerSpec) -> Result<RunSpec, String> {
     });
     run.pause = spec.pause;
     run.no_new_privs = spec.no_new_privs;
+    // T7.7 (Q63): the sandbox sends an explicit 0-cap mask; the default
+    // keeps Docker's set.
+    run.caps = spec.caps;
     run.mounts = spec
         .mounts
         .iter()
@@ -124,6 +127,24 @@ mod tests {
         assert_eq!(run.cgroup.memory_max, Some(1024));
         assert_eq!(run.cgroup.memory_swap_max, Some(0));
         assert_eq!(run.cgroup_name.as_deref(), Some("c1"));
+        assert_eq!(run.caps, engine_proto::DEFAULT_CAPS);
+    }
+
+    #[test]
+    fn maps_an_explicit_empty_capability_mask() {
+        // T7.7 (Q63): the sandbox sends caps=0 for no capabilities at all.
+        let mut spec = ContainerSpec::new("c1", "/srv/rootfs", vec!["/bin/true".into()]);
+        spec.caps = 0;
+        let run = to_run_spec(&spec).unwrap();
+        assert_eq!(run.caps, 0);
+    }
+
+    #[test]
+    fn proto_default_caps_stay_in_lock_step_with_nsrun() {
+        // Q63 D2: `RunSpec::new` defaults caps to nsrun's private
+        // `caps::DEFAULT_CAPS`; the proto mirror must match it exactly.
+        let fresh = RunSpec::new("/r", vec!["/bin/true".into()]);
+        assert_eq!(fresh.caps, engine_proto::DEFAULT_CAPS);
     }
 
     #[test]

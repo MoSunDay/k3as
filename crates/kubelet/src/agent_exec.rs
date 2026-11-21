@@ -86,13 +86,20 @@ pub(crate) async fn run_attempt(
     keep_going: &mut watch::Receiver<bool>,
 ) -> Option<(&'static str, Value)> {
     let view = &record.view;
-    let runner = cfg.runner_bin.as_ref()?;
     if let Err(reason) = objs::validate_prompt(view) {
         return Some((
             objs::PHASE_FAILED,
             fail_cond(reason, "spec.prompt is empty; nothing to execute"),
         ));
     }
+    // T7.7 (Q63): hardened Agents never take the legacy direct-subprocess
+    // path — the sandbox branch owns them end-to-end (fail-closed).
+    if let Some(outcome) =
+        crate::agent_exec_sandbox::try_hardened(client, cfg, written, record, keep_going).await
+    {
+        return Some(outcome);
+    }
+    let runner = cfg.runner_bin.as_ref()?;
     let source = objs::workspace_source(&record.raw, cfg.anyhome_addr.as_deref());
     let (ws, _mounted) = match &source {
         Some((addr, path)) => match mount_workspace(&cfg.data_dir, addr, path, &view.name).await {
@@ -231,7 +238,7 @@ async fn verdict(
 
 /// Node-side mount target for one Agent workspace: `<data>/agent-ws/<name>`
 /// (names are RFC1123 subdomains; `/` is rejected as defense in depth).
-fn workspace_dir(data_dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn workspace_dir(data_dir: &Path, name: &str) -> PathBuf {
     if name.contains('/') {
         // Unreachable via the apiserver; refuse rather than escape.
         return data_dir.join(WS_ROOT).join("invalid");
@@ -317,7 +324,7 @@ async fn mount_with_retry(addr: &str, parent: &str, root: &Path) -> Result<(), S
 /// mounting the same export. The root mount is deliberately left pinned
 /// (it is per-address and reusable across Agents; the per-attempt
 /// umount of the old per-Agent design would unmount siblings).
-async fn mount_workspace(
+pub(crate) async fn mount_workspace(
     data_dir: &Path,
     addr: &str,
     path: &str,
@@ -405,7 +412,7 @@ async fn create_dir_retry(dir: &Path) -> Result<(), String> {
 /// (Q37): `skills/`, `tools/`, `mem/` and the `.opencoder/skills -> ../skills`
 /// bridge that redirects opencoder's HOME-based skill lookup into the
 /// shared export (A2).
-async fn prepare_workspace(dir: &Path) -> Result<(), String> {
+pub(crate) async fn prepare_workspace(dir: &Path) -> Result<(), String> {
     for sub in ["skills", "tools", "mem", ".opencoder"] {
         create_dir_retry(&dir.join(sub)).await?;
     }

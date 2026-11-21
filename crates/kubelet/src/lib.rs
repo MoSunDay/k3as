@@ -35,8 +35,16 @@
 //!   [`spawn`].
 #![forbid(unsafe_code)]
 
+pub mod agent_broker;
 pub mod agent_exec;
+pub mod agent_exec_sandbox;
+#[cfg(test)] // T7.7 (Q63) hardened-sandbox pure-selection cases
+mod agent_exec_sandbox_tests;
 pub mod agent_objects;
+pub mod agent_sandbox;
+pub mod agent_sandbox_plan;
+#[cfg(test)] // T7.7 (Q63) hardened-sandbox spec/tamper cases
+mod agent_sandbox_tests;
 pub mod agents;
 pub mod cri_backend;
 pub mod engine;
@@ -62,6 +70,7 @@ pub mod sync;
 pub mod volumes;
 pub mod watch;
 
+pub use agent_sandbox::{select_sandbox, SandboxNodeConfig, SandboxSelection};
 pub use agents::spawn_agent_runner;
 pub use agents::AgentRunnerConfig;
 pub use cri_backend::{ContainerView, CriBackend, CriCtlBackend, SandboxView};

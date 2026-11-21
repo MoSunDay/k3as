@@ -449,6 +449,9 @@ fn run_supervised(
                     // a mount address.
                     ac.anyhome_addr = (!anyhome_addr.trim().is_empty())
                         .then(|| anyhome_addr.clone());
+                    // T7.7 (Q63): node-side sandbox config; absent keeps
+                    // hardened Agents Pending (fail-closed).
+                    ac.sandbox = kubelet::agent_sandbox::SandboxNodeConfig::from_env();
                     let handles = kubelet::spawn_agent_runner(ac, shutdown.clone());
                     let mut drain = kubelet_drain.take().unwrap_or_default();
                     drain.extend(handles);

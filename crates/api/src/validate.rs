@@ -52,6 +52,7 @@ const TEMPLATE_KINDS: [&str; 4] = ["Deployment", "ReplicaSet", "StatefulSet", "D
 pub fn admit(group: &str, kind: &str, body: &Value) -> Result<(), String> {
     match (group.to_ascii_lowercase().as_str(), kind) {
         ("", "Pod") => validate_pod(Some(body), "spec"),
+        ("init-pro.io", "Agent") => validate_agent(body),
         ("apps", kind) if TEMPLATE_KINDS.contains(&kind) => {
             validate_pod(body.pointer("/spec/template"), "spec.template.spec")?;
             if kind == "Deployment" {
@@ -60,6 +61,17 @@ pub fn admit(group: &str, kind: &str, body: &Value) -> Result<(), String> {
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+/// Validate one `init-pro.io/v1` Agent body (T7.7, Q63): delegates the
+/// action-policy / hardened-sandbox shape checks to
+/// `agent_policy::validate_agent_spec` over `body.spec` (logic + tests live
+/// there). A missing spec has nothing to check.
+fn validate_agent(body: &Value) -> Result<(), String> {
+    match body.get("spec") {
+        Some(spec) => crate::agent_policy::validate_agent_spec(spec),
+        None => Ok(()),
     }
 }
 

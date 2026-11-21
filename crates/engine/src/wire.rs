@@ -48,6 +48,13 @@ impl FrameBuffer {
     pub fn poll(&mut self, stream: &mut UnixStream) -> io::Result<PeerInput> {
         let mut scratch = [0u8; READ_CHUNK];
         loop {
+            // Parse the buffer BEFORE reading: a peer that writes
+            // Signal+Shutdown back-to-back lands BOTH frames in one
+            // slurp; the first is consumed by `run_one` and the second
+            // would strand here while the socket idles (T7.7 SA4d).
+            if let Some(frame) = try_parse(&mut self.buf)? {
+                return Ok(PeerInput::Frame(frame));
+            }
             match stream.read(&mut scratch) {
                 Ok(0) => {
                     return match try_parse(&mut self.buf)? {
@@ -182,5 +189,26 @@ mod tests {
         let mut fb = FrameBuffer::new();
         assert!(matches!(fb.poll(&mut b).unwrap(), PeerInput::Idle));
         drop(a);
+    }
+
+    /// T7.7 (Q63) regression: a peer writing Signal+Shutdown back-to-back
+    /// lands both frames in one slurp; after the first is consumed the
+    /// second MUST still be delivered once the socket idles — it used to
+    /// strand in the buffer while `poll` reported Idle forever (SA4d).
+    #[test]
+    fn buffered_frame_is_delivered_once_the_socket_idles() {
+        let (_a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
+        b.set_nonblocking(true).unwrap();
+        let mut fb = FrameBuffer::new();
+        // Simulate the one-slurp-two-frames state directly: the buffer
+        // holds a whole frame while the socket has nothing readable.
+        fb.buf
+            .extend_from_slice(&frame(FrameKind::Json, br#"{"op":"shutdown"}"#));
+        match fb.poll(&mut b).unwrap() {
+            PeerInput::Frame(f) => assert_eq!(f.payload, br#"{"op":"shutdown"}"#),
+            other => panic!("expected the buffered frame, got {other:?}"),
+        }
+        assert!(matches!(fb.poll(&mut b).unwrap(), PeerInput::Idle));
+        assert!(fb.buf.is_empty());
     }
 }
