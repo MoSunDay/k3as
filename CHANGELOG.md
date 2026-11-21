@@ -7,6 +7,92 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 48 — T7.7 Stage A 全量 + Stage B 执行面: Agent 动作拦截 + Linux 沙箱落地 (Q63) (2026-11-21)
+
+**Goal:** Phase 3 P0 按计划先行——T7.7/Q63 落地 Stage A 全量 (策略模型 +
+apiserver 准入臂) 与 Stage B 执行面 (nsrun/engine 硬化执行 + per-attempt
+provider broker)，AS1-AS6 验收全部脚本化并在本机特权 Linux (root + cgroup
+v2 + 静态 busybox) 真跑 **16/16 无 SKIP**。按 Q63 分级规则，S48 交付仍是
+mediation 级门控 (policy gate + broker allowlist + 封闭 env) 叠加 Linux
+强制隔离；opencoder 进程内 tool-dispatch 拦截 seam (S48 计划 D7) 移交
+S49——**T7.7 转 in-progress 而非 done，卡保持开放**。
+
+**Changes**
+- **api 策略模型 (Stage A)**: `api/src/agent_policy.rs` (+tests 拆分文件) —
+  AgentSpec `policy` (只收窄 overlay) + `sandbox` (mode:"hardened"、强制
+  limits) wire 类型; default-deny `PolicyBaseline`; 纯函数只收窄求交引擎
+  `effective()` (扩权 => 确定性 `PolicyViolation` + audit); subagent 逐字
+  `inherit()`; 中央 gate 判定 `gate()` + 无 secret `denial_audit()`;
+  apiserver 准入臂 ("init-pro.io","Agent") 经 `validate_agent_spec`——
+  unknown mode / 缺失或零 limits / uid0-gid0 / 坏 tool class / 坏 binds
+  全部拒绝。golden 新套件 `sandbox.sh` **G99-G106**。
+- **engine-proto caps**: `ContainerSpec.caps: u64` (serde default = Docker
+  14-cap 掩码 `DEFAULT_CAPS`，与 nsrun lock-step 单测对齐) +
+  `engine/src/convert.rs` 映射；沙箱路径发送 0 (空 capability)。
+- **provider broker**: `kubelet/src/agent_broker.rs` — per-attempt
+  Unix-socket broker: 仅 loopback 上游 (拒非 loopback——不是 generic
+  proxy)、operation allowlist、凭证**只注入上游** (绝不跨 socket)、attempt
+  结束即吊销 socket、无 secret audit; 单测含 fake local provider 的
+  secret-canary 封闭验证。
+- **沙箱契约**: `kubelet/src/agent_sandbox.rs` (+`agent_sandbox_plan.rs`
+  +tests) — fail-closed `select_sandbox` (hardened 请求 + 节点未配置 =>
+  Pending/SandboxUnavailable，**无 legacy 回退**)；`SandboxNodeConfig::
+  from_env()` (INIT_PRO_AGENT_SANDBOX=1 + INIT_PRO_AGENT_BROKER_* 旋钮)；
+  纯 `sandbox_spec()` builder (私有非宿主空 rootfs root-owned、workspace rw
+  `/workspace`、scratch rw `/scratch`、runner 以 root-owned 副本 staging 进
+  rootfs `/runner` (ro bind 无 exec)、broker socket rw
+  `/broker/provider.sock`、uid/gid 1000、caps 0、no_new_privs、fresh
+  netns、强制 cgroup CPU/memory/PIDs，cgroup 位于 `/sys/fs/cgroup/
+  init-pro/` 之下) + `validate_hardened()` 不变量检查。
+- **沙箱执行 (Stage B)**: `kubelet/src/agent_exec_sandbox.rs`
+  (+`engine/agent_stream.rs` 拆分) — hardened attempt 分支接在 T7.1 run
+  loop 的 legacy 路径**之前**: 封闭集 env 净化 (继承 env 整体丢弃——Q63
+  在该路径 supersede Q37 child-env 凭证传输)、每 attempt 一个 engine
+  进程、per-attempt broker spawn、verdict 映射 (exit0 Succeeded / exit7
+  RunnerFailed / 超时 ExecTimeout / 运行中 DELETE cancelled)，四条路径
+  共享同一 teardown (signal -> engine graceful stop -> cgroup.kill
+  descendants -> socket 移除 -> broker 吊销)。
+- **e2e + golden**: `scripts/sandbox-e2e.sh` (NEW——特权 Linux 本机真跑,
+  无 SKIP) AS1-AS6 **16/16 PASS**; `scripts/golden-conformance.sh` 收编
+  新套件 `scripts/golden/suites/sandbox.sh`; `scripts/all-gates.sh`
+  battery 加入 sandbox-e2e.sh。
+
+**Gates (final tree, 本 session 复跑):** `cargo build --workspace --locked`
+ok; workspace tests **1364 passed / 0 failed**; `cargo clippy --workspace
+--all-targets --locked -- -D warnings` 0; `golden-conformance.sh`
+**68/68** (新增 G99-G106: hardened 往返、soft 模式拒绝、缺失/零 limits
+拒绝、uid0/gid0 拒绝、malformed allowTools 拒绝、相对与 `..` binds 拒绝、
+legacy 无沙箱 Agent 仍准入、SSA create/re-apply 保持沙箱);
+`sandbox-e2e.sh` **16/16** (AS1-AS6 全 PASS 无 SKIP——本机 root + cgroup
+v2 特权真跑: SA1 策略确定性、SA2 uid/gid 1000 + CapEff 全零 + NoNewPrivs
++ 私有 rootfs/netns/hostname + minimal `/dev` + 无 containerd.sock、SA3
+broker socket 生命周期 + fake provider 日志空、SA4 容器内
+memory.max/pids.max/cpu.max + 四路后代清理、SA5 secret canaries 不入
+env/logs、SA6 fail-closed Pending/SandboxUnavailable); 回归门:
+`engine-selftest.sh` 33/33、`cli-flag-parity-test.sh` 26/26、
+`inference-fake-e2e.sh` 11/11、`multicall-selftest.sh` PASS; all-gates
+battery 已含 sandbox-e2e。
+
+**S48 e2e 发现并修复的 3 个产品缺陷:**
+- **cpu_max 配额换算**: millis ×100 误写 ×1000——10 倍宽松上限; 修正后
+  SA4 实测 `cpu.max "50000 100000"`。
+- **engine `wire.rs` FrameBuffer 只在 socket 读后轮询**: 背靠背
+  Signal+Shutdown 两帧时 Shutdown 帧滞留缓冲 (engine park 直到 reap
+  SIGKILL)——空闲时也解析已缓冲帧 + 回归测试。
+- **runner ro-bind 无 exec**: 只读 bind 挂载位无 exec——改为以 root-owned
+  副本 staging 进私有 rootfs `/runner`。
+
+**偏离与顺延 (记录在案, 非静默丢弃):** opencoder 进程内 tool-dispatch
+seam (S48 计划 D7) 移交 S49——S48 交付 wrapper/mediation 级门控 (policy
+gate + broker operation allowlist + 封闭 env); 按 Q63，mediation-only
+阶段**永不关闭 T7.7**。决策: S48 不做 opencoder pin bump (尊重 Q38 pin
+SSOT)。
+
+**风险/后续 (S49):** opencoder 进程内拦截 seam + AS1-AS6 closure 评审;
+T7.7 状态纪律——in-progress 不升级 (见 index.md/plan/07/phase-3 §0b);
+node04 用户自有轨道 (真硬件 HD/GPU6/INF6) 不变; 未来复跑 sandbox-e2e 仍需
+特权 cgroup v2 Linux 宿主 (本机已真跑一次)。
+
 ## Sprint 47 — node04-llama-k3as: T4.15/T7.2/T7.6 进入 in-progress (fake/offline 全链落地; 真硬件 closure 未满足, 三个 TODO 均保持开放) (2026-11-19)
 
 **Goal:** S47 计划的第一实现切片——为 node04 llama.cpp 迁移到 k3as 调度铺平

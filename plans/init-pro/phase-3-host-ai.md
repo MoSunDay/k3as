@@ -60,9 +60,66 @@ closed** (real-hardware closure criteria in §4-§6 are unmet):
   margin（防节点快钟提前放行、慢钟仅延迟不锁死），并文档化 NTP ≤ margin
   前置假设；等待消息携带两侧观测时间戳。
 
+## 0b. Sprint 48 — T7.7 Stage A full + Stage B execution face (Q63)
+
+S48 executed the Phase 3 P0 card as planned; **T7.7 moved not-started →
+in-progress and stays open** — the opencode in-process tool-dispatch seam
+plus the full AS closure review remain, and per §3 a mediation-only stage
+can never close the card:
+
+- **Stage A (policy plane, full)**: `crates/api/src/agent_policy.rs`
+  (+tests, split file) — AgentSpec `policy` (narrowing-only overlay) +
+  `sandbox` (mode `"hardened"`, mandatory limits) wire types, node/operator
+  default-deny `PolicyBaseline`, pure narrowing-only intersection
+  `effective()` (widening ⇒ deterministic `PolicyViolation` + audit),
+  verbatim subagent `inherit()`, central-gate decision `gate()` + no-secret
+  `denial_audit()`; apiserver admission arm ("init-pro.io","Agent") via
+  `validate_agent_spec` (unknown mode / missing-or-zero limits / uid0-gid0
+  / bad tool class / bad binds rejected). Golden suite
+  `scripts/golden/suites/sandbox.sh` adds **G99-G106**.
+- **Stage B (execution face)**: `engine-proto` `ContainerSpec.caps`
+  (serde default = Docker 14-cap `DEFAULT_CAPS` mask, lock-step-tested
+  against nsrun; the sandbox sends 0) + `engine/convert.rs` mapping;
+  `kubelet/src/agent_broker.rs` per-attempt Unix-socket provider broker
+  (loopback-only upstream, operation allowlist, credentials injected
+  upstream only, socket revoked at attempt end);
+  `kubelet/src/agent_sandbox{,_plan}.rs` fail-closed `select_sandbox`
+  (hardened requested + node not ready ⇒ Pending/SandboxUnavailable, no
+  legacy fallback) + pure `sandbox_spec()` + `validate_hardened()`;
+  `kubelet/src/agent_exec_sandbox.rs` (+`engine/agent_stream.rs` split) —
+  hardened attempt branch wired ahead of the legacy T7.1 path: closed-set
+  env (inherited env dropped entirely — Q63 supersedes Q37 child-env
+  credential transport on this path), one engine process per attempt,
+  verdict mapping exit0 Succeeded / exit7 RunnerFailed / timeout
+  ExecTimeout / DELETE-mid-run cancelled, one shared teardown on all four
+  paths.
+- **Evidence (real privileged Linux run on this host: root + cgroup v2 +
+  static busybox, no SKIPs)**: `scripts/sandbox-e2e.sh` (NEW) **16/16**
+  across AS1-AS6 — policy determinism; uid/gid 1000 + CapEff all-zero +
+  NoNewPrivs + private rootfs/netns/hostname/minimal `/dev` + no
+  containerd.sock; broker socket exists-then-revoked with an empty
+  fake-provider log (no arbitrary egress); in-container memory.max
+  268435456 / pids.max 64 / cpu.max "50000 100000" plus four-way
+  descendant cleanup; secret canaries absent from in-container env and
+  engine logs; hardened Agent on an unsandboxed node stays Pending
+  Ready=False SandboxUnavailable and never executes. Workspace tests
+  **1364 passed / 0 failed**; clippy zero; golden **68/68**; regressions
+  engine-selftest 33/33, cli-flag-parity 26/26, inference-fake 11/11;
+  `scripts/all-gates.sh` battery now includes sandbox-e2e.sh.
+- **Product bugs found by the e2e and fixed in-sprint**: cpu_max quota
+  conversion factor (millis ×100, was ×1000 — a 10× loose cap); engine
+  `wire.rs` FrameBuffer was polled only after socket reads so
+  back-to-back Signal+Shutdown stranded the Shutdown frame (now parsed
+  when idle + regression test); runner ro-binds are noexec, so the runner
+  is staged into the private rootfs as root-owned copies.
+- **Deferred (recorded, not silently dropped)**: the opencode in-process
+  tool-dispatch seam (S48 plan D7) moves to S49 — S48 ships
+  wrapper/mediation-level gating (policy gate + broker operation allowlist
+  + closed env). No opencoder pin bump in S48 (Q38 pin SSOT respected).
+
 ## 1. Current baseline
 
-- The SSOT contains **54 TODOs: 38 done, 2 in-progress, 14 not-started**.
+- The SSOT contains **54 TODOs: 38 done, 6 in-progress, 10 not-started**.
   Layer 4 has 15 cards (T4.1–T4.15); Layer 7 has 7 cards (T7.1–T7.7).
 - k3as is a **multi-tenant Agent sandbox platform**. One tenant per cluster with
   tenant-dedicated nodes is **necessary but not sufficient** for hostile
