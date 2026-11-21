@@ -444,6 +444,13 @@ fn run_supervised(
                         cfg.data_dir.clone(),
                     );
                     ac.runner_bin = runner_bin;
+                    // T7.7 D7 (Q63): hardened runner staging (fail-closed).
+                    ac.hardened_runner_bin =
+                        node_runtime::opencoder::stage_agent_runner(&cfg.data_dir)
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(target: "init-pro", error = %e, "agent-runner");
+                                None
+                            });
                     // Empty `--anyhome-addr` = loop on, node-local
                     // workspace fallback (Q37); only a non-empty value is
                     // a mount address.

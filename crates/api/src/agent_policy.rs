@@ -18,6 +18,14 @@ pub const SANDBOX_MODE_HARDENED: &str = "hardened";
 pub const SANDBOX_UID: u32 = 1000;
 /// Default non-root gid for the hardened sandbox (Q63).
 pub const SANDBOX_GID: u32 = 1000;
+/// Where the node writes the attempt's `EffectivePolicy` inside the
+/// sandbox workspace (T7.7 D7: the hardened `agent-runner` reads it
+/// fail-closed; content is policy, never a secret).
+pub const SANDBOX_POLICY_FILE: &str = "/workspace/.init-pro/policy.json";
+/// Where the hardened `agent-runner` appends denial audit JSONL inside
+/// the sandbox workspace (T7.7 D7; advisory — agent-tamperable by design,
+/// the node-side verdict stays authoritative).
+pub const SANDBOX_AUDIT_FILE: &str = "/workspace/.init-pro/audit.jsonl";
 
 /// Tool classes routed through the central tool-dispatch gate (Q63).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -170,7 +178,12 @@ impl PolicyViolation {
 }
 
 /// The effective policy an attempt (and every subagent, verbatim) runs under: narrowed tools + provider operations, allowlisted binds, enforced limits, resolved non-root identity.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serde (camelCase, T7.7 D7): the node serializes this into the sandbox
+/// at `SANDBOX_POLICY_FILE` and the hardened `agent-runner` deserializes
+/// it fail-closed — the wire shape is the Q63 contract between them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EffectivePolicy {
     pub tools: BTreeSet<ToolClass>,
     pub provider_operations: BTreeSet<String>,

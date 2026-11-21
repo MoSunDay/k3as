@@ -81,6 +81,10 @@ flannel-cni = { path = "link_repos/flannel-rust/crates/flannel-cni" }
 #   their own `workspace = true` refs against their own workspace).
 opencoder-core = { path = "link_repos/opencoder/crates/core" }
 opencoder-session = { path = "link_repos/opencoder/crates/session" }
+# T7.7 D7 (Q63): the hardened `agent-runner` bin (crates/agent) builds its
+# LLM client exactly like upstream run.rs — `opencoder-llm` is already in
+# the closure via opencoder-session; declaring it keeps the version single-sourced.
+opencoder-llm = { path = "link_repos/opencoder/crates/llm" }
 # - anyhome: mountable NFSv3 memory service behind workflow/agent workspaces
 #   (T-anyhome, decision Q36). Default features only — the real semantic
 #   embedder (`embed-fastembed`) stays off, like rdb's `store`-only cut.

@@ -142,6 +142,7 @@ mod tests {
             builtin_image_quota: 0,
             builtin_rootfs: "host".to_string(),
             gpu_inventory: "auto".to_string(),
+            agent_require_sandbox: false,
         }
     }
 

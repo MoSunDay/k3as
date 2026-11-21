@@ -147,4 +147,20 @@ pub struct AgentCmd {
         value_name = "SOURCE"
     )]
     pub gpu_inventory: String,
+
+    /// Node-level MANDATORY Agent hardening (T7.7, Q63 — init-pro
+    /// extension): Agents WITHOUT `spec.sandbox` stay Pending
+    /// (`SandboxRequired`) instead of running the legacy direct Q37
+    /// subprocess; implies INIT_PRO_AGENT_SANDBOX enablement.
+    /// env `INIT_PRO_AGENT_REQUIRE_SANDBOX`: clap v4 reads the env value
+    /// through the bool value parser, so ONLY the exact spellings
+    /// `true`/`false` are accepted here (the node-side
+    /// `SandboxNodeConfig::from_env` reader additionally accepts
+    /// `1`/`yes`/`on`).
+    #[arg(
+        long = "agent-require-sandbox",
+        env = "INIT_PRO_AGENT_REQUIRE_SANDBOX",
+        default_value_t = false
+    )]
+    pub agent_require_sandbox: bool,
 }

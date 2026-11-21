@@ -196,6 +196,12 @@ where
         }
         Some(Command::Agent(ag)) => {
             tracing::debug!(target: "init-pro", "agent flags captured: {:?}", ag);
+            // T7.7 (Q63): the node-level mandate rides the same env knob
+            // the sandbox plane reads (`SandboxNodeConfig::from_env`), so
+            // the flag and the env stay one source of truth.
+            if ag.agent_require_sandbox {
+                std::env::set_var("INIT_PRO_AGENT_REQUIRE_SANDBOX", "1");
+            }
             runtime::run_agent(
                 cfg,
                 ag.shared.server.clone(),

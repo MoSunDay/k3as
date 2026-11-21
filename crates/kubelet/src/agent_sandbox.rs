@@ -13,6 +13,10 @@ use engine_proto::{ContainerSpec, MountSpec};
 
 /// Node-side enable flag: any truthy value turns the default baseline on.
 const ENV_ENABLE: &str = "INIT_PRO_AGENT_SANDBOX";
+/// Node-level MANDATORY hardening switch (T7.7, Q63): any truthy value
+/// refuses Agents WITHOUT `spec.sandbox` outright (Pending) instead of
+/// the legacy Q37 direct subprocess — and implies [`ENV_ENABLE`].
+const ENV_REQUIRE: &str = "INIT_PRO_AGENT_REQUIRE_SANDBOX";
 /// Broker knob: the single loopback upstream URL (never a generic proxy).
 const ENV_BROKER_UPSTREAM: &str = "INIT_PRO_AGENT_BROKER_UPSTREAM";
 /// Broker knob: comma-separated operation allowlist.
@@ -25,24 +29,40 @@ const ENV_BROKER_CREDENTIAL: &str = "INIT_PRO_AGENT_BROKER_CREDENTIAL";
 
 /// Outcome of the hardened-selection gate (Q63): `Selected` runs the
 /// sandbox path; `NotSelected` keeps the legacy Q37 path; `Invalid`
-/// fails closed (stays Pending) — never a silent fallback.
+/// fails closed (stays Pending) — never a silent fallback. `RequiredRefused`
+/// is the node-level mandatory-hardening refusal (T7.7): the node mandates
+/// sandboxes but the Agent has none to run — also Pending, never a legacy
+/// spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxSelection {
     Selected,
     NotSelected,
     Invalid(String),
+    RequiredRefused(String),
 }
 
 /// `node_ready` = the node-side sandbox config exists AND a runner binary
-/// is staged (containment stack available). Hardened request + not ready =
-/// `Invalid` (fail-closed actionable reason) — NEVER the legacy path (Q63).
-pub fn select_sandbox(sandbox: Option<&AgentSandboxSpec>, node_ready: bool) -> SandboxSelection {
+/// is staged AND the hardened agent-runner is staged (containment stack
+/// available). Hardened request + not ready = `Invalid` (fail-closed
+/// actionable reason) — NEVER the legacy path (Q63). `require_hardened`
+/// (the node-level switch) refuses sandbox-less Agents before any of it.
+pub fn select_sandbox(
+    sandbox: Option<&AgentSandboxSpec>,
+    node_ready: bool,
+    require_hardened: bool,
+) -> SandboxSelection {
     match sandbox {
+        None if require_hardened => SandboxSelection::RequiredRefused(
+            "node mandates hardened sandboxes (INIT_PRO_AGENT_REQUIRE_SANDBOX, T7.7 Q63) but \
+             this Agent has no spec.sandbox; agent stays Pending — no legacy spawn"
+                .to_string(),
+        ),
         None => SandboxSelection::NotSelected,
         Some(_) if node_ready => SandboxSelection::Selected,
         Some(_) => SandboxSelection::Invalid(
-            "hardened sandbox requested but node containment unavailable (Q63); agent stays \
-             Pending — no fallback to the direct subprocess path"
+            "hardened sandbox requested but node containment unavailable (Q63) — sandbox config \
+             and staged runners incl. the hardened agent-runner (INIT_PRO_AGENT_HARDENED_RUNNER_\
+             BIN); agent stays Pending — no fallback to the direct subprocess path"
                 .to_string(),
         ),
     }
@@ -55,6 +75,9 @@ pub fn select_sandbox(sandbox: Option<&AgentSandboxSpec>, node_ready: bool) -> S
 pub struct SandboxNodeConfig {
     pub baseline: PolicyBaseline,
     pub broker: Option<crate::agent_broker::BrokerConfig>,
+    /// Node-level mandatory hardening (T7.7, Q63): sandbox-less Agents are
+    /// refused (`SandboxRequired` Pending), never spawned the legacy way.
+    pub require_hardened: bool,
 }
 
 fn truthy(v: &str) -> bool {
@@ -102,8 +125,11 @@ impl SandboxNodeConfig {
     /// workspace/scratch/runner binds are NOT spec binds, so the empty
     /// allowlist still lets a bind-less hardened Agent run. Broker knobs
     /// (all optional, see the `ENV_BROKER_*` consts above).
+    /// `INIT_PRO_AGENT_REQUIRE_SANDBOX=1` additionally refuses sandbox-less
+    /// Agents (T7.7) and implies enablement.
     pub fn from_env() -> Option<Self> {
-        if !truthy(&std::env::var(ENV_ENABLE).unwrap_or_default()) {
+        let require_hardened = truthy(&std::env::var(ENV_REQUIRE).unwrap_or_default());
+        if !require_hardened && !truthy(&std::env::var(ENV_ENABLE).unwrap_or_default()) {
             return None;
         }
         let baseline = PolicyBaseline {
@@ -119,6 +145,7 @@ impl SandboxNodeConfig {
         Some(Self {
             baseline,
             broker: broker_from_env(),
+            require_hardened,
         })
     }
 }

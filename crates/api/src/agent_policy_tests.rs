@@ -395,3 +395,33 @@ fn agent_spec_policy_sandbox_serde_roundtrip() {
     );
     assert_eq!(wire.pointer("/sandbox/limits/cpuMillis"), Some(&json!(500)));
 }
+
+// --- T7.7 D7: EffectivePolicy serde (the runner<->node wire contract) ---------
+
+#[test]
+fn effective_policy_serde_roundtrip_camel_case() {
+    let eff = EffectivePolicy {
+        tools: BTreeSet::from([ToolClass::Ordinary, ToolClass::Subagent]),
+        provider_operations: BTreeSet::from(["files.read".to_string()]),
+        binds: vec![bind("/data", "/data", true)],
+        limits: limits(500, 268435456, 64),
+        uid: SANDBOX_UID,
+        gid: SANDBOX_GID,
+    };
+    let wire = serde_json::to_value(&eff).unwrap();
+    // camelCase keys on the wire (Q10) — the hardened agent-runner parses
+    // exactly this shape from SANDBOX_POLICY_FILE.
+    assert_eq!(
+        wire.get("providerOperations"),
+        Some(&json!(["files.read"])),
+        "wire: {wire}"
+    );
+    assert_eq!(
+        wire.get("limits"),
+        Some(&json!({
+            "cpuMillis": 500, "memoryBytes": 268435456, "pidsMax": 64
+        }))
+    );
+    let back: EffectivePolicy = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, eff);
+}

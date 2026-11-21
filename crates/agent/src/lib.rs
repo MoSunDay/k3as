@@ -15,6 +15,12 @@
 
 #![forbid(unsafe_code)]
 
+// T7.7 D7 (Q63): the in-process tool-dispatch gate wrapped around every
+// registry entry inside the hardened `agent-runner` bin (src/bin/).
+pub mod runner_gate;
+#[cfg(test)] // T7.7 D7 (Q63) gating-core evidence (file-size split)
+mod runner_gate_tests;
+
 use api::AgentSpec;
 
 /// Failure modes of the `AgentSpec` -> opencoder config bridge.

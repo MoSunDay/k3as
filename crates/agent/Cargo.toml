@@ -12,5 +12,12 @@ publish.workspace = true
 api = { workspace = true }
 opencoder-core = { workspace = true }
 opencoder-session = { workspace = true }
+# T7.7 D7 (Q63): the hardened `agent-runner` bin only — the lib stays a
+# pure translation seam.
+opencoder-llm = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }

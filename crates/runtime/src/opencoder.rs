@@ -36,10 +36,21 @@ use sha2::{Digest, Sha256};
 pub const RUNNER_NAME: &str = "opencoder";
 /// Explicit runner override env (test/e2e seam; documented in Q37).
 pub const ENV_RUNNER_BIN: &str = "INIT_PRO_AGENT_RUNNER_BIN";
+/// The staged HARDENED agent-runner binary name (T7.7 D7, Q63 — the
+/// in-process gated runner `[[bin]]` of the `agent` crate).
+pub const AGENT_RUNNER_NAME: &str = "agent-runner";
+/// Explicit hardened agent-runner override env (T7.7 D7, Q63).
+pub const ENV_AGENT_HARDENED_RUNNER_BIN: &str = "INIT_PRO_AGENT_HARDENED_RUNNER_BIN";
 /// Path (relative to the embedded data root) an embedded runner would take.
 const EMBEDDED_REL: &str = "data/current/bin/opencoder";
 /// Repo-relative release-build path (A1 dev-loop source).
 const LINK_REPOS_REL: &str = "link_repos/opencoder/target/release/opencoder";
+/// Build-tree candidates for the hardened agent-runner (T7.7 D7): the
+/// workspace build output (release preferred, then debug).
+const AGENT_RUNNER_BUILD_RELS: [&str; 2] =
+    ["target/release/agent-runner", "target/debug/agent-runner"];
+/// Embedded-data path for the hardened agent-runner (T7.7 D7).
+const AGENT_RUNNER_EMBEDDED_REL: &str = "data/current/bin/agent-runner";
 
 /// Resolve the runner binary for `data_dir` (see module docs for the order).
 pub fn discover_runner_bin(data_dir: &Path) -> Option<PathBuf> {
@@ -97,18 +108,86 @@ pub fn stage_runner(data_dir: &Path) -> Result<Option<PathBuf>, String> {
 /// explicit inputs, unit-testable without depending on where the test
 /// binary happens to live). `Ok(None)` is unreachable via [`stage_runner`].
 pub fn stage_from(src: &Path, data_dir: &Path) -> Result<Option<PathBuf>, String> {
-    let dest = data_dir.join("bin").join(RUNNER_NAME);
+    stage_named(src, data_dir, RUNNER_NAME)
+}
+
+/// Shared sha256-idempotent copy: `<data-dir>/bin/<name>`, 0755, staged via
+/// a `.<name>-tmp` rename so a torn copy never becomes the live binary.
+fn stage_named(src: &Path, data_dir: &Path, name: &str) -> Result<Option<PathBuf>, String> {
+    let dest = data_dir.join("bin").join(name);
     if same_content(src, &dest) {
         return Ok(Some(dest));
     }
     let dir = dest.parent().ok_or("bin dir has no parent")?;
     fs::create_dir_all(dir).map_err(|e| io_err("create bin dir", e))?;
-    let tmp = dest.with_extension("opencoder-tmp");
+    let tmp = dest.with_extension(format!("{name}-tmp"));
     fs::copy(src, &tmp).map_err(|e| io_err("copy runner", e))?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
         .map_err(|e| io_err("chmod runner", e))?;
     fs::rename(&tmp, &dest).map_err(|e| io_err("commit runner", e))?;
     Ok(Some(dest))
+}
+
+/// Stage the HARDENED agent-runner (T7.7 D7, Q63) into
+/// `<data-dir>/bin/agent-runner`. Discovery order (first hit wins):
+/// 1. `INIT_PRO_AGENT_HARDENED_RUNNER_BIN` — explicit override, used AS-IS
+///    (no copy); a missing/non-executable override is a terminal `Err`
+///    (fail-closed Q63: an operator-set knob that silently degraded would
+///    mask a misconfigured hardened node).
+/// 2. Already staged: `<data-dir>/bin/agent-runner` (idempotent fast path).
+/// 3. Build tree: `target/release/agent-runner` then
+///    `target/debug/agent-runner` via the same exe-ancestor walk as
+///    [`runner_bin_from`] (deployed + cargo-test layouts).
+/// 4. Embedded data tree: `<data-dir>/data/current/bin/agent-runner`.
+///
+/// Sources (3)/(4) are sha256-idempotently copied to
+/// `<data-dir>/bin/agent-runner` (0755). `Ok(None)` => no hardened runner:
+/// hardened Agents stay Pending (`SandboxUnavailable`), never a fallback.
+pub fn stage_agent_runner(data_dir: &Path) -> Result<Option<PathBuf>, String> {
+    stage_agent_runner_from(
+        std::env::var_os(ENV_AGENT_HARDENED_RUNNER_BIN).map(PathBuf::from),
+        data_dir,
+        std::env::current_exe().ok().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
+}
+
+/// Pure core of [`stage_agent_runner`] (explicit inputs, unit-testable).
+pub fn stage_agent_runner_from(
+    env: Option<PathBuf>,
+    data_dir: &Path,
+    exe: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(p) = env {
+        return if is_exec_file(&p) {
+            Ok(Some(p))
+        } else {
+            Err(format!(
+                "INIT_PRO_AGENT_HARDENED_RUNNER_BIN={}: not an executable file (Q63 fail-closed; no fallback)",
+                p.display()
+            ))
+        };
+    }
+    let staged = data_dir.join("bin").join(AGENT_RUNNER_NAME);
+    if is_exec_file(&staged) {
+        return Ok(Some(staged));
+    }
+    let mut cands: Vec<PathBuf> = Vec::new();
+    // Same exe-ancestor walk as runner_bin_from: both deployed shapes reach
+    // a repo root two levels up; cargo-test binaries sit one deeper.
+    for base in [exe.and_then(Path::parent), cwd].into_iter().flatten() {
+        for up in ["../..", "../../.."] {
+            for rel in AGENT_RUNNER_BUILD_RELS {
+                cands.push(base.join(up).join(rel));
+            }
+        }
+    }
+    cands.push(data_dir.join(AGENT_RUNNER_EMBEDDED_REL));
+    match cands.into_iter().find(|c| is_exec_file(c)) {
+        Some(src) => stage_named(&src, data_dir, AGENT_RUNNER_NAME),
+        None => Ok(None),
+    }
 }
 
 /// `true` for an existing, regular, executable file.
@@ -270,5 +349,64 @@ mod tests {
         let data = tmp_dir("stage-none");
         assert!(is_exec_file(&write_bin(&data.join("x"), b"#!/bin/sh\n")));
         let _ = fs::remove_dir_all(&data);
+    }
+
+    // --- T7.7 D7 (Q63): hardened agent-runner staging -----------------------
+
+    #[test]
+    fn hardened_env_override_is_used_as_is_and_missing_is_terminal_err() {
+        let data = tmp_dir("hr-ovr");
+        // The override env (INIT_PRO_AGENT_HARDENED_RUNNER_BIN) used AS-IS:
+        // no staging copy appears under <data>/bin.
+        let real = write_bin(&data.join("hr.sh"), b"#!/bin/sh\n");
+        assert_eq!(
+            stage_agent_runner_from(Some(real.clone()), &data, None, None).unwrap(),
+            Some(real)
+        );
+        assert!(!data.join("bin/agent-runner").exists());
+        // Missing/non-exec override: terminal Err (Q63 fail-closed; never
+        // a silent fallback to the build tree or embedded copy).
+        let ghost = data.join("ghost");
+        let err = stage_agent_runner_from(Some(ghost), &data, None, None).unwrap_err();
+        assert!(err.contains("INIT_PRO_AGENT_HARDENED_RUNNER_BIN"), "{err}");
+        assert!(err.contains("Q63"), "{err}");
+        let _ = fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn hardened_staged_fast_path_then_build_tree_copy() {
+        let data = tmp_dir("hr-fast");
+        // Nothing anywhere => Ok(None) (hardened Agents stay Pending).
+        assert_eq!(
+            stage_agent_runner_from(None, &data, None, None).unwrap(),
+            None
+        );
+        // Build-tree source (deployed exe shape <repo>/target/debug/init-pro
+        // -> target/release/agent-runner): sha256-idempotent copy to
+        // <data>/bin/agent-runner 0755, then the staged fast path wins.
+        let repo = tmp_dir("hr-repo");
+        let exe = write_bin(&repo.join("target/debug/init-pro"), b"bin");
+        write_bin(&repo.join("target/release/agent-runner"), b"hr-v1");
+        let dest = data.join("bin/agent-runner");
+        assert_eq!(
+            stage_agent_runner_from(None, &data, Some(&exe), None)
+                .unwrap()
+                .unwrap(),
+            dest
+        );
+        assert!(is_exec_file(&dest));
+        assert_eq!(fs::read(&dest).unwrap(), b"hr-v1");
+        let ino = fs::metadata(&dest).unwrap().ino();
+        // Fast path: same content keeps the inode (idempotent); once staged
+        // the fast path wins without touching the source again.
+        assert_eq!(
+            stage_agent_runner_from(None, &data, Some(&exe), None)
+                .unwrap()
+                .unwrap(),
+            dest
+        );
+        assert_eq!(fs::metadata(&dest).unwrap().ino(), ino);
+        let _ = fs::remove_dir_all(&data);
+        let _ = fs::remove_dir_all(&repo);
     }
 }

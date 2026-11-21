@@ -20,7 +20,8 @@ use crate::agent_sandbox::{
     BROKER_TARGET,
 };
 use crate::agent_sandbox_plan::{
-    attempt_id, container_plan, decode_policy, decode_sandbox, stage_runner_into_rootfs,
+    attempt_id, audit_denial_count, container_plan, decode_policy, decode_sandbox,
+    stage_runner_into_rootfs, write_policy_file,
 };
 use crate::agents::{AgentRecord, AgentRunnerConfig};
 use crate::engine::agent_stream::{wait_verdict, SandboxVerdict};
@@ -105,18 +106,40 @@ pub(crate) async fn try_hardened(
     keep_going: &mut watch::Receiver<bool>,
 ) -> Option<(&'static str, Value)> {
     let view = &record.view;
+    let require_hardened = cfg
+        .sandbox
+        .as_ref()
+        .map(|n| n.require_hardened)
+        .unwrap_or(false);
     let sandbox = match decode_sandbox(&record.raw) {
-        None => return None, // legacy Q37 path
+        None => None, // legacy Q37 path (unless the node mandates hardening)
         Some(Err(e)) => return Some((objs::PHASE_FAILED, fail_cond("SandboxSpecInvalid", &e))),
-        Some(Ok(s)) => s,
+        Some(Ok(s)) => Some(s),
     };
     let policy = match decode_policy(&record.raw) {
         Some(Err(e)) => return Some((objs::PHASE_FAILED, fail_cond("PolicySpecInvalid", &e))),
         Some(Ok(p)) => Some(p),
         None => None,
     };
-    let node_ready = cfg.sandbox.is_some() && cfg.runner_bin.is_some();
-    let node_cfg = match select_sandbox(Some(&sandbox), node_ready) {
+    // T7.7 D7 (Q63): the containment stack = sandbox config + staged
+    // runner + staged HARDENED agent-runner (the gated in-process runner).
+    let node_ready =
+        cfg.sandbox.is_some() && cfg.runner_bin.is_some() && cfg.hardened_runner_bin.is_some();
+    if !node_ready {
+        tracing::warn!(
+            target: "init-pro", agent = %view.key,
+            sandbox_config = cfg.sandbox.is_some(),
+            runner = cfg.runner_bin.is_some(),
+            hardened_agent_runner = cfg.hardened_runner_bin.is_some(),
+            "T7.7 containment stack incomplete (Q63); hardened Agents stay Pending"
+        );
+    }
+    let node_cfg = match select_sandbox(sandbox.as_ref(), node_ready, require_hardened) {
+        // Node mandates hardening but this Agent has no spec.sandbox:
+        // refuse BEFORE the legacy spawn could ever run (T7.7, Q63).
+        SandboxSelection::RequiredRefused(msg) => {
+            return Some((objs::PHASE_PENDING, fail_cond("SandboxRequired", &msg)))
+        }
         // Stay Pending (retried by the loop); NO fallback (Q63).
         SandboxSelection::Invalid(msg) => {
             return Some((objs::PHASE_PENDING, fail_cond("SandboxUnavailable", &msg)))
@@ -134,6 +157,17 @@ pub(crate) async fn try_hardened(
                 ))
             }
         },
+    };
+    // `Selected` is only reachable with a decoded spec (the select_sandbox
+    // contract); re-bind it for the effective-policy computation below.
+    let Some(sandbox) = sandbox else {
+        return Some((
+            objs::PHASE_PENDING,
+            fail_cond(
+                "SandboxUnavailable",
+                "hardened spec lost after selection (Q63); no fallback",
+            ),
+        ));
     };
     let attempt = attempt_id(view);
     let eff = match effective(&node_cfg.baseline, policy.as_ref(), &sandbox) {
@@ -169,6 +203,17 @@ pub(crate) async fn try_hardened(
     };
     if let Err(e) = crate::agent_exec::prepare_workspace(&ws_host).await {
         return Some((objs::PHASE_FAILED, fail_cond("WorkspacePrepareFailed", &e)));
+    }
+    // T7.7 D7 (Q63): the effective policy rides the workspace at
+    // `/workspace/.init-pro/policy.json` (camelCase wire form, Q10); the
+    // hardened agent-runner refuses to dispatch without it (fail-closed).
+    if let Err(e) = write_policy_file(&ws_host, &eff) {
+        tracing::warn!(target: "init-pro", agent = %view.key, error = %e,
+            "sandbox policy file write failed");
+        return Some((
+            objs::PHASE_FAILED,
+            fail_cond("PolicyWriteFailed", &e.to_string()),
+        ));
     }
     let running = objs::status_patch(
         objs::PHASE_RUNNING,
@@ -222,19 +267,30 @@ async fn run_engine(
         Ok(pair) => pair,
         Err(e) => return spawn_failed(spawned, e.to_string()).await,
     };
-    // Q63 runner staging: /runner lives INSIDE the private rootfs (a ro
-    // bind is noexec and could never run the runner; see the fn doc).
-    if let Some(runner) = &cfg.runner_bin {
-        if let Err(e) = stage_runner_into_rootfs(&rootfs, runner) {
-            return spawn_failed(spawned, format!("stage runner: {e}")).await;
-        }
+    // Q63 D7 runner staging: argv[0] is the HARDENED agent-runner (the
+    // gated in-process tool registry), staged from
+    // `<data>/bin/agent-runner` (or INIT_PRO_AGENT_HARDENED_RUNNER_BIN).
+    // `/runner` lives INSIDE the private rootfs (a ro bind is noexec and
+    // could never run it; see the fn doc); its parent dir is copied so any
+    // sibling payload rides along. The legacy opencode CLI is NOT argv[0].
+    let runner_host = cfg.hardened_runner_bin.clone();
+    if runner_host.is_none() {
+        return spawn_failed(
+            spawned,
+            "hardened agent-runner not staged (Q63); no fallback".to_string(),
+        )
+        .await;
     }
-    let runner_host = cfg.runner_bin.clone();
     let runner_base = runner_host
         .as_ref()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "opencoder".to_string());
+        .unwrap_or_else(|| "agent-runner".to_string());
+    if let Some(runner) = &runner_host {
+        if let Err(e) = stage_runner_into_rootfs(&rootfs, runner) {
+            return spawn_failed(spawned, format!("stage hardened agent-runner: {e}")).await;
+        }
+    }
     let prompt_file = {
         let p = ws_host.join("prompt.md");
         p.is_file().then_some(p)
@@ -244,7 +300,7 @@ async fn run_engine(
     // rootfs itself stays root-owned so writes outside workspace/scratch
     // fail for the non-root identity (AS2).
     open_workspace_to_sandbox(ws_host);
-    let (argv, plan_envs) = container_plan(view, prompt_file.as_deref(), &runner_base);
+    let (argv, plan_envs) = container_plan(view, prompt_file.as_deref(), &runner_base, &spawned.id);
     // Q63: the runner sees the IN-CONTAINER broker endpoint, never the
     // host path (invisible inside the private mount namespace).
     let env = sanitize_env(
@@ -292,6 +348,21 @@ async fn run_engine(
     let session_note = objs::session_id_from_stderr(&stderr)
         .map(|s| format!("; session {s}"))
         .unwrap_or_default();
+    // T7.7 D7 (Q63): advisory denial count from the in-workspace audit
+    // JSONL — agent-tamperable by design, so it never influences the
+    // verdict, only observability. Read after teardown (the runner may
+    // flush its last line at exit).
+    let attempt = spawned.id.clone();
+    let audit_note = match audit_denial_count(ws_host, &attempt) {
+        Some(n) if n > 0 => {
+            tracing::warn!(
+                target: "init-pro", attempt = %attempt, denials = n,
+                "T7.7 gate denials recorded in the workspace audit (advisory, Q63)"
+            );
+            format!(" (audit: {n} denials [advisory])")
+        }
+        _ => String::new(),
+    };
     match verdict {
         SandboxVerdict::Cancelled => None, // deleted mid-flight
         SandboxVerdict::Timeout => Some((
@@ -308,12 +379,15 @@ async fn run_engine(
                 objs::COND_READY,
                 "True",
                 "Completed",
-                &format!("exit 0{session_note}"),
+                &format!("exit 0{session_note}{audit_note}"),
             ),
         )),
         SandboxVerdict::Exited(code) => Some((
             objs::PHASE_FAILED,
-            fail_cond("RunnerFailed", &format!("exit {code}{session_note}")),
+            fail_cond(
+                "RunnerFailed",
+                &format!("exit {code}{session_note}{audit_note}"),
+            ),
         )),
     }
 }

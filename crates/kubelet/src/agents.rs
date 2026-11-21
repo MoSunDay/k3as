@@ -42,6 +42,11 @@ pub struct AgentRunnerConfig {
     pub data_dir: PathBuf,
     /// Staged runner binary; `None` => `RunnerMissing` degradation.
     pub runner_bin: Option<PathBuf>,
+    /// Staged HARDENED agent-runner binary (T7.7 D7, Q63) — the in-process
+    /// gated runner executed inside the sandbox. `None` => hardened Agents
+    /// stay Pending `SandboxUnavailable` (fail-closed; never the legacy
+    /// subprocess and never an ungated runner).
+    pub hardened_runner_bin: Option<PathBuf>,
     /// Fallback anyhome NFS address when an Agent carries no workspace
     /// annotation (`--anyhome-addr`; the single-node default needs no flag).
     pub anyhome_addr: Option<String>,
@@ -59,6 +64,7 @@ impl AgentRunnerConfig {
             node_name,
             data_dir,
             runner_bin: None,
+            hardened_runner_bin: None,
             anyhome_addr: None,
             exec_timeout: exec_timeout_from_env().unwrap_or(DEFAULT_EXEC_TIMEOUT),
             sandbox: None,

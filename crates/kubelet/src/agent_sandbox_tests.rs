@@ -51,9 +51,15 @@ fn inputs() -> SandboxInputs {
 
 #[test]
 fn selection_is_fail_closed_not_silent() {
-    // No sandbox spec: the legacy Q37 path applies unchanged.
-    assert_eq!(select_sandbox(None, false), SandboxSelection::NotSelected);
-    assert_eq!(select_sandbox(None, true), SandboxSelection::NotSelected);
+    // No sandbox spec: the legacy Q37 path applies unchanged (no mandate).
+    assert_eq!(
+        select_sandbox(None, false, false),
+        SandboxSelection::NotSelected
+    );
+    assert_eq!(
+        select_sandbox(None, true, false),
+        SandboxSelection::NotSelected
+    );
     // Hardened + containment stack ready: the sandbox path owns it.
     let spec = api::agent_policy::AgentSandboxSpec {
         mode: "hardened".to_string(),
@@ -67,17 +73,40 @@ fn selection_is_fail_closed_not_silent() {
         },
     };
     assert_eq!(
-        select_sandbox(Some(&spec), true),
+        select_sandbox(Some(&spec), true, false),
         SandboxSelection::Selected
     );
     // Hardened + node not ready: Pending + no-fallback wording (Q63).
-    match select_sandbox(Some(&spec), false) {
+    match select_sandbox(Some(&spec), false, false) {
         SandboxSelection::Invalid(msg) => {
             assert!(msg.contains("(Q63)"), "msg: {msg}");
             assert!(msg.contains("no fallback"), "msg: {msg}");
             assert!(msg.contains("Pending"), "msg: {msg}");
         }
         other => panic!("expected Invalid, got {other:?}"),
+    }
+    // The mandate does not soften the hardened failure shape: an
+    // unavailable stack is still Invalid (Pending), not RequiredRefused.
+    assert!(matches!(
+        select_sandbox(Some(&spec), false, true),
+        SandboxSelection::Invalid(_)
+    ));
+}
+
+/// Node-level mandatory hardening (T7.7, Q63): a sandbox-less Agent on a
+/// mandating node is RequiredRefused — Pending, never a legacy spawn —
+/// regardless of the containment stack state (the refusal precedes it).
+#[test]
+fn mandatory_hardening_refuses_sandbox_less_agents() {
+    for node_ready in [false, true] {
+        match select_sandbox(None, node_ready, true) {
+            SandboxSelection::RequiredRefused(msg) => {
+                assert!(msg.contains("INIT_PRO_AGENT_REQUIRE_SANDBOX"), "msg: {msg}");
+                assert!(msg.contains("spec.sandbox"), "msg: {msg}");
+                assert!(msg.contains("no legacy spawn"), "msg: {msg}");
+            }
+            other => panic!("node_ready={node_ready}: expected RequiredRefused, got {other:?}"),
+        }
     }
 }
 
@@ -223,6 +252,7 @@ fn sandbox_dirs_are_private_per_attempt() {
 #[test]
 fn node_config_from_env_gates_and_defaults() {
     std::env::remove_var("INIT_PRO_AGENT_SANDBOX");
+    std::env::remove_var("INIT_PRO_AGENT_REQUIRE_SANDBOX");
     std::env::remove_var("INIT_PRO_AGENT_BROKER_UPSTREAM");
     std::env::remove_var("INIT_PRO_AGENT_BROKER_OPS");
     std::env::remove_var("INIT_PRO_AGENT_BROKER_CREDENTIAL_HEADER");
@@ -254,4 +284,13 @@ fn node_config_from_env_gates_and_defaults() {
     std::env::remove_var("INIT_PRO_AGENT_BROKER_UPSTREAM");
     std::env::remove_var("INIT_PRO_AGENT_BROKER_OPS");
     std::env::remove_var("INIT_PRO_AGENT_BROKER_CREDENTIAL");
+    // T7.7: the mandatory switch alone enables the plane AND flags the
+    // mandate (implies enablement; no separate INIT_PRO_AGENT_SANDBOX).
+    std::env::set_var("INIT_PRO_AGENT_REQUIRE_SANDBOX", "1");
+    let cfg = crate::agent_sandbox::SandboxNodeConfig::from_env().unwrap();
+    assert!(cfg.require_hardened, "mandate implied");
+    assert!(cfg.broker.is_none(), "broker knobs stay off");
+    std::env::set_var("INIT_PRO_AGENT_REQUIRE_SANDBOX", "0");
+    assert!(!crate::agent_sandbox::SandboxNodeConfig::from_env().is_some());
+    std::env::remove_var("INIT_PRO_AGENT_REQUIRE_SANDBOX");
 }
