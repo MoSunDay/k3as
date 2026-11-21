@@ -87,6 +87,7 @@ BATTERY=(
   builtin-image-e2e.sh
   builtin-hostroot-e2e.sh
   sandbox-e2e.sh
+  auth-e2e.sh
 )
 # Scripts that would FAIL (not SKIP) without root -> pre-gated here.
 # Keep this list minimal: engine-selftest.sh and builtin-runtime-e2e.sh already

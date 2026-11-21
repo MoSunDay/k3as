@@ -215,6 +215,7 @@ source "$SCRIPT_DIR/golden/suites/nscascade.sh"
 source "$SCRIPT_DIR/golden/suites/negative.sh"
 source "$SCRIPT_DIR/golden/suites/phase3.sh"
 source "$SCRIPT_DIR/golden/suites/sandbox.sh"
+source "$SCRIPT_DIR/golden/suites/auth.sh"
 
 echo
 echo "golden: $PASS passed, $FAIL failed"

@@ -178,6 +178,13 @@ live_help "t77-agent" agent --agent-require-sandbox
 # ---------------------------------------------------------------------------
 live_help "t83" server --disable-pipeline --pipeline-dir
 
+# ---------------------------------------------------------------------------
+# T1.3a (Q47) live-help surface: the auth/TLS opt-ins are wired on `server`
+# (--token-file CSV authn, repeatable --tls-san). The frozen snapshots
+# predate the flags; checked against LIVE --help like the blocks above.
+# ---------------------------------------------------------------------------
+live_help "t78-auth" server --token-file --tls-san
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
