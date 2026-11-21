@@ -77,7 +77,9 @@ where
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(target: "init-pro", addr = %addr, tls = tls.is_some(), auth = auth.is_some(), "apiserver listening");
+    // Keep the historical "discovery listening" substring: the e2e/golden
+    // scripts gate server readiness on it (T1.3a adds the tls/auth flags).
+    tracing::info!(target: "init-pro", addr = %addr, tls = tls.is_some(), auth = auth.is_some(), "apiserver discovery listening");
 
     let app: Router = router(AppState {
         registry: Arc::new(registry),
