@@ -34,7 +34,10 @@
 # negative.sh G50-G55 (locked/edge semantics), workloads.sh G60-G66 (real
 # STS/DS/CronWorkflow on the agent/containerd stack), realtraffic.sh G70-G72
 # (served router plane + Ingress-listener gap pin), nscascade.sh G80-G82
-# (live namespace terminal-delete cascade).
+# (live namespace terminal-delete cascade), phase3.sh G90-G98 (HD1 host-direct
+# admission + template annotation propagation), sandbox.sh G99-G106 (T7.7/Q63
+# sandbox admission shapes: hardened round-trip, mode/limits/identity/
+# tool-class/bind rejects, the preserved legacy path, SSA).
 #
 # Volatility: the only non-deterministic field is APIVersions.serverAddress
 # (the bind host:port); it is normalized to the token @@PORT@@ before diffing.
@@ -211,6 +214,7 @@ source "$SCRIPT_DIR/golden/suites/realtraffic.sh"
 source "$SCRIPT_DIR/golden/suites/nscascade.sh"
 source "$SCRIPT_DIR/golden/suites/negative.sh"
 source "$SCRIPT_DIR/golden/suites/phase3.sh"
+source "$SCRIPT_DIR/golden/suites/sandbox.sh"
 
 echo
 echo "golden: $PASS passed, $FAIL failed"
