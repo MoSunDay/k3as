@@ -634,6 +634,11 @@ except Exception:
   done
   grep -q "kubelet started (T4.12 built-in engine)" "$NCLUSTER_AGENT_LOG" \
     || nfail "N3 builtin agent never came up ($(tail -5 "$NCLUSTER_AGENT_LOG" | tr '\n' ' '))"
+  # The skip line lands AFTER the agent-runner staging (T7.7 D7 binary
+  # copy), tens of ms later — poll for it instead of racing one grep.
+  for _ in $(seq 1 300); do
+    grep -q "flannel skipped (Q52)" "$NCLUSTER_AGENT_LOG" && break; sleep 0.1
+  done
   grep -q "flannel skipped (Q52)" "$NCLUSTER_AGENT_LOG" \
     || nfail "N3 builtin agent must skip flanneld (Q52)"
 
