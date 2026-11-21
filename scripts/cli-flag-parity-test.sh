@@ -166,6 +166,12 @@ live_help "t414-agent" agent --builtin-rootfs
 live_help "t72-agent" agent --gpu-inventory
 
 # ---------------------------------------------------------------------------
+# T7.7 (Q63) live-help surface: the node-level MANDATORY Agent hardening
+# switch is wired on `agent` (legacy Agents stay Pending, never spawned).
+# ---------------------------------------------------------------------------
+live_help "t77-agent" agent --agent-require-sandbox
+
+# ---------------------------------------------------------------------------
 # T8.3 (Q56) live-help surface: the embedded CI/CD pipeline plane (default-on,
 # --disable-pipeline opt-out) is wired on `server` (the controller manager
 # lives there).

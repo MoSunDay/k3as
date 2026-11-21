@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # T7.7 (Q63): privileged-Linux e2e for the hardened Agent sandbox — the
 # real-machine acceptance of the Q63 containment plane over a real
-# `init-pro server` + three `init-pro agent`s (a1: sandbox+broker node with
+# `init-pro server` + four `init-pro agent`s (a1: sandbox+broker node with
 # credential canaries in its host env; a2: sandbox node with a 5 s exec
-# budget; a3: node WITHOUT INIT_PRO_AGENT_SANDBOX), a busybox runner stub
-# staged into the private rootfs, and a loopback python3 fake provider.
+# budget; a3: node WITHOUT INIT_PRO_AGENT_SANDBOX; a4: MANDATING node —
+# INIT_PRO_AGENT_REQUIRE_SANDBOX=1), a busybox runner stub staged into the
+# private rootfs, the real hardened `agent-runner` (probe mode, SA8) and a
+# loopback python3 fake provider.
 #
 #   SA1  policy determinism: exit 0 -> Succeeded/Completed; exit 7 ->
 #        Failed/RunnerFailed "exit 7"; allowTools ["ssh"] -> Failed/
@@ -25,19 +27,38 @@
 #        provider log stays EMPTY (no egress).
 #   SA6  fail-closed: a hardened Agent on a3 stays Pending/
 #        SandboxUnavailable >= 6 s, no engine, never executes.
+#   SA7  node-level mandatory hardening: on the mandating node (a4) a
+#        legacy (no spec.sandbox) Agent stays Pending/SandboxRequired
+#        >= 6 s — the legacy stub never runs, no engine ever spawns.
+#   SA8  the D7 in-process tool-dispatch seam (real `agent-runner`, probe
+#        mode on the HOST — no LLM): fail-closed policy load, ordinary
+#        tool dispatch passes the gate, a denied class is a deterministic
+#        exit 4 + the secret-free 6-key audit JSONL, unknown tool = 5,
+#        malformed policy = 1.
 #
 # SKIP doctrine (engine-selftest parity): missing root, static busybox,
 # cgroup v2, python3 or curl => one SKIP line, exit 0. Anything else FAILs.
-# Usage: scripts/sandbox-e2e.sh  (INIT_PRO_BIN / INIT_PRO_BUSYBOX overrides)
+# Usage: scripts/sandbox-e2e.sh  (INIT_PRO_BIN / INIT_PRO_BUSYBOX /
+#        AGENT_RUNNER_BIN overrides)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN="${INIT_PRO_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/init-pro}"
 BUSYBOX="${INIT_PRO_BUSYBOX:-/usr/bin/busybox}"
+# The real hardened agent-runner (T7.7 D7, SA8): an [[bin]] of the `agent`
+# crate — NEVER linked into the init-pro multicall (Q36 D1 libsql guard).
+RUNNER="${AGENT_RUNNER_BIN:-}"
+if [[ -z "$RUNNER" ]]; then
+  for c in "${CARGO_TARGET_DIR:-$ROOT/target}/release/agent-runner" \
+           "${CARGO_TARGET_DIR:-$ROOT/target}/debug/agent-runner"; do
+    [[ -x "$c" ]] && { RUNNER="$c"; break; }
+  done
+fi
 
 skip() { echo "SKIP sandbox-e2e: $*"; exit 0; }
 [[ -x "$BIN" ]] || { echo "error: $BIN not found. Run 'cargo build'." >&2; exit 1; }
+[[ -n "$RUNNER" && -x "$RUNNER" ]] || skip "no hardened agent-runner binary found (run 'cargo build --workspace'; or set AGENT_RUNNER_BIN)"
 command -v curl >/dev/null 2>&1 || skip "no curl (probes are HTTP-only)"
 command -v python3 >/dev/null 2>&1 || skip "no python3 (fake provider)"
 command -v pgrep >/dev/null 2>&1 || skip "no pgrep"
@@ -67,14 +88,14 @@ note(){ echo "----  $*"; }
 API_PORT="$(pick_port)"; PROV_PORT="$(pick_port)"
 BASE="http://127.0.0.1:$API_PORT"
 TMP="$(mktemp -d /tmp/sandbox-e2e.XXXXXX)"
-A1="$TMP/a1-data"; A2="$TMP/a2-data"; A3="$TMP/a3-data"
-SRV_PID=""; A1_PID=""; A2_PID=""; A3_PID=""; PROV_PID=""
+A1="$TMP/a1-data"; A2="$TMP/a2-data"; A3="$TMP/a3-data"; A4="$TMP/a4-data"
+SRV_PID=""; A1_PID=""; A2_PID=""; A3_PID=""; A4_PID=""; PROV_PID=""
 
 KEEP_TMP="${KEEP_TMP:-0}"
 cleanup() {
   trap - EXIT INT TERM
   echo; echo "sandbox e2e: tearing down ..."
-  for p in "$A3_PID" "$A2_PID" "$A1_PID" "$PROV_PID" "$SRV_PID"; do stop_pid "$p"; done
+  for p in "$A4_PID" "$A3_PID" "$A2_PID" "$A1_PID" "$PROV_PID" "$SRV_PID"; do stop_pid "$p"; done
   pkill -f "engine serve --socket $TMP/" 2>/dev/null || true  # failed-check strays
   if [[ "$KEEP_TMP" == "1" ]]; then echo "sandbox e2e: logs kept at $TMP (KEEP_TMP=1)"; return; fi
   rm -rf "$TMP" 2>/dev/null || true
@@ -189,9 +210,13 @@ start_agent() {
     --anyhome-addr= >"$logf" 2>&1 &
 }
 # a1: hardened sandbox + per-attempt broker; host env has canaries it must NEVER see.
+# T7.7 D7: the sandbox exec is the HARDENED agent-runner, so the stub rides
+# INIT_PRO_AGENT_HARDENED_RUNNER_BIN (the legacy INIT_PRO_AGENT_RUNNER_BIN
+# only proves the legacy runner slot is staged for node readiness).
 start_agent "$A1" "$TMP/a1.log" sbx-a1 10273 \
   INIT_PRO_AGENT_SANDBOX=1 \
   INIT_PRO_AGENT_RUNNER_BIN="$TMP/runner/stub" \
+  INIT_PRO_AGENT_HARDENED_RUNNER_BIN="$TMP/runner/stub" \
   INIT_PRO_AGENT_BROKER_UPSTREAM="http://127.0.0.1:$PROV_PORT" \
   INIT_PRO_AGENT_BROKER_OPS="chat, embed" \
   INIT_PRO_AGENT_BROKER_CREDENTIAL="secret-canary-sbx" \
@@ -201,14 +226,25 @@ A1_PID=$!
 start_agent "$A2" "$TMP/a2.log" sbx-a2 10274 \
   INIT_PRO_AGENT_SANDBOX=1 \
   INIT_PRO_AGENT_RUNNER_BIN="$TMP/runner/stub" \
+  INIT_PRO_AGENT_HARDENED_RUNNER_BIN="$TMP/runner/stub" \
   INIT_PRO_AGENT_EXEC_TIMEOUT_SECS=5
 A2_PID=$!
 # a3: NO sandbox plane (SA6 fail-closed + SA1d Q37 parity).
 start_agent "$A3" "$TMP/a3.log" sbx-a3 10275 \
   INIT_PRO_AGENT_RUNNER_BIN="$TMP/legacy-stub"
 A3_PID=$!
+# a4: MANDATING node (SA7): INIT_PRO_AGENT_REQUIRE_SANDBOX=true (the clap
+# bool env accepts only true/false) — a legacy Agent must be refused
+# outright; the legacy stub is staged as a tripwire (if the mandate leaked,
+# sa7-legacy would run it and leave its marker).
+start_agent "$A4" "$TMP/a4.log" sbx-a4 10276 \
+  INIT_PRO_AGENT_SANDBOX=1 \
+  INIT_PRO_AGENT_REQUIRE_SANDBOX=true \
+  INIT_PRO_AGENT_RUNNER_BIN="$TMP/legacy-stub" \
+  INIT_PRO_AGENT_HARDENED_RUNNER_BIN="$TMP/runner/stub"
+A4_PID=$!
 sleep 2
-note "S1  agents booted (a1 sandbox+broker, a2 sandbox 5s-budget, a3 plain)"
+note "S1  agents booted (a1 sandbox+broker, a2 sandbox 5s-budget, a3 plain, a4 mandating)"
 
 AGENTS="/apis/init-pro.io/v1/namespaces/default/agents"
 SANDBOX=',"sandbox":{"mode":"hardened","limits":{"cpuMillis":500,"memoryBytes":268435456,"pidsMax":64}}'
@@ -393,7 +429,90 @@ else
   bad "SA6  no Pending/SandboxUnavailable (POST $CODE)"
 fi
 
+# --- SA7: node-level mandatory hardening (mandating node refuses legacy) -------------
+CODE="$(post sa7-legacy sbx-a4 sa7-legacy "" || echo 000)"
+if poll sa7-legacy 15 Pending SandboxRequired; then
+  sleep 6
+  if poll sa7-legacy 2 Pending SandboxRequired \
+     && ! pgrep -f "engine serve --socket $A4/run/engine/sa7-legacy-" >/dev/null 2>&1 \
+     && ! ls -d "$A4/agent-ws/sa7-legacy/reports" >/dev/null 2>&1; then
+    ok "SA7  mandating node (INIT_PRO_AGENT_REQUIRE_SANDBOX): legacy Agent Pending/SandboxRequired >= 6 s, no engine, legacy stub never ran"
+  else
+    bad "SA7  mandate broken: $(grep -o '"reason":"[^"]*"' "$TMP/obs-sa7-legacy.json" | head -1)"
+  fi
+else
+  bad "SA7  no Pending/SandboxRequired (POST $CODE; $(tail -2 "$TMP/a4.log" 2>/dev/null | tr '\n' ' '))"
+fi
+
+# --- SA8: the D7 in-process tool-dispatch seam (real agent-runner, probe mode) -------
+# The hardened agent-runner wraps the WHOLE tool registry behind the Q63
+# central gate. Probe mode drives single dispatches on the HOST (no LLM, no
+# sandbox) to pin the seam contract: the policy file is fail-closed input,
+# allowed classes pass, denied classes are deterministic exit 4 + the
+# secret-free 6-key audit JSONL, unknown tools are 5, malformed policy 1.
+WS8="$TMP/sa8-ws"; mkdir -p "$WS8/reports" "$WS8/.init-pro"
+printf 'sa8-read-marker-ok' > "$WS8/reports/sa8.txt"
+POLICY_ALLOW="$WS8/.init-pro/policy.json"          # ordinary tools pass
+POLICY_DENY="$WS8/.init-pro/policy-deny.json"      # empty class set: all denied
+printf '%s' '{"tools":["ordinary"],"providerOperations":[],"binds":[],"limits":{"cpuMillis":500,"memoryBytes":268435456,"pidsMax":64},"uid":1000,"gid":1000}' > "$POLICY_ALLOW"
+printf '%s' '{"tools":[],"providerOperations":[],"binds":[],"limits":{"cpuMillis":500,"memoryBytes":268435456,"pidsMax":64},"uid":1000,"gid":1000}' > "$POLICY_DENY"
+probe() { # probe POLICY -- --probe NAME [--probe-input JSON] -> RC + sa8.out/sa8.err
+  local pol="$1"; shift
+  set +e
+  "$RUNNER" --workdir "$WS8" --policy "$pol" --audit "$WS8/.init-pro/audit.jsonl" \
+    --attempt sa8-attempt "$@" >"$TMP/sa8.out" 2>"$TMP/sa8.err"
+  RC=$?
+  set -e
+}
+probe "$POLICY_ALLOW" --probe read --probe-input '{"path":"reports/sa8.txt"}'
+if [[ "$RC" == "0" ]] && grep -q "PROBE-OK" "$TMP/sa8.out" && grep -q "sa8-read-marker-ok" "$TMP/sa8.out"; then
+  ok "SA8a allowed ordinary tool dispatches in-process (read -> PROBE-OK, exit 0)"
+else
+  bad "SA8a read probe not PROBE-OK/0 (rc=$RC; $(head -c 200 "$TMP/sa8.out" | tr '\n' ' '))"
+fi
+probe "$POLICY_DENY" --probe bash --probe-input '{"command":"id"}'
+if [[ "$RC" == "4" ]] && grep -q "denied by the agent action policy" "$TMP/sa8.out" \
+   && ! grep -q '"command"' "$WS8/.init-pro/audit.jsonl"; then
+  ok "SA8b denied class -> deterministic exit 4, denial marker, no input echo in the audit"
+else
+  bad "SA8b denial contract broken (rc=$RC; $(head -c 200 "$TMP/sa8.out" | tr '\n' ' '))"
+fi
+if python3 - "$WS8/.init-pro/audit.jsonl" <<'PY'
+import json, sys
+lines = [l for l in open(sys.argv[1]) if l.strip()]
+assert len(lines) == 1, f"expected exactly 1 audit line, got {len(lines)}"
+ev = json.loads(lines[0])
+assert sorted(ev.keys()) == ["action", "agent", "attempt", "reason", "toolClass", "type"], ev.keys()
+assert ev["type"] == "ActionDenied" and ev["attempt"] == "sa8-attempt", ev
+assert ev["action"] == "bash" and ev["toolClass"] == "ordinary", ev
+PY
+then
+  ok "SA8c audit JSONL is the secret-free 6-key ActionDenied event for THIS attempt"
+else
+  bad "SA8c audit event shape wrong: $(cat "$WS8/.init-pro/audit.jsonl" 2>/dev/null | head -1)"
+fi
+probe "$POLICY_ALLOW" --probe nosuchtool
+if [[ "$RC" == "5" ]]; then
+  ok "SA8d unknown tool (incl. hallucinated names) -> exit 5"
+else
+  bad "SA8d unknown tool not exit 5 (rc=$RC)"
+fi
+printf 'not json' > "$WS8/.init-pro/policy-bad.json"
+probe "$WS8/.init-pro/policy-bad.json" --probe read
+if [[ "$RC" == "1" ]] && grep -q "fail-closed" "$TMP/sa8.err"; then
+  ok "SA8e malformed policy file -> exit 1 (fail-closed, no dispatch)"
+else
+  bad "SA8e malformed policy not exit 1 (rc=$RC; $(head -c 200 "$TMP/sa8.err" | tr '\n' ' '))"
+fi
+probe "$POLICY_ALLOW" --probe-list
+if [[ "$RC" == "0" ]] && grep -qx "bash" "$TMP/sa8.out" && grep -qx "read" "$TMP/sa8.out" \
+   && ! grep -qx "task" "$TMP/sa8.out"; then
+  ok "SA8f --probe-list advertises the ordinary surface only (task stays unadvertised)"
+else
+  bad "SA8f advertisement filter wrong: $(tr '\n' ' ' < "$TMP/sa8.out")"
+fi
+
 # --- summary -------------------------------------------------------------------
 echo; echo "sandbox e2e: $PASS passed, $FAIL failed"
-if [[ "$FAIL" == "0" ]]; then echo "ALL sandbox e2e checks passed (SA1-SA6, T7.7/Q63)"; exit 0; fi
+if [[ "$FAIL" == "0" ]]; then echo "ALL sandbox e2e checks passed (SA1-SA8, T7.7/Q63)"; exit 0; fi
 echo "sandbox e2e FAILED" >&2; exit 1
