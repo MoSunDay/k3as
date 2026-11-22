@@ -43,7 +43,7 @@ S49 收口; 硬件链与平台链按本文排程继续。
 | T4.10 | Q46 供给前置 | hostPath + 经 bound PV 的 PVC 消费, volumes e2e | T6.2 done |
 | T5.5 | Q32 余量 + **Q38 P2-1 pin bump** | live informer/drain/shared-dict 等价/动态证书 + TLS serving e2e | 无(可并行) |
 | T5.6 | Q28/Q41 余量 | SNI/TLS passthrough e2e | T5.5 done |
-| T5.7 | Q4 | Router 平台配置变量面 | T4.5 + T5.4(done) |
+| T5.7 | Q4 | Router 平台配置变量面 | ~~T4.5 + T5.4(done)~~ **S52 后全满足**（T4.5 done 解锁, 仅余 T5.5 线排程序 S55→S56） |
 | T6.1 | Q59 子集 | HelmChart auto-deploy 最小面 + e2e | T1.2/T3.1(done) |
 | T6.2 | **Q45/Q46 定稿**; Q22 lazy-binding 由 T6.2b 封洞 | 内嵌 Cluster DNS + local-path provisioner/binder e2e; ~~metrics-server 按 Q59 决策~~ **S49 已弃置(§6)** | T6.1 + T4.3 |
 
@@ -53,7 +53,7 @@ S49 收口; 硬件链与平台链按本文排程继续。
 P0 链     T7.7 D7 ──► done(S49 收口, 无外部依赖)
 硬件链    T4.15 HD ─► T7.2 GPU6 ─► T7.6 INF6   (node04 现场一次性收割, 浮动可插)
 认证链    Q47定稿✓ ─► T1.3a ─► T1.3b ─► T3.3 ─► T3.4
-网络链    Q44定稿 ─► T4.3余量 ─► T4.4 ;  T5.5 ─► T5.6 ;  T4.5 ─► T5.7
+网络链    Q44定稿✓ ─► T4.3余量✓ ─► T4.4✓ ;  T5.5 ─► T5.6 ;  T4.5✓ ─► T5.7(依赖全满足, 仅余 T5.5 线排程)
 存储链    T6.1 ─► T6.2(Q45/Q46定稿) ─► T4.10
 ```
 
@@ -145,10 +145,11 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 ## 9. S49 后剩余链状态
 
 - 认证链: Q47✓ → S50 T1.3a/b ✓(**done**) → S58 T3.3 → S59 T3.4。
-- 网络链: S51 Q44+T4.3 ✓(**done**) → S52 T4.4/T4.5; S55 T5.5 → S56 T5.6/T5.7。
+- 网络链: S51 Q44+T4.3 ✓(**done**) → S52 T4.4/T4.5 ✓(**done**, Q64/Q65); S55 T5.5 → S56 T5.6/T5.7(T5.7 依赖已全满足, 仅余 T5.5 线排程)。
 - 存储链: S53 T6.1/T6.2 → S54 T4.10。
 - 硬件链: S57(浮动) T4.15/T7.2/T7.6。
-- 计数: **41 done / 4 in-progress / 9 not-started**。
+- 计数: **43 done / 4 in-progress / 7 not-started**(S52 后; §11 时点为
+  41/4/9)。
 
 ## 10. S50 执行记录 (2026-11-21)
 
@@ -233,3 +234,58 @@ REMOTE_DD`, 缺失/不可达 → SKIP 不 FAIL, 实机 acceptance-2node 先例),
 - 计数: **41 done / 4 in-progress / 9 not-started**。
 - **Q44 定稿 LOCKED** (2026-11-22 定稿即交付, decisions.md; Q28 原文加
   `Superseded (Sprint 51)` 注记, 仅限 ClusterIP-deferred 语义)。
+
+## 12. S52 执行记录 (2026-11-22)
+
+**T4.4、T4.5 → done(网络链 II 收口, Q64/Q65 定稿即交付)。** 排程对照:
+原排「T4.4 netpol(Q59 子集) + T4.5 代理隧道(Q31 对齐)」**全部交付**,
+无顺延; 顺带 D0(T4.3 Scope C 后续: Service 写路径校验)与 S51 审查债
+微更正(drain 顺序: nodeport 面先于 clusterip, 对齐 `runtime.rs` 实际,
+c859072)。commits: c859072(审查债) + 855cb68(代码) + e0f76ef(证据门)。
+交付:
+
+- **T4.4 API 面 (Q64)**: 上游 1:1 手写 `networking.k8s.io/v1`
+  NetworkPolicy 类型(`api/src/networking/network_policy.rs` 196L +
+  `network_policy_rules.rs` 365L) + discovery 注册——golden **G31 字节
+  锁步变更**(fixture+断言+注册同 commit 原子落地, T0.6 合并门纪律);
+  子集准入 422(SCTP/命名端口/非法 peer 混排); LabelSelector 匹配委托
+  `api::label_selector_matches`。
+- **T4.4 执行面 (Q64)**: `cli/src/netpol_keeper.rs`(5s 全量重生成
+  LIST 循环) + `netpol_compile.rs`(纯函数编译) + `netpol_cidr.rs`
+  (ipBlock cidr+except 减法) + `netpol_iptables.rs`(数据面 = in-tree
+  iptables shell: `INIT-PRO-NPOL-FWD` FORWARD pos-1 分发链 + per-pod
+  `{I,E}<12hex>` 链, conntrack ACCEPT + 终端 REJECT, 单次
+  `iptables-restore --noflush` 幂等重写 + 陈链剪枝, LIST 失败降级
+  WARN 停最后好程序, teardown 零残留; trafficmngr 评估后弃——flannel
+  masq 整形非任意策略程序, 钉定树不动); Q52 builtin 节点/hostNetwork
+  Pod 永不 policing; `--disable-network-policy`(agent 默认开, server
+  accept-noop-warn, parity t80)。
+- **T4.5 隧道 (Q65)**: `apiserver/src/tunnel_{registry,wire,http}.rs`
+  (park=活性+代际守卫+死泊自愈, `RELAY_TIMEOUT_SLA`=10s; register/
+  next 长轮询 25s/responses, JSON-only Q10 + agent Q47 token) +
+  `cli/src/tunnel_dialer.rs`(默认开, 退避 1s→15s, 客户端帽 35s>
+  server 25s, 重注册 SLA ≤30s, `--disable-proxy-tunnel` t81) +
+  `common/src/b64.rs`; `kubelet_hop` 缝 = 直连优先、仅 transport 错误
+  回退、502 形状对齐(Q31 客户端透明); `--node-ip` 未设改
+  `kubelet/src/config.rs::detect_outbound_ip` 出向探测(node2 不再
+  广告 127.0.0.1)。
+- **D0 Service 写路径校验 (Q44 后续)**: `apiserver/src/service_ip.rs`
+  `validate_on_write` 不可变或默认语义(显式改 clusterIP/nodePort →
+  422; 省略 → 从存量默认回填; unset-old → 复用 create 判定 + VIP:port
+  跨 Service 冲突); 挂接 `item.rs` do_replace/do_patch + `apply.rs`
+  do_apply; CAS 409 优先于 admission 422; `item_http.rs` 拆分守文件
+  上限; +22 测试。集成期 golden **G38 两处修正**: put-stale
+  409-before-422 次序 + put-fresh omitted-clusterIP 默认回填。
+- **环境脚注(环境卫生, 非产品缺陷)**: netpol 链 host-global, 遗留
+  k3as-agent 验收部署与本轮 agent 同 host 覆写共享链(一 host 一 agent
+  姿态, Q64 Consequences 记录在案); 本地 k3as-agent unit 留 stopped,
+  远端 node02 部署不动。
+- **门禁**: build ✓; workspace tests **1488/0** (S51: 1433); clippy
+  -D warnings 0; golden **97/0** (SKIP g24 = registry 不可达, 环境门控
+  Q25); netpol-e2e **NP0-NP4 12/12**(append all-gates gate-8);
+  acceptance-2node **16/16 两轮**(T1 中继 exec 穿 INPUT DROP / T2 重连
+  SLA / T3 disable 回归); flag-parity **31/31**(+t80/t81);
+  flannel-e2e **10/10**(共享 `runtime.rs` drain 路径, 无回归)。
+- 计数: **43 done / 4 in-progress / 7 not-started**。
+- **Q64/Q65 定稿 LOCKED** (2026-11-22 定稿即交付, decisions.md; Q31 增
+  S52 对齐注记——中继只换传输, 单请求/响应语义不重开)。

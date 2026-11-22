@@ -1605,6 +1605,11 @@ consequences:
   three write seams (apiserver create, SSA create branch,
   StorageClient.create).
 
+**S52 落地注记 (Q65 对齐).** T4.5 反向中继隧道落地时, Q31 单请求/响应
+语义原样保持——中继只换传输（agent 长轮询反向回传）, 不引入流式子协议;
+HTTP 错误状态不触发回退, 回退失败与直连失败同 502 形状, kubectl 侧零
+感知。exec 流式仍不在 v1 范围（见 Q65 Consequences）。
+
 ---
 
 ## Q32 — Router rides openrusty: h2c gateway embedded as a library, Lua data plane deleted (T5.1–T5.4 / Sprint 25)
@@ -3200,3 +3205,100 @@ map 的路径在广告层拦截，被强制 spawn 的子会话整体处于已门
 containerd 伪成功。遗留（可用性差距，非遏制差距）：provider broker 的
 op-protocol ↔ OpenAI HTTP 真实桥接仍为 stub——fresh netns 下无 egress，
 沙箱化 Agent 的真实上游调用待 provider 桥接兑现（phase-4-closure 台账）。
+
+## Q64 — T4.4 NetworkPolicy supported-subset: 上游 1:1 API 面 + agent 侧 in-tree iptables 执行面 (T4.4 / S52) (LOCKED 2026-11-22, S52 定稿即交付)
+
+**Context.** T4.4 是 Layer 4 网络面最后一个 TODO。Q59 已把前向交付收敛为
+「有限支持子集 + discovery 发布 + golden 矩阵覆盖」；Q52 锁定 builtin
+Pod 网络 = host netns 共享（builtin 节点无从 policing）；k3s 以
+`--disable-network-policy` 让位上游 netpol 控制器，而 init-pro 无 addon
+控制器可选，需要自带执行面。定稿即交付——LOCKED 与落地代码同 sprint
+（2026-11-22），无 draft-only 窗口残留。
+
+**Options.** (a) **数据面** — flannel-core trafficmngr（link_repos 钉定
+树, masq 整形 API）vs in-tree iptables shell（`masq.rs` 先例）。
+trafficmngr 评估后弃：其 API 为 flannel masq 整形而非任意 per-pod 策略
+程序，且不触碰钉定树是 Q38 纪律。**定稿选 in-tree iptables。**
+(b) **匹配策略** — ipset 风格集合 vs 逐 pod 枚举 allow-list。**定稿选
+逐 pod 枚举链**（不引 ipset 依赖；规则量 O(被隔离 pod × peers) 为记录
+在案的子集边界）。
+
+**Decision (final, as-built S52).**
+- **API 面上游 1:1**: 手写 `networking.k8s.io/v1` NetworkPolicy 类型
+  （`api/src/networking/network_policy.rs` 196L +
+  `network_policy_rules.rs` 365L）注册进 discovery——**golden G31 字节
+  锁步变更**，fixture + suite 断言 + 注册**同 commit 原子落地**（T0.6
+  合并门纪律：任何 API 增补都是字节级合并门事件）；LabelSelector 匹配
+  委托 `api::label_selector_matches`（controllers 复用，零重复）。
+- **子集口径（Q59）**: ingress+egress 隔离；peers = podSelector /
+  namespaceSelector / ipBlock（cidr + except，CIDR 减法在
+  `cli/src/netpol_cidr.rs`）；TCP/UDP 数字端口；policyTypes k8s 默认；
+  空 rules = default-deny。**OUT**（admission 422）: SCTP、命名端口、
+  非法 peer 混排（如 podSelector+ipBlock 同一 peer）。
+- **执行面在 agent**: `netpol_keeper.rs` 5s 全量重生成 LIST 循环
+  （pods/namespaces/networkpolicies）+ `netpol_compile.rs` 纯函数程序
+  编译；数据面 in-tree iptables shell（`netpol_iptables.rs`）:
+  `INIT-PRO-NPOL-FWD` 分发链自 FORWARD pos 1 跳入
+  （bridge-nf-call-iptables 路径承接同节点桥接 pod 流量），per-pod
+  `INIT-PRO-NPOL-{I,E}<12hex>` 链 = conntrack ACCEPT + allow 规则 +
+  终端 REJECT（**deny = REJECT fail-fast，非 DROP**），每次重生成单条
+  `iptables-restore --noflush` payload（幂等显式 `-F`；
+  `iptables-save` 陈链剪枝），LIST 失败降级 WARN（执行停在最后好
+  程序，agent 绝不下线），shutdown teardown 零残留。
+- **排除（Q52）**: builtin-engine 节点与 hostNetwork Pod 永不被
+  policing；无 CNI（flannel none）= 不执行。
+- **Flag**: `--disable-network-policy` wired 在 `agent`（默认开），
+  `server` 侧 accept-noop-warn（k3s 把它拼在 server；init-pro 的执行面
+  是 agent 本地的）——parity t80。
+
+**Consequences.** (+) Layer 4 网络面 TODO 随 T4.4 收口；上游 1:1 wire
+类型 + k8s 默认语义使现有 manifest 直接可用；agent 本地执行面无 addon
+控制器依赖；e2e 证据 `scripts/netpol-e2e.sh` NP0-NP4 **12/12**（基线 /
+default-deny+子集准入 / 选中放行 / egress ipBlock 白名单 / 剪枝+零残留
+teardown），append 进 all-gates.sh（gate-8），root+vendor+iptables 缺失
+→ SKIP（Q25）。(−) 规则量 O(被隔离 pod × peers) 逐 pod 枚举链（无
+ipset 依赖）——supported-subset 边界记录在案；链命名空间 host-global →
+一 host 一 agent 姿态（同 host 第二个 agent 会覆写共享链——测试环境与
+遗留验收部署的碰撞观察，非产品缺陷）；golden discovery 字节此后是任何
+API 增补的合并门事件。
+
+## Q65 — T4.5 代理隧道: agent 主动拨号反向中继（长轮询, 单请求/响应对齐 Q31） (T4.5 / S52) (LOCKED 2026-11-22, S52 定稿即交付)
+
+**Context.** T4.5 余量 = 代理隧道（节点注册/心跳已在 T4.2 Scope A
+落地）。跨节点 logs/exec 需要 apiserver→kubelet 可达性；Q31 已锁定单
+请求/响应语义（kubectl 不变，无客户端流式）；k3s 式全多路复用
+remotedialer 与 WebSocket/SPDY 显式 OUT（不重开 Q31）。两节点默认陷阱:
+`--node-ip` 未设时 node2 广告 127.0.0.1。定稿即交付——LOCKED 与落地
+代码同 sprint（2026-11-22）。
+
+**Options.** (a) k3s 式 remotedialer 全多路复用反向隧道（OUT，重开
+Q31）；(b) WebSocket/SPDY upgrade 通道（OUT，同上）；(c) **agent 主动
+拨号的反向中继，plain HTTP + JSON 长轮询**。**定稿选 (c)。**
+
+**Decision (final, as-built S52).**
+- **协议**（JSON-only Q10；认证 = agent 的 Q47 bearer token，
+  `Target::NonResource` → AUTHENTICATED）: `POST /api/v1/nodes/{name}/
+  tunnel/register`（心跳锚）· `GET .../tunnel/next`（server park 25s；
+  204 空 / 200 `{id,method,path,headers,bodyB64}`）· `POST .../tunnel/
+  responses/{id}`（`{status,headers,bodyB64}`）；wire 类型
+  `apiserver/src/tunnel_wire.rs`，b64 helper `common/src/b64.rs`。
+- **Registry**（`apiserver/src/tunnel_registry.rs`）: park=活性
+  （LongPollGuard drop 即 unpark），代际守卫防陈旧 unpark，死泊自愈，
+  pending id→oneshot，`RELAY_TIMEOUT_SLA`=10s。
+- **缝**: `kubelet_hop::call_kubelet_relayed`——**DIRECT 优先**；仅
+  transport 错误回退中继（HTTP 错误状态不回退）；回退失败与直连失败同
+  502 形状（Q31 客户端透明）。单节点默认姿态零变化（直连永远赢）。
+- **Dialer**（`cli/src/tunnel_dialer.rs`）: agent run path 默认开，
+  退避 1s→15s 指数帽，客户端长轮询帽 35s > server 25s（免竞态），
+  重注册 SLA ≤30s（SIGSTOP/SIGCONT 实测 5-6s）；`--disable-proxy-tunnel`
+  退出（parity t81）。
+- **Node 地址修正**: `--node-ip` 未设 → `kubelet::detect_outbound_ip(
+  server_url)`（bindless UDP connect 探 apiserver host，兜底
+  127.0.0.1）——node2 不再广告 loopback。
+
+**Consequences.** (+) 两节点默认姿态下跨节点 logs/exec 可用
+（acceptance-2node **16/16 两轮**：T1 exec 穿 kubelet 直连端口 INPUT
+DROP 经中继 / T2 隧道断开重连 SLA / T3 `--disable-proxy-tunnel` 回归
+直连 exec + Ready=True）；隧道永不承重（处处直连优先）；node 地址修正
+顺带消掉 loopback 广告陷阱。(−) exec 流式不穿隧道（单请求/响应 =
+Q31 范围，standing）；中继跳加长轮询交接延迟；无 mTLS（Q21 明文前提）。

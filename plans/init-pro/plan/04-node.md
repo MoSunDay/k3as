@@ -411,59 +411,130 @@ format.
 - **卡点 / Blockers** — none（卡面收口）。原第一项债务（flannel_keeper
   缺 `status/conditions` merge key）S51 由 D7 收口（strategic-merge key
   `status/conditions → type` + `patch_json_strategic` 单写条件）；
-  遗留归他卡：netpol = T4.4；wireguard backend informational（F9）；
+  遗留归他卡：netpol = T4.4（S52 收口, Q64）；wireguard backend informational（F9）；
   F7/F8 两节点跨机 host-gw 为 opt-in 实机证据面（环境门控）；
   `ingress_listen` CLI flag 接线仍归 T5.5/T5.7（router 侧, 非本卡）。
 - **依赖 / Depends on** — T4.2
 
 ---
 
-## T4.4 — 网络策略 (netpol 等价)
+## T4.4 — 网络策略 (netpol supported-subset, Q64; S52 收口)
 
 - **目标 / Goal**
   `NetworkPolicy` enforcement (k3s `pkg/agent/netpol/` parity): allow/deny
-  ingress/egress by label/namespace selectors.
+  ingress/egress isolation by label/namespace/ipBlock selectors.
 
 - **核心实现 / Core implementation**
   - Translates NetworkPolicy objects into dataplane rules consistent with
     T4.3's chosen dataplane.
   - Watches policies + pods/endpoints; reconciles rule sets.
+  - **As-built (S52, Q64 — API 面 + 执行面):**
+    - API 面上游 1:1: 手写 `networking.k8s.io/v1` NetworkPolicy 类型
+      （`api/src/networking/network_policy.rs` 196L +
+      `network_policy_rules.rs` 365L）注册进 discovery——**golden G31
+      字节锁步变更**（fixture `golden/discovery-networking-v1.json` +
+      suite 断言 + 注册**同一 commit 原子落地**, T0.6 合并门纪律）;
+      LabelSelector 匹配委托 `api::label_selector_matches`
+      （controllers 复用, 零重复）。
+    - 子集口径（Q59）: ingress+egress 隔离; peers = podSelector /
+      namespaceSelector / ipBlock（cidr + except, CIDR 减法在
+      `cli/src/netpol_cidr.rs`）; TCP/UDP 数字端口; policyTypes k8s
+      默认; 空 rules = default-deny。**OUT**（admission 422）: SCTP、
+      命名端口、非法 peer 混排（如 podSelector+ipBlock 同一 peer）。
+    - 执行面（agent 侧）: `cli/src/netpol_keeper.rs`——5s 全量重生成
+      LIST 循环（pods/namespaces/networkpolicies）+ `netpol_compile.rs`
+      纯函数程序编译; 数据面 = **in-tree iptables shell**
+      （`netpol_iptables.rs`; flannel-core trafficmngr 评估后弃——为
+      flannel masq 整形而非任意 per-pod 策略程序, 钉定树不动）:
+      `INIT-PRO-NPOL-FWD` 分发链自 FORWARD pos 1 跳入
+      （bridge-nf-call-iptables 路径承接同节点桥接 pod 流量）、per-pod
+      `INIT-PRO-NPOL-{I,E}<12hex>` 链 = conntrack ACCEPT + allow 规则
+      + 终端 REJECT（**deny 是 REJECT fail-fast, 非 DROP**）、每次
+      重生成单条 `iptables-restore --noflush` payload（幂等显式 `-F`;
+      `iptables-save` 陈链剪枝）、LIST 失败降级 WARN（执行停在最后
+      好程序, agent 绝不下线）、shutdown teardown 零残留。
+    - 排除（Q52）: builtin-engine 节点与 hostNetwork Pod 永不被
+      policing; 无 CNI（flannel none）= 不执行。
+    - Flag: `--disable-network-policy` wired 在 `agent`（默认开）,
+      `server` 侧 accept-noop-warn（k3s 把它拼在 server; init-pro 的
+      执行面是 agent 本地的）——parity t80。
 
 - **验收手段 / Acceptance**
   - Golden: a `default-deny` namespace blocks traffic; a selected pod is
     allowed; egress policy honored.
+  - As-delivered (S52): `scripts/netpol-e2e.sh` **NP0-NP4 12/12** —
+    NP0 基线连通; NP1 default-deny + 子集准入（SCTP/命名端口/非法
+    混排 422）; NP2 选中放行; NP3 egress ipBlock 白名单; NP4 策略
+    删除剪枝 + 零残留 teardown; root/vendor/iptables 缺失 → SKIP
+    （Q25）; 已 append 进 `all-gates.sh`（gate-8）。
 
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **状态 / Status** — done (Sprint 52, Q64)
+- **证据 / Evidence** — Sprint 52: netpol-e2e **NP0-NP4 12/0**
+  （all-gates gate-8）; workspace tests **1488/0**; golden **97/0**
+  （G31 字节锁步变更, SKIP g24 = registry 不可达环境门控 Q25）;
+  flag-parity **31/31**（+t80-netpol）; clippy -D warnings 零;
+  CHANGELOG S52。
+- **卡点 / Blockers** — none（卡面收口）。记录在案: 规则量
+  O(被隔离 pod × peers) 逐 pod 枚举链（无 ipset 依赖）=
+  supported-subset 边界; 链命名空间 host-global → 一 host 一 agent
+  姿态（同 host 第二个 agent 覆写共享链——测试环境遗留部署碰撞
+  观察, 非产品缺陷）; golden discovery 字节 = 后续任何 API 增补的
+  合并门事件。
 - **依赖 / Depends on** — T4.3
 
 ---
 
-## T4.5 — 节点注册/心跳/代理隧道
+## T4.5 — 节点注册/心跳/代理隧道 (隧道面 Q65; S52 收口)
 
 - **目标 / Goal**
   Node registration with the API server, heartbeat (lease/Status), and the
   server↔agent tunnel (k3s `pkg/agent/tunnel`, `pkg/daemons/control/tunnel.go`).
 
 - **核心实现 / Core implementation**
-  - Node object bootstrap on agent start; `NodeLease` heartbeat loop.
-  - Tunnel: agent dials server; multiplexed reverse proxy for apiserver
-    egress from server-side controllers (k3s `--node-external-ip`/proxy).
-  - Reconnect/backoff; credentials from T3.3.
+  - Node object bootstrap on agent start; `NodeLease` heartbeat loop. —
+    已由 T4.2 Scope A 交付（`kubelet/src/node.rs`）。
+  - Tunnel: agent dials server; reverse proxy for apiserver→kubelet
+    reachability (logs/exec hop), reconnect/backoff.
+  - **As-built (S52, Q65 — agent-dialed 反向中继隧道):**
+    - 协议（JSON-only Q10; 认证 = agent 的 Q47 bearer token,
+      `Target::NonResource` → AUTHENTICATED）: `POST /api/v1/nodes/
+      {name}/tunnel/register`（心跳锚）· `GET .../tunnel/next`（server
+      park 25s; 204 空 / 200 `{id,method,path,headers,bodyB64}`）·
+      `POST .../tunnel/responses/{id}`（`{status,headers,bodyB64}`）;
+      wire 类型 `apiserver/src/tunnel_wire.rs`, b64 helper
+      `common/src/b64.rs`。k3s 式 remotedialer 全多路复用与
+      WebSocket/SPDY 显式 OUT（不重开 Q31）。
+    - Registry（`apiserver/src/tunnel_registry.rs`）: park=活性
+      （LongPollGuard drop 即 unpark）、代际守卫防陈旧 unpark、死泊
+      自愈、pending id→oneshot、`RELAY_TIMEOUT_SLA`=10s。
+    - 缝: `kubelet_hop::call_kubelet_relayed`——**DIRECT 优先**; 仅
+      transport 错误回退中继（HTTP 错误状态不回退）; 回退失败与直连
+      失败同 502 形状（Q31 客户端透明）。单节点默认姿态零变化
+      （直连永远赢）。
+    - Dialer（`cli/src/tunnel_dialer.rs`）: agent run path 默认开,
+      退避 1s→15s 指数帽, 客户端长轮询帽 35s > server 25s（免竞态）,
+      重注册 SLA ≤30s（SIGSTOP/SIGCONT 实测 5-6s）;
+      `--disable-proxy-tunnel` 退出（parity t81）。
+    - Node 地址修正: `--node-ip` 未设 → `kubelet/src/config.rs::
+      detect_outbound_ip(server_url)`（bindless UDP connect 探
+      apiserver host 出向 IP, 兜底 127.0.0.1）——两节点默认姿态不再
+      广告 loopback。
 
 - **验收手段 / Acceptance**
   - Golden: agent joins, `kubectl get nodes` shows `Ready`; sever tunnel,
     observe reconnect within SLA.
+  - As-delivered (S52): `scripts/acceptance-2node-e2e.sh` **16/16 两轮
+    一致** — T1 exec 穿 kubelet 直连端口 INPUT DROP（中继回退）;
+    T2 隧道断开重连 SLA（实测 5-6s ≤ 30s）; T3 `--disable-proxy-tunnel`
+    回归（直连 exec + Ready=True）。
 
-- **备注 / Note (Sprint 17, T4.2 Scope A as-built):** node registration,
-  `kube-node-lease` heartbeat, and `kubectl get nodes` Ready are already
-  delivered by T4.2 Scope A (`crates/kubelet/src/node.rs`). T4.5's unique
-  remaining scope = the server↔agent tunnel, reconnect SLA, and
-  credentials (T3.3).
-- **状态 / Status** — not-started
-- **证据 / Evidence** — —
-- **卡点 / Blockers** — none
+- **状态 / Status** — done (注册/心跳 T4.2 Scope A; 隧道面 Sprint 52, Q65)
+- **证据 / Evidence** — Sprint 52: acceptance-2node **16/16**（两轮）;
+  workspace tests **1488/0**; flag-parity **31/31**（+t81-proxy-tunnel）;
+  golden **97/0**; clippy -D warnings 零; CHANGELOG S52。
+- **卡点 / Blockers** — none（卡面收口）。记录在案: exec 流式不穿
+  隧道（单请求/响应 = Q31 范围, standing）; 中继跳加长轮询交接延迟;
+  隧道永不承重（处处直连优先）; 无 mTLS（Q21 明文前提）。
 - **依赖 / Depends on** — T4.2, T1.2
 
 ---

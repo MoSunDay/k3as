@@ -7,6 +7,92 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 52 — 网络链 II: T4.4 + T4.5 done (netpol supported-subset Q64 + agent-dialed 代理隧道 Q65 + D0 Service 写路径校验) (2026-11-22)
+
+**Goal:** 网络链 II 收口——T4.4 NetworkPolicy（Q64）+ T4.5 代理隧道
+（Q65）双双落地，Layer 4 网络 TODO 清零；顺带 D0 = T4.3 Scope C 后续
+（Service 写路径校验, Q44）与 S51 审查债微更正（drain 顺序）。Q64/Q65
+**定稿即交付**（LOCKED 与代码同 sprint）。**T4.4、T4.5 → done**
+(counts: 43 done · 4 in-progress · 7 not-started；T5.7 的 TODO 依赖
+全满足，仅余 T5.5 线排程序)。commits: **c859072**（S51 审查债 drain
+顺序更正，先行单独落库）+ **855cb68**（代码）+ **e0f76ef**（证据门）。
+
+**Changes**
+- **D0 Service 写路径校验（T4.3 Scope C 后续, Q44）**: `service_ip.rs`
+  NEW `validate_on_write`——不可变或默认语义：显式改 clusterIP/nodePort
+  → 422 Invalid；**省略（OMITTED）→ 从存量默认回填**（分配保留，k8s
+  update parity）；unset-old → 复用 create 路径判定（validate-or-
+  allocate + VIP:port 跨 Service 冲突）。挂接 `item.rs`
+  do_replace/do_patch + `apply.rs` do_apply；**CAS 冲突 409 优先于
+  admission 422**（golden put-stale parity，k8s 惯例）；`item_http.rs`
+  拆分（守迭代文件上限）；新增 22 测试（unit + wire）。
+- **T4.4 netpol API 面（Q64, 核心）**: NEW `api/src/networking/
+  network_policy.rs`（196L）+ `network_policy_rules.rs`（365L）——上游
+  1:1 手写 `networking.k8s.io/v1` 类型注册进 discovery，**golden G31
+  字节锁步变更**（fixture + suite 断言 + 注册同 commit 原子落地，
+  T0.6 合并门纪律）；子集准入（Q59）：ingress+egress 隔离 +
+  podSelector/namespaceSelector/ipBlock（cidr+except，`netpol_cidr.rs`
+  CIDR 减法）+ TCP/UDP 数字端口 + policyTypes k8s 默认 + 空 rules =
+  default-deny；SCTP/命名端口/非法 peer 混排 → 422。LabelSelector
+  匹配委托 `api::label_selector_matches`（controllers 复用）。
+- **T4.4 netpol 执行面（Q64, 核心）**: NEW `cli/src/netpol_keeper.rs`
+  （5s 全量重生成 LIST 循环：pods/namespaces/networkpolicies）+
+  `netpol_compile.rs`（纯函数程序编译）+ `netpol_iptables.rs`（**数据
+  面 = in-tree iptables shell**；flannel-core trafficmngr 评估后弃——
+  为 flannel masq 整形而非任意 per-pod 策略程序，钉定树不动）：
+  `INIT-PRO-NPOL-FWD` 分发链自 FORWARD pos 1 跳入
+  （bridge-nf-call-iptables 承接同节点桥接 pod 流量）、per-pod
+  `INIT-PRO-NPOL-{I,E}<12hex>` 链（conntrack ACCEPT + allow 规则 +
+  终端 REJECT——deny 是 REJECT fail-fast 非 DROP）、每次重生成单条
+  `iptables-restore --noflush` payload（幂等显式 `-F` +
+  `iptables-save` 陈链剪枝）、LIST 失败降级 WARN（执行停在最后好
+  程序，agent 绝不下线）、shutdown teardown 零残留。Q52 排除：
+  builtin 节点与 hostNetwork Pod 永不 policing；无 CNI = 不执行。
+  `--disable-network-policy` wired 在 `agent`（默认开）、`server`
+  accept-noop-warn（k3s 把它拼在 server；init-pro 执行面在 agent）。
+- **T4.5 代理隧道（Q65, 核心）**: NEW `apiserver/src/tunnel_registry.rs`
+  （park=活性——LongPollGuard drop 即 unpark；代际守卫防陈旧 unpark；
+  死泊自愈；pending id→oneshot；`RELAY_TIMEOUT_SLA`=10s）+
+  `tunnel_wire.rs`/`tunnel_http.rs`（`tunnel/register` 心跳锚 ·
+  `tunnel/next` server park 25s 长轮询（204 空 / 200 `{id,method,
+  path,headers,bodyB64}`）· `tunnel/responses/{id}`；JSON-only Q10 +
+  agent Q47 bearer token）+ `common/src/b64.rs`。缝
+  `kubelet_hop::call_kubelet_relayed`：**DIRECT 优先**，仅 transport
+  错误回退中继（HTTP 错误状态不回退），回退失败与直连失败同 502 形状
+  （Q31 客户端透明；单节点姿态零变化）。NEW `cli/src/tunnel_dialer.rs`
+  （agent 默认开；退避 1s→15s 指数帽；客户端长轮询帽 35s > server 25s
+  免竞态；重注册 SLA ≤30s，SIGSTOP/SIGCONT 实测 5-6s）；
+  `--disable-proxy-tunnel` 退出。`--node-ip` 未设改
+  `kubelet/src/config.rs::detect_outbound_ip`（bindless UDP connect
+  出向探测）——node2 不再广告 127.0.0.1。
+- **golden G38 两处修正（集成期发现，与代码同 commit）**: put-stale
+  期望改为 **409-before-422 次序**（陈 rv CAS 冲突优先于 admission
+  拒绝）；put-fresh 期望增 **omitted-clusterIP 从存量默认回填**
+  （k8s update parity）。
+- **审查债微更正（c859072）**: drain 顺序更正——`runtime.rs` 实际顺序
+  为 nodeport 面先 drain、clusterip 后（decisions.md / CHANGELOG /
+  plan/04-node.md 三处同步，S51 审查发现）。
+- **环境脚注（环境卫生，非产品缺陷）**: netpol 链命名空间 host-global，
+  测试机遗留的 k3as-agent 验收部署与本轮 agent 同 host 时覆写共享
+  `INIT-PRO-NPOL-*` 链（一 host 一 agent 姿态，Q64 Consequences 记录
+  在案）；处置：本地 k3as-agent unit 留 stopped，远端 node02 部署不动。
+- **证据门（commit e0f76ef）**: NEW `scripts/netpol-e2e.sh` **NP0-NP4
+  12/12**——NP0 基线连通 / NP1 default-deny+子集准入 422 / NP2 选中
+  放行 / NP3 egress ipBlock 白名单 / NP4 策略删除剪枝+零残留 teardown
+  （root+vendor+iptables 缺失 → SKIP，Q25）；append 进 all-gates.sh
+  （gate-8）。`scripts/acceptance-2node-e2e.sh` **16/16 两轮一致**——
+  T1 exec 穿透 kubelet 直连端口 INPUT DROP（中继回退）/ T2 隧道断开
+  重连 SLA（实测 5-6s ≤ 30s）/ T3 `--disable-proxy-tunnel` 回归（直连
+  exec + Ready=True）。`scripts/cli-flag-parity-test.sh` **31/31**（新
+  t80-netpol / t81-proxy-tunnel）。
+- **门禁**: build ✓; workspace tests **1488/0**（S51: 1433）; clippy
+  -D warnings 0; golden **97/0**（SKIP g24 sandbox smoke——registry
+  不可达，环境门控 Q25）; flannel-e2e **10/10**（共享 `runtime.rs`
+  drain 路径——无回归）; all-gates 全绿。
+- 计数: **43 done / 4 in-progress / 7 not-started**。
+- **Q64/Q65 定稿 LOCKED**（2026-11-22 定稿即交付, decisions.md；Q31 增
+  S52 对齐注记——中继只换传输，单请求/响应语义不重开）。
+
 ## Sprint 51 — 网络链 I: T4.3 done (Scope C ClusterIP 分配面 + Router VIP 承载面 + flannel host-gw, Q44) (2026-11-22)
 
 **Goal:** 网络链 I 收口——T4.3 Scope C (ClusterIP 分配面 + Router VIP
