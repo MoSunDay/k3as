@@ -68,7 +68,7 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 |---|---|---|
 | ~~S49~~ P0 收口 | ~~T7.7 D7 + 强制硬化 + Q63 复核; S48 审计收口; Q47 定稿; T1.3a 开工~~ **已执行**(§7; T1.3a 按风险裁决 1 顺延 S50) | ~~T7.7 done; Q47 LOCKED; 审计归档~~ ✓ |
 | ~~S50~~ 认证链 I | ~~T1.3a TLS+静态 token + T1.3b RBAC supported-subset~~ **已执行**(§10; 原排 auth-e2e A1-A6 实交付为 A1-A7) | ~~T1.3 → done; kubeconfig full parity 弃置记录(Q47)~~ ✓ |
-| **S51** 网络链 I | Q44 定稿 → T4.3 余量: Scope C ClusterIP 分配 + L4 承载(沿 Q57 折入 Router 权重面模式, 归属面定稿时裁定); flannel host-gw/multi-node F6+ | T4.3 → done; Q44 LOCKED |
+| ~~S51~~ 网络链 I | ~~Q44 定稿 → T4.3 余量: Scope C ClusterIP 分配 + L4 承载(沿 Q57 折入 Router 权重面模式, 归属面定稿时裁定); flannel host-gw/multi-node F6+~~ **已执行**(§11; F7/F8 两节点跨机 host-gw 环境门控 SKIP——opt-in 实机证据面, 非顺延) | ~~T4.3 → done; Q44 LOCKED~~ ✓ |
 | **S52** 网络链 II | T4.4 netpol(Q59 子集, allow/deny e2e)+ T4.5 代理隧道(Q31 对齐) | T4.4、T4.5 → done(解锁 T5.7) |
 | **S53** 存储/addon 链 | T6.1 HelmChart auto-deploy 最小面; Q45/Q46 定稿 → T6.2a 内嵌 Cluster DNS + T6.2b local-path provisioner/binder(**封 Q22 lazy-binding 洞**) | T6.1、T6.2 → done; Q45/Q46 LOCKED |
 | **S54** 卷消费 | T4.10 hostPath + PVC(bound PV 解析, 依赖 T6.2b) volumes e2e | T4.10 → done |
@@ -96,7 +96,7 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 | protobuf wire、动态 CRD 注册、admission、aggregation、全量 RBAC | Q59 | 显式弃置(Q59 原文); **S50 T1.3b supported-subset RBAC 已落**(四 wire 类型 + 授权中间件 + bootstrap)，全量 RBAC 仍在子集外 | standing |
 | T4.15/T7.2/T7.6 真硬件证据 | Q60/Q61/Q62 | **收口中**: node04 窗口收割(S57, 最晚 S59) | open |
 | T4.8 命名端口、T4.9 capacity/eviction 子项 | done 卡内 deferred | S60 终审: 收口或 Q59 弃置 | open |
-| Router TLS/SNI 余量、netpol、host-gw/multi-node | T5.5/T5.6/T4.3/T4.4 | **收口中**: S51-S56 排程 | open |
+| Router TLS/SNI 余量、netpol | T5.5/T5.6/T4.4 | **收口中**: host-gw 已 S51 落地(F6a-F6d 实证; F7/F8 两节点跨机为 opt-in 实机证据面, 环境门控 `FLANNEL_E2E_REMOTE_NODE`); 剩余 TLS/SNI (S55/S56) + netpol (S52/T4.4) | open |
 | HA 多 server | T3.4 | **收口中**(S59); 弃置需用户裁决, 不得默认 | open |
 
 ## 7. S49 执行记录 (2026-11-21)
@@ -145,10 +145,10 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 ## 9. S49 后剩余链状态
 
 - 认证链: Q47✓ → S50 T1.3a/b ✓(**done**) → S58 T3.3 → S59 T3.4。
-- 网络链: S51 Q44+T4.3 → S52 T4.4/T4.5; S55 T5.5 → S56 T5.6/T5.7。
+- 网络链: S51 Q44+T4.3 ✓(**done**) → S52 T4.4/T4.5; S55 T5.5 → S56 T5.6/T5.7。
 - 存储链: S53 T6.1/T6.2 → S54 T4.10。
 - 硬件链: S57(浮动) T4.15/T7.2/T7.6。
-- 计数: **40 done / 5 in-progress / 9 not-started**。
+- 计数: **41 done / 4 in-progress / 9 not-started**。
 
 ## 10. S50 执行记录 (2026-11-21)
 
@@ -178,3 +178,58 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
   -D warnings 0; golden **75/75** (+G107-G113; 6 SKIP = 无 vendor
   bundle/宿主 cni0 预存); auth-e2e **7/7**; sandbox-e2e **23/23**;
   flag-parity **28/28**; all-gates 全绿。
+
+## 11. S51 执行记录 (2026-11-22)
+
+**T4.3 → done(Q44 定稿即交付, 网络链 I 收口)。** 排程对照: 原排「Q44
+定稿 → Scope C ClusterIP 分配 + L4 承载 + flannel host-gw/multi-node
+F6+」**全部交付**, 无顺延——F7/F8 两节点跨机 host-gw 为环境门控 SKIP
+(`FLANNEL_E2E_REMOTE_NODE`/`FLANNEL_E2E_REMOTE_BIN`/`FLANNEL_E2E_
+REMOTE_DD`, 缺失/不可达 → SKIP 不 FAIL, 实机 acceptance-2node 先例),
+是 opt-in 实机证据面而非顺延项。交付:
+
+- **分配面归 apiserver (Q44)**: `crates/apiserver/src/service_ip.rs`
+  (290L) + `service_ip_tests.rs` (248L); `--service-cidr` 从 noop 转
+  wired (**server only**, S50 `wired_for_server` 先例), 默认
+  10.43.0.0/16, 畸形 CIDR = server 启动 fatal fail-closed; in-CIDR
+  顺序分配 + 去重, 显式 `spec.clusterIP` 尊重 (out-of-CIDR → 422),
+  冲突 → CAS 自愈 (乐观重读 + 409 重试), headless 保持 None (留
+  T6.2a); `collection.rs` create 路径 `prepare_clusterip` +
+  `heal_clusterip_collision`。
+- **承载面归 Router (Q44)**: `crates/router/src/clusterip.rs` (302L) +
+  `clusterip_tests.rs` (117L), 仿 `nodeport.rs` —— 每 ClusterIP
+  Service port 一个 openrusty reverse-proxy listener (TCP only), ready
+  Endpoints 上游, Q57 TrafficSplit per-endpoint 折叠权重复用 (与
+  NodePort 面同折叠), plane enable 旗标门控; headless/ExternalName
+  不分 VIP 不监听。
+- **bind = 回环别名**: `crates/router/src/vip.rs` (132L) —— `ip addr
+  add VIP/32 dev lo` (klipper/k3s 先例), 幂等 (容忍 EEXIST), drain
+  全量清理; 接线 `cli/runtime_server.rs` (plane spawn + 3-tuple
+  drain) 与 `cli/runtime.rs` (clusterip 面先于 nodeport drain)。
+  **single-node VIP scope** 记录在案: 跨节点 ClusterIP 可达性不主张。
+- **flannel host-gw 后端**: F6a-F6d 实证 (net-conf.json body ==
+  host-gw + 10.42.0.0/16; node 注解 backend-type=host-gw 带 podCIDR;
+  subnet.env FLANNEL_NETWORK=10.42.0.0; host route 10.42.0.0/24 dev
+  cni0)。
+- **D0 authz 拆分**: `authz.rs` 412→305L (拆出 `authz_tests.rs`
+  110L), 无行为变化。
+- **D7 conditions-merge 债务收口**: `api/src/patch.rs`
+  `kubernetes_defaults()` 增 `status/conditions → type` strategic-merge
+  key (按 type list merge, k8s 语义); `cli/src/flannel_keeper.rs` 改
+  `HttpJson::patch_json_strategic` PATCH `/api/v1/nodes/{name}/status`
+  单写 NetworkUnavailable 条件 (不再整体替换 clobber 他方条件)。
+- **servicelb.rs 死文件更正**: 删除 `router/src/servicelb.rs` (432L) ——
+  从未在 `router/src/lib.rs` 声明, 从未编译入 plane, 其测试从未运行;
+  L4 实际由 NodePort 面承载 (Q28/Q41)——更正 Sprint 35 CHANGELOG 的
+  文件级归属 (announce 控制器 + nodeport LB admission 为真, Q41 有效)。
+- **门禁**: build ✓; workspace tests **1433/0** (S50: 1404); clippy
+  -D warnings 0; `cargo fmt -p` 干净 (link_repos 已物化, 不用
+  `--all`); golden **75/75**; service-traffic-e2e **ST1-ST10b 11/0**
+  (ST7 分配面 / ST8 VIP dataplane / ST9 drain 零残留 / ST10+ST10b
+  TrafficSplit 折叠 + 503-收敛); flannel-e2e **10/0** (F1-F6d 全绿,
+  F7/F8 门控 SKIP, F9 informational); flag-parity **29/29** (+t79-
+  service-cidr); 跑后卫生复核: 无 10.43 lo 别名残留、无 init-pro
+  进程、无 flannel.1/cni0 链路、e2e 临时目录清理。
+- 计数: **41 done / 4 in-progress / 9 not-started**。
+- **Q44 定稿 LOCKED** (2026-11-22 定稿即交付, decisions.md; Q28 原文加
+  `Superseded (Sprint 51)` 注记, 仅限 ClusterIP-deferred 语义)。

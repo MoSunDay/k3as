@@ -275,7 +275,7 @@ format.
 
 ---
 
-## T4.3 — CNI/网络 (flannel 等价 + ServiceLB L4)
+## T4.3 — CNI/网络 (flannel 等价 + ServiceLB L4 + ClusterIP 面, Q34/Q41/Q44; S51 收口)
 
 - **目标 / Goal**
   Pod networking via a bundled CNI (flannel-equivalent VXLAN/Host-GW) +
@@ -316,25 +316,60 @@ format.
       `status/conditions` merge key，一次性条件写入尚不可行
       （upstream 式 status subresource merge 待做）。
     - 新 CLI flag：`--flannel-backend`、`--cluster-cidr`。
-  - **As-built (Sprint 35, Q41)：** ServiceLB L4 / LoadBalancer VIP
-    announce 已落地 —— `controllers/service_lb.rs` announce 控制器
-    （klipper-lb 语义：显式 `spec.loadBalancerIP` 优先，否则首 Node
-    InternalIP；非空 ingress 永不改写；CAS status 写 + 限速重排；
-    `--disable servicelb` 关闭）+ `router/servicelb.rs` raw-TCP L4 面
-    （`vip:servicePort` 监听 round-robin ready Endpoints；bind 失败 =
-    announce-only 单条 warn；空后端连接立即 FIN；NodePort 面同时放行
-    LoadBalancer 型 Service）。
-  - **剩余 T4.3 范围（not-started）：** 上游 flannel conformance 面
-    （host-gw / wireguard backend、multi-node vxlan、netpol）。
-  - **Scope C (S42 排期, Q44 草案)：** 分配面 —— `--service-cidr` 从
-    noop 表转 wired，`service.rs` noop 分支改为从 CIDR 池分配 ClusterIP +
-    冲突 CAS 自愈（复用 NodePort 现有分配模式）；承载面 —— 仿
-    `servicelb.rs` 新 listener 类型（bind clusterIP:port，RR 就绪
-    Endpoints，`copy_bidirectional`；bind 依赖 IP_FREEBIND 或本机回环
-    别名，取舍由 Q44 定夺）；headless（`clusterIP: None`）不分 IP 不监听
-    （为 T6.2a DNS 留数据源）。明确 out: sessionAffinity/UDP/
-    externalTrafficPolicy（Q28 原文保留）。验收: 分配/冲突单测 +
-    service-traffic-e2e ST7–ST10。
+  - **As-built (Sprint 35, Q41; S51 更正)：** ServiceLB L4 /
+    LoadBalancer VIP announce 已落地 —— `controllers/service_lb.rs`
+    announce 控制器（klipper-lb 语义：显式 `spec.loadBalancerIP` 优先，
+    否则首 Node InternalIP；非空 ingress 永不改写；CAS status 写 +
+    限速重排；`--disable servicelb` 关闭）+ NodePort 面放行
+    LoadBalancer 型 Service。**S51 归属更正**：L4 数据面由 NodePort
+    平面承载 —— `router/src/servicelb.rs` 从未接入 `router/src/lib.rs`
+    （死文件，从未编译入 plane，其 "3 L4 plane tests" 从未运行），
+    S51 删除；Sprint 35 CHANGELOG 的文件级归属据此更正，announce
+    控制器 + nodeport LoadBalancer admission 为真，Q41 本身仍有效。
+  - **Scope C as-built (Sprint 51, Q44 LOCKED —— ClusterIP 分配面 +
+    Router VIP 承载面)：**
+    - 分配面归 apiserver：`crates/apiserver/src/service_ip.rs` (290L) +
+      `service_ip_tests.rs` (248L)；`--service-cidr` 从 noop 转 wired
+      (**server only**, agent 不持有)，经 S50 `wired_for_server` 先例
+      接线（与 `--tls-san` 同机制），默认 `10.43.0.0/16`，畸形 CIDR =
+      server 启动 fatal fail-closed；分配 = in-CIDR 顺序分配 + 既有
+      Services 去重，显式 `spec.clusterIP` 尊重（in-CIDR 校验，
+      out-of-CIDR → 422 拒绝），冲突 → CAS 自愈（乐观重读 + 409 重试）；
+      headless（`clusterIP: None`）保持 None（为 T6.2a DNS 消费保留）；
+      经 `collection.rs` create 路径 `prepare_clusterip` +
+      `heal_clusterip_collision` 接入；flag 链 `ServerCmd`/`ServerBind`/
+      `lib.rs` → `ServeOptions.service_cidr` → `AppState.service_cidr`。
+    - 承载面归 Router：`crates/router/src/clusterip.rs` (302L) +
+      `clusterip_tests.rs` (117L)，仿 `nodeport.rs` 建模 —— 每 ClusterIP
+      Service port 一个 openrusty reverse-proxy listener（TCP only；
+      UDP 显式 out-of-subset），ready-Endpoints 上游，reconcile 循环按
+      Q57 TrafficSplit per-endpoint 折叠权重（与 NodePort 面同一折叠；
+      split 对象名 == 入口 Service 名，SMI 惯例），plane enable 旗标
+      门控；headless/ExternalName Service 不分 VIP 不监听。
+    - bind = 回环别名：`crates/router/src/vip.rs` (132L) —— `ip addr
+      add VIP/32 dev lo`（klipper/k3s 先例），幂等（add-if-absent，
+      容忍 EEXIST），drain 全量清理；接线 `cli/runtime_server.rs`
+      （plane spawn + 3-tuple drain：listeners + aliases）与
+      `cli/runtime.rs`（drain 顺序：clusterip 面先于 nodeport）。
+    - **single-node VIP scope**：回环别名使 VIP 从节点自身及任何能
+      路由到它的客户端可达；跨节点 ClusterIP 可达性不主张（无
+      per-node ARP/routing magic），记录为 single-node scope（klipper
+      parity：k3s servicelb 无 L2 announcer 时同性质）。
+    - flannel host-gw 后端（S51 实证）：fresh cluster 以 host-gw
+      backend 起播 F6a-F6d；两节点跨机 host-gw F7/F8 为环境门控
+      opt-in 实机证据面（`FLANNEL_E2E_REMOTE_NODE`/`FLANNEL_E2E_
+      REMOTE_BIN`/`FLANNEL_E2E_REMOTE_DD`，缺失/不可达 → SKIP 不 FAIL）。
+    - D7 conditions-merge 债务（本卡 Blockers 原第一项）S51 收口：
+      `crates/api/src/patch.rs` `kubernetes_defaults()` 增
+      `status/conditions → type` strategic-merge key（按 condition type
+      list merge，k8s 语义）；`crates/cli/src/flannel_keeper.rs` 改经新
+      `HttpJson::patch_json_strategic` PATCH
+      `/api/v1/nodes/{name}/status` 单写 NetworkUnavailable 条件（此前
+      整体 conditions 替换可能 clobber 其他 actor 的条件）。
+    - 明确 out: sessionAffinity/UDP/externalTrafficPolicy（Q28 原文
+      其余部分继续有效）；跨节点 VIP 可达性（single-node scope）；
+      netpol 归 T4.4；wireguard backend 为 informational（F9，上游
+      余量）。
 
 - **验收手段 / Acceptance**
   - Golden: pod-to-pod across nodes; ClusterIP reachable; LoadBalancer
@@ -345,16 +380,40 @@ format.
     F3 podIP 落在 node podCIDR 内；F4 flannel 织物上 pod↔pod 可达；
     F5 信息性说明（上游 conformance host-gw/multi-node/netpol 不在
     Scope A 内）。
+  - As-built (Scope B, S35): announce 控制器 CAS status 写 + 单测
+    （`controllers` announce reconciler 9 tests）。
+  - As-delivered (Scope C, S51): `scripts/service-traffic-e2e.sh`
+    **ST1-ST10b 11/11** — ST7 分配面（两次 in-CIDR 分配 10.43.0.1/.2
+    互异、out-of-CIDR 显式 IP → 422 拒绝、headless → None）；ST8 VIP
+    dataplane（真实 HTTP 经 `10.43.0.1:18081` lo 别名穿 Router 到真
+    pod）；ST9 drain 零残留（lo 无 10.43 别名、无监听、无 init-pro
+    进程）；ST10/ST10b TrafficSplit 折入 VIP per-endpoint 权重 + 后端
+    回归 503-后-收敛。`scripts/flannel-e2e.sh` **10/10** — F6a-F6d
+    host-gw（net-conf.json body == host-gw + 10.42.0.0/16、node 注解
+    backend-type=host-gw 带 podCIDR、subnet.env FLANNEL_NETWORK=
+    10.42.0.0、host route 10.42.0.0/24 dev cni0）；F7/F8 两节点跨机
+    host-gw 数据面 + remote route 环境门控（缺/不可达 → SKIP 不 FAIL）；
+    F9 informational（wireguard 为上游余量；netpol 归 T4.4）。分配/冲突
+    单测 `service_ip_tests.rs` (248L) + `clusterip_tests.rs` (117L)。
 
-- **状态 / Status** — in-progress (Scope A flannel CNI done, Sprint 25, Q34;
-  Scope B ServiceLB announce/L4 done, Sprint 35, Q41)
+- **状态 / Status** — done (Scope A flannel CNI Q34, Sprint 25; Scope B
+  ServiceLB announce/L4 Q41, Sprint 35; **Scope C ClusterIP 分配面 +
+  Router VIP 承载面 Q44 + flannel host-gw, Sprint 51**)
 - **证据 / Evidence** — Sprint 25: flannel-e2e F1–F5 5/5（F5 信息性）；
-  service-traffic ST1–ST6 6/6（NodePort 面, Q28/Q32, 不属本卡）；
   workspace 852 tests green; flannel multicall selftest 9 别名含 flannel。
-- **卡点 / Blockers** — 债务两项：flannel_keeper 依赖 5s 轮询（缺
-  `status/conditions` merge key，upstream 式 status subresource merge
-  待做）；`ingress_listen` CLI flag 未接线（router 侧, T5.5/T5.7 相邻）。
-  LoadBalancer VIP 需要 T5.6 dataplane 协调。
+  Sprint 35: announce reconciler 单测（9）；service-traffic ST1–ST6 6/6
+  （NodePort 面, Q28/Q32）。**Sprint 51**: service-traffic-e2e
+  **ST1-ST10b 11/0**（ST7-ST10b 新增）；flannel-e2e **10/0**（F6a-F6d
+  新增, F7/F8 环境门控 SKIP）；flag-parity **29/29**（新增 t79-
+  service-cidr：`server --service-cidr` 入 live --help, agent 不持有）；
+  workspace tests **1433/0**; clippy -D warnings 零；golden **75/75**；
+  CHANGELOG S51。
+- **卡点 / Blockers** — none（卡面收口）。原第一项债务（flannel_keeper
+  缺 `status/conditions` merge key）S51 由 D7 收口（strategic-merge key
+  `status/conditions → type` + `patch_json_strategic` 单写条件）；
+  遗留归他卡：netpol = T4.4；wireguard backend informational（F9）；
+  F7/F8 两节点跨机 host-gw 为 opt-in 实机证据面（环境门控）；
+  `ingress_listen` CLI flag 接线仍归 T5.5/T5.7（router 侧, 非本卡）。
 - **依赖 / Depends on** — T4.2
 
 ---

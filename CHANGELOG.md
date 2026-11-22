@@ -7,6 +7,81 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 51 — 网络链 I: T4.3 done (Scope C ClusterIP 分配面 + Router VIP 承载面 + flannel host-gw, Q44) (2026-11-22)
+
+**Goal:** 网络链 I 收口——T4.3 Scope C (ClusterIP 分配面 + Router VIP
+承载面) + flannel host-gw 后端实证; Q44 自 S42 草案顺延至此**定稿即交付**
+(LOCKED 与代码同 sprint), ClusterIP 从 Q28 deferred 语义转 wired (Q28 原文
+加 Superseded 注记, 仅限 ClusterIP-deferred 语义)。**T4.3 → done**
+(counts: 41 done · 4 in-progress · 9 not-started)。commits: **5b49962**
+(代码) + **f8f682f** (证据门)。
+
+**Changes**
+- **分配面归 apiserver (Q44, 核心)**: NEW `crates/apiserver/src/
+  service_ip.rs` (290L) + `service_ip_tests.rs` (248L); `--service-cidr`
+  从 noop 转 wired, **server only** (agent 不持有)——经 S50
+  `wired_for_server` 先例接线 (与 `--tls-san` 同机制), flag 链
+  `ServerCmd`/`ServerBind`/`lib.rs` → `ServeOptions.service_cidr` →
+  `AppState.service_cidr`; 默认 `10.43.0.0/16`, 畸形 CIDR = server 启动
+  **fatal fail-closed**; 分配 = in-CIDR 顺序分配 + 既有 Services 去重,
+  显式 `spec.clusterIP` 尊重 (in-CIDR 校验, out-of-CIDR → 422 拒绝),
+  冲突 → CAS 自愈 (乐观重读 + 409 重试), headless (`clusterIP: None`)
+  保持 None (为 T6.2a DNS 保留); `collection.rs` create 路径
+  `prepare_clusterip` + `heal_clusterip_collision` 接入。
+- **承载面归 Router (Q44, 核心)**: NEW `crates/router/src/clusterip.rs`
+  (302L) + `clusterip_tests.rs` (117L), 仿 `nodeport.rs` 建模——每
+  ClusterIP Service port 一个 openrusty reverse-proxy listener (**TCP
+  only**; UDP 显式 out-of-subset), ready-Endpoints 上游, reconcile 循环
+  按 Q57 TrafficSplit per-endpoint 折叠权重 (与 NodePort 面同一折叠;
+  split 对象名 == 入口 Service 名, SMI 惯例), plane enable 旗标门控;
+  headless/ExternalName Service 不分 VIP 不监听。
+- **bind = 回环别名**: NEW `crates/router/src/vip.rs` (132L) —— `ip
+  addr add VIP/32 dev lo` (klipper/k3s 先例), 幂等 (add-if-absent, 容忍
+  EEXIST), drain 全量清理; 接线 `cli/runtime_server.rs` (plane spawn +
+  3-tuple drain: listeners + aliases) + `cli/runtime.rs` (drain 顺序:
+  clusterip 面先于 nodeport)。**single-node VIP scope** 记录在案: 回环
+  别名使 VIP 从节点自身及任何能路由到它的客户端可达, 跨节点 ClusterIP
+  可达性不主张 (klipper parity: 无 L2 announcer 的 k3s servicelb 同性质)。
+- **flannel host-gw 后端**: fresh cluster 以 host-gw backend 起播——
+  net-conf.json body == host-gw + 10.42.0.0/16、node 注解
+  backend-type=host-gw 带 podCIDR、subnet.env FLANNEL_NETWORK=10.42.0.0
+  写入、host route 10.42.0.0/24 dev cni0 (F6a-F6d)。
+- **D0 authz 拆分**: `authz.rs` 412→305L (拆出 `authz_tests.rs` 110L),
+  无行为变化 (守迭代文件上限)。
+- **D7 conditions-merge 债务收口**: `api/src/patch.rs`
+  `kubernetes_defaults()` 增 `status/conditions → type` strategic-merge
+  key (按 condition type list merge, k8s 语义); `cli/src/
+  flannel_keeper.rs` 改经新 `HttpJson::patch_json_strategic` PATCH
+  `/api/v1/nodes/{name}/status` 单写 NetworkUnavailable 条件 (此前整体
+  conditions 替换可能 clobber 其他 actor 写入的条件)。
+- **servicelb.rs 死文件更正 (删除)**: 删除 `router/src/servicelb.rs`
+  (432L)——它是**死文件**: 从未在 `router/src/lib.rs` 声明 (仅 nodeport.rs
+  一条陈旧注释提及), 从未编译入 plane, 其测试从未运行; 真实 L4 转发一直
+  由 NodePort 面 (Q28/Q41) 承载。**据此更正 Sprint 35 CHANGELOG 的
+  "router/src/servicelb.rs (432 lines): raw-TCP L4 plane … 3 L4 plane
+  tests" 记载——那些测试从未执行**; S35 的 announce 控制器
+  (`controllers/src/controllers/service_lb.rs`) + nodeport LoadBalancer
+  admission 为真且保留, Q41 决策本身仍有效 (仅文件级归属更正)。
+- **证据门 (commit f8f682f)**: `scripts/service-traffic-e2e.sh`
+  **ST1-ST10b 11/0**——ST7 分配面 (两次 in-CIDR 分配 10.43.0.1/.2 互异、
+  out-of-CIDR 显式 IP → 422 拒绝、headless → None); ST8 VIP dataplane
+  (真实 HTTP 经 10.43.0.1:18081 lo 别名穿 Router 到真 pod); ST9 drain
+  零残留 (lo 无 10.43 别名、无监听、无 init-pro 进程); ST10 + ST10b
+  TrafficSplit 折入 VIP per-endpoint 权重 + 后端回归 503-后-收敛。
+  `scripts/flannel-e2e.sh` **10/0**——F6a-F6d host-gw 新增; F7/F8 (两
+  节点跨机 host-gw datapath + remote route) **环境门控**:
+  `FLANNEL_E2E_REMOTE_NODE` (ssh 目标) / `FLANNEL_E2E_REMOTE_BIN` (默认
+  /root/k3as-d/bin/init-pro) / `FLANNEL_E2E_REMOTE_DD`, 缺失/不可达 →
+  **SKIP 不 FAIL** (实机先例: acceptance-2node-e2e.sh / K3AS_NODE02_SSH),
+  本轮 SKIP; F9 informational (wireguard 为上游余量; netpol 归 T4.4)。
+  `scripts/cli-flag-parity-test.sh` **29/29** (新增 t79-service-cidr:
+  `server --service-cidr` 出现在 live --help, agent 不持有)。
+- **门禁**: build ✓; workspace tests **1433/0** (S50: 1404); clippy
+  -D warnings 0; `cargo fmt -p` 干净 (link_repos 已物化, 从不
+  `cargo fmt --all`); golden **75/75**; 跑后卫生复核: 无 10.43 lo 别名
+  残留、无 init-pro 进程、无 flannel.1/cni0 链路、e2e 临时目录清理;
+  all-gates 全绿。
+
 ## Sprint 50 — 认证链 I: T1.3 done (T1.3a TLS+静态 token + T1.3b RBAC supported-subset, Q47/Q59) (2026-11-21)
 
 **Goal:** 认证授权链首个落地 sprint——T1.3a (TLS serving + 静态 token

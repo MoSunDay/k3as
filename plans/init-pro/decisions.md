@@ -1278,6 +1278,13 @@ environments.
 
 ## Q28 — Service traffic: NodePort-only plane in the built-in Router (no ClusterIP dataplane) (Sprint 18)
 
+**Superseded (Sprint 51, 2026-11-22).** Q44 (T4.3 Scope C / S51,
+LOCKED) supersedes ONLY Q28's ClusterIP-deferred semantics — the
+`--service-cidr` noop and "ClusterIP Services stay creatable but
+non-forwarding" are void as of S51 (分配面归 apiserver, 承载面归 Router
+`clusterip.rs`). The NodePort plane itself and the rest of Q28 remain in
+force. See Q44.
+
 **Date.** 2026-08-17 (Sprint 18, recorded at S7 — "decision D" in the
 slice commits).
 
@@ -2354,34 +2361,61 @@ all landed the same day:
   per-path authz in v1, the same client-trust model as native k8s NFS;
   per-path ACLs would be a follow-up decision.
 
-## Q44 — T4.3 Scope C: ClusterIP 分配面 + L4 承载数据面 (T4.3 Scope C / S42) (DRAFT 2026-11-15, S42 开工前定稿)
+## Q44 — T4.3 Scope C: ClusterIP 分配面 + Router VIP 承载面 (T4.3 Scope C / S51) (LOCKED 2026-11-22, S51 定稿即交付)
 
 **Context.** Q28 locked the Service plane as NodePort-only in the Router
 with the ClusterIP dataplane explicitly deferred. The S38–S48 semantic-
-backfill iteration now schedules it (S42): without a ClusterIP plane the
-Cluster DNS story (T6.2a, S43) has nothing stable to resolve to. This is
-a DRAFT — nothing in it may touch code before finalization.
+backfill iteration originally scheduled it for S42; per the phase-4-
+closure 排程 it actually executed in S51 (网络链 I): without a ClusterIP
+plane the Cluster DNS story (T6.2a) has nothing stable to resolve to.
+定稿即交付 — LOCKED 与落地代码同 sprint (2026-11-22), 无 draft-only
+窗口残留。
 
 **Options.** (a) **bind 取舍** — `IP_FREEBIND` socket option vs 本机回环
 别名 (`ip addr add`, the klipper/k3s precedent). The key difference is
 route correctness for LOCALLY-ORIGINATED connections: FREEBIND only
 solves bind (an agent connecting to its own ClusterIP still needs a
 route), while a loopback alias solves bind AND the local route at once.
-草案倾向回环别名. (b) **分配面** — a standalone allocator state machine
-vs 复用 NodePort 现有 CAS 自愈分配模式 (apiserver `service.rs` 的
-noop 分支改为从 `--service-cidr` 池分配 + 冲突 CAS 自愈). 草案选后者.
+**定稿选回环别名** — not IP_FREEBIND (FREEBIND solves bind only, not
+the local route; the alias solves both). (b) **分配面** — a standalone
+allocator state machine vs 复用 apiserver CAS 自愈分配模式 (NodePort
+现有分配模式同型). **定稿选后者** — NOT a standalone state machine.
 
-**Decision (草案).** 分配面复用 NodePort CAS 自愈模式 (`--service-cidr`
-wired)；承载面仿 `router/servicelb.rs` 新 listener 类型 (bind
-clusterIP:port, RR ready Endpoints, `copy_bidirectional`)，bind 机制取
-回环别名（待定稿确认）。headless (`clusterIP: None`) 不分 IP 不监听
-(留给 T6.2a DNS 消费)。必须在 S42 开工前定稿；定稿时在 Q28 原文加
-`Superseded (Sprint N)` 注记 (Q44 修订 Q28 的 ClusterIP-deferred 语义).
+**Decision (final, as-built S51).** **分配面归 apiserver**: `--service-cidr`
+从 noop 转 wired, **server only** (agent 不持有), 经 S50 `wired_for_server`
+先例接线 (与 `--tls-san` 同机制); 默认 `10.43.0.0/16`; 畸形 CIDR = server
+启动 **fatal fail-closed**。分配 = in-CIDR 顺序分配 + 既有 Services 去重;
+显式 `spec.clusterIP` 尊重 (in-CIDR 校验, out-of-CIDR → 422 拒绝); 冲突 →
+CAS 自愈 (乐观重读 + 409 重试); headless (`clusterIP: None`) 保持 None
+(为 T6.2a DNS 消费保留)。落点 `crates/apiserver/src/service_ip.rs` (290L)
++ `service_ip_tests.rs` (248L), 经 `collection.rs` create 路径接入
+(`prepare_clusterip` + `heal_clusterip_collision`); flag 链 `ServerCmd`/
+`ServerBind`/`lib.rs` → `ServeOptions.service_cidr` → `AppState.service_cidr`。
+**承载面归 Router**: `crates/router/src/clusterip.rs` (302L, 仿 `nodeport.rs`
+建模) + `clusterip_tests.rs` (117L) — 每 ClusterIP Service port 一个
+openrusty reverse-proxy listener (**TCP only**; UDP 显式 out-of-subset),
+ready-Endpoints 上游, reconcile 循环按 Q57 TrafficSplit per-endpoint 折叠
+权重 (与 NodePort 面同一折叠算法; split 对象名 == 入口 Service 名, SMI
+惯例), plane enable 旗标门控; headless/ExternalName Service 不分 VIP 不
+监听。**bind = 回环别名**: `crates/router/src/vip.rs` (132L) — `ip addr add
+VIP/32 dev lo` (klipper/k3s 先例), 幂等 (add-if-absent, 容忍 EEXIST),
+drain 全量清理。接线 `crates/cli/src/runtime_server.rs` (plane spawn +
+3-tuple drain: listeners + aliases) 与 `runtime.rs` (drain 顺序: clusterip
+面先于 nodeport)。**single-node VIP scope**: 回环别名使 VIP 从节点自身及
+任何能路由到它的客户端可达; 跨节点 ClusterIP 可达性 **不主张** (无
+per-node ARP/routing magic) — 记录为 single-node scope (klipper parity:
+k3s servicelb 无 L2 announcer 时同性质)。另记: 草案的「承载面仿
+`router/servicelb.rs`」指针**作废** — servicelb.rs 被发现为死文件 (从未在
+`router/src/lib.rs` 声明, 从未编译入 plane, 其测试从未运行), S51 删除;
+实际模型是 `nodeport.rs`, Q41 的 L4 现实即 NodePort 面 (更正 Sprint 35
+CHANGELOG 的文件级归属; announce 控制器 + nodeport LoadBalancer admission
+为真, Q41 本身仍有效)。
 
-**Consequences.** (+) ClusterIP 可达 → T6.2a DNS 有数据源。
-(−) out 明确保留: sessionAffinity/UDP/externalTrafficPolicy (Q28 原文
-其余部分继续有效)；回环别名触碰节点网络状态 (需幂等 + 清理纪律，
-定稿时核对)。
+**Consequences.** (+) ClusterIP 可达 → T6.2a DNS (S53) 有稳定数据源;
+Q28 NodePort 面与 ClusterIP 面互补共存 (Router 内双平面, 无第二套数据面)。
+(−) out-of-subset 逐字保留: sessionAffinity/UDP/externalTrafficPolicy
+(Q28 原文其余部分继续有效); 回环别名触碰节点网络状态 (幂等 + drain 清理
+纪律已由 ST9 验证); 跨节点 VIP 可达性 out (single-node scope)。
 
 ## Q45 — T6.2a 内嵌 Cluster DNS: 宿主形态 (T6.2a / S43) (DRAFT 2026-11-15, S43 开工前定稿)
 
