@@ -17,11 +17,18 @@ mod engine_probe;
 mod flags;
 mod flannel;
 mod flannel_keeper;
+mod netpol_cidr;
+mod netpol_compile;
+#[cfg(test)] // T4.4 (Q64) pure compile cases (file size limit)
+mod netpol_compile_tests;
+mod netpol_iptables;
+mod netpol_keeper;
 mod runtime;
 mod runtime_server;
 mod stage;
 mod stage_cmd;
 mod storage_dsn;
+mod tunnel_dialer;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -155,6 +162,15 @@ where
                             .unwrap_or_else(|_| "docker".to_string()),
                         default_timeout_seconds: 900,
                     });
+                    // T4.4 (Q64): the server's `--disable-network-policy`
+                    // is accept-noop-warn — enforcement lives on the agent
+                    // (node-side iptables keeper); this WARN is the "warn".
+                    if svc.disable_network_policy {
+                        tracing::warn!(
+                            target: "init-pro",
+                            "server --disable-network-policy is a no-op: NetworkPolicy enforcement is node-side; set the agent flag instead (Q64)"
+                        );
+                    }
                     runtime::run_server(
                         cfg,
                         runtime::ServerBind {
@@ -242,6 +258,12 @@ where
                 // T1.3a (Q47 P3): bearer token the node-side loops
                 // present to a token-file-authenticated apiserver.
                 ag.shared.token.clone(),
+                // T4.4 (Q64): default-on NetworkPolicy enforcement
+                // (`--disable-network-policy` opts the node out).
+                !ag.disable_network_policy,
+                // T4.5 (Q65): default-on reverse relay tunnel
+                // (`--disable-proxy-tunnel` opts the node out).
+                !ag.disable_proxy_tunnel,
             )
         }
         Some(Command::Stage { dry_run }) => stage_cmd::run_stage(cfg, dry_run, manifest),
@@ -342,8 +364,11 @@ mod tests {
         };
         match parsed(&["agent", "--server", "http://s", "--token", "t"]).command {
             Some(Command::Agent(ag)) => {
-                assert_eq!(ag.node_ip, "127.0.0.1");
+                // T4.5 (Q65): unset --node-ip means auto-detect at boot
+                // (no clap default_value anymore).
+                assert_eq!(ag.node_ip, None);
                 assert_eq!(ag.kubelet_port, 10250);
+                assert!(!ag.disable_proxy_tunnel);
             }
             _ => panic!("expected Agent"),
         }
@@ -361,24 +386,24 @@ mod tests {
         .command
         {
             Some(Command::Agent(ag)) => {
-                assert_eq!(ag.node_ip, "10.0.0.7");
+                assert_eq!(ag.node_ip.as_deref(), Some("10.0.0.7"));
                 assert_eq!(ag.kubelet_port, 10251);
             }
             _ => panic!("expected Agent"),
         }
     }
 
-    /// Server-only flags must NOT appear in `agent --help` (scope correctness).
+    /// Server-only flags must NOT appear in `agent --help` (scope
+    /// correctness). T4.4 (Q64) note: `--disable-network-policy` left
+    /// this list — the flag is agent-WIRED now (the node-side iptables
+    /// keeper); the server copy stays accept-noop-warn (enforcement is
+    /// a node concern, k3s `--disable-network-policy` parity).
     #[test]
     fn agent_help_excludes_server_only_flags() {
         let cmd = Cli::command();
         let mut agent = cmd.find_subcommand("agent").expect("agent exists").clone();
         let help = agent.render_help().to_string();
-        for flag in [
-            "--cluster-init",
-            "--datastore-endpoint",
-            "--disable-network-policy",
-        ] {
+        for flag in ["--cluster-init", "--datastore-endpoint"] {
             assert!(
                 !help.contains(flag),
                 "agent --help should not list server-only flag {flag}"

@@ -102,6 +102,11 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
         kubelet::GpuInventorySource::Auto,
         // T1.3a (Q47 P3): servers run no node loops — no bearer token.
         None,
+        // T4.4 (Q64): servers run no node data plane — no enforcement.
+        false,
+        // T4.5 (Q65): servers never dial tunnels — they ARE the relay
+        // endpoint; node-side dialing is agent-only.
+        false,
     )
 }
 

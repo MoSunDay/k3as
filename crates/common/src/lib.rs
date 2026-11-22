@@ -3,6 +3,7 @@
 //! Shared domain primitives used by every layer. Kept dependency-free so heavy
 //! layers can depend on it without pulling the world.
 
+pub mod b64;
 pub mod embed;
 pub mod gpu;
 pub mod quantity;

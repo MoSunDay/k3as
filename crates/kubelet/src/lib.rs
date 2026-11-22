@@ -74,7 +74,7 @@ pub mod watch;
 pub use agent_sandbox::{select_sandbox, SandboxNodeConfig, SandboxSelection};
 pub use agents::spawn_agent_runner;
 pub use agents::AgentRunnerConfig;
-pub use config::KubeletConfig;
+pub use config::{detect_outbound_ip, KubeletConfig};
 pub use cri_backend::{ContainerView, CriBackend, CriCtlBackend, SandboxView};
 pub use env::{
     config_error_event, parse_env, parse_env_from, resolve_env, EnvFromSource, EnvSources,

@@ -29,7 +29,14 @@ mod collection;
 mod discovery_handlers;
 mod error;
 mod item;
-pub(crate) mod kubelet_hop;
+// S52-D0 hygiene split: the axum wrapper handlers moved out of `item.rs`
+// (file-size cap; the shared do_* logic stays there).
+mod item_http;
+// T4.5 (Q65): `kubelet_hop` is PUBLIC so the node-side tunnel dialer
+// (crates/cli/src/tunnel_dialer.rs) reuses the exact frozen wire contract
+// (build_hop_request / parse_hop_response / call_kubelet) instead of
+// re-implementing it.
+pub mod kubelet_hop;
 pub(crate) mod node_status;
 pub(crate) mod pod_io;
 #[cfg(test)]
@@ -45,6 +52,17 @@ mod pod_workspace;
 mod serve;
 mod service;
 mod service_ip;
+// T4.5 (Q65): the reverse relay tunnel — registry state machine + the
+// agent-dialed HTTP surface (Q31 single-request relay over JSON).
+// T4.5 (Q65): the wire types are re-exported PUBLIC because the
+// node-side dialer (crates/cli/src/tunnel_dialer.rs) must parse
+// `RelayRequest` and build `RelayResponse` with the EXACT same serde
+// shape the apiserver emits (Q10 JSON-only wire contract).
+mod tunnel_http;
+mod tunnel_registry;
+mod tunnel_wire;
+pub use tunnel_registry::LONG_POLL_TIMEOUT;
+pub use tunnel_wire::{RelayRequest, RelayResponse};
 // S51: the ClusterIP allocation unit tests live beside `service_ip.rs`
 // (file-size cap; the `authz_tests` precedent).
 #[cfg(test)]

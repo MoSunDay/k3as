@@ -17,7 +17,7 @@ use axum::Router;
 
 use crate::collection;
 use crate::discovery_handlers::discovery_routes;
-use crate::item;
+use crate::item_http;
 use crate::state::AppState;
 use api::SchemaRegistry;
 use storage::StorageBackend;
@@ -67,6 +67,8 @@ pub fn api_app_full(
         // the k3s default pool; production threads `--service-cidr` through
         // `serve`.
         service_cidr: crate::service_ip::ServiceCidr::default(),
+        // T4.5 (Q65): default-on reverse relay tunnel registry.
+        tunnels: crate::tunnel_registry::TunnelRegistry::new_shared(),
     };
     router(state)
 }
@@ -92,10 +94,10 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/{resource}/{name}",
-            get(item::core_get)
-                .put(item::core_replace)
-                .delete(item::core_delete)
-                .patch(item::core_patch),
+            get(item_http::core_get)
+                .put(item_http::core_replace)
+                .delete(item_http::core_delete)
+                .patch(item_http::core_patch),
         )
         // T3.2: pod binding subresource (upstream `pods/binding`; the
         // in-process scheduler drives the same do_bind semantics).
@@ -116,6 +118,21 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/nodes/{name}/status",
             put(crate::node_status::put_node_status).patch(crate::node_status::patch_node_status),
         )
+        // T4.5 (Q65): the agent-dialed reverse relay tunnel surface. These
+        // five/six-segment paths never collide with the item routes above;
+        // auth rides the same authn/authz middleware pair (Q47).
+        .route(
+            "/api/v1/nodes/{name}/tunnel/register",
+            post(crate::tunnel_http::register),
+        )
+        .route(
+            "/api/v1/nodes/{name}/tunnel/next",
+            get(crate::tunnel_http::next),
+        )
+        .route(
+            "/api/v1/nodes/{name}/tunnel/responses/{id}",
+            post(crate::tunnel_http::respond),
+        )
         // T4.2 Scope C: pods/log + pods/exec relay subresources — resolved
         // to the owning node's kubelet, then passed through verbatim (Q31).
         .route(
@@ -128,10 +145,10 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/namespaces/{namespace}/{resource}/{name}",
-            get(item::core_get_ns)
-                .put(item::core_replace_ns)
-                .delete(item::core_delete_ns)
-                .patch(item::core_patch_ns),
+            get(item_http::core_get_ns)
+                .put(item_http::core_replace_ns)
+                .delete(item_http::core_delete_ns)
+                .patch(item_http::core_patch_ns),
         )
         // --- grouped groups ---
         .route(
@@ -144,17 +161,17 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route(
             "/apis/{group}/{version}/{resource}/{name}",
-            get(item::grp_get)
-                .put(item::grp_replace)
-                .delete(item::grp_delete)
-                .patch(item::grp_patch),
+            get(item_http::grp_get)
+                .put(item_http::grp_replace)
+                .delete(item_http::grp_delete)
+                .patch(item_http::grp_patch),
         )
         .route(
             "/apis/{group}/{version}/namespaces/{namespace}/{resource}/{name}",
-            get(item::grp_get_ns)
-                .put(item::grp_replace_ns)
-                .delete(item::grp_delete_ns)
-                .patch(item::grp_patch_ns),
+            get(item_http::grp_get_ns)
+                .put(item_http::grp_replace_ns)
+                .delete(item_http::grp_delete_ns)
+                .patch(item_http::grp_patch_ns),
         )
         .with_state(state.clone());
 

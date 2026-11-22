@@ -34,7 +34,7 @@ pub fn run_agent(
     cfg: Config,
     server_url: Option<String>,
     node_name: Option<String>,
-    node_ip: String,
+    node_ip: Option<String>,
     kubelet_port: u16,
     flannel: crate::flannel::FlannelNet,
     // T4.12 (Q48/Q51): "builtin" runs the node on the built-in engine
@@ -55,6 +55,12 @@ pub fn run_agent(
     // T1.3a (Q47 P3): static bearer token the kubelet/Agent/flannel
     // loops present to a token-file-authenticated apiserver.
     server_token: Option<String>,
+    // T4.4 (Q64): NetworkPolicy enforcement on/off (`--disable-network-
+    // policy` opts out; enforced only for kubelet+flannel nodes).
+    netpol_enabled: bool,
+    // T4.5 (Q65): reverse relay tunnel on/off (`--disable-proxy-tunnel`
+    // opts out; the node then serves hops over the direct dial only).
+    tunnel_enabled: bool,
 ) -> ExitCode {
     // T7.2 (Q61): fail fast on a bad --gpu-inventory value — the GPU
     // plane's ledger/publication contract must never boot half-parsed.
@@ -65,6 +71,17 @@ pub fn run_agent(
             return ExitCode::FAILURE;
         }
     };
+    // T4.5 (Q65): `--node-ip` unset -> auto-detect the primary outbound IP
+    // towards the apiserver host (no packet leaves; fallback loopback) so
+    // BOTH the direct hop and the reverse tunnel address the kubelet.
+    let node_ip = node_ip.unwrap_or_else(|| {
+        let detected = server_url
+            .as_deref()
+            .map(kubelet::detect_outbound_ip)
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        tracing::info!(target: "init-pro", node_ip = %detected, "auto-detected --node-ip (T4.5)");
+        detected
+    });
     run_supervised(
         "agent",
         cfg,
@@ -80,6 +97,8 @@ pub fn run_agent(
         builtin_rootfs,
         gpu_inventory,
         server_token,
+        netpol_enabled,
+        tunnel_enabled,
     )
 }
 
@@ -152,6 +171,12 @@ pub(crate) fn run_supervised(
     gpu_inventory: kubelet::GpuInventorySource,
     // T1.3a (Q47 P3): static apiserver bearer token (`--token`/env).
     server_token: Option<String>,
+    // T4.4 (Q64): NetworkPolicy enforcement (agent mode only — the
+    // server passes `false`; it runs no node data plane).
+    netpol_enabled: bool,
+    // T4.5 (Q65): reverse relay tunnel dialer (agent mode only; the
+    // server passes `false` — it dials nodes directly or not at all).
+    tunnel_enabled: bool,
 ) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -190,6 +215,14 @@ pub(crate) fn run_supervised(
         // T4.3 Scope A (Q34): embedded flanneld (kube subnet-mgr). Drained
         // after the kubelet, before the containerd runtime.
         let mut flannel_drain: Option<tokio::task::JoinHandle<()>> = None;
+        // T4.4 (Q64): node-side NetworkPolicy enforcement keeper. Drained
+        // after flanneld — its teardown (zero-residue iptables, NP4) must
+        // complete before the process exits.
+        let mut netpol_drain: Option<tokio::task::JoinHandle<()>> = None;
+        // T4.5 (Q65): the reverse relay tunnel dialer. Drained after the
+        // netpol keeper — it holds only one outbound long-poll, so its
+        // exit is instant once the shutdown token interrupts the poll.
+        let mut tunnel_drain: Option<tokio::task::JoinHandle<()>> = None;
         // T4.12 (Q49/Q51): engine selection for this boot. `builtin` runs
         // the node on the built-in engine once the Q51 boot probe passes;
         // any probe failure falls back to the staged containerd with a
@@ -421,6 +454,61 @@ pub(crate) fn run_supervised(
                         "flannel disabled by --flannel-backend=none"
                     );
                 }
+                // T4.4 (Q64): node-side NetworkPolicy enforcement —
+                // default-on for the standard (containerd + flannel)
+                // data plane, opted out by `--disable-network-policy`.
+                // Q52 exclusions: builtin nodes never police (their pods
+                // share the host netns — skipped above), and no CNI means
+                // no pod addresses to police.
+                if netpol_enabled && !builtin && crate::flannel::is_enabled(&net) {
+                    netpol_drain = crate::netpol_keeper::spawn_netpol_keeper(
+                        &url,
+                        &node,
+                        server_token.as_deref(),
+                        shutdown.clone(),
+                    );
+                    tracing::info!(
+                        target: "init-pro",
+                        role,
+                        node = %node,
+                        "network policy enforcement started (T4.4)"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "init-pro",
+                        role,
+                        "network policy enforcement off (--disable-network-policy or no CNI)"
+                    );
+                }
+                // T4.5 (Q65): the agent-dialed reverse relay tunnel —
+                // default-on for joined nodes, opted out by
+                // `--disable-proxy-tunnel`. It reuses the kubelet's own
+                // advertised address (`node_ip:kubelet_port`, T4.2 Scope C)
+                // as the local execution target.
+                if tunnel_enabled {
+                    if let Some((ip, port)) = &kubelet_addr {
+                        tunnel_drain = crate::tunnel_dialer::spawn_tunnel_dialer(
+                            &url,
+                            &node,
+                            ip,
+                            *port,
+                            server_token.as_deref(),
+                            shutdown.clone(),
+                        );
+                        tracing::info!(
+                            target: "init-pro",
+                            role,
+                            node = %node,
+                            "reverse relay tunnel started (T4.5, Q65)"
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        target: "init-pro",
+                        role,
+                        "reverse relay tunnel off (--disable-proxy-tunnel, T4.5)"
+                    );
+                }
             }
         }
         // T1.3a (Q47): the server plane spawns in
@@ -510,6 +598,19 @@ pub(crate) fn run_supervised(
         if let Some(h) = flannel_drain {
             let _ = h.await;
             tracing::info!(target: "init-pro", role, "flannel drained");
+        }
+        // T4.4 (Q64): the netpol keeper right after flanneld — its exit
+        // is the zero-residue teardown (jump + every INIT-PRO-NPOL-*
+        // chain gone, NP4); waiting here keeps shutdown residue-free.
+        if let Some(h) = netpol_drain {
+            let _ = h.await;
+            tracing::info!(target: "init-pro", role, "network policy drained");
+        }
+        // T4.5 (Q65): the tunnel dialer right after the netpol keeper —
+        // confirm its long-poll task exited (no lingering outbound poll).
+        if let Some(h) = tunnel_drain {
+            let _ = h.await;
+            tracing::info!(target: "init-pro", role, "tunnel dialer drained");
         }
         // T-anyhome (Q36): drain the NFS data plane here too (data plane,
         // before the API surface) so no workspace IO survives the drain.

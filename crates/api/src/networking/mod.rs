@@ -8,8 +8,10 @@
 //! model in-tree (`api` crate), dropping the `k8s-openapi`/`kube-core`
 //! networking deps from the data plane.
 //!
-//! Scope: [`Ingress`] + [`IngressClass`] (GA v1 shapes) with list wrappers.
-//! `NetworkPolicy`/`IPAddress`/`ServiceCIDR` are out of scope (no consumer).
+//! Scope: [`Ingress`] + [`IngressClass`] (GA v1 shapes) with list wrappers,
+//! plus [`NetworkPolicy`] + its semantics/validation module (TODO **T4.4**,
+//! decision **Q64**; consumed by the node-side enforcement keeper).
+//! `IPAddress`/`ServiceCIDR` are out of scope (no consumer).
 //! Minimal-fidelity notes (documented, upstream-faithful but reduced):
 //! - `IngressLoadBalancerIngress.ports` is not carried (no LB status writer).
 //! - `IngressClassSpec.parameters` is not carried (no external controller).
@@ -18,6 +20,8 @@
 
 pub mod ingress;
 pub mod ingress_class;
+pub mod network_policy;
+pub mod network_policy_rules;
 
 use crate::schema::{SchemaRegistry, Scope};
 
@@ -29,9 +33,12 @@ pub const VERSION: &str = "v1";
 pub const API_VERSION: &str = "networking.k8s.io/v1";
 
 /// Register the `networking.k8s.io/v1` kinds into a [`SchemaRegistry`]:
-/// `ingresses` (namespaced, short name `ing`) and `ingressclasses`
-/// (cluster-scoped). Registration is generic CRUD/watch via the apiserver
-/// routes — the gateway consumes the same objects through its reflectors.
+/// `ingresses` (namespaced, short name `ing`), `ingressclasses`
+/// (cluster-scoped), and `networkpolicies` (namespaced, short name
+/// `netpol`, TODO **T4.4** / decision **Q64** — consumed by the node-side
+/// enforcement keeper on the agent). Registration is generic CRUD/watch
+/// via the apiserver routes — the gateway consumes the same objects
+/// through its reflectors.
 pub fn register(reg: &mut SchemaRegistry) {
     reg.register_with_short_names(
         GROUP,
@@ -51,6 +58,15 @@ pub fn register(reg: &mut SchemaRegistry) {
         Scope::Cluster,
         &[],
     );
+    reg.register_with_short_names(
+        GROUP,
+        VERSION,
+        "NetworkPolicy",
+        "networkpolicies",
+        "NetworkPolicyList",
+        Scope::Namespaced,
+        &["netpol"],
+    );
 }
 
 pub use ingress::{
@@ -59,11 +75,63 @@ pub use ingress::{
     IngressSpec, IngressStatus, IngressTLS, ServiceBackendPort, TypedLocalObjectReference,
 };
 pub use ingress_class::{IngressClass, IngressClassList, IngressClassSpec};
+pub use network_policy::{
+    IPBlock, IntOrString, LabelSelector, LabelSelectorRequirement, NetworkPolicy,
+    NetworkPolicyCondition, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyList,
+    NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec, NetworkPolicyStatus,
+};
+pub use network_policy_rules::{
+    effective_policy_types, ipv4_cidr_range, label_selector_matches, validate_network_policy,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::serde_ext::from_json;
+
+    /// Wire parity for `NetworkPolicy` (T4.4, Q64): camelCase json tags,
+    /// `from`/`to` peer keys, omitempty round-trip, `status` absent.
+    #[test]
+    fn network_policy_wire_format_is_k8s_faithful() {
+        let doc = serde_json::json!({
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "metadata": {"name": "deny-all", "namespace": "default"},
+            "spec": {
+                "podSelector": {"matchLabels": {"app": "victim"}},
+                "policyTypes": ["Ingress", "Egress"],
+                "ingress": [{
+                    "from": [
+                        {"podSelector": {"matchLabels": {"app": "friend"}}},
+                        {"namespaceSelector": {"matchLabels": {"tier": "edge"}}},
+                        {"ipBlock": {"cidr": "10.42.0.0/16", "except": ["10.42.1.0/24"]}}
+                    ],
+                    "ports": [{"protocol": "TCP", "port": 8080}]
+                }],
+                "egress": [{"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}]
+            }
+        });
+        let np: NetworkPolicy = from_json(&serde_json::to_vec(&doc).unwrap()).expect("parse");
+        assert_eq!(np.types.api_version, API_VERSION);
+        assert_eq!(np.types.kind, "NetworkPolicy");
+        let spec = np.spec.as_ref().expect("spec kept");
+        assert_eq!(
+            spec.pod_selector.match_labels.as_ref().unwrap()["app"],
+            "victim"
+        );
+        assert_eq!(
+            spec.policy_types.as_deref(),
+            Some(["Ingress".to_string(), "Egress".to_string()].as_slice())
+        );
+        let peer = &spec.ingress.as_ref().unwrap()[0].from.as_ref().unwrap()[2];
+        assert_eq!(peer.ip_block.as_ref().unwrap().cidr, "10.42.0.0/16");
+        // Round-trip: only populated fields serialize; status stays absent.
+        let wire: serde_json::Value =
+            serde_json::from_slice(&crate::serde_ext::to_json(&np).unwrap()).unwrap();
+        assert!(wire.get("status").is_none(), "status is omitempty");
+        let back: NetworkPolicy = from_json(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        assert_eq!(back, np);
+    }
 
     /// Wire parity with upstream `networking/v1` json tags: camelCase keys,
     /// `typeMeta` flattened to `apiVersion`/`kind`, omitempty round-trips.
@@ -130,7 +198,8 @@ mod tests {
         assert_eq!(back, cls);
     }
 
-    /// Registry wiring: both kinds are discoverable with kubectl short names.
+    /// Registry wiring: all three kinds are discoverable with kubectl short
+    /// names (T4.4 added `networkpolicies`/`netpol`, Q64).
     #[test]
     fn registry_exposes_ingresses_and_classes() {
         let mut reg = SchemaRegistry::with_core_v1();
@@ -138,7 +207,7 @@ mod tests {
         let list = crate::api_resource_list(&reg, GROUP, VERSION).expect("group served");
         let mut names: Vec<&str> = list.resources.iter().map(|r| r.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, ["ingressclasses", "ingresses"]);
+        assert_eq!(names, ["ingressclasses", "ingresses", "networkpolicies"]);
         let ing = list
             .resources
             .iter()
@@ -147,5 +216,13 @@ mod tests {
         assert_eq!(ing.kind, "Ingress");
         assert!(ing.namespaced, "ingresses are namespaced");
         assert_eq!(ing.short_names, Some(vec!["ing".to_string()]));
+        let npol = list
+            .resources
+            .iter()
+            .find(|r| r.name == "networkpolicies")
+            .expect("networkpolicies served");
+        assert_eq!(npol.kind, "NetworkPolicy");
+        assert!(npol.namespaced, "networkpolicies are namespaced");
+        assert_eq!(npol.short_names, Some(vec!["netpol".to_string()]));
     }
 }

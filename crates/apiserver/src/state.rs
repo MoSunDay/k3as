@@ -32,6 +32,11 @@ pub(crate) struct AppState {
     /// allocated from this CIDR at create time. Defaults to the k3s
     /// `10.43.0.0/16`.
     pub(crate) service_cidr: crate::service_ip::ServiceCidr,
+    /// Reverse relay tunnel registry (T4.5, Q65): the agent-dialed
+    /// long-poll seats + pending relayed kubelet requests, keyed by node
+    /// name. Always present (default-on like the embedded registry);
+    /// `kubelet_hop` falls back to it only after a DIRECT connect failure.
+    pub(crate) tunnels: std::sync::Arc<crate::tunnel_registry::TunnelRegistry>,
 }
 
 /// A resource resolved from the schema for one REST request.

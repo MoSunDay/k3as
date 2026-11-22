@@ -34,6 +34,7 @@ pub(crate) fn app(store: Arc<EmbeddedStorage>) -> axum::Router {
         workspace_nfs: None,
         auth: None,
         service_cidr: crate::service_ip::ServiceCidr::default(),
+        tunnels: crate::tunnel_registry::TunnelRegistry::new_shared(),
     })
 }
 

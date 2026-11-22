@@ -20,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
 use crate::error::{status_failure, storage_error, ApiError};
-use crate::kubelet_hop::{call_kubelet, relay_reply};
+use crate::kubelet_hop::relay_reply;
 use crate::state::{cluster_key, namespaced_key, AppState};
 
 /// Kubelet listener port annotation on the Node object (frozen contract).
@@ -117,6 +117,8 @@ struct KubeletTarget {
     ip: String,
     port: u16,
     uid: String,
+    /// Owning node's name — the T4.5 reverse relay lookup key (Q65).
+    node_name: String,
 }
 
 /// Resolution chain steps 1-4 of the frozen contract, shared by both verbs.
@@ -196,10 +198,13 @@ async fn resolve_kubelet(
         ip,
         port: kubelet_port(&node),
         uid,
+        node_name: node_name.to_string(),
     })
 }
 
 /// Consume the resolution chain, then run one hop; either way a Response.
+/// Direct first; the T4.5 reverse tunnel engages only after a transport
+/// failure (Q65 — single-node posture sees zero change).
 async fn relay(
     st: &AppState,
     namespace: &str,
@@ -214,9 +219,11 @@ async fn relay(
         Err(response) => return *response,
     };
     relay_reply(
-        call_kubelet(
+        crate::kubelet_hop::call_kubelet_relayed(
             &target.ip,
             target.port,
+            &target.node_name,
+            &st.tunnels,
             method,
             &request_target(&target),
             content_type,

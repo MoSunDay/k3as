@@ -20,8 +20,10 @@
 //!   consumed by the Router's NodePort plane (T8.2, Q57).
 //! - [`pipeline`] / [`build`] — `ServicePipeline` + `Build`: per-service
 //!   CI/CD config and immutable build records (T8.3, Q56).
-//! - [`networking`] — the `networking.k8s.io/v1` group (Ingress/IngressClass;
-//!   consumed by the openrusty Ingress gateway, decision Q32).
+//! - [`networking`] — the `networking.k8s.io/v1` group (Ingress/IngressClass
+//!   consumed by the openrusty Ingress gateway, decision Q32; NetworkPolicy
+//!   and its shared LabelSelector matcher for the node-side enforcement
+//!   keeper, TODO T4.4 / Q64).
 //! - [`validate`] — admission validation for Pod specs/templates: explicit
 //!   `imagePullPolicy`, whole-GPU quantities, GPU visibility-env conflict,
 //!   and the shared host-direct rules (T4.15/T7.2, Q60/Q61).
@@ -62,10 +64,16 @@ pub use discovery::{api_group_list, api_resource_list, core_api_versions};
 pub use gvk::{ApiVersion, ApiVersionError, GroupVersionKind, GroupVersionResource};
 pub use initpro::{LuaRouter, LuaRouterSpec};
 pub use networking::{
-    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressClass, IngressClassList,
-    IngressClassSpec, IngressList, IngressLoadBalancerIngress, IngressLoadBalancerStatus,
-    IngressRule, IngressServiceBackend, IngressSpec, IngressStatus, IngressTLS, ServiceBackendPort,
-    TypedLocalObjectReference, API_VERSION as NETWORKING_API_VERSION, GROUP as NETWORKING_GROUP,
+    effective_policy_types, ipv4_cidr_range, label_selector_matches, validate_network_policy,
+};
+pub use networking::{
+    HTTPIngressPath, HTTPIngressRuleValue, IPBlock, Ingress, IngressBackend, IngressClass,
+    IngressClassList, IngressClassSpec, IngressList, IngressLoadBalancerIngress,
+    IngressLoadBalancerStatus, IngressRule, IngressServiceBackend, IngressSpec, IngressStatus,
+    IngressTLS, IntOrString, LabelSelector, LabelSelectorRequirement, NetworkPolicy,
+    NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyList, NetworkPolicyPeer,
+    NetworkPolicyPort, NetworkPolicySpec, ServiceBackendPort, TypedLocalObjectReference,
+    API_VERSION as NETWORKING_API_VERSION, GROUP as NETWORKING_GROUP,
     VERSION as NETWORKING_VERSION,
 };
 pub use patch::{strategic_merge, PatchStrategy};

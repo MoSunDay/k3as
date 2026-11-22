@@ -22,13 +22,13 @@ use tokio::net::TcpStream;
 use crate::error::status_failure;
 
 /// Per-hop timeout (connect + write + read) for the kubelet relay.
-pub(crate) const HOP_TIMEOUT: Duration = Duration::from_secs(5);
+pub const HOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Hard cap on one relayed response (matches the kubectl client cap).
-pub(crate) const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Build the exact HTTP/1.1 request bytes for one hop (pure; unit-tested —
 /// this pins the frozen wire contract byte-for-byte).
-pub(crate) fn build_hop_request(
+pub fn build_hop_request(
     method: &str,
     target: &str,
     host_port: &str,
@@ -51,15 +51,16 @@ pub(crate) fn build_hop_request(
 }
 
 /// One parsed kubelet reply ready for verbatim pass-through.
-pub(crate) struct KubeletReply {
-    pub(crate) code: u16,
+#[derive(Debug)]
+pub struct KubeletReply {
+    pub code: u16,
     /// Lowercased Content-Type of the kubelet answer (absent -> `None`).
-    pub(crate) content_type: Option<String>,
-    pub(crate) body: Vec<u8>,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
 }
 
 /// Split one raw hop response into status/content-type/body.
-pub(crate) fn parse_hop_response(raw: &[u8]) -> Result<KubeletReply, String> {
+pub fn parse_hop_response(raw: &[u8]) -> Result<KubeletReply, String> {
     let hdr_end = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -167,7 +168,7 @@ fn decode_chunked(body: &[u8]) -> Result<Vec<u8>, String> {
 /// One kubelet hop: build + send + frame-parse, capped by [`HOP_TIMEOUT`] and
 /// [`MAX_RESPONSE_BYTES`]. Every failure surfaces as `Err(String)` which the
 /// caller renders as 502 `relay to kubelet failed: <err>`.
-pub(crate) async fn call_kubelet(
+pub async fn call_kubelet(
     ip: &str,
     port: u16,
     method: &str,
@@ -250,4 +251,180 @@ pub(crate) async fn relay_reply(hop: Result<KubeletReply, String>) -> Response {
         }
     }
     response
+}
+
+// ------------------------------------------------- T4.5 reverse relay seam ---
+
+/// [`call_kubelet`] with the T4.5 reverse relay fallback (**Q65**):
+///
+/// 1. DIRECT first, byte-for-byte today's behavior (single-node default
+///    posture = zero change; Q31 single-request semantics).
+/// 2. Only when the DIRECT hop fails at the TRANSPORT layer — connect,
+///    write, read, timeout, framing — does the request retry through the
+///    node's agent-dialed reverse tunnel. A non-2xx kubelet HTTP response
+///    is NOT a transport failure: it returns `Ok` here and passes through
+///    verbatim, so the fallback never engages for it.
+/// 3. Any relay failure (tunnel not live, handoff lost, SLA timeout)
+///    surfaces as the SAME `Err(String)` shape today's direct path
+///    returns — rendered by [`relay_reply`] as the contract's 502
+///    `relay to kubelet failed: <err>` envelope. No new client-visible
+///    semantics (Q31).
+#[allow(clippy::too_many_arguments)] // 8 = the frozen hop inputs + tunnel seams
+pub(crate) async fn call_kubelet_relayed(
+    ip: &str,
+    port: u16,
+    node_name: &str,
+    tunnels: &std::sync::Arc<crate::tunnel_registry::TunnelRegistry>,
+    method: &str,
+    request_target: &str,
+    content_type: Option<&str>,
+    body: Option<Vec<u8>>,
+) -> Result<KubeletReply, String> {
+    let direct = call_kubelet(ip, port, method, request_target, content_type, body.clone()).await;
+    match direct {
+        Ok(reply) => Ok(reply),
+        Err(direct_err) => {
+            if !tunnels.is_live(node_name) {
+                // Tunnel absent/expired: relay attempts fail like today.
+                return Err(direct_err);
+            }
+            let relayed = tunnels
+                .submit(
+                    node_name,
+                    method,
+                    request_target,
+                    content_type,
+                    body.as_deref(),
+                )
+                .await
+                .map_err(|relay_err| {
+                    format!("{direct_err}; reverse tunnel fallback: {relay_err}")
+                })?;
+            tracing::debug!(
+                target: "init-pro",
+                node = node_name,
+                method,
+                "kubelet hop served via reverse tunnel (T4.5)"
+            );
+            Ok(relayed)
+        }
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    use crate::tunnel_registry::TunnelRegistry;
+    use crate::tunnel_wire::RelayResponse;
+    use std::time::Duration;
+
+    /// A port where nothing listens on loopback -> instant connect refusal.
+    const DEAD_PORT: u16 = 1;
+
+    /// Fake agent: parks one long-poll, answers every handed-off request
+    /// with `reply`, then stops (one poll per `spawn_fake_agent`).
+    fn spawn_fake_agent(reg: &std::sync::Arc<TunnelRegistry>, reply: KubeletReply) {
+        let reg = reg.clone();
+        tokio::spawn(async move {
+            let park = reg.park("n1");
+            if let Ok(request) = park.rx.await {
+                let _ = reg.complete("n1", &request.id, RelayResponse::from_reply(&reply));
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn direct_failure_falls_back_to_tunnel() {
+        let reg = TunnelRegistry::new_shared();
+        spawn_fake_agent(
+            &reg,
+            KubeletReply {
+                code: 200,
+                content_type: Some("text/plain".into()),
+                body: b"relayed-log\n".to_vec(),
+            },
+        );
+        // Give the fake agent's park a beat to seat (deterministic enough:
+        // is_live gates the fallback, retry a few ms if the race hits).
+        for _ in 0..50 {
+            if reg.is_live("n1") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let reply = call_kubelet_relayed(
+            "127.0.0.1",
+            DEAD_PORT,
+            "n1",
+            &reg,
+            "GET",
+            "/pods/u/containers/c/log",
+            None,
+            None,
+        )
+        .await
+        .expect("relay roundtrip");
+        assert_eq!(reply.code, 200);
+        assert_eq!(reply.body, b"relayed-log\n");
+    }
+
+    #[tokio::test]
+    async fn dead_tunnel_keeps_todays_error_shape() {
+        let reg = TunnelRegistry::new_shared();
+        let err = call_kubelet_relayed(
+            "127.0.0.1",
+            DEAD_PORT,
+            "n1",
+            &reg,
+            "GET",
+            "/pods/u/containers/c/log",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        // Same shape the direct path returns today (rendered as 502 by
+        // relay_reply): starts with the direct transport error.
+        assert!(err.starts_with("connect failed:"), "{err}");
+        assert!(!err.contains("reverse tunnel"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn non_2xx_direct_response_never_engages_the_tunnel() {
+        let reg = TunnelRegistry::new_shared();
+        // A real kubelet answering 404 on loopback: spawn a one-shot TCP
+        // responder pinned to an ephemeral port.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+        let reply = call_kubelet_relayed(
+            "127.0.0.1",
+            port,
+            "n1",
+            &reg,
+            "GET",
+            "/pods/u/containers/c/log",
+            None,
+            None,
+        )
+        .await
+        .expect("direct exchange");
+        assert_eq!(reply.code, 404);
+        assert!(
+            !reg.is_live("n1"),
+            "tunnel never consulted for HTTP-level answers"
+        );
+        server.await.unwrap();
+    }
 }

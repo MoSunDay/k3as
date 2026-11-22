@@ -39,7 +39,9 @@ pub fn resource_version(v: &Value) -> Option<u64> {
 /// k8s `LabelSelector` match. An **empty** selector (`{}` or only empty
 /// `matchLabels`/`matchExpressions`) selects NOTHING: selector-less Services
 /// get no managed Endpoints, and Deployment/RS specs require a non-empty
-/// selector anyway.
+/// selector anyway. (Contrast the NetworkPolicy posture: T4.4/Q64 moved the
+/// upstream empty-matches-ALL matcher into `api::label_selector_matches`;
+/// the non-empty core is shared, not duplicated.)
 pub fn selector_matches(obj: &Value, selector: &Value) -> bool {
     let Some(sel) = selector.as_object() else {
         return false;
@@ -62,45 +64,12 @@ pub fn selector_matches(obj: &Value, selector: &Value) -> bool {
         return constraints > 0;
     }
     if let Some(ml) = sel.get("matchLabels").and_then(Value::as_object) {
-        for (k, want) in ml {
-            constraints += 1;
-            let got = labels.and_then(|l| l.get(k)).and_then(Value::as_str);
-            if got != want.as_str() {
-                return false;
-            }
-        }
+        constraints += ml.len();
     }
     if let Some(exprs) = sel.get("matchExpressions").and_then(Value::as_array) {
-        for expr in exprs {
-            constraints += 1;
-            if !expression_matches(labels, expr) {
-                return false;
-            }
-        }
+        constraints += exprs.len();
     }
-    constraints > 0
-}
-
-fn expression_matches(labels: Option<&Value>, expr: &Value) -> bool {
-    let (Some(key), Some(op)) = (
-        expr.get("key").and_then(Value::as_str),
-        expr.get("operator").and_then(Value::as_str),
-    ) else {
-        return false;
-    };
-    let value = labels.and_then(|l| l.get(key)).and_then(Value::as_str);
-    let listed = |v: &str| {
-        expr.get("values")
-            .and_then(Value::as_array)
-            .map(|vs| vs.iter().any(|x| x.as_str() == Some(v)))
-    };
-    match op {
-        "Exists" => value.is_some(),
-        "DoesNotExist" => value.is_none(),
-        "In" => value.map(|v| listed(v).unwrap_or(false)).unwrap_or(false),
-        "NotIn" => value.map(|v| !listed(v).unwrap_or(false)).unwrap_or(true),
-        _ => false, // unknown operator: no match
-    }
+    constraints > 0 && api::label_selector_matches(labels, selector)
 }
 
 /// The `controller: true` ownerReference, if any (clone).

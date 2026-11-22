@@ -1,6 +1,8 @@
-//! REST per-item handlers: get / replace / delete / patch / apply (T1.2b + T1.2c).
+//! REST per-item handlers: get / replace / delete / patch (T1.2b + T1.2c)
+//! — the shared `do_*` logic the axum wrappers in [`crate::item_http`]
+//! delegate to (split in **S52-D0**, file-size cap).
 //!
-//! Routes (core group `""` + grouped):
+//! Subroutes (core group `""` + grouped):
 //!  - `GET    /<collection>/<name>` -> read one object
 //!  - `PUT    /<collection>/<name>` -> replace (honours `metadata.resourceVersion` CAS)
 //!    or server-side apply when Content-Type: application/apply-patch+yaml
@@ -8,19 +10,22 @@
 //!    finalizer-gated soft delete + `propagationPolicy=Orphan` (T3.1b, Q20)
 //!  - `PATCH  /<collection>/<name>` -> strategic-merge / merge / json-patch
 //!    or server-side apply when Content-Type: application/apply-patch+yaml
+//!
+//! **S52-D0** (T4.3 Scope C follow-up / Q44): `do_replace` / `do_patch`
+//! run the Service write-path admission (`service_ip::validate_on_write`,
+//! immutable-or-validate) on the final mutated object BEFORE the write.
 
-use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::apply;
 use crate::error::{storage_error, ApiError};
 use crate::pod_workspace;
+use crate::service;
+use crate::service_ip;
 use crate::state::{
     item_key, resolve, resource_revision, set_namespace, set_resource_version, set_type_meta,
     AppState, Loc,
@@ -121,8 +126,60 @@ pub(crate) async fn do_replace(st: &AppState, loc: &Loc, name: &str, mut body: V
             .into_response();
         }
     }
+    // S52-D0 (T4.3 Scope C follow-up / Q44): Service write-path admission —
+    // the FINAL replace body is validated against the stored object BEFORE
+    // the write: a set clusterIP/nodePort is immutable (change or drop ->
+    // 422), otherwise the create-path judgment (validate-or-allocate) runs.
+    if res.kind == "Service" {
+        let stored = match st.store.get(&key).await {
+            Ok(cur) => cur,
+            Err(e) => return storage_error(e, &res.kind, name).into_response(),
+        };
+        // Golden parity (`put-n`): an optimistic-concurrency conflict (409)
+        // wins over write-path admission (422) — a stale replace fails with
+        // the exact storage `Conflict` it produced before this hook existed;
+        // validation never sees a superseded body.
+        if let (Some(expected), Some(cur)) = (if_revision, stored.as_ref()) {
+            if expected != cur.mod_revision {
+                return storage_error(
+                    storage::StorageError::Conflict {
+                        key: key.as_path(),
+                        expected: Some(expected),
+                        have: Some(cur.mod_revision),
+                    },
+                    &res.kind,
+                    name,
+                )
+                .into_response();
+            }
+        }
+        if let Err(service::ServiceError::Invalid(message)) = service_ip::validate_on_write(
+            &st.store,
+            &key,
+            stored.as_ref().map(|e| &e.value),
+            &mut body,
+            &st.service_cidr,
+        )
+        .await
+        {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
+    }
     match st.store.update(&key, body, if_revision).await {
         Ok(entry) => {
+            let entry = if res.kind == "Service" {
+                // The create-path CAS self-heal precedent (collection.rs):
+                // a write race that re-took our values is repaired, never
+                // failed here.
+                let entry = service::heal_nodeport_collision(&st.store, &key, entry).await;
+                service_ip::heal_clusterip_collision(&st.store, &key, entry, &st.service_cidr).await
+            } else {
+                entry
+            };
             finalize_if_complete(st, &key, &entry).await;
             let mut v = entry.value;
             set_resource_version(&mut v, entry.mod_revision);
@@ -320,8 +377,37 @@ pub(crate) async fn do_patch(
         return e.into_response();
     }
     set_type_meta(&mut merged, &res.api_version, &res.kind);
+    // S52-D0 (T4.3 Scope C follow-up / Q44): Service write-path admission —
+    // the FINAL merged object (post-patch) is validated against the stored
+    // object BEFORE the CAS write: a set clusterIP/nodePort is immutable
+    // (change or drop -> 422), otherwise the create-path judgment
+    // (validate-or-allocate) runs.
+    if res.kind == "Service" {
+        if let Err(service::ServiceError::Invalid(message)) = service_ip::validate_on_write(
+            &st.store,
+            &key,
+            Some(&current.value),
+            &mut merged,
+            &st.service_cidr,
+        )
+        .await
+        {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
+    }
     match st.store.update(&key, merged, if_revision).await {
         Ok(entry) => {
+            let entry = if res.kind == "Service" {
+                // The create-path CAS self-heal precedent (collection.rs).
+                let entry = service::heal_nodeport_collision(&st.store, &key, entry).await;
+                service_ip::heal_clusterip_collision(&st.store, &key, entry, &st.service_cidr).await
+            } else {
+                entry
+            };
             finalize_if_complete(st, &key, &entry).await;
             let mut v = entry.value;
             set_resource_version(&mut v, entry.mod_revision);
@@ -427,343 +513,4 @@ fn deletion_now() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     common::time::now_rfc3339(secs)
-}
-
-/// Parse a JSON body or return a 400 response.
-fn parse_json(body: &[u8]) -> Option<Value> {
-    serde_json::from_slice(body).ok()
-}
-
-/// Extract the Content-Type header (defaults to `application/json`).
-fn ct_default_json(headers: &HeaderMap) -> String {
-    headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// axum wrappers (core `""` group + grouped groups)
-// ---------------------------------------------------------------------------
-
-// --- core group items ---
-
-pub(crate) async fn core_get(
-    State(st): State<AppState>,
-    Path((resource, name)): Path<(String, String)>,
-) -> Response {
-    do_get(&st, &Loc::new("", "v1", resource, None), &name).await
-}
-
-pub(crate) async fn core_replace(
-    State(st): State<AppState>,
-    Path((resource, name)): Path<(String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = ct_default_json(&headers);
-    if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(&st, &Loc::new("", "v1", resource, None), &name, desired, &q).await;
-    }
-    let body = match parse_json(&body) {
-        Some(v) => v,
-        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-    };
-    do_replace(&st, &Loc::new("", "v1", resource, None), &name, body).await
-}
-
-pub(crate) async fn core_delete(
-    State(st): State<AppState>,
-    Path((resource, name)): Path<(String, String)>,
-    Query(q): Query<DeleteParams>,
-) -> Response {
-    do_delete(&st, &Loc::new("", "v1", resource, None), &name, &q).await
-}
-
-pub(crate) async fn core_patch(
-    State(st): State<AppState>,
-    Path((resource, name)): Path<(String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/strategic-merge-patch+json");
-    if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(&st, &Loc::new("", "v1", resource, None), &name, desired, &q).await;
-    }
-    do_patch(&st, &Loc::new("", "v1", resource, None), &name, ct, &body).await
-}
-
-// --- core group, namespaced items ---
-
-pub(crate) async fn core_get_ns(
-    State(st): State<AppState>,
-    Path((ns, resource, name)): Path<(String, String, String)>,
-) -> Response {
-    do_get(&st, &Loc::new("", "v1", resource, Some(ns)), &name).await
-}
-
-pub(crate) async fn core_replace_ns(
-    State(st): State<AppState>,
-    Path((ns, resource, name)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = ct_default_json(&headers);
-    if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(
-            &st,
-            &Loc::new("", "v1", resource, Some(ns)),
-            &name,
-            desired,
-            &q,
-        )
-        .await;
-    }
-    let body = match parse_json(&body) {
-        Some(v) => v,
-        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-    };
-    do_replace(&st, &Loc::new("", "v1", resource, Some(ns)), &name, body).await
-}
-
-pub(crate) async fn core_delete_ns(
-    State(st): State<AppState>,
-    Path((ns, resource, name)): Path<(String, String, String)>,
-    Query(q): Query<DeleteParams>,
-) -> Response {
-    do_delete(&st, &Loc::new("", "v1", resource, Some(ns)), &name, &q).await
-}
-
-pub(crate) async fn core_patch_ns(
-    State(st): State<AppState>,
-    Path((ns, resource, name)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/strategic-merge-patch+json");
-    if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(
-            &st,
-            &Loc::new("", "v1", resource, Some(ns)),
-            &name,
-            desired,
-            &q,
-        )
-        .await;
-    }
-    do_patch(
-        &st,
-        &Loc::new("", "v1", resource, Some(ns)),
-        &name,
-        ct,
-        &body,
-    )
-    .await
-}
-
-// --- grouped items ---
-
-pub(crate) async fn grp_get(
-    State(st): State<AppState>,
-    Path((group, version, resource, name)): Path<(String, String, String, String)>,
-) -> Response {
-    do_get(&st, &Loc::new(&group, &version, resource, None), &name).await
-}
-
-pub(crate) async fn grp_replace(
-    State(st): State<AppState>,
-    Path((group, version, resource, name)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = ct_default_json(&headers);
-    if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(
-            &st,
-            &Loc::new(&group, &version, resource, None),
-            &name,
-            desired,
-            &q,
-        )
-        .await;
-    }
-    let body = match parse_json(&body) {
-        Some(v) => v,
-        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-    };
-    do_replace(
-        &st,
-        &Loc::new(&group, &version, resource, None),
-        &name,
-        body,
-    )
-    .await
-}
-
-pub(crate) async fn grp_delete(
-    State(st): State<AppState>,
-    Path((group, version, resource, name)): Path<(String, String, String, String)>,
-    Query(q): Query<DeleteParams>,
-) -> Response {
-    do_delete(&st, &Loc::new(&group, &version, resource, None), &name, &q).await
-}
-
-pub(crate) async fn grp_patch(
-    State(st): State<AppState>,
-    Path((group, version, resource, name)): Path<(String, String, String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/strategic-merge-patch+json");
-    if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(
-            &st,
-            &Loc::new(&group, &version, resource, None),
-            &name,
-            desired,
-            &q,
-        )
-        .await;
-    }
-    do_patch(
-        &st,
-        &Loc::new(&group, &version, resource, None),
-        &name,
-        ct,
-        &body,
-    )
-    .await
-}
-
-// --- grouped, namespaced items ---
-
-pub(crate) async fn grp_get_ns(
-    State(st): State<AppState>,
-    Path((group, version, ns, resource, name)): Path<(String, String, String, String, String)>,
-) -> Response {
-    do_get(&st, &Loc::new(&group, &version, resource, Some(ns)), &name).await
-}
-
-pub(crate) async fn grp_replace_ns(
-    State(st): State<AppState>,
-    Path((group, version, ns, resource, name)): Path<(String, String, String, String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = ct_default_json(&headers);
-    if apply::is_apply_ct(&ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(
-            &st,
-            &Loc::new(&group, &version, resource, Some(ns)),
-            &name,
-            desired,
-            &q,
-        )
-        .await;
-    }
-    let body = match parse_json(&body) {
-        Some(v) => v,
-        None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-    };
-    do_replace(
-        &st,
-        &Loc::new(&group, &version, resource, Some(ns)),
-        &name,
-        body,
-    )
-    .await
-}
-
-pub(crate) async fn grp_delete_ns(
-    State(st): State<AppState>,
-    Path((group, version, ns, resource, name)): Path<(String, String, String, String, String)>,
-    Query(q): Query<DeleteParams>,
-) -> Response {
-    do_delete(
-        &st,
-        &Loc::new(&group, &version, resource, Some(ns)),
-        &name,
-        &q,
-    )
-    .await
-}
-
-pub(crate) async fn grp_patch_ns(
-    State(st): State<AppState>,
-    Path((group, version, ns, resource, name)): Path<(String, String, String, String, String)>,
-    headers: HeaderMap,
-    Query(q): Query<apply::ApplyQuery>,
-    body: Bytes,
-) -> Response {
-    let ct = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/strategic-merge-patch+json");
-    if apply::is_apply_ct(ct) {
-        let desired = match parse_json(&body) {
-            Some(v) => v,
-            None => return ApiError::BadRequest("invalid JSON".into()).into_response(),
-        };
-        return apply::do_apply(
-            &st,
-            &Loc::new(&group, &version, resource, Some(ns)),
-            &name,
-            desired,
-            &q,
-        )
-        .await;
-    }
-    do_patch(
-        &st,
-        &Loc::new(&group, &version, resource, Some(ns)),
-        &name,
-        ct,
-        &body,
-    )
-    .await
 }

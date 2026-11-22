@@ -101,3 +101,66 @@ impl KubeletConfig {
         self.data_dir.join("pods")
     }
 }
+
+/// Auto-detect the node's primary outbound IPv4 towards the apiserver
+/// host (T4.5, Q65): a bind-less `UdpSocket::connect` makes the kernel
+/// pick the source IP of the route WITHOUT sending any packet, so the
+/// agent can default `--node-ip` to the address the apiserver will
+/// actually be able to dial back through. Falls back to `127.0.0.1`
+/// (single-node / loopback-only setups) whenever the host cannot be
+/// resolved or connected.
+pub fn detect_outbound_ip(server_url: &str) -> String {
+    let host = server_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        // Drop the port (plain IPv4/host planes only, Q10-era v1 scope).
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if host.is_empty() {
+        return "127.0.0.1".to_string();
+    }
+    let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+        return "127.0.0.1".to_string();
+    };
+    // Port is irrelevant: UDP connect only installs a route-local filter.
+    if sock.connect((host.as_str(), 9)).is_err() {
+        return "127.0.0.1".to_string();
+    }
+    match sock.local_addr() {
+        Ok(addr) => addr.ip().to_string(),
+        Err(_) => "127.0.0.1".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod detect_tests {
+    use super::detect_outbound_ip;
+
+    #[test]
+    fn detect_falls_back_to_loopback_on_unroutable_host() {
+        // No route to that name/port -> the helper must degrade, not panic.
+        assert_eq!(
+            detect_outbound_ip("http://no-such-host.invalid:6443"),
+            "127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn detect_falls_back_on_empty_and_scheme_only() {
+        assert_eq!(detect_outbound_ip(""), "127.0.0.1");
+        assert_eq!(detect_outbound_ip("http://"), "127.0.0.1");
+        assert_eq!(detect_outbound_ip("http://:6443"), "127.0.0.1");
+    }
+
+    #[test]
+    fn detect_returns_a_routable_source_ip_for_the_loopback_plane() {
+        // Connecting towards the loopback plane picks a loopback source.
+        let ip = detect_outbound_ip("http://127.0.0.1:6443");
+        assert!(ip.starts_with("127."), "unexpected source ip {ip}");
+    }
+}

@@ -94,6 +94,10 @@ where
         workspace_nfs,
         auth,
         service_cidr: service_cidr.unwrap_or_default(),
+        // T4.5 (Q65): the reverse relay tunnel registry is default-on
+        // (embedded-registry doctrine); agents opt their dialer out with
+        // `--disable-proxy-tunnel`.
+        tunnels: crate::tunnel_registry::TunnelRegistry::new_shared(),
     });
 
     let (fired_tx, fired_rx) = tokio::sync::oneshot::channel::<()>();

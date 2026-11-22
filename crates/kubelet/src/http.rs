@@ -56,6 +56,10 @@ pub struct HttpJson {
     /// `Authorization: Bearer <t>` on every request/watch the kubelet
     /// loops issue — inert when the server runs auth-open (v1 default).
     token: Option<String>,
+    /// Per-read timeout for one request/response exchange. Defaults to
+    /// [`READ_TIMEOUT`]; the T4.5 reverse-tunnel dialer widens it past the
+    /// apiserver's 25s long-poll window (Q65) via [`Self::with_read_timeout`].
+    read_timeout: Duration,
 }
 
 impl HttpJson {
@@ -93,7 +97,16 @@ impl HttpJson {
             port,
             base_path: base.to_string(),
             token: None,
+            read_timeout: READ_TIMEOUT,
         })
+    }
+
+    /// Widen the per-read timeout (T4.5, Q65): the tunnel dialer's
+    /// long-poll parks ~25s server-side before the first byte, so it
+    /// passes ~35s here; everything else keeps the 10s default.
+    pub fn with_read_timeout(mut self, timeout: Duration) -> Self {
+        self.read_timeout = timeout;
+        self
     }
 
     /// Attach the static bearer token (T1.3a, Q47, P3): kubelet-side
@@ -193,7 +206,7 @@ impl HttpJson {
                     break;
                 }
             }
-            let n = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf))
+            let n = tokio::time::timeout(self.read_timeout, stream.read(&mut buf))
                 .await
                 .map_err(|_| HttpError::Io("timed out reading response".to_string()))?
                 .map_err(|e| HttpError::Io(format!("read response: {e}")))?;

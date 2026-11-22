@@ -149,7 +149,11 @@ pub struct ServerCmd {
     )]
     pub pipeline_dir: Option<std::path::PathBuf>,
 
-    /// Disable the network-policy controller.
+    /// Disable the network-policy controller. ACCEPT-NOOP-WARN on
+    /// `server` (T4.4, Q64): enforcement is a NODE concern — the
+    /// agent-side iptables keeper is disabled by the agent's own
+    /// `--disable-network-policy`; NetworkPolicy objects stay
+    /// accepted/stored either way (a WARN fires at server boot).
     #[arg(long = "disable-network-policy")]
     pub disable_network_policy: bool,
 

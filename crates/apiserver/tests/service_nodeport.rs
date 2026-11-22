@@ -7,6 +7,11 @@
 //! allocated from `--service-cidr` (default `10.43.0.0/16`) for every
 //! non-headless, non-ExternalName Service; the Router carries the VIP
 //! traffic (its ClusterIP plane).
+//!
+//! **S52-D0** (T4.3 Scope C follow-up / Q44): write-path admission — a set
+//! clusterIP/nodePort is immutable across PUT / PATCH / SSA apply (change
+//! or drop -> 422), otherwise the create-path judgment (validate-or-
+//! allocate) runs on the final object.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -28,6 +33,12 @@ fn served() -> SchemaRegistry {
 /// the router keeps the same store across requests).
 fn app() -> axum::Router {
     let store: Arc<dyn StorageBackend> = Arc::new(EmbeddedStorage::new());
+    app_seeded_with(store)
+}
+
+/// The same router over a caller-seeded store (S52-D0 tests need stored
+/// legacy Services that pre-date clusterIP allocation).
+fn app_seeded_with(store: Arc<dyn StorageBackend>) -> axum::Router {
     apiserver::api_app(Arc::new(served()), store, "127.0.0.1:6443".to_string())
 }
 
@@ -324,4 +335,448 @@ async fn loadbalancer_type_also_gets_nodeport() {
     assert_eq!(out["spec"]["type"], "LoadBalancer");
     let np = node_port(&out).expect("nodePort allocated");
     assert!((30000..=32767).contains(&np), "np {np} in range");
+}
+
+// --- S52-D0 (T4.3 Scope C follow-up / Q44): write-path admission ---------
+
+/// Item URI for one Service in `default`.
+fn item(name: &str) -> String {
+    format!("{URI}/{name}")
+}
+
+/// Create a ClusterIP Service, return its allocated clusterIP.
+async fn created_with_ip(r: &axum::Router, name: &str) -> String {
+    let body = svc(name, json!({ "ports": [{ "port": 80 }] }));
+    let (st, out) = send(r.clone(), "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    cluster_ip(&out).expect("clusterIP allocated").to_string()
+}
+
+/// A full PUT body echoing `name` with an explicit clusterIP.
+fn put_body(name: &str, cluster_ip: &str) -> Value {
+    svc(
+        name,
+        json!({ "type": "ClusterIP", "ports": [{ "port": 80 }], "clusterIP": cluster_ip }),
+    )
+}
+
+#[tokio::test]
+async fn put_with_stale_rv_conflict_wins_over_admission() {
+    // Golden `put-n` parity: a stale-replace CAS conflict (409) must win
+    // over the S52-D0 admission (422) even when the superseded body also
+    // "changes" the allocated clusterIP.
+    let r = app();
+    let ip = created_with_ip(&r, "web").await;
+    let (st, cur) = send(r.clone(), "GET", &item("web"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let stale_rv = cur["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Bump the stored revision with a valid replace (clusterIP unchanged).
+    let mut ok = put_body("web", &ip);
+    ok["metadata"]["resourceVersion"] = json!(stale_rv);
+    let (st, _) = send(r.clone(), "PUT", &item("web"), json_body(&ok)).await;
+    assert_eq!(st, StatusCode::OK);
+    // Stale rv + a clusterIP "change": 409 Conflict, never 422 Invalid.
+    let mut stale = put_body("web", "10.43.99.99");
+    stale["metadata"]["resourceVersion"] = json!(stale_rv);
+    let (st, out) = send(r, "PUT", &item("web"), json_body(&stale)).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(out["reason"], "Conflict");
+}
+
+#[tokio::test]
+async fn put_changing_set_clusterip_is_422() {
+    let r = app();
+    let ip = created_with_ip(&r, "web").await;
+    let (st, out) = send(
+        r.clone(),
+        "PUT",
+        &item("web"),
+        json_body(&put_body("web", "10.43.99.99")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(out["reason"], "Invalid");
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(ip.as_str()),
+        "message names the stored IP {ip}: {out}"
+    );
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("may not change once set"),
+        "message states immutability: {out}"
+    );
+    // The stored object is untouched.
+    let (st, got) = send(r, "GET", &item("web"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(cluster_ip(&got), Some(ip.as_str()));
+}
+
+#[tokio::test]
+async fn put_keeping_clusterip_identical_is_200() {
+    let r = app();
+    let ip = created_with_ip(&r, "web").await;
+    let (st, out) = send(
+        r.clone(),
+        "PUT",
+        &item("web"),
+        json_body(&put_body("web", &ip)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        cluster_ip(&out),
+        Some(ip.as_str()),
+        "unchanged, not reallocated"
+    );
+}
+
+#[tokio::test]
+async fn put_omitting_clusterip_defaults_from_stored_is_200() {
+    // k8s update parity (golden `put-fresh`): a replace body that omits
+    // clusterIP keeps the allocation — 200, the stored IP echoed back.
+    let r = app();
+    let ip = created_with_ip(&r, "web").await;
+    let body = svc(
+        "web",
+        json!({ "type": "ClusterIP", "ports": [{ "port": 80 }] }),
+    );
+    let (st, out) = send(r, "PUT", &item("web"), json_body(&body)).await;
+    assert_eq!(st, StatusCode::OK, "omitted clusterIP persists: {out}");
+    assert_eq!(cluster_ip(&out), Some(ip.as_str()));
+}
+
+#[tokio::test]
+async fn merge_patch_changing_clusterip_is_422() {
+    let r = app();
+    let _ip = created_with_ip(&r, "web").await;
+    let patch = json!({ "spec": { "clusterIP": "10.43.77.77" } });
+    let (st, out) = send(
+        r.clone(),
+        "PATCH",
+        &item("web"),
+        Some((
+            "application/merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(out["reason"], "Invalid");
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("may not change once set"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn strategic_patch_changing_clusterip_is_422() {
+    let r = app();
+    let _ip = created_with_ip(&r, "web").await;
+    let patch = json!({ "spec": { "clusterIP": "10.43.77.78" } });
+    let (st, _) = send(
+        r,
+        "PATCH",
+        &item("web"),
+        Some((
+            "application/strategic-merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// SSA apply with an explicit different clusterIP -> 422; leaving it out
+/// -> 200 with the stored VIP preserved (the merge keeps self-owned live
+/// fields the apply does not mention).
+#[tokio::test]
+async fn apply_changing_clusterip_is_422_leaving_it_is_200() {
+    let r = app();
+    let ip = created_with_ip(&r, "ssa").await;
+    let changed = svc(
+        "ssa",
+        json!({ "ports": [{ "port": 81 }], "clusterIP": "10.43.66.66" }),
+    );
+    let (st, out) = send(
+        r.clone(),
+        "PATCH",
+        &format!("{}?fieldManager=tester", item("ssa")),
+        Some((
+            "application/apply-patch+yaml",
+            serde_json::to_vec(&changed).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("may not change once set"),
+        "{out}"
+    );
+    let leave = svc("ssa", json!({ "ports": [{ "port": 81 }] }));
+    let (st, out) = send(
+        r.clone(),
+        "PATCH",
+        &format!("{}?fieldManager=tester", item("ssa")),
+        Some((
+            "application/apply-patch+yaml",
+            serde_json::to_vec(&leave).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(cluster_ip(&out), Some(ip.as_str()), "apply keeps the VIP");
+}
+
+#[tokio::test]
+async fn apply_create_still_allocates_and_conflicts() {
+    // The create-via-apply branch runs the create-path judgment: allocate
+    // when absent, 422 on an explicit VIP another Service already holds.
+    let r = app();
+    let ip = created_with_ip(&r, "vip-owner").await;
+    let hit = svc(
+        "ssa-new",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": ip }),
+    );
+    let (st, out) = send(
+        r.clone(),
+        "PUT",
+        &format!("{}?fieldManager=tester", item("ssa-new")),
+        Some((
+            "application/apply-patch+yaml",
+            serde_json::to_vec(&hit).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already allocated"),
+        "cross-Service VIP conflict: {out}"
+    );
+    let bare = svc("ssa-new", json!({ "ports": [{ "port": 80 }] }));
+    let (st, out) = send(
+        r,
+        "PUT",
+        &format!("{}?fieldManager=tester", item("ssa-new")),
+        Some((
+            "application/apply-patch+yaml",
+            serde_json::to_vec(&bare).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(
+        in_default_cidr(cluster_ip(&out).expect("allocated")),
+        "{out}"
+    );
+}
+
+/// (e) The create-path VIP:port cross-Service conflict stays rejected —
+/// the write path reuses the same judgment (a shared VIP implies a shared
+/// VIP:port pair).
+#[tokio::test]
+async fn create_vip_conflict_rejected_and_reused_on_write() {
+    let r = app();
+    let a = svc(
+        "a",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": "10.43.5.5" }),
+    );
+    let (st, _) = send(r.clone(), "POST", URI, json_body(&a)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let b = svc(
+        "b",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": "10.43.5.5" }),
+    );
+    let (st, out) = send(r, "POST", URI, json_body(&b)).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("10.43.5.5"),
+        "{out}"
+    );
+    // Write-path reuse of the same judgment: a stored Service that holds NO
+    // clusterIP yet (a pre-Q44 legacy object seeded straight into the
+    // store) cannot PUT itself onto a foreign VIP.
+    let store: Arc<dyn StorageBackend> = Arc::new(EmbeddedStorage::new());
+    let legacy = svc(
+        "legacy",
+        json!({ "type": "ClusterIP", "ports": [{ "port": 80 }] }),
+    );
+    store
+        .create(
+            &storage::Key::new("", "services", "default", "legacy"),
+            legacy,
+        )
+        .await
+        .unwrap();
+    let r2 = app_seeded_with(store);
+    let owner = svc(
+        "owner",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": "10.43.5.5" }),
+    );
+    let (st, _) = send(r2.clone(), "POST", URI, json_body(&owner)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (st, out) = send(
+        r2,
+        "PUT",
+        &item("legacy"),
+        json_body(&put_body("legacy", "10.43.5.5")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already allocated"),
+        "cross-Service conflict on the write path: {out}"
+    );
+}
+
+// --- S52-D0: nodePort matrix ----------------------------------------------
+
+/// Create a NodePort Service with an explicit nodePort.
+async fn created_nodeport(r: &axum::Router, name: &str, np: u64) {
+    let body = svc(
+        name,
+        json!({ "type": "NodePort", "ports": [{ "port": 80, "nodePort": np }] }),
+    );
+    let (st, out) = send(r.clone(), "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{out}");
+}
+
+fn nodeport_put_body(name: &str, ip: &str, np: u64) -> Value {
+    svc(
+        name,
+        json!({
+            "type": "NodePort",
+            "ports": [{ "port": 80, "nodePort": np }],
+            "clusterIP": ip
+        }),
+    )
+}
+
+#[tokio::test]
+async fn put_changing_set_nodeport_is_422() {
+    let r = app();
+    created_nodeport(&r, "np", 30400).await;
+    let ip = {
+        let (st, got) = send(r.clone(), "GET", &item("np"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        cluster_ip(&got).expect("vip").to_string()
+    };
+    let (st, out) = send(
+        r.clone(),
+        "PUT",
+        &item("np"),
+        json_body(&nodeport_put_body("np", &ip, 30401)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("30400"),
+        "message names the stored port: {out}"
+    );
+}
+
+#[tokio::test]
+async fn put_keeping_nodeport_is_200() {
+    let r = app();
+    created_nodeport(&r, "np", 30402).await;
+    let ip = {
+        let (st, got) = send(r.clone(), "GET", &item("np"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        cluster_ip(&got).expect("vip").to_string()
+    };
+    let (st, out) = send(
+        r.clone(),
+        "PUT",
+        &item("np"),
+        json_body(&nodeport_put_body("np", &ip, 30402)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(node_port(&out), Some(30402), "unchanged");
+}
+
+#[tokio::test]
+async fn patch_changing_nodeport_is_422() {
+    let r = app();
+    created_nodeport(&r, "np", 30403).await;
+    let patch = json!({ "spec": { "ports": [{ "port": 80, "nodePort": 30999 }] } });
+    let (st, out) = send(
+        r,
+        "PATCH",
+        &item("np"),
+        Some((
+            "application/strategic-merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("30403"),
+        "{out}"
+    );
+}
+
+/// Old holds NO nodePort (ClusterIP-typed): the write-path validate branch
+/// accepts a valid explicit nodePort and still rejects a foreign one.
+#[tokio::test]
+async fn nodeport_unset_old_validate_path_ok() {
+    let r = app();
+    created_nodeport(&r, "squatter", 30410).await;
+    let ip = created_with_ip(&r, "plain").await;
+    // Valid + free -> 200, kept verbatim.
+    let (st, out) = send(
+        r.clone(),
+        "PUT",
+        &item("plain"),
+        json_body(&nodeport_put_body("plain", &ip, 30411)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{out}");
+    assert_eq!(node_port(&out), Some(30411));
+    // Taken by a DIFFERENT Service -> 422 (same message as create).
+    let ip2 = created_with_ip(&r, "plain2").await;
+    let (st, out) = send(
+        r,
+        "PUT",
+        &item("plain2"),
+        json_body(&nodeport_put_body("plain2", &ip2, 30410)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        out["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already allocated"),
+        "{out}"
+    );
 }

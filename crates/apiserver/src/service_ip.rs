@@ -1,5 +1,6 @@
 //! ClusterIP allocation at Service create time (TODO **T4.3 Scope C**,
-//! decision **Q44**).
+//! decision **Q44**) + the write-path immutable-or-validate admission
+//! (**S52-D0**, the T4.3 Scope C follow-up).
 //!
 //! Allocation rides the apiserver and mirrors the NodePort CAS self-heal
 //! precedent in [`crate::service`]: on Service create a missing
@@ -11,6 +12,12 @@
 //! Headless Services (`clusterIP: "None"`) and `ExternalName` Services are
 //! left untouched. The Router carries the VIP traffic on the ClusterIP
 //! plane (Q44; see the `clusterip` module there).
+//!
+//! **S52-D0** extends the same judgment to every Service WRITE (replace /
+//! patch / SSA apply) via [`validate_on_write`]: a stored clusterIP or
+//! nodePort is immutable (change or drop -> 422 Invalid), otherwise the
+//! exact create-path judgment (validate-or-allocate) runs on the final
+//! object — cross-Service VIP / nodePort conflicts included.
 
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -287,4 +294,87 @@ pub(crate) async fn heal_clusterip_collision(
         }
     }
     entry
+}
+
+// ---------------------------------------------------------------------------
+// S52-D0: write-path admission (immutable-or-validate)
+// ---------------------------------------------------------------------------
+
+/// Raw `spec.clusterIP` string (absent / null / empty -> `None`). Unlike
+/// [`cluster_ip_of`] the headless `"None"` counts as SET: it participates
+/// in the immutability comparison verbatim.
+fn cluster_ip_raw(v: &Value) -> Option<String> {
+    v.pointer("/spec/clusterIP")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// S52-D0 (T4.3 Scope C follow-up, **Q44**): Service write-path admission
+/// with k8s immutable-or-validate semantics, run on the FINAL mutated
+/// object BEFORE it is written (create precedent: `collection::do_create`).
+///
+/// Per field (`spec.clusterIP`, `spec.ports[].nodePort`), `old` = the
+/// STORED object (`None` on the create-via-apply path):
+///  - old SET + the final object changes or drops it -> `Invalid` (422),
+///    `may not change once set`;
+///  - old SET + unchanged -> allow (the value is already self-owned);
+///  - old UNSET -> the exact create-path judgment runs in place:
+///    [`crate::service::default_service`] / [`default_cluster_ip`]
+///    (validate-or-allocate, cross-Service conflicts included — two
+///    different Services can never hold one VIP or one `(protocol,
+///    nodePort)` pair).
+///
+/// This is apiserver-side by design: the judgment needs the store, which
+/// `api::validate::admit` (pure, no store/cidr access) cannot reach.
+pub(crate) async fn validate_on_write(
+    store: &Arc<dyn StorageBackend>,
+    key: &Key,
+    old: Option<&Value>,
+    new: &mut Value,
+    cidr: &ServiceCidr,
+) -> Result<(), crate::service::ServiceError> {
+    use crate::service::ServiceError;
+    // Other Services only: a value this object already holds is not a
+    // conflict against itself (the create path lists the whole collection
+    // precisely because the object does not exist yet).
+    let others: Vec<Value> = match store.list(&KeyPrefix::new("", "services", None)).await {
+        Ok(listing) => listing
+            .into_iter()
+            .filter(|e| e.key != key.as_path())
+            .map(|e| e.value)
+            .collect(),
+        Err(_) => Vec::new(), // graceful: the `prepare` posture
+    };
+    // nodePort: per-entry immutable-or-retain semantics (k8s update parity:
+    // an omitted nodePort persists the stored allocation, an explicit
+    // different value is immutable, a removed entry releases it); the
+    // create-path judgment (range, per-object duplicates, cross-Service
+    // conflicts, allocate-if-absent) then runs on the final object.
+    if let Some(old) = old {
+        crate::service::retain_node_ports(old, new)?;
+    }
+    let mut used_ports = crate::service::used_node_ports(&others);
+    crate::service::default_service(new, &mut used_ports)?;
+    // clusterIP: immutable once set — an explicit different value (the
+    // headless "None" included) is rejected, while an OMITTED value is
+    // defaulted from the stored object (k8s update parity: the allocation
+    // persists; `kubectl replace` bodies routinely drop the field).
+    if let Some(stored) = old.and_then(cluster_ip_raw) {
+        let requested = cluster_ip_raw(new);
+        if requested.as_deref() != Some(stored.as_str()) {
+            if let Some(req) = requested {
+                return Err(ServiceError::Invalid(format!(
+                    "clusterIP may not change once set (stored {stored:?}, requested {req:?})"
+                )));
+            }
+            if let Some(spec) = new.pointer_mut("/spec").and_then(Value::as_object_mut) {
+                spec.insert("clusterIP".to_string(), Value::String(stored.clone()));
+            }
+        }
+    } else {
+        let mut used_ips = used_cluster_ips(&others);
+        default_cluster_ip(new, &mut used_ips, cidr)?;
+    }
+    Ok(())
 }

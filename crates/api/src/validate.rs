@@ -53,6 +53,7 @@ pub fn admit(group: &str, kind: &str, body: &Value) -> Result<(), String> {
     match (group.to_ascii_lowercase().as_str(), kind) {
         ("", "Pod") => validate_pod(Some(body), "spec"),
         ("init-pro.io", "Agent") => validate_agent(body),
+        ("networking.k8s.io", "NetworkPolicy") => crate::networking::validate_network_policy(body),
         ("apps", kind) if TEMPLATE_KINDS.contains(&kind) => {
             validate_pod(body.pointer("/spec/template"), "spec.template.spec")?;
             if kind == "Deployment" {

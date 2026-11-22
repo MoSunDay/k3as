@@ -133,7 +133,7 @@ mod tests {
         AgentCmd {
             shared,
             node_name: None,
-            node_ip: "127.0.0.1".to_string(),
+            node_ip: Some("127.0.0.1".to_string()),
             kubelet_port: 10250,
             cluster_cidr: "10.42.0.0/16".to_string(),
             flannel_backend: "vxlan".to_string(),
@@ -145,7 +145,11 @@ mod tests {
             builtin_image_quota: 0,
             builtin_rootfs: "host".to_string(),
             gpu_inventory: "auto".to_string(),
+            // T4.4 (Q64): default-on enforcement; tests opt out explicitly.
+            disable_network_policy: false,
             agent_require_sandbox: false,
+            // T4.5 (Q65): default-on reverse relay tunnel.
+            disable_proxy_tunnel: false,
         }
     }
 

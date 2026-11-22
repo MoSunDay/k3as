@@ -66,7 +66,9 @@ fn spec_ports_mut(v: &mut Value) -> &mut [Value] {
 }
 
 /// The `(protocol, nodePort)` pairs one Service holds.
-fn node_ports_of(v: &Value) -> BTreeSet<(String, u16)> {
+/// `pub(crate)`: the S52-D0 write-path admission (`service_ip::
+/// validate_on_write`) reuses this exact judgment instead of duplicating it.
+pub(crate) fn node_ports_of(v: &Value) -> BTreeSet<(String, u16)> {
     let mut out = BTreeSet::new();
     if is_nodeport_type(v) {
         for p in spec_ports(v) {
@@ -81,6 +83,61 @@ fn node_ports_of(v: &Value) -> BTreeSet<(String, u16)> {
 /// Every `(protocol, nodePort)` pair already taken across `services`.
 pub(crate) fn used_node_ports(services: &[Value]) -> BTreeSet<(String, u16)> {
     services.iter().flat_map(node_ports_of).collect()
+}
+
+/// S52-D0 (T4.3 Scope C follow-up, **Q44**): nodePort write-path admission
+/// per port entry (identity = `(protocol, service port)`), matching k8s
+/// update semantics:
+///  - entry retained with the same nodePort  -> ok
+///  - entry retained with nodePort omitted   -> the allocation persists
+///    (the stored nodePort is defaulted back into the entry)
+///  - entry retained with a different value  -> `Invalid` (immutable)
+///  - entry (or the NodePort/LoadBalancer type) removed -> the allocation
+///    is released (upstream frees nodePorts on type/port-entry removal)
+///
+/// `pub(crate)`: the `service_ip::validate_on_write` seam calls this on the
+/// final mutated object before the create-path judgment re-runs.
+pub(crate) fn retain_node_ports(old: &Value, new: &mut Value) -> Result<(), ServiceError> {
+    use std::collections::HashMap;
+    if !is_nodeport_type(new) {
+        return Ok(()); // the allocation is released with the type
+    }
+    let mut stored: HashMap<(String, i64), u16> = HashMap::new();
+    for p in spec_ports(old) {
+        if let (Some(svc), Some(Ok(np))) =
+            (p.get("port").and_then(Value::as_i64), explicit_node_port(p))
+        {
+            stored.insert((protocol_of(p), svc), np);
+        }
+    }
+    let ports = match new.pointer_mut("/spec/ports").and_then(Value::as_array_mut) {
+        Some(a) => a,
+        None => return Ok(()),
+    };
+    for p in ports.iter_mut() {
+        let Some(svc_port) = p.get("port").and_then(Value::as_i64) else {
+            continue;
+        };
+        let proto = p.get("protocol").and_then(Value::as_str).unwrap_or("TCP");
+        let Some(&was) = stored.get(&(proto.to_string(), svc_port)) else {
+            continue;
+        };
+        match explicit_node_port(p) {
+            None => {
+                if let Some(map) = p.as_object_mut() {
+                    map.insert("nodePort".to_string(), Value::from(was));
+                }
+            }
+            Some(Ok(np)) if np == was => {}
+            Some(Ok(np)) => {
+                return Err(ServiceError::Invalid(format!(
+                    "nodePort {np} for protocol {proto} may not change once set (was {was})"
+                )));
+            }
+            Some(Err(e)) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Lowest free nodePort for `proto` outside `used`.

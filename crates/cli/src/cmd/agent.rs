@@ -17,10 +17,13 @@ pub struct AgentCmd {
     pub node_name: Option<String>,
 
     /// IP the kubelet advertises on the Node object and binds its local
-    /// container log/exec listener on (k3s `--node-ip` parity; T4.2 Scope C,
-    /// Q31 — the apiserver relay dials this address).
-    #[arg(long = "node-ip", default_value = "127.0.0.1", value_name = "IP")]
-    pub node_ip: String,
+    /// container log/exec listener on (k3s `--node-ip` parity; T4.2 Scope
+    /// C, Q31 — the apiserver relay dials this address). DEFAULT (T4.5,
+    /// Q65): unset -> auto-detect the primary outbound IP towards the
+    /// apiserver host (bind-less UDP connect; fallback `127.0.0.1`) so the
+    /// direct relay AND the reverse tunnel both reach the kubelet.
+    #[arg(long = "node-ip", value_name = "IP")]
+    pub node_ip: Option<String>,
 
     /// Port of the kubelet's local log/exec listener, advertised via the
     /// Node annotation `init-pro.io/kubelet-port` (T4.2 Scope C, Q31).
@@ -148,6 +151,19 @@ pub struct AgentCmd {
     )]
     pub gpu_inventory: String,
 
+    /// Node-level NetworkPolicy enforcement (TODO **T4.4**, decision
+    /// **Q64** — k3s parity): default ON; the node-side keeper compiles
+    /// `networking.k8s.io/v1` NetworkPolicies into iptables (flannel
+    /// data plane). `--disable-network-policy` opts THIS node out of
+    /// enforcement (policy objects stay accepted/stored server-side).
+    /// env `INIT_PRO_DISABLE_NETWORK_POLICY`.
+    #[arg(
+        long = "disable-network-policy",
+        env = "INIT_PRO_DISABLE_NETWORK_POLICY",
+        default_value_t = false
+    )]
+    pub disable_network_policy: bool,
+
     /// Node-level MANDATORY Agent hardening (T7.7, Q63 — init-pro
     /// extension): Agents WITHOUT `spec.sandbox` stay Pending
     /// (`SandboxRequired`) instead of running the legacy direct Q37
@@ -163,4 +179,15 @@ pub struct AgentCmd {
         default_value_t = false
     )]
     pub agent_require_sandbox: bool,
+
+    /// Disable the agent-dialed reverse relay tunnel (TODO **T4.5**,
+    /// decision **Q65** — init-pro extension; k3s has no equivalent): the
+    /// node then serves kubelet API hops (logs/exec) ONLY over the direct
+    /// apiserver->node dial. env `INIT_PRO_DISABLE_PROXY_TUNNEL`.
+    #[arg(
+        long = "disable-proxy-tunnel",
+        env = "INIT_PRO_DISABLE_PROXY_TUNNEL",
+        default_value_t = false
+    )]
+    pub disable_proxy_tunnel: bool,
 }

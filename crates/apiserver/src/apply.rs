@@ -19,6 +19,8 @@ use api::patch::PatchStrategy;
 
 use crate::error::{storage_error, ApiError};
 use crate::pod_workspace;
+use crate::service;
+use crate::service_ip;
 use crate::state::{
     item_key, resolve, set_namespace, set_resource_version, set_type_meta, AppState, Loc,
 };
@@ -132,10 +134,38 @@ pub(crate) async fn do_apply(
     set_type_meta(&mut value, &res.api_version, &res.kind);
     set_managed_fields(&mut value, result.managed_fields);
 
+    // S52-D0 (T4.3 Scope C follow-up / Q44): Service write-path admission —
+    // the FINAL applied object (post-merge) is validated against the
+    // currently stored object (if any) BEFORE the write: a set
+    // clusterIP/nodePort is immutable (change or drop -> 422), otherwise
+    // the create-path judgment (validate-or-allocate) runs — which also
+    // closes the gap where an apply-created Service previously skipped
+    // allocation entirely.
+    if res.kind == "Service" {
+        let old = live_entry.as_ref().map(|e| &e.value);
+        if let Err(service::ServiceError::Invalid(message)) =
+            service_ip::validate_on_write(&st.store, &key, old, &mut value, &st.service_cidr).await
+        {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
+    }
+
     if result.created {
         super::state::ensure_object_uid(&mut value);
         match st.store.create(&key, value).await {
             Ok(entry) => {
+                let entry = if res.kind == "Service" {
+                    // The create-path CAS self-heal precedent (collection.rs).
+                    let entry = service::heal_nodeport_collision(&st.store, &key, entry).await;
+                    service_ip::heal_clusterip_collision(&st.store, &key, entry, &st.service_cidr)
+                        .await
+                } else {
+                    entry
+                };
                 let mut v = entry.value;
                 set_resource_version(&mut v, entry.mod_revision);
                 (StatusCode::CREATED, Json(v)).into_response()
@@ -146,6 +176,14 @@ pub(crate) async fn do_apply(
         let if_revision = live_entry.as_ref().map(|e| e.mod_revision);
         match st.store.update(&key, value, if_revision).await {
             Ok(entry) => {
+                let entry = if res.kind == "Service" {
+                    // The create-path CAS self-heal precedent (collection.rs).
+                    let entry = service::heal_nodeport_collision(&st.store, &key, entry).await;
+                    service_ip::heal_clusterip_collision(&st.store, &key, entry, &st.service_cidr)
+                        .await
+                } else {
+                    entry
+                };
                 let mut v = entry.value;
                 set_resource_version(&mut v, entry.mod_revision);
                 (StatusCode::OK, Json(v)).into_response()
