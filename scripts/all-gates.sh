@@ -84,6 +84,7 @@ BATTERY=(
   resources-e2e.sh
   service-traffic-e2e.sh
   flannel-e2e.sh
+  netpol-e2e.sh
   builtin-image-e2e.sh
   builtin-hostroot-e2e.sh
   sandbox-e2e.sh

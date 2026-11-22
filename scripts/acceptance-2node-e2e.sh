@@ -14,6 +14,10 @@
 #   G4  Node annotation init-pro.io/kubelet-port matches the unit port
 #   A12 Agent exec loop: Pending -> Succeeded + merge-patch write-back (Q37)
 #   A13 Workflow template.agent -> Agent child scheduled + Succeeded (Q30/Q35)
+#   T1  reverse tunnel relay: pod exec works with the kubelet port firewalled
+#       from non-local sources (agent-dialed long-poll carries the hop, Q65)
+#   T2  dropped-tunnel self-heal: SIGSTOP/SIGCONT, relay back <= 30s (Q65 SLA)
+#   T3  --disable-proxy-tunnel drop-in: tunnel off, direct hops still ok
 #   A9/A10 (opt-in ACCEPTANCE_RESTART=1): server/agent restart self-heal.
 #   A11 (dual reboot) is MANUAL ONLY - never automated here.
 #
@@ -339,6 +343,124 @@ if [[ "$A13" == "Succeeded" && "$AG13" == "$NODE04_NAME Succeeded" ]]; then
 else
   bad "A13 wf=$A13 agent='$AG13' ($A13_NAME)"
 fi
+
+# ------------------------------------------------------- T1-T3 (T4.5/Q65) ---
+# Reverse relay tunnel gates (agent-dialed; Q65; Q31 semantics locked):
+#   T1  apiserver CANNOT dial the node04 kubelet (INPUT DROP on the
+#       kubelet port for non-local sources) yet pod exec still works —
+#       the request rides the node's outbound long-poll back.
+#   T2  dropped-tunnel self-heal: SIGSTOP/SIGCONT the agent, measure the
+#       wall clock until a relayed exec succeeds again (SLA <= 30s).
+#   T3  `--disable-proxy-tunnel` (env drop-in): tunnel off, direct hops
+#       keep working; flag removed again afterwards.
+T_KPORT="${UNIT_PORT:-10250}"
+T_SELF_IP="$(grep -oE '\-\-node-ip [0-9.]+' "$UNIT_AGENT" 2>/dev/null | awk '{print $2}' | head -1)"
+T_SELF_IP="${T_SELF_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+np4_exec() { # -> exec JSON on the netpod-node04 pod (self-probe command)
+  curl -s --max-time 25 -X POST -H 'Content-Type: application/json' \
+    -d '{"command":["/netpod","get","127.0.0.1","9999"]}' \
+    "$BASE/api/v1/namespaces/default/pods/$NP4_NAME/exec"
+}
+np4_exec_ok() {
+  python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("exitCode")==0 and "netpod" in d.get("output","").lower() else 1)' "$1" 2>/dev/null
+}
+t_drop_rule() { # t_drop_rule -I|-D : block the kubelet port for non-local sources
+  # NOTE: iptables negation is its own argv token (`!` then `-s`), which is
+  # exactly what lets the node-local dialer (tunnel execution) through while
+  # the apiserver's direct dial is dropped.
+  case "$1" in
+    -I) iptables -I INPUT 1 '!' -s "$T_SELF_IP" -p tcp --dport "$T_KPORT" -j DROP 2>/dev/null ;;
+    -D) iptables -D INPUT '!' -s "$T_SELF_IP" -p tcp --dport "$T_KPORT" -j DROP 2>/dev/null ;;
+  esac
+}
+
+# -------------------------------------------------------------------- T1 ----
+T1="skip"
+if command -v iptables >/dev/null && [[ -n "$NP4_NAME" && -n "$T_SELF_IP" ]] && t_drop_rule -I; then
+  TX="$(np4_exec)"
+  if np4_exec_ok "$TX"; then
+    ok "T1  relayed exec behind INPUT DROP (kubelet :$T_KPORT non-local): tunnel carried the hop"
+    T1="pass"
+  else
+    bad "T1  relayed exec behind DROP failed: $TX"
+    T1="fail"
+  fi
+else
+  note "T1 skipped (iptables or NP4 pod unavailable; Q25)"
+fi
+
+# -------------------------------------------------------------------- T2 ----
+if [[ "$T1" == "pass" ]] && systemctl is-active --quiet k3as-agent 2>/dev/null; then
+  # --kill-who=main: freeze ONLY the agent process (dialer + kubelet) —
+  # `all` would SIGSTOP containerd/shims and wound the running pods.
+  systemctl kill -s SIGSTOP --kill-who=main k3as-agent 2>/dev/null
+  sleep 30   # let the apiserver-side 25s park window expire (tunnel not live)
+  systemctl kill -s SIGCONT --kill-who=main k3as-agent 2>/dev/null
+  T0=$(date +%s); T2_OK=""; T2_S=""
+  for i in $(seq 1 30); do
+    T2_S="$(np4_exec)"
+    if np4_exec_ok "$T2_S"; then T2_OK=1; break; fi
+    sleep 1
+  done
+  T_ELAPSED=$(( $(date +%s) - T0 ))
+  t_drop_rule -D
+  if [[ -n "$T2_OK" && "$T_ELAPSED" -le 30 ]]; then
+    ok "T2  dropped tunnel re-registered in ${T_ELAPSED}s (SLA <=30s, Q65)"
+  else
+    bad "T2  tunnel re-registration: ok=$T2_OK elapsed=${T_ELAPSED}s"
+  fi
+else
+  t_drop_rule -D
+  [[ "$T1" == "pass" ]] && note "T2 skipped (systemctl/agent unit unavailable; Q25)"
+fi
+
+# -------------------------------------------------------------------- T3 ----
+T3_DROPIN="/etc/systemd/system/k3as-agent.service.d/acc-tunnel-off.conf"
+if [[ -f "$UNIT_AGENT" ]] && systemctl is-active --quiet k3as-agent 2>/dev/null; then
+  mkdir -p "${T3_DROPIN%/*}"
+  # NOTE: clap v4 parses env bools strictly — only `true`/`false` (the
+  # documented `--agent-require-sandbox` convention); `1` would exit(2).
+  printf '[Service]\nEnvironment=INIT_PRO_DISABLE_PROXY_TUNNEL=true\n' > "$T3_DROPIN"
+  systemctl daemon-reload && systemctl restart k3as-agent
+  # Boot-race guard: the Node object's Ready stays stale-True across an
+  # agent restart (lease expiry lags), so wait for the NEW process's own
+  # boot marker instead — the tunnel-off line proves both the flag and
+  # that the agent reached its spawn block (A10 notes 40-70s boots).
+  T3_BOOTED=""
+  for i in $(seq 1 60); do
+    T3_BOOTED="$(journalctl -u k3as-agent --since '-3 min' --no-pager 2>/dev/null \
+      | grep -c 'reverse relay tunnel off')"
+    [[ "${T3_BOOTED:-0}" -ge 1 ]] && break
+    sleep 2
+  done
+  T3_X=""; T3_OK=""
+  for i in $(seq 1 45); do
+    NP4_T3="$(pods_of "app=netpod-$NODE04_NAME" | awk -v n="$NODE04_NAME" '$2=="Running" && $4==n {print $1; exit}')"
+    [[ -z "$NP4_T3" ]] && { sleep 2; continue; }
+    T3_X="$(curl -s --max-time 20 -X POST -H 'Content-Type: application/json' \
+      -d '{"command":["/netpod","get","127.0.0.1","9999"]}' \
+      "$BASE/api/v1/namespaces/default/pods/$NP4_T3/exec")"
+    if np4_exec_ok "$T3_X"; then T3_OK=1; break; fi
+    sleep 2
+  done
+  rm -f "$T3_DROPIN"; systemctl daemon-reload && systemctl restart k3as-agent
+  if [[ -n "$T3_OK" && "${T3_BOOTED:-0}" -ge 1 ]]; then
+    ok "T3  --disable-proxy-tunnel: tunnel off (unit log x$T3_BOOTED), direct exec still ok"
+  else
+    bad "T3  disable-tunnel (booted=$T3_BOOTED exec-ok=$T3_OK exec=$T3_X)"
+  fi
+  for i in $(seq 1 60); do  # restore: wait Ready again before later gates
+    R="$(curl -s --max-time 5 "$BASE/api/v1/nodes/$NODE04_NAME" \
+      | jqpy 'import json,sys
+n=json.load(sys.stdin); conds={c["type"]:c["status"] for c in n.get("status",{}).get("conditions",[])}
+print(conds.get("Ready",""))' 2>/dev/null || true)"
+    [[ "$R" == "True" ]] && break
+    sleep 2
+  done
+else
+  note "T3 skipped (systemd agent unit unavailable; Q25)"
+fi
+
 
 # ------------------------------------------------------- A9/A10 (opt-in) ----
 if [[ "$RESTART_GATES" == "1" ]]; then

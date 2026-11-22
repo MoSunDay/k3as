@@ -192,6 +192,22 @@ live_help "t78-auth" server --token-file --tls-san
 # ---------------------------------------------------------------------------
 live_help "t79-service-cidr" server --service-cidr
 
+# ---------------------------------------------------------------------------
+# T4.4 (Q64) live-help surface: NetworkPolicy enforcement is NODE-side —
+# `--disable-network-policy` is wired on `agent` (the iptables keeper
+# lives there); the `server` copy is accept-noop-warn (checked above in
+# the wired server set, t-anyhome/t78-era rows).
+# ---------------------------------------------------------------------------
+live_help "t80-netpol" agent --disable-network-policy
+
+# ---------------------------------------------------------------------------
+# T4.5 (Q65) live-help surface: the reverse relay tunnel dialer is
+# NODE-side — `--disable-proxy-tunnel` is an init-pro EXTENSION wired on
+# `agent` only (k3s has no equivalent; the `--disable-agent-exec`
+# precedent: extension flags stay OUT of the noop table entirely).
+# ---------------------------------------------------------------------------
+live_help "t81-proxy-tunnel" agent --disable-proxy-tunnel
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
