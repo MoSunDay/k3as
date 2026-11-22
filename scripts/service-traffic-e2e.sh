@@ -9,7 +9,13 @@
 # writeup; since Q32 the plane is the openrusty-powered h2c gateway — the
 # externally observable contract below is unchanged). Modeled on k3s/Argo
 # e2e conventions: manifest-driven (JSON-only wire, Q10), assertions
-# numbered ST1..ST6.
+# numbered ST1..ST10.
+#
+# T4.3 Scope C (Q44, Sprint 51) added ST7-ST10: the ClusterIP/VIP plane —
+# the apiserver allocates `spec.clusterIP` lowest-free from --service-cidr
+# (default 10.43.0.0/16) and the server-side Router aliases each VIP as a
+# /32 on `lo` and serves `vip:servicePort` through the openrusty gate
+# (TrafficSplit folding included, Q57); headless Services get no VIP.
 #
 # SKIP semantics (G24/G25 parity): without a vendored containerd bundle, or
 # without `cc` for the offline image builders, the suite prints a SKIP line
@@ -93,6 +99,11 @@ CNI0_PREEXISTS=0
 ip link show dev cni0 >/dev/null 2>&1 && CNI0_PREEXISTS=1
 FLANNEL1_PREEXISTS=0
 ip link show dev flannel.1 >/dev/null 2>&1 && FLANNEL1_PREEXISTS=1
+# T4.3 Scope C (Q44) hygiene, same posture: the Router's VIP plane aliases
+# `10.43.x.y/32`s onto `lo` while it serves. Record the pre-existing ones
+# BEFORE boot so the cleanup backstop below only ever removes aliases THIS
+# run added (the router drains its own on shutdown; this is the backstop).
+VIPS_PRE="$(ip -4 addr show dev lo 2>/dev/null | grep -oE '10\.43\.[0-9]+\.[0-9]+/32' | sort -u || true)"
 
 cleanup() {
   trap - EXIT
@@ -108,6 +119,12 @@ cleanup() {
   # awk index() keeps the sweep pipefail-safe when nothing is mounted.
   for m in $(mount | awk -v dd="$DD/" 'index($3, dd) == 1 {print $3}'); do
     umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+  done
+  # T4.3 Scope C (Q44) backstop: the Router's VIP plane drains its own `lo`
+  # aliases on shutdown; remove any 10.43.x.y/32 left behind that THIS run
+  # added (pre-existing ones — VIPS_PRE — stay untouched).
+  for v in $(ip -4 addr show dev lo 2>/dev/null | grep -oE '10\.43\.[0-9]+\.[0-9]+/32' | sort -u || true); do
+    grep -qx "$v" <<<"$VIPS_PRE" || ip addr del "$v" dev lo 2>/dev/null || true
   done
   # Tolerate leftovers regardless; never let the trap flip the exit status.
   rm -rf "$DD" "$SRV_LOG" "$AG_LOG" 2>/dev/null || true
@@ -125,7 +142,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "service-traffic e2e: booting cluster (API $BASE, datadir $DD)"
-"$BIN" server --data-dir "$DD/srv" --bind-address 127.0.0.1 --https-listen-port "$API_PORT" >"$SRV_LOG" 2>&1 &
+# --service-cidr is spelled out (same value as the default) to document the
+# T4.3 Scope C (Q44) allocation pool the ST7-ST10 gates assert against.
+"$BIN" server --data-dir "$DD/srv" --bind-address 127.0.0.1 --https-listen-port "$API_PORT" \
+  --service-cidr 10.43.0.0/16 >"$SRV_LOG" 2>&1 &
 SRV_PID=$!
 for _ in $(seq 1 60); do grep -q "discovery listening" "$SRV_LOG" && break; sleep 0.1; done
 grep -q "discovery listening" "$SRV_LOG" || { echo "error: server never reported listening"; cat "$SRV_LOG" >&2; exit 1; }
@@ -290,6 +310,221 @@ if [[ "$ST6" -eq 1 ]]; then
   PASS=$((PASS+1))
 else
   echo "FAIL ST6  nodePort still reachable after Service delete"
+  FAIL=$((FAIL+1))
+fi
+
+# --- ST7: ClusterIP allocation + validation (T4.3 Scope C, Q44; CNI-free) ---
+# The apiserver allocates spec.clusterIP lowest-free from --service-cidr for
+# every non-headless non-ExternalName Service with ports; explicit IPs are
+# validated in-CIDR + unique; "None" stays verbatim. CNI-free: no pods are
+# needed behind the selector (ST5 scaled echo to 0), only the API surface.
+in_cidr_10_43() { # "a.b.c.d" -> rc 0 iff a valid IPv4 inside 10.43.0.0/16
+  python3 -c 'import sys
+o = sys.argv[1].split(".")
+ok = len(o) == 4 and o[0] == "10" and o[1] == "43" \
+     and all(p.isdigit() and 0 <= int(p) < 256 for p in o)
+sys.exit(0 if ok else 1)' "$1" 2>/dev/null
+}
+svc_clusterip_json() { # name [clusterIP] -> ClusterIP Service JSON on stdout
+  python3 - "$@" <<'PY'
+import json, sys
+name = sys.argv[1]
+spec = {"selector": {"app": "echo"},
+        "ports": [{"name": "web", "port": 80, "targetPort": 8080, "protocol": "TCP"}]}
+if len(sys.argv) > 2:
+    spec["clusterIP"] = sys.argv[2]
+print(json.dumps({"apiVersion": "v1", "kind": "Service",
+                  "metadata": {"name": name, "namespace": "default"}, "spec": spec}))
+PY
+}
+clusterip_of() { # file-or-URL-body file -> prints spec.clusterIP (or nothing)
+  python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1]))["spec"]["clusterIP"] or "")
+except Exception: pass' "$1" 2>/dev/null || true
+}
+ST7=0
+CODE_A="$(curl -s -o "$DD/cip-a-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "$(svc_clusterip_json cip-a)" "$BASE/api/v1/namespaces/default/services" || true)"
+CODE_B="$(curl -s -o "$DD/cip-b-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "$(svc_clusterip_json cip-b)" "$BASE/api/v1/namespaces/default/services" || true)"
+CIP_A="$(clusterip_of "$DD/cip-a-resp.json")"
+CIP_B="$(clusterip_of "$DD/cip-b-resp.json")"
+curl -s "$BASE/api/v1/namespaces/default/services/cip-a" -o "$DD/cip-a-get.json"
+curl -s "$BASE/api/v1/namespaces/default/services/cip-b" -o "$DD/cip-b-get.json"
+if [[ "$CODE_A" == "201" && "$CODE_B" == "201" && -n "$CIP_A" && -n "$CIP_B" && "$CIP_A" != "$CIP_B" ]] \
+   && in_cidr_10_43 "$CIP_A" && in_cidr_10_43 "$CIP_B" \
+   && [[ "$(clusterip_of "$DD/cip-a-get.json")" == "$CIP_A" && "$(clusterip_of "$DD/cip-b-get.json")" == "$CIP_B" ]]; then
+  ST7=1
+fi
+if [[ "$ST7" -eq 1 ]]; then
+  ST7_ALLOC="ok"
+else
+  ST7_ALLOC="BROKEN (codes $CODE_A/$CODE_B, IPs '${CIP_A:-}'/'${CIP_B:-}')"
+fi
+# explicit out-of-CIDR + explicit duplicate of cip-a's IP -> both 422
+CODE_OOC="$(curl -s -o "$DD/cip-ooc.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "$(svc_clusterip_json cip-ooc 10.44.9.9)" "$BASE/api/v1/namespaces/default/services" || true)"
+CODE_DUP="$(curl -s -o "$DD/cip-dup.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "$(svc_clusterip_json cip-dup "$CIP_A")" "$BASE/api/v1/namespaces/default/services" || true)"
+if [[ "$CODE_OOC" == "422" && "$CODE_DUP" == "422" ]] \
+   && grep -qiE 'cidr|clusterip' "$DD/cip-ooc.json" && grep -qiE 'cidr|clusterip' "$DD/cip-dup.json"; then
+  ST7_VALID="ok"
+else
+  ST7_VALID="BROKEN (codes $CODE_OOC/$CODE_DUP)"
+fi
+# headless: clusterIP "None" is stored verbatim (no allocation, no VIP later)
+CODE_HL="$(curl -s -o "$DD/hl-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "$(svc_clusterip_json hl None)" "$BASE/api/v1/namespaces/default/services" || true)"
+[[ "$CODE_HL" == "201" && "$(clusterip_of "$DD/hl-resp.json")" == "None" ]] && ST7_HL="ok" || ST7_HL="BROKEN (code $CODE_HL)"
+# cip-a/cip-b retire here: their VIPs are aliased on lo even while their
+# :80 listeners cannot bind (host nginx owns wildcard :80), and ST9 below
+# must observe a `lo` alias plane holding ONLY the ST8 VIP.
+curl -s -o /dev/null -X DELETE "$BASE/api/v1/namespaces/default/services/cip-a"
+curl -s -o /dev/null -X DELETE "$BASE/api/v1/namespaces/default/services/cip-b"
+if [[ "$ST7_ALLOC" == "ok" && "$ST7_VALID" == "ok" && "$ST7_HL" == "ok" ]]; then
+  ok "ST7  clusterIPs auto-allocated in-CIDR + distinct ($CIP_A/$CIP_B); explicit out-of-CIDR + duplicate 422; headless None verbatim"
+  PASS=$((PASS+1))
+else
+  echo "FAIL ST7  allocation:$ST7_ALLOC validation:$ST7_VALID headless:$ST7_HL"
+  FAIL=$((FAIL+1))
+fi
+
+# --- ST8: VIP:servicePort reaches a pod through the Router VIP plane -------
+# Scale the echo Deployment back to 1 (ST5 zeroed it), then a plain
+# ClusterIP Service on service port 18081 — the host owns wildcard :80
+# (nginx) and :18080 (its own tooling), so the VIP listener needs a port
+# it can bind — must serve the pod through the VIP's /32 alias on `lo` (Q44).
+ST8=0
+VIP=""
+curl -s "$BASE/apis/apps/v1/namespaces/default/deployments/echo" -o "$DD/dep.json"
+python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); d["spec"]["replicas"]=1
+json.dump(d,open(sys.argv[1],"w"))' "$DD/dep.json"
+curl -s -o /dev/null -X PUT -H 'Content-Type: application/json' \
+  --data-binary "@$DD/dep.json" "$BASE/apis/apps/v1/namespaces/default/deployments/echo"
+for _ in $(seq 1 240); do
+  S="$(curl -s "$BASE/api/v1/namespaces/default/pods" | python3 -c 'import json,sys
+try: items=json.load(sys.stdin).get("items",[])
+except Exception: sys.exit(0)
+ready=0
+for p in items:
+  st=p.get("status",{})
+  conds={c.get("type"):c.get("status") for c in st.get("conditions",[])}
+  if st.get("phase")=="Running" and conds.get("Ready")=="True": ready+=1
+if ready>=1: print("READY1")' 2>/dev/null || true)"
+  [[ "$S" == "READY1" ]] && break
+  sleep 0.5
+done
+if [[ "$S" == "READY1" ]]; then
+  cat > "$DD/cip.json" <<EOF
+{"apiVersion":"v1","kind":"Service","metadata":{"name":"cip","namespace":"default"},"spec":{"selector":{"app":"echo"},"ports":[{"name":"web","port":18081,"targetPort":8080,"protocol":"TCP"}]}}
+EOF
+  CODE="$(curl -s -o "$DD/cip-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    --data-binary "@$DD/cip.json" "$BASE/api/v1/namespaces/default/services" || true)"
+  VIP="$(clusterip_of "$DD/cip-resp.json")"
+  if [[ "$CODE" == "201" && -n "$VIP" ]]; then
+    for _ in $(seq 1 120); do
+      RESP="$(curl -s --max-time 3 -w $'\n%{http_code}' "http://$VIP:18081/probe" 2>/dev/null || true)"
+      C="${RESP##*$'\n'}"; BODY="${RESP%$'\n'*}"
+      if [[ "$C" == "200" ]] && grep -q '^METHOD GET$' <<<"$BODY" && grep -q '^PATH /probe$' <<<"$BODY"; then
+        ST8=1; break
+      fi
+      sleep 0.5
+    done
+  fi
+fi
+if [[ "$ST8" -eq 1 ]] && ip -4 addr show dev lo | grep -qF "$VIP/32"; then
+  ok "ST8  http://$VIP:18081/probe answered by the echo pod (VIP /32 aliased on lo)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL ST8  VIP plane never served the pod (VIP: '${VIP:-}'; server: $SRV_LOG)"
+  FAIL=$((FAIL+1))
+fi
+
+# --- ST9: headless Service — no VIP, no alias, no listener ------------------
+# `hl` (ST7) must keep clusterIP "None" and contribute NOTHING to the alias
+# plane: poll-bounded (alias drain of cip-a/cip-b is async) until `lo` holds
+# no 10.43.x.y/32 other than $VIP (pre-existing aliases stay allowed).
+ST9=0
+for _ in $(seq 1 120); do
+  curl -s "$BASE/api/v1/namespaces/default/services/hl" -o "$DD/hl-get.json"
+  HL_NOW="$(clusterip_of "$DD/hl-get.json")"
+  LEFT="$(ip -4 addr show dev lo 2>/dev/null | grep -oE '10\.43\.[0-9]+\.[0-9]+/32' | sort -u \
+    | python3 -c 'import sys
+vip, pre = sys.argv[1], set(x for x in sys.argv[2].split() if x)
+strays = [l.strip() for l in sys.stdin if l.strip() != vip + "/32" and l.strip() not in pre]
+print(" ".join(strays))' "$VIP" "$VIPS_PRE" 2>/dev/null || true)"
+  if [[ "$HL_NOW" == "None" && -z "$LEFT" ]]; then ST9=1; break; fi
+  sleep 0.5
+done
+if [[ "$ST9" -eq 1 ]]; then
+  ok "ST9  headless hl keeps clusterIP None; no lo alias beyond $VIP (strays: none)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL ST9  headless leaked (clusterIP: '${HL_NOW:-}', stray aliases: '${LEFT:-}')"
+  FAIL=$((FAIL+1))
+fi
+
+# --- ST10: TrafficSplit folding on the ClusterIP plane (Q57 riding Q44) ----
+# ts-entry (no selector — zero own endpoints) gets a VIP listener (service
+# port 18082, kept distinct from ST8's) that only serves once the split
+# folds ts-b1's endpoints in; without folding it would 503 forever. The
+# split is NAMED after the entry Service (router `find_split` semantics,
+# same convention as the T8.2 nodeport-plane test). Then the ST5 parity
+# flip: scale echo to 0 -> VIP 503.
+ST10=0
+TS_VIP=""
+cat > "$DD/ts-entry.json" <<EOF
+{"apiVersion":"v1","kind":"Service","metadata":{"name":"ts-entry","namespace":"default"},"spec":{"ports":[{"name":"web","port":18082,"protocol":"TCP"}]}}
+EOF
+cat > "$DD/ts-b1.json" <<EOF
+{"apiVersion":"v1","kind":"Service","metadata":{"name":"ts-b1","namespace":"default"},"spec":{"selector":{"app":"echo"},"ports":[{"name":"web","port":18082,"targetPort":8080,"protocol":"TCP"}]}}
+EOF
+cat > "$DD/ts.json" <<EOF
+{"apiVersion":"init-pro.io/v1","kind":"TrafficSplit","metadata":{"name":"ts-entry","namespace":"default"},"spec":{"service":"ts-entry","backends":[{"service":"ts-b1","weight":100}]}}
+EOF
+CODE_E="$(curl -s -o "$DD/ts-entry-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "@$DD/ts-entry.json" "$BASE/api/v1/namespaces/default/services" || true)"
+CODE_B1="$(curl -s -o "$DD/ts-b1-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "@$DD/ts-b1.json" "$BASE/api/v1/namespaces/default/services" || true)"
+CODE_TS="$(curl -s -o "$DD/ts-resp.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  --data-binary "@$DD/ts.json" "$BASE/apis/init-pro.io/v1/namespaces/default/trafficsplits" || true)"
+TS_VIP="$(clusterip_of "$DD/ts-entry-resp.json")"
+if [[ "$CODE_E" == "201" && "$CODE_B1" == "201" && "$CODE_TS" == "201" && -n "$TS_VIP" ]]; then
+  for _ in $(seq 1 120); do
+    RESP="$(curl -s --max-time 3 -w $'\n%{http_code}' "http://$TS_VIP:18082/probe" 2>/dev/null || true)"
+    C="${RESP##*$'\n'}"; BODY="${RESP%$'\n'*}"
+    if [[ "$C" == "200" ]] && grep -q '^METHOD GET$' <<<"$BODY" && grep -q '^PATH /probe$' <<<"$BODY"; then
+      ST10=1; break
+    fi
+    sleep 0.5
+  done
+fi
+if [[ "$ST10" -eq 1 ]]; then
+  ok "ST10  TrafficSplit folded ts-b1 into ts-entry's VIP plane (http://$TS_VIP:18082/probe 200)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL ST10  VIP plane never served through the split (VIP: '${TS_VIP:-}', codes $CODE_E/$CODE_B1/$CODE_TS)"
+  FAIL=$((FAIL+1))
+fi
+# Flip (ST5 parity on the VIP plane): zero backends -> gate 503s.
+ST10B=0
+curl -s "$BASE/apis/apps/v1/namespaces/default/deployments/echo" -o "$DD/dep.json"
+python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); d["spec"]["replicas"]=0
+json.dump(d,open(sys.argv[1],"w"))' "$DD/dep.json"
+curl -s -o /dev/null -X PUT -H 'Content-Type: application/json' \
+  --data-binary "@$DD/dep.json" "$BASE/apis/apps/v1/namespaces/default/deployments/echo"
+for _ in $(seq 1 120); do
+  C="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$TS_VIP:18082/probe" 2>/dev/null || true)"
+  [[ "$C" == "503" ]] && { ST10B=1; break; }
+  sleep 0.5
+done
+if [[ "$ST10B" -eq 1 ]]; then
+  ok "ST10b scale-to-zero converges: VIP plane answers 503 (empty folded Endpoints)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL ST10b VIP plane never converged to 503 after scale-to-zero"
   FAIL=$((FAIL+1))
 fi
 

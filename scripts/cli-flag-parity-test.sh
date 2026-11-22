@@ -185,6 +185,13 @@ live_help "t83" server --disable-pipeline --pipeline-dir
 # ---------------------------------------------------------------------------
 live_help "t78-auth" server --token-file --tls-san
 
+# ---------------------------------------------------------------------------
+# T4.3 Scope C (Q44/S51) live-help surface: --service-cidr is now wired on
+# `server` (ClusterIP allocation pool; default 10.43.0.0/16). It remains
+# accept-no-op-warn on agent/stage (tls-san precedent).
+# ---------------------------------------------------------------------------
+live_help "t79-service-cidr" server --service-cidr
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]
