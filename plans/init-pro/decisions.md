@@ -2400,8 +2400,8 @@ ready-Endpoints 上游, reconcile 循环按 Q57 TrafficSplit per-endpoint 折叠
 监听。**bind = 回环别名**: `crates/router/src/vip.rs` (132L) — `ip addr add
 VIP/32 dev lo` (klipper/k3s 先例), 幂等 (add-if-absent, 容忍 EEXIST),
 drain 全量清理。接线 `crates/cli/src/runtime_server.rs` (plane spawn +
-3-tuple drain: listeners + aliases) 与 `runtime.rs` (drain 顺序: clusterip
-面先于 nodeport)。**single-node VIP scope**: 回环别名使 VIP 从节点自身及
+3-tuple drain: listeners + aliases) 与 `runtime.rs` (drain 顺序: nodeport
+面先于 clusterip)。**single-node VIP scope**: 回环别名使 VIP 从节点自身及
 任何能路由到它的客户端可达; 跨节点 ClusterIP 可达性 **不主张** (无
 per-node ARP/routing magic) — 记录为 single-node scope (klipper parity:
 k3s servicelb 无 L2 announcer 时同性质)。另记: 草案的「承载面仿

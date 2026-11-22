@@ -350,7 +350,7 @@ format.
       add VIP/32 dev lo`（klipper/k3s 先例），幂等（add-if-absent，
       容忍 EEXIST），drain 全量清理；接线 `cli/runtime_server.rs`
       （plane spawn + 3-tuple drain：listeners + aliases）与
-      `cli/runtime.rs`（drain 顺序：clusterip 面先于 nodeport）。
+      `cli/runtime.rs`（drain 顺序：nodeport 面先于 clusterip）。
     - **single-node VIP scope**：回环别名使 VIP 从节点自身及任何能
       路由到它的客户端可达；跨节点 ClusterIP 可达性不主张（无
       per-node ARP/routing magic），记录为 single-node scope（klipper

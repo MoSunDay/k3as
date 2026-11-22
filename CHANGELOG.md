@@ -39,7 +39,7 @@ the time of the entry (passed / failed), included so the numbers stay auditable.
   addr add VIP/32 dev lo` (klipper/k3s 先例), 幂等 (add-if-absent, 容忍
   EEXIST), drain 全量清理; 接线 `cli/runtime_server.rs` (plane spawn +
   3-tuple drain: listeners + aliases) + `cli/runtime.rs` (drain 顺序:
-  clusterip 面先于 nodeport)。**single-node VIP scope** 记录在案: 回环
+  nodeport 面先于 clusterip)。**single-node VIP scope** 记录在案: 回环
   别名使 VIP 从节点自身及任何能路由到它的客户端可达, 跨节点 ClusterIP
   可达性不主张 (klipper parity: 无 L2 announcer 的 k3s servicelb 同性质)。
 - **flannel host-gw 后端**: fresh cluster 以 host-gw backend 起播——
