@@ -202,6 +202,7 @@ mod tests {
                 node_port: None,
             }],
             ingress_ip: None,
+            cluster_ip: None,
         }
     }
 

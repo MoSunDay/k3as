@@ -11,11 +11,14 @@
 //! - the **route model**: [`route::RouteTable`] — the Ingress compiler
 //!   ([`ingress`]) target, still the semantic reference for host × path →
 //!   upstream matching;
-//! - the **gateways**: per-`nodePort` listeners ([`nodeport`]) and the
-//!   Ingress gateway ([`gateway`]), both openrusty `AppState`s served
-//!   through the 503 gate ([`gate`]) over real HTTP/1.1 + h2c connections
-//!   ([`serve`]), with openrusty's in-memory reload for live endpoint and
-//!   Ingress changes (the Lua-era "hot reload" seam, now config-driven).
+//! - the **gateways**: per-`nodePort` listeners ([`nodeport`]), the
+//!   ClusterIP VIP listeners ([`clusterip`], T4.3 Scope C / **Q44** —
+//!   VIPs aliased on `lo`, sharing the same resolver+gate+split seams),
+//!   and the Ingress gateway ([`gateway`]), all openrusty `AppState`s
+//!   served through the 503 gate ([`gate`]) over real HTTP/1.1 + h2c
+//!   connections ([`serve`]), with openrusty's in-memory reload for live
+//!   endpoint and Ingress changes (the Lua-era "hot reload" seam, now
+//!   config-driven).
 //!
 //! Deviations from the Lua era are documented per-module (wildcard hosts,
 //! TLS termination, active health probes); the wire behavior gated by
@@ -27,6 +30,9 @@
 
 #![forbid(unsafe_code)]
 
+mod clusterip;
+#[cfg(test)]
+mod clusterip_tests;
 mod endpoints;
 mod endpoints_watch;
 mod gate;
@@ -39,7 +45,9 @@ mod route;
 mod serve;
 mod split;
 mod traffic_watch;
+mod vip;
 
+pub use clusterip::{spawn as spawn_clusterip_plane, ClusterIpPlane};
 pub use endpoints::{
     resolve_with_state, EndpointsResolver, EndpointsView, ResolverState, ServiceView, SvcPort,
     TargetPort,

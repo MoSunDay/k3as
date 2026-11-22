@@ -5,7 +5,7 @@
 //! peers -> the gateway gate answers 503 ([`crate::gate`]).
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -46,6 +46,9 @@ pub struct ServiceView {
     /// `LoadBalancer`-type Services (**T5.6 / T4.3 Scope B**, Q41);
     /// `None` while unannounced.
     pub ingress_ip: Option<String>,
+    /// `spec.clusterIP` parsed as IPv4 (T4.3 Scope C, Q44); `None` for
+    /// headless Services ("None"), absent, or unparseable values.
+    pub cluster_ip: Option<Ipv4Addr>,
 }
 
 /// Endpoints port entry; `port` is the resolved container port.
@@ -134,12 +137,19 @@ pub fn parse_service(value: &Value) -> Option<ServiceView> {
         .and_then(Value::as_str)
         .filter(|ip| !ip.is_empty())
         .map(str::to_string);
+    // Q44 (T4.3 Scope C): headless "None"/empty/unparseable -> None.
+    let cluster_ip = spec
+        .get("clusterIP")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && *s != "None")
+        .and_then(|s| s.parse::<Ipv4Addr>().ok());
     Some(ServiceView {
         namespace,
         name,
         kind_type,
         ports,
         ingress_ip,
+        cluster_ip,
     })
 }
 

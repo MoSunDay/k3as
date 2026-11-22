@@ -23,6 +23,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::error::{storage_error, ApiError};
 use crate::pod_workspace;
 use crate::service;
+use crate::service_ip;
 use crate::state::{
     cluster_key, collection_prefix, namespaced_key, resolve, set_namespace, set_resource_version,
     set_type_meta, AppState, Loc, Resolved,
@@ -136,6 +137,19 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
             }
             .into_response();
         }
+        // T4.3 Scope C (Q44): ClusterIP allocation — `spec.clusterIP`
+        // defaulted lowest-free from --service-cidr for every non-headless,
+        // non-ExternalName Service (NodePort/LoadBalancer included,
+        // upstream parity); explicit IPs validated in-CIDR + unique.
+        if let Err(service::ServiceError::Invalid(message)) =
+            service_ip::prepare(&st.store, &mut body, &st.service_cidr).await
+        {
+            return ApiError::Invalid {
+                kind: res.kind.clone(),
+                message,
+            }
+            .into_response();
+        }
     }
     // T7.5 (Q43): per-Pod anyhome defaulting — init-pro.io/anyhome(-mounts)
     // become injected nfs volumes + mounts at create time; None = the anyhome
@@ -152,7 +166,10 @@ pub(crate) async fn do_create(st: &AppState, loc: &Loc, mut body: Value) -> Resp
     match st.store.create(&key, body).await {
         Ok(entry) => {
             let entry = if res.kind == "Service" {
-                service::heal_nodeport_collision(&st.store, &key, entry).await
+                let entry = service::heal_nodeport_collision(&st.store, &key, entry).await;
+                // T4.3 Scope C (Q44): same CAS self-heal for a clusterIP
+                // double-allocation lost to a LIST/CREATE race.
+                service_ip::heal_clusterip_collision(&st.store, &key, entry, &st.service_cidr).await
             } else {
                 entry
             };

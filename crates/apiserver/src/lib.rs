@@ -20,6 +20,10 @@ mod auth_tests;
 mod authn;
 mod authz;
 pub mod authz_bootstrap;
+// S51 hygiene split (D0): the authz unit tests moved out of `authz.rs`
+// to keep that file under the 400-line cap (the `pod_io_tests` precedent).
+#[cfg(test)]
+mod authz_tests;
 pub(crate) mod binding;
 mod collection;
 mod discovery_handlers;
@@ -40,6 +44,11 @@ pub(crate) mod pod_status;
 mod pod_workspace;
 mod serve;
 mod service;
+mod service_ip;
+// S51: the ClusterIP allocation unit tests live beside `service_ip.rs`
+// (file-size cap; the `authz_tests` precedent).
+#[cfg(test)]
+mod service_ip_tests;
 mod state;
 mod tls;
 
@@ -47,6 +56,7 @@ pub use app::{api_app, api_app_with_workspace_nfs};
 pub use authn::{Identity, TokenAuth};
 pub use authz_bootstrap::bootstrap_rbac;
 pub use serve::{serve, ServeOptions};
+pub use service_ip::{ServiceCidr, DEFAULT_SERVICE_CIDR};
 pub use tls::{acceptor, generate_self_signed, TlsListener, TlsMaterial};
 
 /// Discovery-only router kept for backward compatibility with the T1.2a tests:

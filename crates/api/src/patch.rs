@@ -69,6 +69,12 @@ impl PatchStrategy {
         // imagePullSecrets / local volumes -> by name
         s.merge_keys
             .insert("spec/imagePullSecrets".to_string(), "name".to_string());
+        // status/conditions -> merge by type (upstream core/v1 declares
+        // patchMergeKey=type on every condition list — Node, Pod, ...);
+        // T4.3 S51 (D7): node status keepers can now strategic-merge a
+        // single condition without clobbering foreign ones.
+        s.merge_keys
+            .insert("status/conditions".to_string(), "type".to_string());
         s
     }
 
@@ -388,5 +394,70 @@ mod tests {
         let mut out2 = json!({"spec": {"networks": [{"name": "n1", "value": "a", "extra": "x"}]}});
         strategic_merge(&mut out2, &patch, &PatchStrategy::default()).unwrap();
         assert!(out2["spec"]["networks"][0].get("extra").is_none());
+    }
+
+    /// T4.3 S51 (D7): `status/conditions` merges by `type` (upstream
+    /// patchMergeKey=type) — a status-subresource patch upserts ONE
+    /// condition and preserves every foreign one.
+    #[test]
+    fn status_conditions_merge_by_type_appends_new() {
+        let node = json!({
+            "status": {"conditions": [
+                {"type": "Ready", "status": "True", "reason": "KubeletReady"}
+            ]}
+        });
+        let patch = json!({"status": {"conditions": [
+            {"type": "NetworkUnavailable", "status": "False", "reason": "FlannelIsUp"}
+        ]}});
+        let out = merge(node, patch);
+        let conds = out
+            .pointer("/status/conditions")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(conds.len(), 2, "append, not replace: {out}");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
+        assert_eq!(ready["status"], "True", "foreign Ready preserved");
+        let nu = conds
+            .iter()
+            .find(|c| c["type"] == "NetworkUnavailable")
+            .unwrap();
+        assert_eq!(nu["status"], "False");
+        assert_eq!(nu["reason"], "FlannelIsUp");
+    }
+
+    #[test]
+    fn status_conditions_merge_by_type_updates_existing_slot() {
+        let node = json!({
+            "status": {"conditions": [
+                {"type": "Ready", "status": "True"},
+                {"type": "NetworkUnavailable", "status": "True",
+                 "reason": "NoRoute", "message": "no route to network"}
+            ]}
+        });
+        let patch = json!({"status": {"conditions": [
+            {"type": "NetworkUnavailable", "status": "False", "reason": "FlannelIsUp"}
+        ]}});
+        let out = merge(node, patch);
+        let conds = out
+            .pointer("/status/conditions")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(conds.len(), 2, "upsert in place, no duplicate: {out}");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
+        assert_eq!(ready["status"], "True", "foreign Ready untouched");
+        let nu = conds
+            .iter()
+            .find(|c| c["type"] == "NetworkUnavailable")
+            .unwrap();
+        assert_eq!(nu["status"], "False", "patched field updated");
+        assert_eq!(nu["reason"], "FlannelIsUp", "patched field updated");
+        // Matched slots merge recursively (containers precedent): an
+        // unpatched foreign field inside the slot survives.
+        assert_eq!(
+            nu["message"], "no route to network",
+            "unpatched slot field preserved"
+        );
     }
 }

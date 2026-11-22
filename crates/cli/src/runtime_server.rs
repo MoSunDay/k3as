@@ -42,6 +42,10 @@ pub struct ServerBind {
     /// `--cluster-cidr`: the node-cidr controller carves Node `/24`
     /// podCIDRs from it (T4.3 Scope A, Q34).
     pub cluster_cidr: String,
+    /// `--service-cidr`: the apiserver allocates Service `spec.clusterIP`s
+    /// from it and the Router VIP plane aliases them onto `lo` (T4.3
+    /// Scope C, Q44). Must parse as an IPv4 CIDR or startup is fatal.
+    pub service_cidr: String,
     /// Embedded anyhome NFSv3 workspace plane (T-anyhome, Q36):
     /// `Some(addr)` = serve on that address; `None` = disabled
     /// (`--disable-anyhome`).
@@ -108,7 +112,11 @@ pub(crate) struct ServerPlaneDrains {
     pub(crate) server_join: Option<tokio::task::JoinHandle<()>>,
     pub(crate) controllers: Option<(Vec<tokio::task::JoinHandle<()>>, controllers::Stop)>,
     pub(crate) scheduler: Option<(Vec<tokio::task::JoinHandle<()>>, controllers::Stop)>,
-    pub(crate) service_plane: Option<(router::NodePortPlane, Vec<tokio::task::JoinHandle<()>>)>,
+    pub(crate) service_plane: Option<(
+        router::NodePortPlane,
+        router::ClusterIpPlane,
+        Vec<tokio::task::JoinHandle<()>>,
+    )>,
     pub(crate) anyhome: Option<tokio::task::JoinHandle<()>>,
     pub(crate) registry: Option<tokio::task::JoinHandle<()>>,
 }
@@ -134,6 +142,18 @@ pub(crate) async fn spawn_server_plane(
         registry: None,
     };
     let reg = crate::discovery::served_schema(b.token_file.is_some());
+    // T4.3 Scope C (Q44): parse --service-cidr once, up front — a
+    // malformed CIDR is fatal BEFORE any listener binds (VIP plane or
+    // apiserver); k3s parity is a hard refusal, not a silent default.
+    let service_cidr = match apiserver::ServiceCidr::parse(&b.service_cidr) {
+        Some(c) => c,
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("--service-cidr {}: malformed IPv4 CIDR", b.service_cidr),
+            ));
+        }
+    };
     let advertised = b.addr.to_string();
     let summary = crate::discovery::served_groups_summary(&reg, &advertised);
     tracing::info!(target: "init-pro", role, "T1.1 {summary}");
@@ -243,16 +263,22 @@ pub(crate) async fn spawn_server_plane(
     // k3s-parity escape hatch that turns it off).
     if !b.disable_kube_proxy {
         let (resolver, reflectors) = router::supervise(store.clone(), shutdown.clone());
+        // T4.3 Scope C (Q44): the SAME resolver feeds the ClusterIP VIP
+        // plane — one lo-aliased listener per (VIP, servicePort).
+        let clusterip = router::spawn_clusterip_plane(resolver.clone(), shutdown.clone());
         drains.service_plane = Some((
             router::spawn_nodeport_plane(
                 resolver,
                 router::NodePortConfig::default(),
                 shutdown.clone(),
             ),
+            clusterip,
             reflectors,
         ));
         tracing::info!(target: "init-pro", role,
             "service plane started: Router carries nodePort traffic (Sprint 18 / S4, Q28)");
+        tracing::info!(target: "init-pro", role,
+            "clusterIP plane started: Router carries ClusterIP VIP traffic (T4.3 Scope C, Q44)");
     }
     let server_shutdown = shutdown.clone();
     let addr = b.addr;
@@ -316,6 +342,9 @@ pub(crate) async fn spawn_server_plane(
                 workspace_nfs,
                 auth,
                 tls,
+                // T4.3 Scope C (Q44): drive the apiserver's clusterIP
+                // allocator with the parsed --service-cidr.
+                service_cidr: Some(service_cidr),
             },
             async move {
                 server_shutdown.cancelled().await;

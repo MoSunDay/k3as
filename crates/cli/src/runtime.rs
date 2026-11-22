@@ -534,9 +534,12 @@ pub(crate) fn run_supervised(
         }
         // Sprint 18 / S4 (Q28): drain the Router service plane AFTER the
         // agent runtime and BEFORE the API surface — nodePort listeners stop
-        // serving, then the reflectors join on the shared shutdown token.
-        if let Some((plane, reflectors)) = service_plane_drain {
+        // serving, then the ClusterIP VIP listeners (T4.3 Scope C, Q44 —
+        // their lo aliases are removed with the plane), then the reflectors
+        // join on the shared shutdown token.
+        if let Some((plane, clusterip, reflectors)) = service_plane_drain {
             plane.drain().await;
+            clusterip.drain().await;
             for h in reflectors {
                 let _ = h.await;
             }

@@ -36,8 +36,10 @@ fn wired_for_agent(long: &str) -> bool {
 /// subcommand is `server`, still stripped (and warned) everywhere else —
 /// `--tls-san` mints the serving cert SANs, `--token-file` loads the
 /// static-token CSV; both default off (plain h2c, no authn).
+/// `--service-cidr` drives the clusterIP allocator + Router VIP plane
+/// (T4.3 Scope C, Q44; default `10.43.0.0/16`).
 fn wired_for_server(long: &str) -> bool {
-    matches!(long, "tls-san" | "token-file")
+    matches!(long, "tls-san" | "token-file" | "service-cidr")
 }
 
 /// Strip accept-no-op-warn flags from `argv` (argv[0] is preserved as-is).
@@ -166,6 +168,7 @@ fn detect_subcommand(tokens: &[&String]) -> Option<&'static str> {
                 // `--flag VALUE`: skip the separate value token.
                 let takes_value = rest == "data-dir"
                     || rest == "cluster-cidr"
+                    || rest == "service-cidr"
                     || find_long(rest).is_some_and(|f| f.takes_value);
                 if takes_value {
                     i += 1;
@@ -211,16 +214,22 @@ mod tests {
         let r = strip_noop(&argv(&[
             "init-pro",
             "server",
-            "--service-cidr",
+            "--service-node-port-range",
             "10.0.0.0/16",
         ]));
         assert_eq!(r.argv, argv(&["init-pro", "server"]));
-        assert_eq!(r.seen, vec!["service-cidr".to_string()]);
+        assert_eq!(r.seen, vec!["service-node-port-range".to_string()]);
     }
 
     #[test]
     fn equals_form_keeps_no_value_token() {
-        let r = strip_noop(&argv(&["init-pro", "server", "--service-cidr=10.0.0.0/16"]));
+        // `--service-cidr` is clap-wired for `server` since T4.3 Scope C
+        // (Q44), so the no-op equals-form check uses another value flag.
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "server",
+            "--service-node-port-range=10.0.0.0/16",
+        ]));
         assert_eq!(r.argv, argv(&["init-pro", "server"]));
     }
 
@@ -412,6 +421,32 @@ mod tests {
             let r = strip_noop(&argv(&["init-pro", sub, "--tls-san", "x.internal"]));
             assert_eq!(r.argv, argv(&["init-pro", sub]), "{sub} argv");
             assert_eq!(r.seen, vec!["tls-san".to_string()], "{sub} seen");
+        }
+    }
+
+    #[test]
+    fn service_cidr_wired_for_server_stripped_elsewhere() {
+        // T4.3 Scope C (Q44): `--service-cidr` reaches clap on `server`
+        // (drives the clusterIP allocator + the Router VIP plane); it
+        // stays accept-no-op-warn on agent/stage, including when it
+        // appears before the subcommand (its VALUE token must not blind
+        // detect_subcommand).
+        let r = strip_noop(&argv(&[
+            "init-pro",
+            "server",
+            "--service-cidr",
+            "10.43.0.0/16",
+        ]));
+        assert_eq!(
+            r.argv,
+            argv(&["init-pro", "server", "--service-cidr", "10.43.0.0/16"])
+        );
+        assert!(r.seen.is_empty());
+
+        for sub in ["agent", "stage"] {
+            let r = strip_noop(&argv(&["init-pro", "--service-cidr", "10.43.0.0/16", sub]));
+            assert_eq!(r.argv, argv(&["init-pro", sub]), "{sub} argv");
+            assert_eq!(r.seen, vec!["service-cidr".to_string()], "{sub} seen");
         }
     }
 

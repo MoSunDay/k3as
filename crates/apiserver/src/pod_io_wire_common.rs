@@ -33,6 +33,7 @@ pub(crate) fn app(store: Arc<EmbeddedStorage>) -> axum::Router {
         server_address: "127.0.0.1:6443".into(),
         workspace_nfs: None,
         auth: None,
+        service_cidr: crate::service_ip::ServiceCidr::default(),
     })
 }
 

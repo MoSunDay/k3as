@@ -115,6 +115,7 @@ mod tests {
             datastore_endpoint: None,
             cluster_init: false,
             cluster_cidr: "10.42.0.0/16".to_string(),
+            service_cidr: "10.43.0.0/16".to_string(),
             anyhome_addr: "127.0.0.1:11111".to_string(),
             disable_anyhome: false,
             registry_addr: "127.0.0.1:15000".to_string(),

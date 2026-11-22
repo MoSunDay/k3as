@@ -3,9 +3,12 @@
 //! `rest_crud.rs`: the real axum handlers via axum's in-process `oneshot`
 //! transport.
 //!
-//! Decision **D**: NodePort-only dataplane in v1 — ClusterIP Services are
-//! creatable/stored but non-forwarding; no `spec.clusterIP` is assigned.
+//! **Q44** (T4.3 Scope C, Sprint 51) supersedes Decision D: ClusterIPs ARE
+//! allocated from `--service-cidr` (default `10.43.0.0/16`) for every
+//! non-headless, non-ExternalName Service; the Router carries the VIP
+//! traffic (its ClusterIP plane).
 
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use api::SchemaRegistry;
@@ -75,6 +78,22 @@ fn message_contains(v: &Value, needle: &str) -> bool {
 fn node_port(body: &Value) -> Option<u64> {
     body.pointer("/spec/ports/0/nodePort")
         .and_then(Value::as_u64)
+}
+
+/// True when the string is an IPv4 inside the default service CIDR
+/// `10.43.0.0/16` (Q44: the test-facing app allocates from that pool).
+fn in_default_cidr(s: &str) -> bool {
+    match s.parse::<Ipv4Addr>() {
+        Ok(ip) => {
+            let n = u32::from(ip);
+            (n >> 16) == ((10 << 8) | 43)
+        }
+        Err(_) => false,
+    }
+}
+
+fn cluster_ip(body: &Value) -> Option<&str> {
+    body.pointer("/spec/clusterIP").and_then(Value::as_str)
 }
 
 const URI: &str = "/api/v1/namespaces/default/services";
@@ -170,7 +189,127 @@ async fn service_type_defaults_to_clusterip() {
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(out["spec"]["type"], "ClusterIP");
     assert!(node_port(&out).is_none(), "ClusterIP gets no nodePort");
-    assert!(out["spec"].get("clusterIP").is_none(), "no clusterIP (D)");
+    // Q44 (T4.3 Scope C): a clusterIP IS allocated, inside the default CIDR.
+    let ip = cluster_ip(&out).expect("clusterIP allocated (Q44)");
+    assert!(in_default_cidr(ip), "clusterIP {ip} inside 10.43.0.0/16");
+}
+
+#[tokio::test]
+async fn clusterip_allocated_distinct_and_sequential() {
+    let r = app();
+    let mut got = Vec::new();
+    for i in 0..3 {
+        let body = svc(&format!("cip{i}"), json!({ "ports": [{ "port": 80 }] }));
+        let (st, out) = send(r.clone(), "POST", URI, json_body(&body)).await;
+        assert_eq!(st, StatusCode::CREATED);
+        let ip = cluster_ip(&out).expect("clusterIP allocated");
+        assert!(in_default_cidr(ip), "clusterIP {ip} inside 10.43.0.0/16");
+        got.push(ip.to_string());
+    }
+    assert_eq!(
+        got,
+        vec!["10.43.0.1", "10.43.0.2", "10.43.0.3"],
+        "lowest-free sequential"
+    );
+}
+
+#[tokio::test]
+async fn explicit_in_cidr_clusterip_honored_verbatim() {
+    let r = app();
+    let body = svc(
+        "cip",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": "10.43.9.9" }),
+    );
+    let (st, out) = send(r, "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(cluster_ip(&out), Some("10.43.9.9"), "explicit verbatim");
+}
+
+#[tokio::test]
+async fn explicit_out_of_cidr_clusterip_rejected() {
+    for bad in ["10.44.0.5", "192.168.1.1"] {
+        let r = app();
+        let body = svc(
+            "cip",
+            json!({ "ports": [{ "port": 80 }], "clusterIP": bad }),
+        );
+        let (st, out) = send(r, "POST", URI, json_body(&body)).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "clusterIP {bad}");
+        assert_eq!(out["reason"], "Invalid");
+        assert!(
+            message_contains(&out["message"], "10.43.0.0/16"),
+            "message names the service CIDR: {out}"
+        );
+        assert!(
+            message_contains(&out["message"], bad),
+            "message names the IP: {out}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_explicit_clusterip_rejected() {
+    let r = app();
+    let first = svc(
+        "c1",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": "10.43.4.4" }),
+    );
+    let (st, _) = send(r.clone(), "POST", URI, json_body(&first)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let second = svc(
+        "c2",
+        json!({ "ports": [{ "port": 81 }], "clusterIP": "10.43.4.4" }),
+    );
+    let (st, out) = send(r, "POST", URI, json_body(&second)).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        message_contains(&out["message"], "already allocated"),
+        "message names the collision: {out}"
+    );
+}
+
+#[tokio::test]
+async fn headless_clusterip_none_preserved_verbatim() {
+    let r = app();
+    let body = svc(
+        "headless",
+        json!({ "ports": [{ "port": 80 }], "clusterIP": "None" }),
+    );
+    let (st, out) = send(r, "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(
+        cluster_ip(&out),
+        Some("None"),
+        "headless stays verbatim, no allocation"
+    );
+}
+
+#[tokio::test]
+async fn externalname_gets_no_clusterip() {
+    let r = app();
+    let body = svc("en", json!({ "externalName": "db.example.com" }));
+    let (st, out) = send(r, "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(
+        out.pointer("/spec/clusterIP").is_none(),
+        "ExternalName untouched: {out}"
+    );
+}
+
+#[tokio::test]
+async fn nodeport_service_also_gets_clusterip() {
+    // Q44: every non-headless Service has a VIP (NodePort included) —
+    // upstream parity with k8s.
+    let r = app();
+    let body = svc(
+        "np",
+        json!({ "type": "NodePort", "ports": [{ "port": 80 }] }),
+    );
+    let (st, out) = send(r, "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert!(node_port(&out).is_some(), "nodePort still allocated");
+    let ip = cluster_ip(&out).expect("clusterIP allocated (Q44)");
+    assert!(in_default_cidr(ip), "clusterIP {ip} inside 10.43.0.0/16");
 }
 
 #[tokio::test]

@@ -63,6 +63,10 @@ pub fn api_app_full(
         server_address,
         workspace_nfs,
         auth,
+        // T4.3 Scope C (Q44): the test-facing constructor allocates from
+        // the k3s default pool; production threads `--service-cidr` through
+        // `serve`.
+        service_cidr: crate::service_ip::ServiceCidr::default(),
     };
     router(state)
 }

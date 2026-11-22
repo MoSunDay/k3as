@@ -38,7 +38,10 @@ pub const NOOP_FLAGS: &[NoopFlag] = &[
     nf("tls-san-security", None, false),
     // C.3 Cluster networking
     // (`cluster-cidr` is wired in T4.3 Scope A — server allocates Node
-    // podCIDRs from it; the agent synthesizes net-conf.json from it.)
+    // podCIDRs from it; the agent synthesizes net-conf.json from it.
+    // `service-cidr` is clap-wired for `server` since T4.3 Scope C/Q44 —
+    // clusterIP allocation + the Router VIP plane; still no-op-warned on
+    // `agent`/`stage`.)
     nf("service-cidr", None, true),
     nf("service-node-port-range", None, true),
     nf("cluster-dns", None, true),

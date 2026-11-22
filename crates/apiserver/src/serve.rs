@@ -48,6 +48,11 @@ pub struct ServeOptions {
     /// Serving TLS. `Some` switches the bound listener to a TLS listener
     /// (self-signed CA chain minted upstream in the CLI plane).
     pub tls: Option<TlsAcceptor>,
+    /// The ClusterIP allocation pool (T4.3 Scope C, Q44): every
+    /// non-headless, non-ExternalName Service gets `spec.clusterIP`
+    /// allocated from this CIDR at create time. `None` = the k3s default
+    /// `10.43.0.0/16`.
+    pub service_cidr: Option<crate::service_ip::ServiceCidr>,
 }
 
 /// Run the API server until `shutdown` resolves.
@@ -69,6 +74,7 @@ where
         workspace_nfs,
         auth,
         tls,
+        service_cidr,
     } = options;
 
     // Auth on -> RBAC on: seed the default bindings once (idempotent).
@@ -87,6 +93,7 @@ where
         server_address,
         workspace_nfs,
         auth,
+        service_cidr: service_cidr.unwrap_or_default(),
     });
 
     let (fired_tx, fired_rx) = tokio::sync::oneshot::channel::<()>();

@@ -299,7 +299,9 @@ async fn start_listener(
 /// `nodePort` of every NodePort-type Service — and, since **Q41**
 /// (T5.6 / T4.3 Scope B), every LoadBalancer-type Service too: an LB
 /// builds on NodePort in k8s, so the nodePort plane serves it the same
-/// way (the VIP byte-pipe lives in [`crate::servicelb`]).
+/// way. (LB Services are admitted on the nodePort plane directly since
+/// Q41; the never-wired raw-TCP draft `servicelb.rs` was removed in
+/// Sprint 51 — Q44 records that it never shipped.)
 fn desired_listeners(state: &ResolverState) -> BTreeMap<u16, UpstreamRef> {
     let mut out = BTreeMap::new();
     for (key, svc) in &state.services {
@@ -343,6 +345,7 @@ mod tests {
             kind_type: kind.into(),
             ports,
             ingress_ip: None,
+            cluster_ip: None,
         }
     }
 

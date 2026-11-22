@@ -227,6 +227,23 @@ impl HttpJson {
             .await
     }
 
+    /// PATCH with a strategic-merge body. T4.3 S51 (D7): the apiserver's
+    /// `status/conditions` merge key (`type`) makes a single-condition
+    /// status patch upsert in place instead of replacing the array.
+    pub async fn patch_json_strategic(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<(u16, Value), HttpError> {
+        self.json_exchange_ct(
+            "PATCH",
+            path,
+            Some(body),
+            "application/strategic-merge-patch+json",
+        )
+        .await
+    }
+
     async fn json_exchange_ct(
         &self,
         method: &str,

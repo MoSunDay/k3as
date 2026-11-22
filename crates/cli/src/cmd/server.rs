@@ -195,4 +195,17 @@ pub struct ServerCmd {
         value_name = "CIDR"
     )]
     pub cluster_cidr: String,
+
+    /// IPv4 CIDR range for Service clusterIPs. The apiserver allocates
+    /// every non-headless Service a VIP from it and the Router VIP plane
+    /// aliases each onto `lo` and serves it — the k3s `--service-cidr`
+    /// parity, T4.3 Scope C (Q44). Malformed input is fatal.
+    /// env `INIT_PRO_SERVICE_CIDR`.
+    #[arg(
+        long = "service-cidr",
+        env = "INIT_PRO_SERVICE_CIDR",
+        default_value = "10.43.0.0/16",
+        value_name = "CIDR"
+    )]
+    pub service_cidr: String,
 }

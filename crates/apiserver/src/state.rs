@@ -27,6 +27,11 @@ pub(crate) struct AppState {
     /// Static-token authentication (T1.3a, Q47); `None` = the default
     /// h2c posture — anonymous, every request passes through unauthenticated.
     pub auth: Option<Arc<crate::authn::TokenAuth>>,
+    /// The ClusterIP allocation pool (T4.3 Scope C, Q44): every
+    /// non-headless, non-ExternalName Service gets `spec.clusterIP`
+    /// allocated from this CIDR at create time. Defaults to the k3s
+    /// `10.43.0.0/16`.
+    pub(crate) service_cidr: crate::service_ip::ServiceCidr,
 }
 
 /// A resource resolved from the schema for one REST request.

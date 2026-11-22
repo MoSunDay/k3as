@@ -171,6 +171,8 @@ where
                             scheduler_args: svc.kube_scheduler_arg.clone(),
                             datastore_endpoint: svc.datastore_endpoint.clone(),
                             cluster_cidr: svc.cluster_cidr.clone(),
+                            // T4.3 Scope C (Q44): Service clusterIP range.
+                            service_cidr: svc.service_cidr.clone(),
                             // T-anyhome (Q36): None = --disable-anyhome.
                             anyhome: crate::anyhome::anyhome_endpoint(
                                 svc.disable_anyhome,

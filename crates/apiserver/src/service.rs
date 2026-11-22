@@ -7,9 +7,11 @@
 //! protocol); a double allocation lost to a concurrent writer between LIST
 //! and CREATE is healed post-create via CAS retry ([`heal_nodeport_collision`]).
 //!
-//! Decision **D**: NodePort-only dataplane in v1 — ClusterIP Services are
-//! creatable/stored but non-forwarding; no `spec.clusterIP` is assigned
-//! (JSON-only wire, **Q10**).
+//! **Q44** (T4.3 Scope C, Sprint 51) supersedes Decision D's no-clusterIP
+//! clause: ClusterIPs ARE now allocated from `--service-cidr` (default
+//! `10.43.0.0/16`, see [`crate::service_ip`]) for every non-headless,
+//! non-ExternalName Service — NodePort/LoadBalancer included, upstream
+//! parity. The Router carries the VIP traffic (its ClusterIP plane, Q44).
 
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
