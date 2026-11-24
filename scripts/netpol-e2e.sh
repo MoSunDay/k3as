@@ -256,6 +256,14 @@ for f in np-bad1 np-bad2 np-bad3; do
   [[ "$C" == "422" ]] || { SUBSET=0; bad "NP1 subset gate $f -> $C (want 422)"; }
 done
 [[ "$SUBSET" == "1" ]] && ok "NP1 subset admission: SCTP/named-port/ipBlock-mix all 422 (Q64)"
+# S53 (Q64 review P1-①): the PATCH write path runs the same subset
+# admission — merging SCTP ports into a stored policy must 422 too.
+C="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+  -H 'Content-Type: application/merge-patch+json' \
+  --data '{"spec":{"ingress":[{"ports":[{"protocol":"SCTP","port":81}]}]}}' \
+  "$BASE/$NPOL_GROUP/np-deny-all")"
+[[ "$C" == "422" ]] && ok "NP1 patch subset gate: SCTP merge-patch -> 422 (P1-①)" \
+  || bad "NP1 patch subset gate -> $C (want 422)"
 # Enforcement: EVERY pod is ingress-isolated (empty podSelector); deny is
 # fail-fast REJECT (refused), not a drop.
 if wait_probe "$CLI_UID" "$WEB_IP" 8080 denied 45; then
