@@ -34,9 +34,9 @@ S49 收口; 硬件链与平台链按本文排程继续。
 | T4.15 | Q60 | node04 现场真机 HD 验收 recorded | 硬件窗口 |
 | T7.2 | Q61(GPU6 强制) | per-vendor 真硬件 recorded evidence | 硬件窗口 |
 | T7.6 | Q62(INF6 强制) | 真 llama-server + pin 定 GGUF + 真整卡 recorded | T7.2 收口 + 硬件 |
-| T4.3 | Q34/Q41 + **Q44 定稿** | Scope C ClusterIP 分配 + L4 承载; flannel host-gw/multi-node e2e F6+ | Q44 LOCKED |
-| T4.4 | Q59 边界 | netpol supported-subset + allow/deny e2e | T4.3 done |
-| T4.5 | Q31 对齐 | 注册/心跳硬化 + kubelet↔server 代理隧道(exec/logs 经 apiserver) | T4.2/T1.2(done) |
+| ~~T4.3~~ | Q34/Q41 + **Q44 定稿** | ~~Scope C ClusterIP 分配 + L4 承载; flannel host-gw/multi-node e2e F6+~~ **S51 已收口**(§11): ClusterIP 分配面(apiserver `--service-cidr`)+ Router VIP 承载面(lo 别名)+ flannel host-gw F6a-F6d 实证; F7/F8 两节点跨机为 opt-in 实机证据面(环境门控 `FLANNEL_E2E_REMOTE_NODE`); ST1-ST10b 11/0 | 无 |
+| ~~T4.4~~ | Q59 边界 | ~~netpol supported-subset + allow/deny e2e~~ **S52 已收口**(§12): Q64 netpol 上游 1:1 类型 + discovery 注册(golden G31 锁步)+ 子集准入 422 + in-tree iptables 执行面(`INIT-PRO-NPOL-*` 幂等重写); netpol-e2e NP0-NP4 12/12 | 无 |
+| ~~T4.5~~ | Q31 对齐 | ~~注册/心跳硬化 + kubelet↔server 代理隧道(exec/logs 经 apiserver)~~ **S52 已收口**(§12): Q65 agent-dialed 反向中继隧道(register/next/responses 长轮询), 直连优先、仅 transport 错误回退, Q31 单请求/响应语义不重开; acceptance-2node 16/16 两轮 | 无 |
 | T1.3 | **Q47 定稿**(含 Q11 修订注记) | T1.3a TLS+静态 token(auth-e2e A1-A6)→ T1.3b RBAC supported-subset | ~~Q47 LOCKED~~ **S49 已定稿** |
 | T3.3 | 依赖 T1.3 | bootstrap/证书/token 轮转 e2e | T1.3 done |
 | T3.4 | Q18(Lease+CAS)+ Q33(etcd-gRPC client 唯一消费者) | 多 server 选主 + failover e2e | T3.3 done |
@@ -96,7 +96,7 @@ SSOT lockstep(index + plan/*.md + decisions + CHANGELOG)。
 | protobuf wire、动态 CRD 注册、admission、aggregation、全量 RBAC | Q59 | 显式弃置(Q59 原文); **S50 T1.3b supported-subset RBAC 已落**(四 wire 类型 + 授权中间件 + bootstrap)，全量 RBAC 仍在子集外 | standing |
 | T4.15/T7.2/T7.6 真硬件证据 | Q60/Q61/Q62 | **收口中**: node04 窗口收割(S57, 最晚 S59) | open |
 | T4.8 命名端口、T4.9 capacity/eviction 子项 | done 卡内 deferred | S60 终审: 收口或 Q59 弃置 | open |
-| Router TLS/SNI 余量、netpol | T5.5/T5.6/T4.4 | **收口中**: host-gw 已 S51 落地(F6a-F6d 实证; F7/F8 两节点跨机为 opt-in 实机证据面, 环境门控 `FLANNEL_E2E_REMOTE_NODE`); 剩余 TLS/SNI (S55/S56) + netpol (S52/T4.4) | open |
+| Router TLS/SNI 余量 | T5.5/T5.6 | **收口中**: host-gw 已 S51 落地(F6a-F6d 实证; F7/F8 两节点跨机为 opt-in 实机证据面, 环境门控 `FLANNEL_E2E_REMOTE_NODE`); 剩余 TLS/SNI (S55/S56); ~~netpol~~ **T4.4 S52 已收口**(Q64) | open |
 | HA 多 server | T3.4 | **收口中**(S59); 弃置需用户裁决, 不得默认 | open |
 
 ## 7. S49 执行记录 (2026-11-21)

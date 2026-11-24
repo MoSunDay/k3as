@@ -3262,6 +3262,19 @@ ipset 依赖）——supported-subset 边界记录在案；链命名空间 host-
 遗留验收部署的碰撞观察，非产品缺陷）；golden discovery 字节此后是任何
 API 增补的合并门事件。
 
+**S53 补记（评审修复批 P1-①/P1-⑤）.** (a) **写路径准入补全**:
+`apiserver do_patch` 在 CAS 写前对 FINAL merged 对象补跑
+`api::validate::admit`（与 create/replace 同一单点）——此前 PATCH /
+apply-patch 可绕过子集准入走私（如 SCTP 端口 merge-patch 入库）；
+集成测试 `patch_runs_subset_admission_netpol` + netpol-e2e NP1 patch
+门（SCTP merge-patch → 422）防回归。(b) **编译器 fail-closed 收紧**:
+`netpol_compile::port_entries` 未知 `protocol` 由静默按 TCP 编译改为
+skip + WARN（杜绝事故性 tcp 放行；TCP/UDP/缺省之外的值整条跳过）。
+(c) **稳定性**: `netpol_iptables.rs` 全部 exec 套 5s `EXEC_TIMEOUT`
+（`kill_on_drop`，超时归一为 `TimedOut` 走既有 WARN 降级路径，不挂
+resync/drain），keeper drain 对齐 `REGISTRY_DRAIN_TIMEOUT` 的 10s 有界
+写法（超时 abort + WARN，不挂死 agent 退出）。
+
 ## Q65 — T4.5 代理隧道: agent 主动拨号反向中继（长轮询, 单请求/响应对齐 Q31） (T4.5 / S52) (LOCKED 2026-11-22, S52 定稿即交付)
 
 **Context.** T4.5 余量 = 代理隧道（节点注册/心跳已在 T4.2 Scope A
@@ -3302,3 +3315,12 @@ DROP 经中继 / T2 隧道断开重连 SLA / T3 `--disable-proxy-tunnel` 回归
 直连 exec + Ready=True）；隧道永不承重（处处直连优先）；node 地址修正
 顺带消掉 loopback 广告陷阱。(−) exec 流式不穿隧道（单请求/响应 =
 Q31 范围，standing）；中继跳加长轮询交接延迟；无 mTLS（Q21 明文前提）。
+
+**S53 补记（评审修复批 P1-②）.** `submit` 的 pending 响应者条目加
+RAII Drop-guard（`PendingGuard`，`submit` 改取 `&Arc<Self>` 以便
+guard 持有注册表句柄）：submit future 在 SLA 前被取消（HTTP 调用方
+断连、axum 丢弃 handler）时由 Drop 清理 pending 条目——原仅超时分支
+显式清理，取消路径泄漏至「可能永不到达的 agent 响应」；单测
+`cancelled_submit_cleans_pending` 钉住。隧道 park 身份绑定（评审
+P1-③，register 发一次性 park 凭据 + next/responses 验证归属）留待
+S53 主体批：涉及 wire 字段扩展，先补 Q65 决策修订再动协议。
