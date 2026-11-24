@@ -115,6 +115,9 @@ const SANDBOX_GONE_TIMEOUT: Duration = Duration::from_secs(5);
 /// T6.3 (Q40): cap the registry's graceful HTTP drain so an interrupted blob upload cannot wedge shutdown.
 const REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// S53 / T4.4 (Q64) review P1-⑤: teardown is the NP4 zero-residue drain, but a wedged keeper must not hang agent exit — abort + WARN (mirrors REGISTRY_DRAIN_TIMEOUT).
+const NETPOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Poll the CRI sandbox list until it is empty (bounded by `max`). An empty
 /// list means every shim of this run is gone, so stopping containerd cannot
 /// orphan one. Two consecutive list errors are tolerated (the daemon may
@@ -601,10 +604,21 @@ pub(crate) fn run_supervised(
         }
         // T4.4 (Q64): the netpol keeper right after flanneld — its exit
         // is the zero-residue teardown (jump + every INIT-PRO-NPOL-*
-        // chain gone, NP4); waiting here keeps shutdown residue-free.
-        if let Some(h) = netpol_drain {
-            let _ = h.await;
-            tracing::info!(target: "init-pro", role, "network policy drained");
+        // chain gone, NP4); waiting here keeps shutdown residue-free,
+        // bounded so a wedged keeper cannot hang agent exit (S53 /
+        // review P1-⑤).
+        if let Some(mut h) = netpol_drain {
+            match tokio::time::timeout(NETPOL_DRAIN_TIMEOUT, &mut h).await {
+                Ok(_) => tracing::info!(target: "init-pro", role, "network policy drained"),
+                Err(_) => {
+                    h.abort();
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "network policy drain timed out; keeper aborted"
+                    );
+                }
+            }
         }
         // T4.5 (Q65): the tunnel dialer right after the netpol keeper —
         // confirm its long-poll task exited (no lingering outbound poll).

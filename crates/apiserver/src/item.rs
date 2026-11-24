@@ -14,6 +14,11 @@
 //! **S52-D0** (T4.3 Scope C follow-up / Q44): `do_replace` / `do_patch`
 //! run the Service write-path admission (`service_ip::validate_on_write`,
 //! immutable-or-validate) on the final mutated object BEFORE the write.
+//!
+//! **S53** (Q64 review P1-①): as of this sprint `do_patch` also runs
+//! `api::validate::admit` on the FINAL merged object — the same
+//! cross-resource admission as create/replace, closing the patch-side
+//! bypass of the supported-subset gates (e.g. SCTP NetworkPolicy ports).
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -377,6 +382,17 @@ pub(crate) async fn do_patch(
         return e.into_response();
     }
     set_type_meta(&mut merged, &res.api_version, &res.kind);
+    // S53 (Q64 review P1-①): PATCH runs the same cross-resource admission
+    // as create/replace — the FINAL merged object is checked before the CAS
+    // write (a patch/apply could previously smuggle an out-of-subset spec
+    // past the create-path gate, e.g. SCTP NetworkPolicy ports).
+    if let Err(message) = api::validate::admit(&loc.group, &res.kind, &merged) {
+        return ApiError::Invalid {
+            kind: res.kind.clone(),
+            message,
+        }
+        .into_response();
+    }
     // S52-D0 (T4.3 Scope C follow-up / Q44): Service write-path admission —
     // the FINAL merged object (post-patch) is validated against the stored
     // object BEFORE the CAS write: a set clusterIP/nodePort is immutable

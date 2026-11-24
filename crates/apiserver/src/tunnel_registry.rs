@@ -68,6 +68,28 @@ impl Drop for LongPollGuard {
     }
 }
 
+/// S53 / Q65 (review P1-②): cancellation-clean pending entry. `submit`
+/// parks its responder in `pending` keyed by request id BEFORE awaiting
+/// the agent; if the submit future itself is dropped first (HTTP caller
+/// disconnected, axum dropped the handler), no outcome branch runs and
+/// the entry would leak until a response that may never arrive. This
+/// pure RAII guard removes the entry on Drop; every resolved outcome
+/// disarms it first.
+struct PendingGuard {
+    tunnels: Arc<TunnelRegistry>,
+    node: String,
+    request_id: String,
+    armed: bool,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.tunnels.drop_pending(&self.node, &self.request_id);
+        }
+    }
+}
+
 /// Shared registry threaded through [`crate::state::AppState`].
 pub(crate) struct TunnelRegistry {
     relay_timeout: Duration,
@@ -129,7 +151,7 @@ impl TunnelRegistry {
     /// agent's response (bounded by the relay SLA). Fails fast when the
     /// tunnel is not live — the caller keeps today's direct error (Q31).
     pub(crate) async fn submit(
-        &self,
+        self: &Arc<Self>,
         node: &str,
         method: &str,
         path: &str,
@@ -166,14 +188,32 @@ impl TunnelRegistry {
                 .map_err(|_| format!("node \"{node}\" tunnel handoff failed (agent gone)"))?;
             (rx, request_id)
         };
+        // S53 / Q65 (P1-②): arm the cancellation guard — if THIS future is
+        // dropped before any outcome below runs, its Drop removes the
+        // pending responder (same lock pattern as the timeout branch).
+        let mut guard = PendingGuard {
+            tunnels: Arc::clone(self),
+            node: node.to_string(),
+            request_id: request_id.clone(),
+            armed: true,
+        };
         let outcome = tokio::time::timeout(self.relay_timeout, responder).await;
         match outcome {
-            Ok(Ok(response)) => response.into_reply(),
-            Ok(Err(_gone)) => Err(format!(
-                "node \"{node}\" dropped the relayed request before answering"
-            )),
+            Ok(Ok(response)) => {
+                // `complete` already removed the entry before resolving.
+                guard.armed = false;
+                response.into_reply()
+            }
+            Ok(Err(_gone)) => {
+                // Sender gone => the entry was already removed to drop it.
+                guard.armed = false;
+                Err(format!(
+                    "node \"{node}\" dropped the relayed request before answering"
+                ))
+            }
             Err(_) => {
                 self.drop_pending(node, &request_id);
+                guard.armed = false;
                 Err(format!(
                     "node \"{node}\" tunnel response timed out after {}s",
                     self.relay_timeout.as_secs()
@@ -305,6 +345,32 @@ mod tests {
             "bogus",
             RelayResponse::from_reply(&reply(200, "late"))
         ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_submit_cleans_pending() {
+        // S53 / Q65 (review P1-②): a submit future CANCELLED before the
+        // relay SLA (the HTTP caller disconnected and axum dropped the
+        // handler) runs no outcome branch — the Drop guard must still
+        // remove the pending responder instead of leaking it.
+        let reg = TunnelRegistry::with_relay_timeout(Duration::from_secs(10));
+        let park = reg.park("n1");
+        // Outer window shorter than the relay SLA: when it elapses, the
+        // timeout drops the inner submit future mid-flight.
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(50),
+            reg.submit("n1", "GET", "/pods/u/containers/c/log", None, None),
+        )
+        .await;
+        assert!(cancelled.is_err(), "outer timeout should win the race");
+        let nodes = reg.nodes.lock().expect("tunnel registry poisoned");
+        let entry = nodes.get("n1").expect("node entry remains");
+        assert!(
+            entry.pending.is_empty(),
+            "cancelled submit leaked a pending responder"
+        );
+        drop(nodes);
+        drop(park);
     }
 
     #[tokio::test]

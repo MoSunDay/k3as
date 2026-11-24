@@ -28,30 +28,64 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::netpol_compile::{NetpolProgram, CHAIN_PREFIX, DISPATCH_CHAIN};
 
+/// S53 / Q64 (review P1-⑤): every iptables exec here is bounded — a
+/// wedged binary must degrade through the callers' existing WARN paths
+/// (keeper skip-tick / teardown warn), never hang the resync or the
+/// shutdown drain.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `TimedOut` error naming the wedged binary (S53 / review P1-⑤).
+fn exec_timed_out(what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("{what} timed out after {EXEC_TIMEOUT:?}"),
+    )
+}
+
+/// `Command::output` under [`EXEC_TIMEOUT`]; a wedged child is killed
+/// when the dropped future releases the handle (`kill_on_drop`).
+async fn bounded_output(cmd: &mut Command) -> io::Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    let what = format!("{} exec", cmd.as_std().get_program().to_string_lossy());
+    tokio::time::timeout(EXEC_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| exec_timed_out(&what))?
+}
+
+/// `Command::status` under [`EXEC_TIMEOUT`] (the `-C` probes).
+async fn bounded_status(cmd: &mut Command) -> io::Result<std::process::ExitStatus> {
+    cmd.kill_on_drop(true);
+    let what = format!("{} exec", cmd.as_std().get_program().to_string_lossy());
+    tokio::time::timeout(EXEC_TIMEOUT, cmd.status())
+        .await
+        .map_err(|_| exec_timed_out(&what))?
+}
+
 /// Ensure the FORWARD -> dispatch jump exists exactly once (`-C` guard,
 /// then `-I FORWARD 1`). By exec, never via restore (see module docs).
 pub(crate) async fn ensure_dispatch_jump() -> io::Result<()> {
-    if Command::new("iptables")
-        .args(["-C", "FORWARD", "-j", DISPATCH_CHAIN])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    if bounded_status(
+        Command::new("iptables")
+            .args(["-C", "FORWARD", "-j", DISPATCH_CHAIN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .await
+    .map(|s| s.success())
+    .unwrap_or(false)
     {
         return Ok(()); // already hooked
     }
-    let out = Command::new("iptables")
-        .args(["-I", "FORWARD", "1", "-j", DISPATCH_CHAIN])
-        .output()
-        .await?;
+    let out =
+        bounded_output(Command::new("iptables").args(["-I", "FORWARD", "1", "-j", DISPATCH_CHAIN]))
+            .await?;
     status_ok(&out, "iptables -I FORWARD")
 }
 
@@ -59,10 +93,7 @@ pub(crate) async fn ensure_dispatch_jump() -> io::Result<()> {
 /// (parsed from `iptables-save -t filter`; `Err` on any tool failure —
 /// the caller then skips pruning rather than guessing).
 pub(crate) async fn current_npol_chains() -> io::Result<BTreeSet<String>> {
-    let out = Command::new("iptables-save")
-        .args(["-t", "filter"])
-        .output()
-        .await?;
+    let out = bounded_output(Command::new("iptables-save").args(["-t", "filter"])).await?;
     status_ok(&out, "iptables-save")?;
     let text = String::from_utf8_lossy(&out.stdout);
     Ok(text
@@ -106,14 +137,15 @@ pub(crate) async fn apply_program(prog: &NetpolProgram) -> io::Result<()> {
 /// applies an empty payload and succeeds (zero-residue NP4 posture).
 pub(crate) async fn teardown() -> io::Result<()> {
     let chains = current_npol_chains().await.unwrap_or_default();
-    let jump = Command::new("iptables")
-        .args(["-C", "FORWARD", "-j", DISPATCH_CHAIN])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let jump = bounded_status(
+        Command::new("iptables")
+            .args(["-C", "FORWARD", "-j", DISPATCH_CHAIN])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .await
+    .map(|s| s.success())
+    .unwrap_or(false);
     let mut payload = String::from("*filter\n");
     if jump {
         payload.push_str(&format!("-D FORWARD -j {DISPATCH_CHAIN}\n"));
@@ -129,17 +161,31 @@ pub(crate) async fn teardown() -> io::Result<()> {
 /// callers go through [`apply_program`]/[`teardown`], which own the
 /// payload shapes).
 async fn restore(payload: &str) -> io::Result<()> {
+    // kill_on_drop: a wedged restore dies with this handle (S53 / Q64 /
+    // review P1-⑤) — no orphaned iptables-restore outliving the bound.
     let mut child = Command::new("iptables-restore")
         .arg("--noflush")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(payload.as_bytes()).await?;
-        stdin.shutdown().await?;
+        // Bound the stdin write too: a stuck child that never reads its
+        // payload must not park the caller forever.
+        let write = async {
+            stdin.write_all(payload.as_bytes()).await?;
+            stdin.shutdown().await
+        };
+        match tokio::time::timeout(EXEC_TIMEOUT, write).await {
+            Ok(res) => res?,
+            Err(_) => return Err(exec_timed_out("iptables-restore stdin write")),
+        }
     }
-    let out = child.wait_with_output().await?;
+    let out = match tokio::time::timeout(EXEC_TIMEOUT, child.wait_with_output()).await {
+        Ok(out) => out?,
+        Err(_) => return Err(exec_timed_out("iptables-restore")),
+    };
     status_ok(&out, "iptables-restore")
 }
 

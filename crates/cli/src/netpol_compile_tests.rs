@@ -173,6 +173,37 @@ fn peerless_rule_allows_all() {
     );
 }
 
+/// S53 (Q64 review P1-①): an unknown `protocol` value (admission rejects
+/// SCTP, but a stale/racy object can still reach the keeper) is SKIPPED
+/// fail-closed — that port gains NO accidental tcp allow, while the TCP
+/// entry in the same policy still compiles its allow.
+#[test]
+fn unknown_protocol_port_skipped_fail_closed() {
+    let web = pod("web", WEB_UID, "10.42.0.5", "n1", json!({}));
+    let prog = compile_netpol(
+        &pods(vec![web]),
+        &policies(
+            json!([{"metadata": {"name": "mixed", "namespace": "default"},
+            "spec": {"podSelector": {}, "ingress": [{"ports": [
+                {"protocol": "SCTP", "port": 81},
+                {"protocol": "TCP", "port": 8080}]}]}}]),
+        ),
+        &nss(json!({"items": [{"metadata": {"name": "default"}}]})),
+        "n1",
+    );
+    let rules = rules_of(&prog, WEB_CHAIN_I);
+    assert_eq!(
+        rules,
+        vec![
+            "-m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT".to_string(),
+            "-p tcp --dport 8080 -j ACCEPT".to_string(),
+            "-j REJECT".to_string(),
+        ]
+    );
+    // the SCTP port must not sneak through as a tcp allow (fail-closed)
+    assert!(!rules.iter().any(|l| l.contains("--dport 81")));
+}
+
 /// Q52 exclusions: hostNetwork pods and pods without a podIP are never
 /// policed; pods on other nodes are not this node's problem.
 #[test]

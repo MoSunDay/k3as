@@ -146,7 +146,9 @@ fn collect_ns_labels(ns_list: &Value) -> BTreeMap<String, Value> {
 /// `(proto, port)` allow entry; `None` = all ports AND protocols (a rule
 /// without `ports`, upstream). Named ports / SCTP were rejected at
 /// admission (Q64); anything non-numeric that still reaches the compiler
-/// is SKIPPED — fail-closed, never fail-open.
+/// is SKIPPED — fail-closed, never fail-open. Since **S53** (Q64 review
+/// P1-①) an unknown `protocol` value is likewise skipped fail-closed
+/// instead of silently compiling as a TCP allow.
 type PortEntry = Option<(&'static str, u16)>;
 
 fn port_entries(ports: Option<&Vec<Value>>) -> Vec<PortEntry> {
@@ -157,8 +159,16 @@ fn port_entries(ports: Option<&Vec<Value>>) -> Vec<PortEntry> {
         .iter()
         .filter_map(|p| -> Option<PortEntry> {
             let proto = match p.get("protocol").and_then(Value::as_str) {
+                None | Some("TCP") => "tcp", // upstream default protocol is TCP
                 Some("UDP") => "udp",
-                _ => "tcp", // upstream default protocol is TCP
+                // S53 (Q64 review P1-①): unknown protocol -> skip the whole
+                // entry (fail-closed): the rule must not allow that port on
+                // tcp by accident.
+                Some(other) => {
+                    tracing::warn!(target: "init-pro", protocol = ?other,
+                        "netpol: unknown port protocol skipped (fail-closed)");
+                    return None;
+                }
             };
             let port = p
                 .get("port")

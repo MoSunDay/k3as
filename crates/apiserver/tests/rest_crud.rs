@@ -19,6 +19,10 @@ fn served() -> SchemaRegistry {
     api::initpro::register(&mut reg);
     // A3: the generic routes serve `agents` as-is — no apiserver-src changes.
     api::agent::register(&mut reg);
+    // S53 (Q64 review P1-①): NetworkPolicy subset-admission regression
+    // coverage needs the networking.k8s.io/v1 group served (as the real
+    // server does).
+    api::networking::register(&mut reg);
     reg
 }
 
@@ -490,4 +494,63 @@ async fn list_pagination_key_cursor() {
     let (st, body) = send(r, "GET", &next, None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["items"].as_array().unwrap().len(), 2);
+}
+
+/// S53 (Q64 review P1-①): the PATCH write path runs the same subset
+/// admission as create/replace — a VALID NetworkPolicy (TCP port) is
+/// created, then a merge-patch smuggling an out-of-subset SCTP port must
+/// be rejected 422 (a patch previously bypassed the create-path gate),
+/// leaving the stored object untouched.
+#[tokio::test]
+async fn patch_runs_subset_admission_netpol() {
+    let r = app();
+    let np = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": "np-patch-admit", "namespace": "default"},
+        "spec": {
+            "podSelector": {},
+            "policyTypes": ["Ingress"],
+            "ingress": [{"ports": [{"protocol": "TCP", "port": 80}]}],
+        },
+    });
+    let (st, _) = send(
+        r.clone(),
+        "POST",
+        "/apis/networking.k8s.io/v1/namespaces/default/networkpolicies",
+        json_body(&np),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // merge-patch smuggling SCTP ports past the create-path gate -> 422
+    let patch = json!({"spec": {"ingress": [{"ports": [{"protocol": "SCTP", "port": 81}]}]}});
+    let (st, body) = send(
+        r.clone(),
+        "PATCH",
+        "/apis/networking.k8s.io/v1/namespaces/default/networkpolicies/np-patch-admit",
+        Some((
+            "application/merge-patch+json",
+            serde_json::to_vec(&patch).unwrap(),
+        )),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["reason"], "Invalid");
+    assert!(
+        body["message"].as_str().is_some_and(|m| m.contains("SCTP")),
+        "rejection must name the out-of-subset protocol: {body}"
+    );
+
+    // the stored object is untouched (the rejected write never landed)
+    let (st, body) = send(
+        r,
+        "GET",
+        "/apis/networking.k8s.io/v1/namespaces/default/networkpolicies/np-patch-admit",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["spec"]["ingress"][0]["ports"][0]["protocol"], "TCP");
+    assert_eq!(body["spec"]["ingress"][0]["ports"][0]["port"], 80);
 }
