@@ -17,8 +17,13 @@
 #     (`crate::gateway::run`, which compiles networking.k8s.io/v1 Ingress
 #     objects into host x path routes via ingress.rs + gateway_config.rs)
 #     ONLY when `config.ingress_listen` is `Some`.
-#   - No CLI flag/env/other caller sets `ingress_listen`; only
-#     crates/router/tests/ingress_gateway.rs builds it, in-process.
+#   - No caller set `ingress_listen` when this verdict was ledgered; only
+#     crates/router/tests/ingress_gateway.rs built it, in-process.
+#     S41 slice (2026-11-25): `server --ingress-listen <IP:PORT>` (env
+#     `INIT_PRO_INGRESS_LISTEN`) now wires it -- still default-OFF, and this
+#     suite starts the server WITHOUT the flag, so the default posture pinned
+#     below is unchanged (the with-flag positive variant is the slice's
+#     outstanding golden follow-up).
 #   - The Ingress REFLECTOR does run in the server (router::supervise ->
 #     ingress_watch folds Ingress objects into the resolver), so REST-created
 #     Ingress objects are folded -- but no listener consumes the compiled

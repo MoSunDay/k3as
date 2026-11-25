@@ -208,6 +208,14 @@ live_help "t80-netpol" agent --disable-network-policy
 # ---------------------------------------------------------------------------
 live_help "t81-proxy-tunnel" agent --disable-proxy-tunnel
 
+# ---------------------------------------------------------------------------
+# T5.5 S41 slice (Q32) live-help surface: `--ingress-listen` opts `server`
+# into the openrusty Ingress gateway (default off). init-pro EXTENSION flag
+# (k3s has no equivalent; stays OUT of the noop table -- the
+# `--disable-proxy-tunnel` precedent); frozen snapshots are not regenerated.
+# ---------------------------------------------------------------------------
+live_help "t55-ingress" server --ingress-listen
+
 echo "----"
 echo "parity: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

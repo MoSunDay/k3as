@@ -1,6 +1,7 @@
 //! `INIT_PRO_DISABLE_ANYHOME` env path for `init-pro server --disable-anyhome`
 //! (T-anyhome, Q36) plus the embedded image-registry env surface
-//! (`INIT_PRO_REGISTRY_*`, T6.3, Q40).
+//! (`INIT_PRO_REGISTRY_*`, T6.3, Q40) and the Ingress gateway opt-in
+//! (`INIT_PRO_INGRESS_LISTEN`, T5.5 S41 slice, Q32).
 //!
 //! These tests live in their OWN integration-test binary on purpose: they
 //! mutate the process environment, and the `cli` unit-test binary runs many
@@ -125,4 +126,42 @@ fn registry_env_vars_reach_the_server_flags() {
         }
         other => panic!("expected Server subcommand, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// T5.5 S41 slice (Q32): `INIT_PRO_INGRESS_LISTEN` opts the server into the
+// Ingress gateway. Default-off: an unset env + no flag stays `None`.
+// ---------------------------------------------------------------------------
+const INGRESS_VAR: &str = "INIT_PRO_INGRESS_LISTEN";
+
+fn parse_ingress_listen(argv: &[&str]) -> Result<Option<String>, String> {
+    let cli = Cli::try_parse_from(std::iter::once("init-pro").chain(argv.iter().copied()))
+        .map_err(|e| e.to_string())?;
+    match cli.command {
+        Some(Command::Server(s)) => Ok(s.ingress_listen),
+        other => Err(format!("expected Server subcommand, got {other:?}")),
+    }
+}
+
+#[test]
+fn env_opts_into_ingress_gateway() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var(INGRESS_VAR, "0.0.0.0:80");
+    let parsed = parse_ingress_listen(&["server"]);
+    std::env::remove_var(INGRESS_VAR);
+    assert_eq!(parsed.expect("env parses").as_deref(), Some("0.0.0.0:80"));
+}
+
+#[test]
+fn ingress_listen_defaults_off_and_flag_beats_env() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var(INGRESS_VAR, "0.0.0.0:80");
+    let by_flag = parse_ingress_listen(&["server", "--ingress-listen", "127.0.0.1:8080"]);
+    std::env::remove_var(INGRESS_VAR);
+    assert_eq!(
+        by_flag.expect("flag parses").as_deref(),
+        Some("127.0.0.1:8080")
+    );
+    let off = parse_ingress_listen(&["server"]).expect("bare server parses");
+    assert_eq!(off, None, "unset env + no flag must keep the gateway off");
 }

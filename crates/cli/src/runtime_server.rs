@@ -31,6 +31,12 @@ pub struct ServerBind {
     /// Service traffic — one reverse-proxy listener per allocated nodePort,
     /// peers resolved live from Endpoints (the kube-proxy-equivalent).
     pub disable_kube_proxy: bool,
+    /// `--ingress-listen` (T5.5 S41 slice, Q32): `Some(addr)` binds the
+    /// openrusty Ingress gateway on the service-plane thread (host/path
+    /// routes compiled from the Ingress set + live Endpoints, hot-applied);
+    /// `None` (the default) keeps it off. Mutually exclusive with
+    /// `disable_kube_proxy` (Table B fatal — the gateway rides that plane).
+    pub ingress_listen: Option<SocketAddr>,
     /// `--kube-scheduler-arg KEY=VALUE` passthrough (`config=<path>` wires
     /// HTTP extenders, T3.2/Q3).
     pub scheduler_args: Vec<String>,
@@ -265,7 +271,8 @@ pub(crate) async fn spawn_server_plane(
     // default — LIST->WATCH reflectors over the SAME storage Arc
     // plus one reverse-proxy listener per allocated nodePort
     // (the kube-proxy-equivalent; `--disable-kube-proxy` is the
-    // k3s-parity escape hatch that turns it off).
+    // k3s-parity escape hatch that turns it off). `--ingress-listen`
+    // opts the same thread into the Ingress gateway (T5.5 S41 slice).
     if !b.disable_kube_proxy {
         let (resolver, reflectors) = router::supervise(store.clone(), shutdown.clone());
         // T4.3 Scope C (Q44): the SAME resolver feeds the ClusterIP VIP
@@ -274,7 +281,10 @@ pub(crate) async fn spawn_server_plane(
         drains.service_plane = Some((
             router::spawn_nodeport_plane(
                 resolver,
-                router::NodePortConfig::default(),
+                router::NodePortConfig {
+                    ingress_listen: b.ingress_listen,
+                    ..router::NodePortConfig::default()
+                },
                 shutdown.clone(),
             ),
             clusterip,

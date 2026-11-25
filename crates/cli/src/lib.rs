@@ -173,10 +173,24 @@ where
                             "server --disable-network-policy is a no-op: NetworkPolicy enforcement is node-side; set the agent flag instead (Q64)"
                         );
                     }
+                    // T5.5 S41 slice (Q32): `--ingress-listen` must parse as
+                    // a socket address; malformed input is fatal (the
+                    // --bind-address precedent).
+                    let ingress_listen = match svc.ingress_listen.as_deref() {
+                        None => None,
+                        Some(raw) => match raw.parse::<std::net::SocketAddr>() {
+                            Ok(listen) => Some(listen),
+                            Err(e) => {
+                                eprintln!("init-pro server: invalid --ingress-listen ({raw}): {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                    };
                     runtime::run_server(
                         cfg,
                         runtime::ServerBind {
                             addr,
+                            ingress_listen,
                             disable_apiserver: svc.disable_apiserver,
                             disable_controllers: svc.disable_controller_manager,
                             disable_scheduler: svc.disable_scheduler,
@@ -312,6 +326,7 @@ mod tests {
             "--disable-scheduler",
             "--disable-cloud-controller",
             "--disable-kube-proxy",
+            "--ingress-listen",
             "--disable-network-policy",
             "--disable-helm-controller",
             "--datastore-endpoint",

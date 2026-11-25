@@ -60,6 +60,15 @@ pub fn validate_server(cmd: &ServerCmd, seen_noop: &[String]) -> Result<(), Fata
         ));
     }
 
+    // Rule: --ingress-listen conflicts --disable-kube-proxy (T5.5 S41
+    // slice: the Ingress gateway rides the nodePort service-plane thread,
+    // so turning the plane off would silently drop the flag).
+    if cmd.ingress_listen.is_some() && cmd.disable_kube_proxy {
+        return Err(Fatal(
+            "invalid flag use; cannot use --ingress-listen with --disable-kube-proxy".to_string(),
+        ));
+    }
+
     // Rule: unknown --disable token
     for item in &cmd.disable {
         if !DISABLE_ITEMS.contains(&item.as_str()) {
@@ -110,6 +119,7 @@ mod tests {
             kube_scheduler_arg: vec![],
             disable_cloud_controller: false,
             disable_kube_proxy: false,
+            ingress_listen: None,
             disable_network_policy: false,
             disable_helm_controller: false,
             datastore_endpoint: None,
@@ -208,6 +218,18 @@ mod tests {
         let mut s = srv(sh);
         s.disable_etcd = true;
         assert!(validate_server(&s, &[]).is_ok());
+    }
+
+    #[test]
+    fn ingress_listen_conflicts_disable_kube_proxy() {
+        let mut s = srv(shared());
+        s.ingress_listen = Some("0.0.0.0:80".to_string());
+        assert!(validate_server(&s, &[]).is_ok(), "flag alone is valid");
+        s.disable_kube_proxy = true;
+        let err = validate_server(&s, &[]).unwrap_err();
+        assert!(err
+            .0
+            .contains("cannot use --ingress-listen with --disable-kube-proxy"));
     }
 
     #[test]

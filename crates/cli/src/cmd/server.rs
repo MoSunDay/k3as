@@ -71,6 +71,21 @@ pub struct ServerCmd {
     #[arg(long = "disable-kube-proxy")]
     pub disable_kube_proxy: bool,
 
+    /// Ingress gateway listen address (T5.5 S41 slice, Q32; init-pro
+    /// extension — k3s delegates Ingress to traefik): `IP:PORT` binds the
+    /// openrusty L7 gateway that routes `networking.k8s.io/v1` Ingress
+    /// host/path rules to Service backends (exact host match). Unset (the
+    /// default) keeps the gateway off — only the per-nodePort listeners
+    /// serve. Malformed input is fatal; conflicts with
+    /// `--disable-kube-proxy` (the gateway rides the service plane).
+    /// env `INIT_PRO_INGRESS_LISTEN`.
+    #[arg(
+        long = "ingress-listen",
+        env = "INIT_PRO_INGRESS_LISTEN",
+        value_name = "ADDR"
+    )]
+    pub ingress_listen: Option<String>,
+
     /// Embedded anyhome NFSv3 memory service listen address (T-anyhome,
     /// Q36): NFS/MOUNT/portmap multiplex on this ONE port; export `/`.
     /// env `INIT_PRO_ANYHOME_ADDR`. v1 assumes bind==advertise: pods dial
