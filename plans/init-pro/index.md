@@ -49,7 +49,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.2 | 5 | HTTP 管线 + phase hooks (openrusty h2c gateway 承载) | done | T5.1 |
 | T5.3 | 5 | 路由模型 + 上游解析 (RouteTable / reflectors / resolver) | done | T5.1, T5.2 |
 | T5.4 | 5 | 内置 Router 核心 + Ingress (networking.k8s.io/v1) → 路由编译 (openrusty h2c 网关嵌入, Q32) | done | T5.2, T5.3, T1.1 |
-| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含 openrusty `apply_config` 请求间 no-restart reload；剩余：live informer / drain / shared-dict 等价 / 动态证书 等价；S41 slice: ingress_listen CLI 接线（快赢）) | not-started | T5.4 |
+| T5.5 | 5 | 热加载 / 动态配置 (T5.4 已含 openrusty `apply_config` 请求间 no-restart reload；剩余：live informer / drain / shared-dict 等价 / 动态证书 等价；S41 slice: ingress_listen CLI 接线已落——`server --ingress-listen <ADDR>` 默认关, 2026-11-25 双节点实测, 见 CHANGELOG Slice 条目) | not-started (S41 slice done) | T5.4 |
 | T5.6 | 5 | ServiceLB (L4/LB 数据面) | in-progress (NodePort plane Q28/Q32 + announce/L4 数据面 Q41 done; 剩余 SNI/TLS passthrough, 依赖 T5.5) | T5.4, T4.3 |
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |

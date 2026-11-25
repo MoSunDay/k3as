@@ -73,6 +73,8 @@ re-platform).
 
 The openrusty plane is live (Q32). Deferred to T5.5 / Phase 2: a live
 informer-grade config source beyond the current LIST→WATCH reflectors,
-connection drain, a shared-state equivalent, dynamic cert handling, and
-wiring the `ingress_listen` CLI flag (`NodePortConfig.ingress_listen`
-exists, default `None`).
+connection drain, a shared-state equivalent, and dynamic cert handling.
+The `ingress_listen` CLI flag is wired (T5.5 S41 slice): `server
+--ingress-listen <IP:PORT>` (env `INIT_PRO_INGRESS_LISTEN`) feeds
+`NodePortConfig.ingress_listen`; the default `None` keeps the gateway off
+and it is a Table B fatal together with `--disable-kube-proxy`.

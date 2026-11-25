@@ -208,6 +208,19 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
     `golden/README.md` 行同 sprint 更新（G70 双向钉死纪律）。T5.5
     整体状态不因 slice 翻转（informer 级数据源/drain 仍在卡内），仅
     As-built 记此 slice。
+  - **As-built S41 slice (2026-11-25)**: 实际落点 `ServerCmd.ingress_listen:
+    Option<String>`（env `INIT_PRO_INGRESS_LISTEN`；init-pro 扩展旗标，不入
+    noop 表——`--disable-proxy-tunnel` 先例，故 noop 表无迁移）→ lib.rs 解析
+    `SocketAddr`（畸形 fatal，`--bind-address` 先例）→ `ServerBind.ingress_listen`
+    → `spawn_nodeport_plane(NodePortConfig{ ingress_listen, ..Default })`；
+    与 `--disable-kube-proxy` 互斥（Table B fatal）。验收：cli 单测（conflicts
+    + help 面）+ `tests/server_env_flags.rs` env 用例 + parity `live_help
+    t55-ingress`（t78+ 惯例，冻结快照不重生成）。**未做**：golden G70–G72
+    翻转 + verdict 台账（本 slice 未动 golden）。
+    **部署实测 (2026-11-25)**: node02 unit `--ingress-listen 0.0.0.0:80`
+    (release 构建, 基线 `41435ea` + 本片), Ingress `default/code-grapher`
+    经 :80 按 Host 路由 (200/101/404 姿态正确, `echo.k3as.local` 不受影响,
+    30080 保留)——详见 CHANGELOG Slice 条目。
 
 - **验收手段 / Acceptance**
   - In-flight request completes with old route while new requests use the

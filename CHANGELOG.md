@@ -7,6 +7,52 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Slice — `--ingress-listen`: openrusty Ingress 网关监听旗标接线 (T5.5 S41 slice As-built, 非 sprint) (2026-11-25)
+
+**Goal:** S41 已落地 Ingress 网关 (router gateway: `networking.k8s.io/v1`
+Ingress host 精确匹配 x path 路由, 由 Ingress 集 + 实时 Endpoints 编译、
+按 generation 热应用), 但 server 启动路径恒用 `NodePortConfig::default()`
+(`ingress_listen: None`), 网关实际不可达 (仅 router 进程内测试构建)。本片
+补 server 旗标 `--ingress-listen <ADDR>` (env `INIT_PRO_INGRESS_LISTEN`)
+把它接到 nodePort service-plane 线程; 默认关 (用户面姿态零变化), 与
+`--disable-kube-proxy` 互斥 (Table B fatal——网关骑在该平面上)。T5.5
+整体状态不翻转 (informer 级数据源/drain 仍在卡内)。commits: **90aaac7**
+(代码 + 测试 + 脚本) + 本条收口 (CHANGELOG + index/plan 锁步)。
+
+**Changes**
+- **旗标 (cli)**: `ServerCmd.ingress_listen: Option<String>`
+  (`cmd/server.rs`); `lib.rs` 解析为 `ServerBind.ingress_listen:
+  Option<SocketAddr>` (畸形 → `init-pro server: invalid --ingress-listen
+  (<raw>): ..` exit 1, `--bind-address` 先例); `runtime_server.rs`
+  `spawn_server_plane` 改 `NodePortConfig { ingress_listen, ..Default }`
+  (默认仍为 `None`, 平面线程不变)。init-pro 扩展旗标不入 noop 表
+  (`--disable-proxy-tunnel` 先例)。
+- **冲突表**: `flags/conflicts.rs` 新规则 "cannot use --ingress-listen
+  with --disable-kube-proxy" + 单测 `ingress_listen_conflicts_disable_
+  kube_proxy`; `ServerCmd` 全字段 fixture 补字段。
+- **测试**: `tests/server_env_flags.rs` +2 (env 生效 / 默认关 + 旗标优先
+  env); `lib.rs` help 面列表 + `--ingress-listen`; `scripts/cli-flag-parity-
+  test.sh` + `live_help "t55-ingress"` (冻结快照
+  `tests/snapshots/server-help.txt` 不重生成)。**未做**: golden G70–G72
+  翻转 + verdict 台账 (本片未动 golden; `realtraffic.sh` 仅头注释更新,
+  该 suite 起 server 不带旗标, 默认姿态钉死不变)。
+- **文档 (SSOT)**: `features/router-data-plane.md` Deferred 列表移除该
+  项并记旗标; `plans/init-pro/plan/05-ingress-lua.md` As-built;
+  `plans/init-pro/index.md` T5.5 行同步 (S41 slice 已落, 整体 not-started)。
+
+**As-built (双节点实测)**: node02 `k3as-server.service` 加
+`--ingress-listen 0.0.0.0:80` → 日志 `ingress gateway up addr=0.0.0.0:80`;
+REST 创建 Ingress `default/code-grapher` (hosts `192.168.31.57` +
+`cg.k3as.local` → `code-grapher:80`, `/` Prefix) → 快照 `routes=3` 即时
+生效; :80 按 Host 路由 200 (页面/`/api/health`/静态资源), `/ws/events`
+101, 未匹配 Host 404, 既有 `echo.k3as.local` 不受影响, NodePort 30080
+保留。网关绑定失败 (如端口占用) 仅 WARN 并禁用网关, server 继续。
+
+**门禁**: fmt (member-scope) ✓; build --locked ✓; workspace tests
+**1514/0** (S54 基线 1511 + 本片 3); clippy --all-targets -D warnings ✓;
+unsafe-audit ✓; engine-singlethread ✓; cli-flag-parity **32/0** (含
+t55-ingress)。
+
 ## Sprint 54 — anyhome 实体下线: 工作区 NFS 平面换底 nfsserve 直连 + 内嵌 DirFs (T7.4/T7.5 rebase, Q66) (2026-11-25)
 
 **Goal:** 用户指令「k3as 内置 rdb 存储, 集群内部的存储都可以直接使用它!
