@@ -1899,7 +1899,7 @@ plane — none of the `MemoryDb` retrieval semantics (the `/search` RPC,
 the exact-match `DummyEmbedder`) ever had a consumer in init-pro, so
 nothing observable is lost. The plane is now served by an in-tree
 directory VFS (DirFs, adapted from nfsserve's mirrorfs example,
-Apache-2.0 attribution in NOTICE) mounted directly on `NFSTcpListener`
+BSD-3-Clause attribution in NOTICE) mounted directly on `NFSTcpListener`
 — see Q66. D1 below loses its original rationale (the vendored
 libsql 0.10.0-pre.4 that collided with opencoder's crates.io 0.9.30 copy
 no longer exists in the binary's link graph); the constraint itself is
@@ -3420,7 +3420,7 @@ init-pro 内**零消费者**——从未进入任何 TODO 或用户面契约。�
 实体带来三条结构成本: libsql 成为第 7 个 mandatory pin (Q38 收口时
 发现); Q36 D1 的双 libsql 符号冲突 workaround 以 vendor 副本为前提;
 嵌套 pin / also_link / 词法路径恒等教义整条链只为 any-home 存在。
-nfsserve 仓库的 `examples/mirrorfs.rs` (625 行, Apache-2.0, HuggingFace)
+nfsserve 仓库的 `examples/mirrorfs.rs` (625 行, BSD-3-Clause, HuggingFace)
 是完整的生产级目录 VFS (FSMap/FSEntry/RefreshResult: intaglio
 SymbolTable 字符串驻留 + AtomicU64 fileid + tokio fs, 每次
 lookup/readdir 双 stat 的 mtime 失效刷新, 全写路径 setattr/write/
@@ -3452,8 +3452,8 @@ DirFs, `NFSTcpListener` 直挂导出 `/`, anyhome 实体死亡 —— **选**。
   `anyhome.rs` 收敛为装配层 (`NFSTcpListener::bind(addr, fs)` +
   `with_export_name("/")` 单 TCP 口, serve 循环保留 `tokio::select!` +
   `Shutdown` drain 姿势——nfsserve 无 cancel seam 的 Q36 理由仍成立)。
-  移植源在模块头 + NOTICE 归属 (mirrorfs/nfsserve, Apache-2.0, 仿 kiri
-  条目格式); `intaglio` 1.6 成为 cli 直接 crates.io 依赖 (在 nfsserve
+  移植源在模块头 + NOTICE 归属 (mirrorfs/nfsserve, BSD-3-Clause, 仿
+  kiri 条目格式, 全量许可证文本入 `LICENSES/BSD-3-Clause.txt`); `intaglio` 1.6 成为 cli 直接 crates.io 依赖 (在 nfsserve
   里它只是 optional demo feature)。
 - **实体死亡**: any-home 与 libsql 两个 pin、root `Cargo.toml` 的
   `anyhome` path dep、`crates/cli` 的 anyhome dep、`MemoryDb`/
