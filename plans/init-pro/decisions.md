@@ -3324,3 +3324,22 @@ guard 持有注册表句柄）：submit future 在 SLA 前被取消（HTTP 调�
 `cancelled_submit_cleans_pending` 钉住。隧道 park 身份绑定（评审
 P1-③，register 发一次性 park 凭据 + next/responses 验证归属）留待
 S53 主体批：涉及 wire 字段扩展，先补 Q65 决策修订再动协议。
+
+**S53 主体批修订（评审 P1-③ park 身份绑定, 2026-11-25 定稿即交付）.**
+威胁面（原状）: 隧道三路由的认证姿态是「任何合法 bearer token 即可通过」
+（`tunnel_http` 头注记, `/version` 姿态）——持有合法 token 的任意身份可
+抢占他节点的 park 座位（顶掉真 dialer 的长轮询）或向他节点 pending 注入
+伪造响应（同 token 多节点/凭证共享面）。**修订**: `tunnel/register` ack
+增发 park 凭据 `parkToken`（getrandom 128-bit hex, 每次 register 轮换,
+单一活跃值——「一次性」= 每次 register 单次下发、旧值即刻失效）;
+`tunnel/next` 与 `tunnel/responses/{id}` 以 query 参数携带凭据,
+apiserver 在 park/complete 的**同一临界区内**验证归属（锁内原子
+校验+落座, 无 TOCTOU）; 凭据缺失或不匹配一律 **401 fail-closed**
+（剥离参数与凭据不符不可区分, 不做 absent 容忍）。wire 兼容:
+`parkToken` 为 ack 新增字段 + 两路由新增 query 参数, 旧端忽略未知
+字段; 但新 server 对缺失凭据 fail-closed——版本偏斜（旧 agent + 新
+server）下隧道面 401（直连优先、隧道仅 transport 回退的 Q65 姿态
+不变; 单一二进制整群升级模型下偏斜窗口 = 滚动升级瞬时, 记录在案）。
+明文 h2c 下凭据可嗅探（Q21 无 mTLS 的 standing 限制不因本修订解除
+——本修订把门槛从「任何合法身份」提高到「最新 register 的 dialer」,
+非防嗅探）。Q31 单请求/响应语义不变。
