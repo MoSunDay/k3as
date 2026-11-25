@@ -240,7 +240,7 @@ format.
 - **卡点 / Blockers** — 无 (A+B+C 全部交付)。**S37c 实机跟进
   (候选工单)**: F3 — agent 重启后 ~12 s 内 logs/exec 中继 500 (embedded
   containerd socket 未就绪; 验收脚本已用轮询吸收, 建议 relay 侧短重试
-  或就绪门)。见 `验收报告.md` F3。
+  或就绪门)。
 - **顺延 / Deferred (future enhancements, 非 TODO 阻塞)** — probes
   TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
   exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN
@@ -252,8 +252,8 @@ format.
   `1242c5f`, 3 单测)。修复前: 改 `--kubelet-port` 重启后 relay 拨旧端口。
   实测: 10250→10260 注解 6 s 收敛、中继跟随, 回退同理。验收沉淀:
   `scripts/acceptance-2node-e2e.sh` (A14) + `scripts/build-netpod-image.sh`;
-  遗留发现见仓库根 `验收报告.md` (同名 Agent 重建不 re-reconcile = F4、
-  agent 重启 ~12 s 中继竞态 = F3、sandbox 不收养 = F2)。
+  遗留发现 (同名 Agent 重建不 re-reconcile = F4、
+  agent 重启 ~12 s 中继竞态 = F3、sandbox 不收养 = F2) 见 CHANGELOG Sprint 37c。
 
 - **Forward Phase 3 notes (Q60/T4.15, Q61/T7.2; not as-built, T4.2 stays done):**
   - Strict host-direct selection precedes sync image planning. `image` is retained

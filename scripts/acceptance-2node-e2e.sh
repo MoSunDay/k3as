@@ -2,7 +2,7 @@
 # A14: repeatable two-node acceptance gate for the k3as deployment
 # (node02 control plane + node02 sidecar agent + node04 agent).
 #
-# Encodes the acceptance ledger of 2026-11-15 (验收报告.md):
+# Encodes the acceptance ledger of 2026-11-15 (S37c acceptance run):
 #   A1  echo Deployment pods Running, podIP inside the node podCIDR
 #   A2  pod logs relay (apiserver -> kubelet, Q31)
 #   A3  pod exec relay with exit-code passthrough (Q31)

@@ -89,7 +89,7 @@ inference track.
   (Mount/Reuse/Recover; Recover = `umount -l` + remount) + 3 单测;
   (b) F6 首挂/重挂后 prepare 偶发 EIO → `create_dir_retry` 有界重试。
   实机: run4 复现 → run5 `ACCEPTANCE_RESTART=1` 15/15 全绿。详见
-  CHANGELOG Sprint 37c + `验收报告.md` F6/F10。
+  CHANGELOG Sprint 37c (F6/F10)。
 - **状态 / Status** — done (Phase A Sprint 26 + Phase B 节点执行 Sprint 30,
   Q35/Q37)；B2 专用 CLI run 动词不再单列（`init-pro agent` 子命令 + kubectl
   apply 已覆盖创建路径，需求再现时并入后续 TODO）
@@ -120,7 +120,7 @@ inference track.
   验收 run9 **13/0**。残余候选工单（勿标已修）：`killers` name 键删→建
   竞态可致重复 spawn（Q37 at-least-once 容忍，但浪费进程/争用
   workspace）；`patch_if_changed` 先记后发 — 早期失败路径一次 patch 失败
-  即永久压制；写回缓存无淘汰，DELETED 不清理。见 `验收报告.md` F4。
+  即永久压制；写回缓存无淘汰，DELETED 不清理。见 plan/04 遗留发现 F4。
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---

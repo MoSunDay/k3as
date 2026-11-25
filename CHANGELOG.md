@@ -66,6 +66,13 @@ flag-parity **31/31**; **anyhome-e2e A1/P2/K1/P3/P4/P5 7/0** (新 DirFs
 singlethread ✓。(netpol-e2e/acceptance-2node 环境性未跑——在役 node04
 租户 agent, S53 脚注姿态不变, 非本批引入。)
 - 计数: **43 done / 4 in-progress / 7 not-started**（无 TODO 状态变化）。
+- **收尾 (S54 同日)**: 按用户裁决移除仓库根 `验收报告.md` (2026-11-15 双节点
+  闭环验收交付物; F1-F11 发现与 A0-A14 门禁事实已由 CHANGELOG Sprint 37c +
+  plan/00/04/07 活跃文本承载): 7 处活跃引用同步去指针化 (plan/00 ×2 /
+  plan/04 ×2 / plan/07 ×2 / acceptance-2node-e2e.sh 头注); Sprint 37c 三处
+  历史条目 (落档 / §3 实机发现 / §5 Runbook) 按 append-only 纪律保留原貌
+  (记录时为真)。纯文档收尾, 无代码影响; 提交门复跑 cargo build/clippy/test
+  --workspace --locked 全绿 (88 suites, 1511/0, 与本 sprint 在案计数一致)。
 
 ## Sprint 53 — 评审修复批 I: Q64/Q65 面加固 (PATCH 写路径准入补全 + netpol fail-closed + 隧道 pending 取消清理 + iptables/drain 有界化) (2026-11-25)
 
