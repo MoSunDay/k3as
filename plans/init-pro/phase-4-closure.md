@@ -309,3 +309,14 @@ skip；② 隧道 `PendingGuard` 取消清理（Q65 补记在案, decisions.md�
 先 Q65 决策修订再动 wire）+ P1-④（`nodePort:0` = unspecified）进
 S53 主体批; ①③ 落地过门后触发聚焦外部审计（隧道中继面 + netpol
 准入面）。
+
+**主体批（P1-③④, 2026-11-25 同日续批, counts 仍 43/4/7）**: P1-③ 隧道
+park 身份绑定落地（Q65 决策修订 41435ea 先行——register ack 增轮换
+parkToken, next/responses 以 query 携带并在 park/complete 同一临界区内
+原子验证, 缺失/不匹配 401 fail-closed 无 absent 容忍, `tests/
+tunnel_auth.rs` 9 项 wire 级劫持拒绝矩阵, +14 测试）; P1-④
+nodePort:0=unspecified 落地（Q44 补记在案——create 自动分配/update 保留,
+golden 无钉死, +4 测试）。commits f63be2e/5cade90; 门禁 tests **1509/0**,
+golden 75/0, parity 31/31, clippy 0。①③ 已落地过门——**聚焦外部审计
+（隧道中继面 + netpol 准入面）进入可排期状态**; 批次 3 P2 寄存器为唯一
+未落批。领域 e2e 补跑条件不变（干净宿主或 node04 维护窗口, 见上）。

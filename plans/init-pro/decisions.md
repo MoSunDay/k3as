@@ -2422,6 +2422,14 @@ Q28 NodePort 面与 ClusterIP 面互补共存 (Router 内双平面, 无第二套
 (Q28 原文其余部分继续有效); 回环别名触碰节点网络状态 (幂等 + drain 清理
 纪律已由 ST9 验证); 跨节点 VIP 可达性 out (single-node scope)。
 
+**S53 P1-④ 补记（2026-11-25, 主体批 commit 5cade90）.** 评审 P1-④:
+`spec.ports[].nodePort` 整数字面 **0 = unspecified**（k8s 对齐）——
+`explicit_node_port` 于 u16 转换前将 0 判为缺省返回 None: create 走
+最低空闲自动分配（原为 422 out-of-range）, update ≡ 省略
+（immutable-or-retain 语义一致, S52-D0 `validate_on_write` 复用同一
+判定自动继承）, 0 不再计为已占用/冲突端口。非整数垃圾（字符串/浮点/
+负数）仍报 integer 422。wire 无变化; golden fixture 无 nodePort:0 钉死。
+
 ## Q45 — T6.2a 内嵌 Cluster DNS: 宿主形态 (T6.2a / S43) (DRAFT 2026-11-15, S43 开工前定稿)
 
 **Context.** T6.2a (S43) embeds a Cluster DNS server (纯 Rust):
@@ -3343,3 +3351,9 @@ server）下隧道面 401（直连优先、隧道仅 transport 回退的 Q65 姿
 明文 h2c 下凭据可嗅探（Q21 无 mTLS 的 standing 限制不因本修订解除
 ——本修订把门槛从「任何合法身份」提高到「最新 register 的 dialer」,
 非防嗅探）。Q31 单请求/响应语义不变。
+
+（落地 2026-11-25, S53 主体批 commit f63be2e: `RegisterAck` wire 类型 +
+`parkToken` query 参数 + `park_checked`/`complete_checked` 锁内原子验证,
+`crates/apiserver/tests/tunnel_auth.rs` 9 项 401 劫持拒绝矩阵; 上述
+fail-closed/单活跃轮换/版本偏斜姿态逐款兑现, Q31 单请求语义与 Q47
+bearer 认证层未动。）

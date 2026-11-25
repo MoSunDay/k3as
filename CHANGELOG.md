@@ -74,6 +74,41 @@ P1-④（`nodePort:0` = unspecified）留 S53 主体批。commits: **bea37fb**
   k3s-parity 措辞降级、nodes map GC、`http.rs` watch read_timeout）；
   ①③ 落地过门后触发聚焦外部审计（隧道中继面 + netpol 准入面）。
 
+**主体批（P1-③④, 2026-11-25 同日续批, counts 仍 43/4/7）**: 评审 P1-③
+隧道 park 身份绑定 + P1-④ `nodePort:0` = unspecified 落地。commits:
+**41435ea**（Q65 决策修订先行——先过决策再动 wire）+ **f63be2e**（③代码）
++ **5cade90**（④代码）+ 本条锁步。
+- **P1-③ park 身份绑定（Q65）**: `tunnel_wire.rs` 新增共享 `RegisterAck`
+  （ack 增 `parkToken`, camelCase Q10; 旧 server ack 解析为 None → 旧端
+  省略 query 参数）; `tunnel_registry.rs` `NodeTunnel.park_token` +
+  `register()` 锁内轮换 getrandom 128-bit hex（单活跃值, 旧值即刻失效;
+  不触碰 generation/parked——liveness 仍 park 驱动）+ `park_checked`/
+  `complete_checked` 在与落座/resolve 同一临界区原子验证（无 TOCTOU）;
+  `tunnel_http.rs` next/respond 增 `?parkToken=` 校验, 缺失/不匹配一律
+  401 fail-closed 通用报文（无节点存在性 oracle, respond 鉴权先于
+  pending-id 查找——未认证者无法以 404 探测 id）; `tunnel_dialer.rs`
+  Dialer 持凭据 + 路径追加参数, 401 → 退避 → re-register 轮换自愈。
+  测试 +14（`tests/tunnel_auth.rs` 9 项 wire 级 401 劫持拒绝矩阵含
+  missing≡wrong 字节一致断言 + registry 3 + wire 2）; 旧 park/complete
+  收窄为 `#[cfg(test)]` shim, 生产面只剩 checked 入口。
+- **P1-④ nodePort:0（Q44/T4.3 Scope C）**: `explicit_node_port` 整数
+  字面 0 于 u16 转换前判「未指定」返回 None——create 走最低空闲自动
+  分配（原 422 out-of-range 消失, 字面 0 被分配值原地覆写）、update ≡
+  省略保留已存分配（S52-D0 `validate_on_write` 复用同一判定自动继承,
+  Q44 补记在案）、0 不再计为已占用/冲突端口; 非整数垃圾仍报 integer
+  422。golden fixture 无 nodePort:0 钉死（grep 评估, 金门 75/0 不变）。
+  测试 +4（3 单测 + 1 wire 级 POST 0 → 201 + 读回已分配）。
+- **门禁**: fmt ✓（member-scope）; build ✓; workspace tests **1509/0**
+  （批 I 1491 + 18）; clippy -D warnings 0; golden **75/0**（环境 SKIP
+  同批 I 脚注: g24 registry 不可达 + cni0 在役占用）; flag-parity
+  **31/31**; unsafe-audit ✓; engine-singlethread ✓。
+- **评审遗留收敛**: P1-③④ 闭合——批次 3 P2 寄存器（endPort 形状 422、
+  `spec.ports` merge key、ExternalName clusterIP 释放、组帧后错误不重试
+  中继、k3s-parity 措辞降级、nodes map GC、`http.rs` watch
+  read_timeout）成为唯一未落批; ①③ 已落地过门, **聚焦外部审计（隧道
+  中继面 + netpol 准入面）进入可排期状态**。领域 e2e 补跑条件不变
+  （干净宿主或 node04 维护窗口）。
+
 ## Sprint 52 — 网络链 II: T4.4 + T4.5 done (netpol supported-subset Q64 + agent-dialed 代理隧道 Q65 + D0 Service 写路径校验) (2026-11-22)
 
 **Goal:** 网络链 II 收口——T4.4 NetworkPolicy（Q64）+ T4.5 代理隧道
