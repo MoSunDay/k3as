@@ -12,6 +12,8 @@
 //! clusterIP/nodePort is immutable across PUT / PATCH / SSA apply (change
 //! or drop -> 422), otherwise the create-path judgment (validate-or-
 //! allocate) runs on the final object.
+//!
+//! **S53 P1-4** (Q44): `nodePort: 0` = unspecified (create allocates, update retains).
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -148,6 +150,22 @@ async fn explicit_nodeport_honored() {
     let (st, out) = send(r, "POST", URI, json_body(&body)).await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(node_port(&out), Some(30080));
+}
+
+// S53 P1-4 (Q44): nodePort 0 = unspecified -> 201, allocated port stored.
+#[tokio::test]
+async fn nodeport_zero_means_unspecified_auto_allocates() {
+    let r = app();
+    let body = svc(
+        "np0",
+        json!({ "type": "NodePort", "ports": [{ "port": 80, "nodePort": 0 }] }),
+    );
+    let (st, out) = send(r.clone(), "POST", URI, json_body(&body)).await;
+    assert_eq!(st, StatusCode::CREATED, "{out}");
+    let np = node_port(&out).expect("nodePort allocated");
+    assert!((30000..=32767).contains(&np), "np {np} in range");
+    let (st, got) = send(r, "GET", &item("np0"), None).await;
+    assert_eq!((st, node_port(&got)), (StatusCode::OK, Some(np)));
 }
 
 #[tokio::test]

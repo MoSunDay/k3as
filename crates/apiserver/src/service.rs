@@ -45,8 +45,18 @@ fn protocol_of(port: &Value) -> String {
 }
 
 /// Read an explicit `nodePort` as a `u16`, if present and integral.
+///
+/// S53 P1-4 (k8s parity, T4.3 Scope C / Q44): an INTEGRAL literal 0 means
+/// "unspecified" and behaves exactly like an ABSENT nodePort - it returns
+/// `None` BEFORE the `u16` conversion so the control plane auto-allocates
+/// (create) or retains the stored allocation (update) instead of failing
+/// the 30000-32767 range check. Non-integral junk (strings, floats,
+/// negatives) still yields the integer-parse error.
 fn explicit_node_port(port: &Value) -> Option<Result<u16, ServiceError>> {
     let v = port.get("nodePort").filter(|v| !v.is_null())?;
+    if v.as_u64() == Some(0) {
+        return None; // 0 = unspecified (S53 P1-4, k8s parity)
+    }
     let n = v.as_u64().and_then(|n| u16::try_from(n).ok());
     let bad = ServiceError::Invalid("nodePort must be an integer".into());
     Some(n.ok_or(bad))
@@ -68,6 +78,9 @@ fn spec_ports_mut(v: &mut Value) -> &mut [Value] {
 /// The `(protocol, nodePort)` pairs one Service holds.
 /// `pub(crate)`: the S52-D0 write-path admission (`service_ip::
 /// validate_on_write`) reuses this exact judgment instead of duplicating it.
+/// A literal `nodePort: 0` is unspecified (S53 P1-4) and contributes
+/// nothing: nothing can store 0 anymore, and a ClusterIP-typed Service
+/// carrying one is gated off by `is_nodeport_type` anyway.
 pub(crate) fn node_ports_of(v: &Value) -> BTreeSet<(String, u16)> {
     let mut out = BTreeSet::new();
     if is_nodeport_type(v) {
@@ -91,6 +104,9 @@ pub(crate) fn used_node_ports(services: &[Value]) -> BTreeSet<(String, u16)> {
 ///  - entry retained with the same nodePort  -> ok
 ///  - entry retained with nodePort omitted   -> the allocation persists
 ///    (the stored nodePort is defaulted back into the entry)
+///  - entry retained with `nodePort: 0`      -> same as omitted: 0 is
+///    "unspecified" (S53 P1-4 k8s parity), so the stored allocation
+///    persists and the literal 0 is overwritten in place
 ///  - entry retained with a different value  -> `Invalid` (immutable)
 ///  - entry (or the NodePort/LoadBalancer type) removed -> the allocation
 ///    is released (upstream frees nodePorts on type/port-entry removal)
@@ -361,6 +377,50 @@ mod tests {
             let err = default_service(&mut body, &mut BTreeSet::new()).unwrap_err();
             assert!(invalid(&err, "integer"), "rejects {bad}");
         }
+    }
+
+    #[test]
+    fn nodeport_zero_means_unspecified_auto_allocates() {
+        // S53 P1-4 (k8s parity, Q44): an integral literal 0 is
+        // "unspecified" - the create path auto-allocates lowest-free in
+        // [30000,32767] instead of failing the range check with a 422.
+        let mut used = BTreeSet::from([("TCP".to_string(), NODE_PORT_MIN)]);
+        let mut body = svc(Some("NodePort"), json!([{ "port": 80, "nodePort": 0 }]));
+        assert!(default_service(&mut body, &mut used).is_ok());
+        let got = node_ports(&body);
+        assert_eq!(got, vec![NODE_PORT_MIN + 1]); // lowest free, never 0
+        assert!((NODE_PORT_MIN..=NODE_PORT_MAX).contains(&got[0]));
+        assert!(used.contains(&("TCP".to_string(), NODE_PORT_MIN + 1)));
+        // The literal 0 in the body is overwritten in place.
+        assert_eq!(
+            body["spec"]["ports"][0]["nodePort"],
+            json!(NODE_PORT_MIN + 1)
+        );
+    }
+
+    #[test]
+    fn nodeport_zero_not_counted_as_used() {
+        // S53 P1-4: node_ports_of (used-port scan + S52-D0 admission)
+        // ignores nodePort:0 entries - 0 is not an allocation.
+        let services = vec![
+            svc(Some("NodePort"), json!([{ "port": 80, "nodePort": 0 }])),
+            svc(Some("NodePort"), json!([{ "port": 81, "nodePort": 30000 }])),
+        ];
+        let got = used_node_ports(&services);
+        assert_eq!(got, BTreeSet::from([("TCP".to_string(), 30000u16)]));
+        assert!(!got.contains(&("TCP".to_string(), 0)));
+    }
+
+    #[test]
+    fn nodeport_zero_retains_stored_allocation_on_update() {
+        // S53 P1-4: on update, nodePort:0 behaves exactly like an OMITTED
+        // nodePort (immutable-or-retain, k8s parity) - the stored 30100
+        // is defaulted back into the entry, no 422, and the 0 is gone.
+        let old = svc(Some("NodePort"), json!([{ "port": 80, "nodePort": 30100 }]));
+        let mut new = svc(Some("NodePort"), json!([{ "port": 80, "nodePort": 0 }]));
+        assert!(retain_node_ports(&old, &mut new).is_ok());
+        assert_eq!(node_ports(&new), vec![30100]);
+        assert_eq!(new["spec"]["ports"][0]["nodePort"], json!(30100));
     }
 
     #[test]

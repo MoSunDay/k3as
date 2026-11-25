@@ -348,7 +348,8 @@ pub(crate) async fn validate_on_write(
     };
     // nodePort: per-entry immutable-or-retain semantics (k8s update parity:
     // an omitted nodePort persists the stored allocation, an explicit
-    // different value is immutable, a removed entry releases it); the
+    // different value is immutable, a removed entry releases it; a literal
+    // `nodePort: 0` counts as omitted - S53 P1-4, 0 = unspecified); the
     // create-path judgment (range, per-object duplicates, cross-Service
     // conflicts, allocate-if-absent) then runs on the final object.
     if let Some(old) = old {
