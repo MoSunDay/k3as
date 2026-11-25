@@ -12,12 +12,15 @@
 //!
 //! Loop (HTTP/JSON only, Q10; single-request relay semantics, Q31 locked —
 //! no WebSocket/SPDY/remotedialer):
-//!   1. `POST /api/v1/nodes/{name}/tunnel/register` — heartbeat;
-//!   2. `GET  /api/v1/nodes/{name}/tunnel/next` — long-poll (server parks
-//!      ~25s; client cap 35s): `204` -> re-poll, `200` -> one
-//!      [`apiserver::RelayRequest`];
-//!   3. execute locally, then `POST .../tunnel/responses/{id}` with the
-//!      [`apiserver::RelayResponse`].
+//!   1. `POST /api/v1/nodes/{name}/tunnel/register` — heartbeat; the ack
+//!      carries the rotated park credential `parkToken` (S53 / Q65 review
+//!      P1-③; an old-server ack without it parses to `None`);
+//!   2. `GET  /api/v1/nodes/{name}/tunnel/next?parkToken=...` — long-poll
+//!      (server parks ~25s; client cap 35s): `204` -> re-poll, `200` ->
+//!      one [`apiserver::RelayRequest`]; a missing/mismatched credential
+//!      answers 401 fail-closed;
+//!   3. execute locally, then `POST .../tunnel/responses/{id}?parkToken=...`
+//!      with the [`apiserver::RelayResponse`] (same credential rule).
 //!
 //! SLA (Q65): exponential backoff 1s -> 2s -> ... capped at 15s on any
 //! transport failure (a dropped tunnel re-registers well inside the 30s
@@ -33,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use apiserver::kubelet_hop::call_kubelet;
-use apiserver::{RelayRequest, RelayResponse};
+use apiserver::{RegisterAck, RelayRequest, RelayResponse};
 use infra::Shutdown;
 use kubelet::HttpJson;
 
@@ -56,14 +59,27 @@ fn register_path(node: &str) -> String {
     format!("/api/v1/nodes/{node}/tunnel/register")
 }
 
-/// `GET /api/v1/nodes/{name}/tunnel/next` (pure; unit-tested).
-fn next_path(node: &str) -> String {
-    format!("/api/v1/nodes/{node}/tunnel/next")
+/// `GET /api/v1/nodes/{name}/tunnel/next` (pure; unit-tested). S53 / Q65
+/// (review P1-③): appends the `parkToken` query parameter whenever the
+/// register ack carried a credential; `None` (old server) keeps the bare
+/// path.
+fn next_path(node: &str, token: Option<&str>) -> String {
+    match token {
+        // Plain lowercase-hex token: no percent-encoding needed.
+        Some(t) => format!("/api/v1/nodes/{node}/tunnel/next?parkToken={t}"),
+        None => format!("/api/v1/nodes/{node}/tunnel/next"),
+    }
 }
 
 /// `POST /api/v1/nodes/{name}/tunnel/responses/{id}` (pure; unit-tested).
-fn response_path(node: &str, id: &str) -> String {
-    format!("/api/v1/nodes/{node}/tunnel/responses/{id}")
+/// S53 / Q65 (review P1-③): same `parkToken` query parameter rule as
+/// [`next_path`].
+fn response_path(node: &str, id: &str, token: Option<&str>) -> String {
+    match token {
+        // Plain lowercase-hex token: no percent-encoding needed.
+        Some(t) => format!("/api/v1/nodes/{node}/tunnel/responses/{id}?parkToken={t}"),
+        None => format!("/api/v1/nodes/{node}/tunnel/responses/{id}"),
+    }
 }
 
 /// Decode one handed-off request's optional body (base64 -> bytes).
@@ -89,10 +105,18 @@ fn bad_gateway(message: &str) -> RelayResponse {
 }
 
 /// POST one relayed response; failures only WARN (the apiserver answers
-/// the submitter with a 404-equivalent timeout after its SLA).
-async fn post_response(api: &HttpJson, node: &str, id: &str, response: RelayResponse) {
+/// the submitter with a 404-equivalent timeout after its SLA). S53 / Q65
+/// (review P1-③): carries the node's park credential as a query parameter
+/// when one is held.
+async fn post_response(
+    api: &HttpJson,
+    node: &str,
+    id: &str,
+    token: Option<&str>,
+    response: RelayResponse,
+) {
     let body = serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
-    match api.post_json(&response_path(node, id), &body).await {
+    match api.post_json(&response_path(node, id, token), &body).await {
         Ok((code, _)) if (200..300).contains(&code) => {}
         Ok((code, _)) => tracing::warn!(
             target: "init-pro",
@@ -105,23 +129,43 @@ async fn post_response(api: &HttpJson, node: &str, id: &str, response: RelayResp
     }
 }
 
-/// One dialer instance bound to a node + local kubelet address.
+/// One dialer instance bound to a node + local kubelet address. S53 / Q65
+/// (review P1-③): `park_token` is the credential from the LAST register
+/// ack (`None` against an old server — the query parameter is omitted).
 struct Dialer {
     api: Arc<HttpJson>,
     node: String,
     kubelet_ip: String,
     kubelet_port: u16,
+    park_token: Option<String>,
 }
 
 impl Dialer {
-    /// Register/heartbeat; `Ok` only on a 2xx ack.
-    async fn register(&self) -> Result<(), String> {
+    /// Register/heartbeat; `Ok` only on a 2xx ack. S53 / Q65 (review P1-③):
+    /// a 2xx ack rotates the park credential — parse the
+    /// [`apiserver::RegisterAck`] and store the fresh `parkToken` (single
+    /// active value). An unparsable 2xx body degrades to `None` + WARN
+    /// (the old-server ack shape parses fine with `parkToken` absent).
+    async fn register(&mut self) -> Result<(), String> {
         match self
             .api
             .post_json(&register_path(&self.node), &serde_json::json!({}))
             .await
         {
-            Ok((code, _)) if (200..300).contains(&code) => Ok(()),
+            Ok((code, body)) if (200..300).contains(&code) => {
+                self.park_token = match serde_json::from_value::<RegisterAck>(body) {
+                    Ok(ack) => ack.park_token,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "init-pro",
+                            error = %e,
+                            "tunnel dialer: register ack unparsable, proceeding without parkToken"
+                        );
+                        None
+                    }
+                };
+                Ok(())
+            }
             Ok((code, body)) => Err(format!("register answered {code}: {body}")),
             Err(e) => Err(e.to_string()),
         }
@@ -133,7 +177,11 @@ impl Dialer {
     async fn poll_next(&self) -> Result<Option<RelayRequest>, String> {
         let (code, body) = self
             .api
-            .request("GET", &next_path(&self.node), None)
+            .request(
+                "GET",
+                &next_path(&self.node, self.park_token.as_deref()),
+                None,
+            )
             .await
             .map_err(|e| e.to_string())?;
         match code {
@@ -158,7 +206,14 @@ impl Dialer {
         let body = match decode_body(&request) {
             Ok(b) => b,
             Err(e) => {
-                post_response(&self.api, &self.node, &request.id, bad_gateway(&e)).await;
+                post_response(
+                    &self.api,
+                    &self.node,
+                    &request.id,
+                    self.park_token.as_deref(),
+                    bad_gateway(&e),
+                )
+                .await;
                 return;
             }
         };
@@ -176,12 +231,24 @@ impl Dialer {
             Ok(r) => RelayResponse::from_reply(&r),
             Err(e) => bad_gateway(&e),
         };
-        post_response(&self.api, &self.node, &request.id, response).await;
+        post_response(
+            &self.api,
+            &self.node,
+            &request.id,
+            self.park_token.as_deref(),
+            response,
+        )
+        .await;
     }
 
     /// The dialer loop: register -> park long-poll -> execute -> respond,
     /// backing off exponentially on any failure (Q65 SLA), until shutdown.
-    async fn run(self, shutdown: Shutdown) {
+    /// S53 / Q65 (review P1-③): a 401 on the tunnel face (token rotation
+    /// race, or an old-agent/new-server version skew) surfaces here as a
+    /// poll failure -> backoff -> the next `register` ROTATES a fresh
+    /// token -> the loop self-heals; the direct-first Q65 posture is
+    /// unchanged (a dead tunnel never blocks direct hops).
+    async fn run(mut self, shutdown: Shutdown) {
         let mut backoff = BACKOFF_START;
         loop {
             if let Err(e) = self.register().await {
@@ -256,6 +323,8 @@ pub(crate) fn spawn_tunnel_dialer(
         node: node_name.to_string(),
         kubelet_ip: kubelet_ip.to_string(),
         kubelet_port,
+        // S53 / Q65 (review P1-③): armed by the first register ack.
+        park_token: None,
     };
     Some(tokio::spawn(async move {
         dialer.run(shutdown).await;
@@ -280,11 +349,22 @@ mod tests {
 
     #[test]
     fn tunnel_paths_match_the_http_surface() {
+        // Both arities (S53 / Q65 review P1-③): `None` (old server, no
+        // parkToken in the ack) keeps the bare paths; a held token rides
+        // as the `parkToken` query parameter.
         assert_eq!(register_path("n1"), "/api/v1/nodes/n1/tunnel/register");
-        assert_eq!(next_path("n1"), "/api/v1/nodes/n1/tunnel/next");
+        assert_eq!(next_path("n1", None), "/api/v1/nodes/n1/tunnel/next");
         assert_eq!(
-            response_path("n1", "abc"),
+            response_path("n1", "abc", None),
             "/api/v1/nodes/n1/tunnel/responses/abc"
+        );
+        assert_eq!(
+            next_path("n1", Some("deadbeef")),
+            "/api/v1/nodes/n1/tunnel/next?parkToken=deadbeef"
+        );
+        assert_eq!(
+            response_path("n1", "abc", Some("deadbeef")),
+            "/api/v1/nodes/n1/tunnel/responses/abc?parkToken=deadbeef"
         );
     }
 

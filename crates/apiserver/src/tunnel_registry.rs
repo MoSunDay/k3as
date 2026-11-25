@@ -9,7 +9,17 @@
 //! semantics, existing clients unchanged).
 //!
 //! Semantics (unit-tested as pure state transitions):
-//!  - `park` seats a long-poll and REPLACES any older one (the older
+//!  - `register` (S53 / Q65 review P1-③) mints/rotates the node's park
+//!    credential (`parkToken`, getrandom 128-bit hex): single active
+//!    value, the previous token dies IMMEDIATELY, and generation/parked
+//!    are never touched here (liveness stays park-driven);
+//!  - `park_checked`/`complete_checked` (P1-③) validate the presented
+//!    credential INSIDE the same critical section that seats the park /
+//!    resolves the pending responder (no TOCTOU between check and
+//!    effect); a missing or mismatched credential is an
+//!    [`TunnelAuthError::InvalidParkToken`] -> the HTTP handler answers
+//!    401 fail-closed (the two cases are deliberately indistinguishable);
+//!  - `park_checked` seats a long-poll and REPLACES any older one (the older
 //!    receiver resolves with a disconnect error -> its handler answers 204
 //!    and the dialer immediately re-polls);
 //!  - liveness == "a long-poll is currently parked". No lease, no timer:
@@ -18,7 +28,7 @@
 //!    stale sender fails and clears it;
 //!  - `submit` hands one request to the parked poll and awaits the agent's
 //!    response bounded by [`RELAY_TIMEOUT_SLA`] (10s);
-//!  - `complete` resolves the pending responder by request id.
+//!  - `complete_checked` resolves the pending responder by request id.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,6 +52,29 @@ struct NodeTunnel {
     generation: u64,
     parked: Option<oneshot::Sender<RelayRequest>>,
     pending: HashMap<String, oneshot::Sender<RelayResponse>>,
+    /// S53 / Q65 (review P1-③): the node's active park credential
+    /// (rotated by every `register`). The Default empty string means
+    /// "never registered", so every checked call on a missing entry
+    /// fails (401 fail-closed).
+    park_token: String,
+}
+
+/// S53 / Q65 (review P1-③): park identity check failed. Missing and
+/// mismatched credentials are DELIBERATELY indistinguishable — a stripped
+/// query parameter behaves exactly like an old/wrong token (fail-closed;
+/// no absent-tolerance, a stripped param is indistinguishable from an old
+/// client). Maps to a 401 in the HTTP layer.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TunnelAuthError {
+    InvalidParkToken,
+}
+
+/// S53 / Q65 (review P1-③): the shared ownership predicate — fail when
+/// the node never registered (empty stored token) or the presented
+/// credential is missing/old/wrong. Pure; unit-tested via the checked
+/// entry points.
+fn park_token_mismatch(entry: &NodeTunnel, token: Option<&str>) -> bool {
+    entry.park_token.is_empty() || token != Some(entry.park_token.as_str())
 }
 
 /// A seated long-poll: await the receiver for the handed-off request;
@@ -114,17 +147,41 @@ impl TunnelRegistry {
         })
     }
 
-    /// Seat this node's long-poll, replacing any older one.
-    pub(crate) fn park(&self, node: &str) -> Park {
+    /// S53 / Q65 (review P1-③): register/heartbeat the node's tunnel and
+    /// ROTATE its park credential. Returns the freshly minted token — the
+    /// single active value; the previous one is invalid immediately.
+    /// MUST NOT touch generation/parked: liveness stays park-driven (a
+    /// register replacing a live long-poll would break the Q65 liveness
+    /// contract — re-parking is the dialer's job, right after the ack).
+    pub(crate) fn register(&self, node: &str) -> String {
+        let mut nodes = self.nodes.lock().expect("tunnel registry poisoned");
+        let entry = nodes.entry(node.to_string()).or_default();
+        entry.park_token = new_park_token();
+        entry.park_token.clone()
+    }
+
+    /// Seat this node's long-poll, replacing any older one — but only
+    /// after the S53 / Q65 (review P1-③) ownership check, run INSIDE the
+    /// same critical section that seats the park (no TOCTOU: lock ->
+    /// check token -> seat, all under the one lock). A missing node entry
+    /// fails too (the Default entry carries an empty token).
+    pub(crate) fn park_checked(
+        &self,
+        node: &str,
+        token: Option<&str>,
+    ) -> Result<Park, TunnelAuthError> {
         let (tx, rx) = oneshot::channel();
         let mut nodes = self.nodes.lock().expect("tunnel registry poisoned");
         let entry = nodes.entry(node.to_string()).or_default();
+        if park_token_mismatch(entry, token) {
+            return Err(TunnelAuthError::InvalidParkToken);
+        }
         entry.generation += 1;
         entry.parked = Some(tx); // dropping the prior sender disconnects it
-        Park {
+        Ok(Park {
             generation: entry.generation,
             rx,
-        }
+        })
     }
 
     /// A long-poll ended without a request: clear the seat only when it is
@@ -223,16 +280,58 @@ impl TunnelRegistry {
     }
 
     /// The agent posted its relayed response: resolve the waiter by id.
-    /// `false` = unknown/expired id (the waiter already gave up).
-    pub(crate) fn complete(&self, node: &str, id: &str, response: RelayResponse) -> bool {
+    /// S53 / Q65 (review P1-③): the ownership check runs FIRST, inside
+    /// the same critical section as the pending-remove + send (no TOCTOU;
+    /// auth also precedes the id lookup, so an unauthenticated caller
+    /// learns nothing about pending ids). `Ok(false)` = unknown/expired
+    /// id after auth passed (the waiter already gave up — today's 404).
+    pub(crate) fn complete_checked(
+        &self,
+        node: &str,
+        id: &str,
+        token: Option<&str>,
+        response: RelayResponse,
+    ) -> Result<bool, TunnelAuthError> {
         let mut nodes = self.nodes.lock().expect("tunnel registry poisoned");
-        match nodes
+        let entry = nodes
             .get_mut(node)
-            .and_then(|entry| entry.pending.remove(id))
-        {
+            .ok_or(TunnelAuthError::InvalidParkToken)?;
+        if park_token_mismatch(entry, token) {
+            return Err(TunnelAuthError::InvalidParkToken);
+        }
+        Ok(match entry.pending.remove(id) {
             Some(sender) => sender.send(response).is_ok(),
             None => false,
-        }
+        })
+    }
+
+    /// S53 / Q65 (review P1-③) TEST-ONLY shim for the pre-P1-③ `park`
+    /// surface: kept behind `#[cfg(test)]` for the older test suites that
+    /// do not exercise credentials (kubelet_hop's `relay_tests`), so the
+    /// checked entry points stay the ONLY production surface. The shim
+    /// self-registers and presents the fresh token.
+    #[cfg(test)]
+    pub(crate) fn park(&self, node: &str) -> Park {
+        let token = self.register(node);
+        self.park_checked(node, Some(&token))
+            .expect("test shim park")
+    }
+
+    /// S53 / Q65 (review P1-③) TEST-ONLY shim for the pre-P1-③ `complete`
+    /// surface: presents the node's CURRENT token (never registers — a
+    /// rotation here would invalidate the park the caller just seated).
+    /// `Err` maps to `false` (today's "unknown id" answer).
+    #[cfg(test)]
+    pub(crate) fn complete(&self, node: &str, id: &str, response: RelayResponse) -> bool {
+        let token = self
+            .nodes
+            .lock()
+            .expect("tunnel registry poisoned")
+            .get(node)
+            .map(|entry| entry.park_token.clone())
+            .unwrap_or_default();
+        self.complete_checked(node, id, Some(token.as_str()), response)
+            .unwrap_or_default()
     }
 
     fn drop_pending(&self, node: &str, id: &str) {
@@ -256,6 +355,20 @@ fn new_request_id() -> String {
         if matches!(i, 4 | 6 | 8 | 10) {
             out.push('-');
         }
+        let _ = write!(out, "{x:02x}");
+    }
+    out
+}
+
+/// S53 / Q65 (review P1-③): random 128-bit park credential — 16 getrandom
+/// bytes rendered as 32 lowercase hex chars (mirrors [`new_request_id`]'s
+/// style; plain hex so the query parameter needs no percent-encoding).
+fn new_park_token() -> String {
+    use std::fmt::Write as _;
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("system randomness unavailable");
+    let mut out = String::with_capacity(32);
+    for x in b.iter() {
         let _ = write!(out, "{x:02x}");
     }
     out
@@ -291,11 +404,13 @@ mod tests {
     #[tokio::test]
     async fn handoff_roundtrip() {
         let reg = TunnelRegistry::new_shared();
-        let park = reg.park("n1");
+        let tok = reg.register("n1");
+        let park = reg.park_checked("n1", Some(&tok)).unwrap();
         assert!(reg.is_live("n1"));
 
         // Fake agent: hold the long-poll, answer the handed-off request.
         let reg_agent = reg.clone();
+        let tok_agent = tok.clone();
         let agent = tokio::spawn(async move {
             let request = park.rx.await.expect("parked poll receives request");
             assert_eq!(request.method, "POST");
@@ -304,11 +419,14 @@ mod tests {
                 request.headers.get("content-type").map(String::as_str),
                 Some("application/json")
             );
-            assert!(reg_agent.complete(
-                "n1",
-                &request.id,
-                RelayResponse::from_reply(&reply(200, "ok"))
-            ));
+            assert!(reg_agent
+                .complete_checked(
+                    "n1",
+                    &request.id,
+                    Some(&tok_agent),
+                    RelayResponse::from_reply(&reply(200, "ok"))
+                )
+                .unwrap());
         });
 
         let got = reg
@@ -330,7 +448,8 @@ mod tests {
     #[tokio::test]
     async fn relay_timeout_cleans_pending() {
         let reg = TunnelRegistry::with_relay_timeout(Duration::from_millis(50));
-        let park = reg.park("n1");
+        let tok = reg.register("n1");
+        let park = reg.park_checked("n1", Some(&tok)).unwrap();
         // Agent parks but never answers.
         let err = reg
             .submit("n1", "GET", "/pods/u/containers/c/log", None, None)
@@ -340,11 +459,14 @@ mod tests {
         // The stale pending entry must be gone; the parked poll still holds
         // the request, so completing late is a no-op (waiter left).
         drop(park);
-        assert!(!reg.complete(
-            "n1",
-            "bogus",
-            RelayResponse::from_reply(&reply(200, "late"))
-        ));
+        assert!(!reg
+            .complete_checked(
+                "n1",
+                "bogus",
+                Some(&tok),
+                RelayResponse::from_reply(&reply(200, "late"))
+            )
+            .unwrap());
     }
 
     #[tokio::test]
@@ -354,7 +476,8 @@ mod tests {
         // handler) runs no outcome branch — the Drop guard must still
         // remove the pending responder instead of leaking it.
         let reg = TunnelRegistry::with_relay_timeout(Duration::from_secs(10));
-        let park = reg.park("n1");
+        let tok = reg.register("n1");
+        let park = reg.park_checked("n1", Some(&tok)).unwrap();
         // Outer window shorter than the relay SLA: when it elapses, the
         // timeout drops the inner submit future mid-flight.
         let cancelled = tokio::time::timeout(
@@ -376,8 +499,9 @@ mod tests {
     #[tokio::test]
     async fn unpark_generation_guard() {
         let reg = TunnelRegistry::new_shared();
-        let old = reg.park("n1");
-        let new = reg.park("n1"); // replaces the older poll
+        let tok = reg.register("n1");
+        let old = reg.park_checked("n1", Some(&tok)).unwrap();
+        let new = reg.park_checked("n1", Some(&tok)).unwrap(); // replaces the older poll
         reg.unpark("n1", old.generation); // stale end: must not clear `new`
         assert!(reg.is_live("n1"));
         reg.unpark("n1", new.generation);
@@ -387,7 +511,8 @@ mod tests {
     #[tokio::test]
     async fn dead_park_self_heals() {
         let reg = TunnelRegistry::new_shared();
-        let park = reg.park("n1");
+        let tok = reg.register("n1");
+        let park = reg.park_checked("n1", Some(&tok)).unwrap();
         drop(park.rx); // client vanished mid-poll
         assert!(reg.is_live("n1"), "liveness is optimistic until send");
         let err = reg
@@ -397,8 +522,129 @@ mod tests {
         assert!(err.contains("handoff failed"), "{err}");
         // The stale seat was consumed: not live, and a fresh park works.
         assert!(!reg.is_live("n1"));
-        let fresh = reg.park("n1");
+        let fresh = reg.park_checked("n1", Some(&tok)).unwrap();
         assert!(reg.is_live("n1"));
         drop(fresh);
+    }
+
+    // ---------------------------------------- S53 / Q65 review P1-③ ---
+
+    #[test]
+    fn register_rotates_single_active_token() {
+        let reg = TunnelRegistry::new_shared();
+        let first = reg.register("n1");
+        let second = reg.register("n1");
+        for tok in [&first, &second] {
+            assert_eq!(tok.len(), 32, "128-bit hex: {tok}");
+            assert!(
+                tok.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+                "lowercase hex: {tok}"
+            );
+        }
+        assert_ne!(first, second, "every register rotates the token");
+        // Single active value: the OLD token now fails park_checked.
+        assert!(matches!(
+            reg.park_checked("n1", Some(&first)),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        assert!(!reg.is_live("n1"), "a rejected park must not seat");
+        reg.park_checked("n1", Some(&second)).unwrap();
+        assert!(reg.is_live("n1"));
+    }
+
+    #[test]
+    fn park_rejects_missing_and_wrong_token() {
+        let reg = TunnelRegistry::new_shared();
+        let tok = reg.register("n1");
+        // Missing (None) and mismatched are deliberately indistinguishable.
+        assert!(matches!(
+            reg.park_checked("n1", None),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        assert!(matches!(
+            reg.park_checked("n1", Some("wrong")),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        // Never-registered node: the Default entry carries an empty token.
+        assert!(matches!(
+            reg.park_checked("n2", Some("anything")),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        // Cross-node credential: n2's token does not open n1's seat.
+        let tok2 = reg.register("n2");
+        assert!(matches!(
+            reg.park_checked("n1", Some(&tok2)),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        assert!(!reg.is_live("n1"), "rejected parks must not seat");
+        assert!(!reg.is_live("n2"));
+        // The node's own token still seats after the rejections above.
+        drop(reg.park_checked("n1", Some(&tok)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn complete_rejects_missing_and_wrong_token() {
+        // Needs a live pending: park + submit (the `handoff_roundtrip`
+        // flow), then exercise the agent-side completion checks.
+        let reg = TunnelRegistry::new_shared();
+        let tok = reg.register("n1");
+        let park = reg.park_checked("n1", Some(&tok)).unwrap();
+
+        let reg_agent = reg.clone();
+        let tok_agent = tok.clone();
+        let agent = tokio::spawn(async move {
+            let request = park.rx.await.expect("parked poll receives request");
+            // Missing and mismatched credentials are rejected and must NOT
+            // resolve the waiter (the submit below would then observe the
+            // "bad" body instead of "ok").
+            assert_eq!(
+                reg_agent.complete_checked(
+                    "n1",
+                    &request.id,
+                    None,
+                    RelayResponse::from_reply(&reply(200, "bad"))
+                ),
+                Err(TunnelAuthError::InvalidParkToken)
+            );
+            assert_eq!(
+                reg_agent.complete_checked(
+                    "n1",
+                    &request.id,
+                    Some("wrong"),
+                    RelayResponse::from_reply(&reply(200, "bad"))
+                ),
+                Err(TunnelAuthError::InvalidParkToken)
+            );
+            // Cross-node credential: n2's token cannot resolve n1's waiter.
+            let tok2 = reg_agent.register("n2");
+            assert_eq!(
+                reg_agent.complete_checked(
+                    "n1",
+                    &request.id,
+                    Some(&tok2),
+                    RelayResponse::from_reply(&reply(200, "bad"))
+                ),
+                Err(TunnelAuthError::InvalidParkToken)
+            );
+            // The valid token resolves it.
+            assert!(reg_agent
+                .complete_checked(
+                    "n1",
+                    &request.id,
+                    Some(&tok_agent),
+                    RelayResponse::from_reply(&reply(200, "ok"))
+                )
+                .unwrap());
+        });
+
+        let got = reg
+            .submit("n1", "GET", "/pods/u/containers/c/log", None, None)
+            .await
+            .expect("relayed reply");
+        // The waiter saw ONLY the valid token's response: the rejected
+        // attempts never resolved it (otherwise the body would be "bad").
+        assert_eq!(got.code, 200);
+        assert_eq!(got.body, b"ok");
+        agent.await.unwrap();
     }
 }

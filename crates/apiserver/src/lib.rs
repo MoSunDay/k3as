@@ -62,7 +62,10 @@ mod tunnel_http;
 mod tunnel_registry;
 mod tunnel_wire;
 pub use tunnel_registry::LONG_POLL_TIMEOUT;
-pub use tunnel_wire::{RelayRequest, RelayResponse};
+// S53 / Q65 (review P1-③): `RegisterAck` joins the re-exports because the
+// node-side dialer parses the register ack (park credential) with the
+// EXACT same serde shape the apiserver emits (Q10 JSON-only wire contract).
+pub use tunnel_wire::{RegisterAck, RelayRequest, RelayResponse};
 // S51: the ClusterIP allocation unit tests live beside `service_ip.rs`
 // (file-size cap; the `authz_tests` precedent).
 #[cfg(test)]
