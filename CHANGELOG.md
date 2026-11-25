@@ -7,6 +7,66 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 54 — anyhome 实体下线: 工作区 NFS 平面换底 nfsserve 直连 + 内嵌 DirFs (T7.4/T7.5 rebase, Q66) (2026-11-25)
+
+**Goal:** 用户指令「k3as 内置 rdb 存储, 集群内部的存储都可以直接使用它!
+完全下线掉 anyhome, 使用 link_repos 下的 nfs 做内置存储能力」——平台侧
+结构化存储 rdb-only 已由 Q33 完成; anyhome 实体层 (any-home crate 的
+MemoryDb/libsql 检索面、DummyEmbedder、anyhome.db) 在 init-pro 内零
+消费者, 整体下线; 工作区 NFS 平面 (T7.4/T7.5) 语义与用户面契约 100%
+保留, 底座换为 nfsserve 直连 + 内嵌 mirrorfs 移植 VFS。无 TODO 状态
+变化 (counts: 43 done · 4 in-progress · 7 not-started)。commits:
+**4103746** (Q66 决策先行) + **00fd06e** (许可面修正: nfsserve/mirrorfs
+为 BSD-3-Clause 而非初稿误写) + **ae9e4bb** (代码) + 本条收口。
+
+**Changes**
+- **新底座 (Q66)**: `crates/cli/src/anyhome_vfs.rs` (321 行, FSMap 内核:
+  intaglio SymbolTable 路径驻留 + AtomicU64 fileid + 双 stat mtime 失效
+  刷新, adapted from nfsserve `examples/mirrorfs.rs` @ c00c361) +
+  `anyhome_dirfs.rs` (400 行, `DirFs` + `NFSFileSystem` trait impl 全写
+  路径 setattr/write/create/remove/rename/mkdir/symlink, 3 个 tokio 单测
+  钉 VFS 语义) + `anyhome.rs` 收敛为装配层 (204 行):
+  `NFSTcpListener::bind` 单口复用 NFS+MOUNT+portmap + 导出 `/`, serve
+  循环 `tokio::select!` + Shutdown drain 姿势与 Q36 完全一致。
+- **实体死亡**: link_repos.lock 删 any-home + libsql 两个 pin (7→6),
+  nfsserve 去 also_link (嵌套 pin/词法恒等教义退役); root/cli Cargo.toml
+  anyhome path dep 删除; Cargo.lock 的 anyhome 0.1.0 + libsql
+  0.10.0-pre.4 分支消失 (opencoder 自带 crates.io libsql 0.9.30 保留——
+  其 store 换 rdb 明确不在 Q66 范围); server 二进制 libsql 链接面归零;
+  MemoryDb/anyhome.db/EMBED_DIM/WAL checkpoint/`anyhome::cli::port_of`
+  全部死亡。`intaglio` 1.6 + `async-trait` 成为 cli 直接依赖。
+- **用户面契约零改动 (钉死验证)**: flags `--anyhome-addr`/
+  `--disable-anyhome` (env 同名)、annotations `init-pro.io/workspace`/
+  `init-pro.io/anyhome`/`init-pro.io/anyhome-mounts`、volume 名
+  `anyhome`/`anyhome-<sanitized>`、盘上布局 `<data>/anyhome/fs` +
+  workflow/agent/pod 根、keeper 签名与脚手架 (skills/tools/mem/
+  prompt.md)、Q43 create/apply/replace 注入链、kubelet 父级 export 挂载
+  + `vers=3,tcp,nolock,noacl,port=P,mountport=P`——apiserver/kubelet/
+  common/controllers/cmd 代码一行未动; `anyhome_pod_mounts.rs` (363 行)
+  与 cli `server_env_flags`/kubelet `agents_runner_integration` 钉死
+  测试零改动复跑通过。
+- **归属与许可**: NOTICE 增 nfsserve/mirrorfs 条目 (BSD-3-Clause,
+  Copyright (c) 2023 XetData / 2025 Hugging Face);
+  `LICENSES/BSD-3-Clause.txt` 逐字取自上游 LICENSE; `.gitignore`
+  LICENSES 白名单放行。AUTH_SYS identity patch (Q37) 与 bootstrap
+  also_link 机制 (通用能力, 当前无 pin 使用) 均保留。
+- **Q36 D1 改写**: 约束保留 (server 二进制不链 `agent`, 路径 SSOT 在
+  `common`) 但 rationale 由双 libsql 符号冲突改为 link-graph hygiene
+  (vendor 副本消失, 冲突前提不复存在) —— keeper 模块头注释同步改写。
+- **SSOT 锁步**: decisions.md Q66 + Q36 superseded-in-implementation +
+  Q38 修订 (pin 7→6) + Q43 rebase note + Q66 落地注记; index.md
+  T7.4/T7.5 行注记 + S54 sprint 行; plan/07 T7.4 rebase 块 + T7.5 状态
+  注记; plan/00-foundation T0.2b 段 6-pin 化; agents.md 触点同步。
+
+**门禁**: fmt (member-scope) ✓; build ✓; workspace tests **1511/0**
+(S53: 1509; +3 DirFs 单测 −1 embed_dim 死测); clippy 0; golden **75/0**;
+flag-parity **31/31**; **anyhome-e2e A1/P2/K1/P3/P4/P5 7/0** (新 DirFs
+真挂载字节往返 + keeper + 注解注入全链); agent-exec-e2e **G1-G7 9/0**
+(Q37 执行环 + keeper 脚手架经新平面); unsafe-audit ✓; engine-
+singlethread ✓。(netpol-e2e/acceptance-2node 环境性未跑——在役 node04
+租户 agent, S53 脚注姿态不变, 非本批引入。)
+- 计数: **43 done / 4 in-progress / 7 not-started**（无 TODO 状态变化）。
+
 ## Sprint 53 — 评审修复批 I: Q64/Q65 面加固 (PATCH 写路径准入补全 + netpol fail-closed + 隧道 pending 取消清理 + iptables/drain 有界化) (2026-11-25)
 
 **Goal:** S52 收口后的边界执行评审落地批次 1（P1-①②⑤⑥——安全 ①、

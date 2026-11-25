@@ -31,7 +31,7 @@ is complete; the Phase 2 execution plan is historical and Phase 3
   `04-node.md` T4.1-T4.10 + `04b-builtin-engine.md` T4.11-T4.15; Layer 8
   is the delivery plane, `08-delivery.md` T8.1-T8.5); edit in lock-step
   with index.md.
-- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q63
+- `plans/init-pro/decisions.md` - locked ADR-style decisions Q1-Q66
   (Context / Options / Decision / Consequences).
 - `CHANGELOG.md` - detailed per-sprint retrospectives with auditable test
   counts.
@@ -60,7 +60,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 ## Build & verify (canonical commands)
 
 - COLD CLONES build deps first: `scripts/bootstrap-link-repos.sh`
-  materializes the 7 pinned path-dep repos from `link_repos.lock` (Q38,
+  materializes the 6 pinned path-dep repos from `link_repos.lock` (Q38;
   T0.2b) — idempotent; verifies (never modifies) existing/symlinked dev
   checkouts. Run `cargo fmt --all` with link_repos ABSENT or you will
   reformat foreign pinned trees (CI orders fmt before bootstrap for this
@@ -105,7 +105,7 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
 |-------|------|
 | `init-pro` | Single binary; argv[0] dispatch + build.rs asset bundling. |
 | `multicall` | Alias table + reexec + peer stubs (T0.1). |
-| `cli` | clap CLI + subcommands + flag-parity strip filter (T0.4); embedded flanneld runner + node-condition keeper (T4.3 Scope A, Q34); embedded anyhome NFS supervisor + workspace keeper (T7.4, Q36). |
+| `cli` | clap CLI + subcommands + flag-parity strip filter (T0.4); embedded flanneld runner + node-condition keeper (T4.3 Scope A, Q34); embedded workspace-NFS plane supervisor + workspace keeper (T7.4 Q36; S54 Q66: anyhome entity decommissioned — plane rides nfsserve + the in-tree DirFs, user-facing contract unchanged). |
 | `infra` | tracing, layered config, graceful shutdown (T0.3). |
 | `common` | Shared primitives: embed descriptor + `version()`; workspace path conventions — `MOUNT_TARGET=/workspace`, `/agent/{id}`, `/workflow/{id}` (T7.4, Q36). |
 | `vendor` | Pinned upstream-artifact acquire + SHA-256 verify + SBOM (T0.2). |
@@ -139,9 +139,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   T4.6 (pod-log date dirs + rotation, Q39), T6.3 (embedded registry,
   Q40), T7.1 (`Agent` resource + node-side execution, Q35/Q37), T7.3
   (Argo Workflows, Q30; model/engine since extracted to the
-  link_repos/arust-workflow reference, Q42), T7.4 (anyhome, Q36), and
-  T7.5 (anyhome Pod-level annotation mounts, Q43). Phase 1 (M0 + M1) is
-  complete; 38/54 TODOs done.
+  link_repos/arust-workflow reference, Q42), T7.4 (anyhome, Q36; entity
+  decommissioned S54/Q66 — plane rebased on nfsserve + the in-tree DirFs,
+  contract intact), and T7.5 (anyhome Pod-level annotation mounts, Q43).
+  Phase 1 (M0 + M1) is complete; 43/54 TODOs done.
 - Delivery plane (Layer 8, T8.1-T8.5 done in Sprints 45-46, Q56/Q57/Q58):
   certs.d plain-HTTP image trust (`hosts.toml`, T8.1) + registry V2 push
   client + `docker save` importer; `TrafficSplit` (`ts`) weighted one-click
@@ -209,7 +210,11 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   `--disable-anyhome`); workflow step pods get `/workspace` auto-mounted
   from `/workflow/<name>` and Agents carry the `init-pro.io/workspace`
   annotation; workspace path SSOT lives in `common` (D1: the binary path
-  must not link `agent` — duplicate libsql symbols).
+  must not link `agent` — duplicate libsql symbols). S54/Q66: the any-home
+  ENTITY (MemoryDb/libsql/embedder/anyhome.db) is decommissioned — the
+  plane rides nfsserve + the in-tree DirFs (mirrorfs port, BSD-3-Clause),
+  every user-facing surface unchanged; D1 is retained as link-graph
+  hygiene (the vendored-libsql collision rationale is gone).
 
 - Q37 - T7.1 Phase B: the `agent` subcommand's watch+execute loop runs a
   bound Agent as ONE opencoder CLI subprocess on its node (credentials
@@ -266,4 +271,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   Q35/Q37 history, and forbids direct-process/host-root/host-network/
   containerd fallback when containment is unavailable.
 
-Read `plans/init-pro/decisions.md` for the full list (Q1-Q63).
+- Q66 - S54: the anyhome ENTITY is decommissioned (any-home + libsql pins
+  die; 6 pins remain); the workspace-NFS plane keeps every user-facing
+  surface (flags/annotations/volume names/on-disk layout/keeper/Q43
+  chain) and rides nfsserve directly with the in-tree DirFs (mirrorfs
+  port, BSD-3-Clause) — "anyhome" is now the plane's historical name.
+
+Read `plans/init-pro/decisions.md` for the full list (Q1-Q66).

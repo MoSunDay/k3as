@@ -3479,3 +3479,12 @@ in-tree 移植: nfsserve 上游 mirrorfs 演进不再自动跟进 (适配面记�
 目录直通, 无回归预期, 但性能特征未做专门基准。Gate: workspace tests
 (基线 1509/0)、golden 75/0、parity 31/31、clippy 0、
 `scripts/anyhome-e2e.sh` A1/P2/K1/P3-P5。
+
+（落地 2026-11-25, S54 commit ae9e4bb: `anyhome_vfs.rs`/`anyhome_dirfs.rs`/
+`anyhome.rs` 三文件落地, any-home/libsql pin 与 anyhome path dep 自
+lock 与 manifest 消失; 上述用户面契约逐款兑现——apiserver/kubelet/
+common/controllers 零改动, `anyhome-e2e.sh` A1/P2/K1/P3-P5 7/0 与
+apiserver/kubelet/cli 钉死测试原样复跑通过; workspace tests 1511/0、
+golden 75/0、parity 31/31、clippy 0、agent-exec-e2e 9/0。许可面当日
+修正: nfsserve/mirrorfs 为 BSD-3-Clause 而非初稿误写的 Apache-2.0,
+`LICENSES/BSD-3-Clause.txt` 逐字取自上游 LICENSE。）

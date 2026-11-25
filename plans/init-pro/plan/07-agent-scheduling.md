@@ -445,6 +445,19 @@ inference track.
   阻塞）；D1 令 Agent 执行无法进 server 进程 —— Phase B 必须走节点侧
   （B1）/ 新子命令（B2），与 Q35 记录一致
 - **依赖 / Depends on** — T7.3, T4.2
+- **S54 rebase 注记 (Q66, 2026-11-25)** — anyhome 实体下线, 本 TODO
+  语义与验收口径不变: `link_repos/any-home` (RealFs/MemoryDb/
+  DummyEmbedder/anyhome.db) 整体退役——其检索层 (MemoryDb/libsql、
+  `/search` RPC) 在 init-pro 内零消费者, 无可观察损失; 平面底座换为
+  nfsserve 直连 + 内嵌 DirFs (`crates/cli/src/anyhome_vfs.rs` +
+  `anyhome_dirfs.rs`, adapted from nfsserve `examples/mirrorfs.rs` @
+  c00c361, BSD-3-Clause, 见 NOTICE)。上方「内嵌装配」小节的 any-home
+  逐层镜像描述为历史 as-built; 现行装配 = DirFs →
+  `NFSTcpListener::bind` 单口 + 导出 `/` (serve 循环 `tokio::select!`
+  + Shutdown drain 姿势不变)。用户面契约 (flags/env/盘上布局/keeper/
+  注入链/kubelet 消费面) 零改动——A1/P2/K1 验收原样复跑通过 (S54:
+  anyhome-e2e 7/0)。D1 约束保留但 rationale 改写为 link-graph hygiene
+  (Q66)。详见 decisions.md Q36 supersede 注记 + Q66。
 
 ## T7.5 — anyhome Pod 级注解挂载 (init-pro.io/anyhome + anyhome-mounts; Q43)
 
@@ -497,7 +510,7 @@ inference track.
     keeper 目录); curl/python3 缺失时按 K1 同款降级 doctrine 退出必需集。
   - 无注解 Pod 字节零变化 → golden conformance (T0.6) 不受影响(实测全绿)。
 
-- **状态 / Status** — done (Sprint 35, Q43; Sprint 36b post-review hardening)
+- **状态 / Status** — done (Sprint 35, Q43; Sprint 36b post-review hardening; Sprint 54 Q66 底座更换零触碰——注入链/keeper/e2e P3-P5 原样复跑)
 - **证据 / Evidence** — `cargo test --workspace --locked` **991 passed / 0 failed**
   (Sprint 35: common +8 / apiserver +18 / cli keeper +4; Sprint 36b hardening:
   apiserver +5 单测 +2 集成); `cargo clippy --workspace
