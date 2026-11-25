@@ -13,11 +13,13 @@
 //! shapes cannot drift from the Workflow controller's /workspace
 //! auto-mount injection, the apiserver's per-Pod anyhome defaulting, or
 //! Phase B agent execution. The SSOT deliberately lives in `common`, NOT in
-//! `agent`: `agent` pulls opencoder-session -> opencoder-store -> libsql
-//! 0.9.30 while anyhome vendors libsql 0.10.0-pre.4, and the two copies
-//! collide at link time (`duplicate symbol: update_hook_cb`) in EVERY
-//! binary that links cli -- so no crate on the binary's dependency path may
-//! depend on `agent` (T-anyhome finding), while `common` is dependency-free.
+//! `agent` (Q36 D1, post-Q66 wording): the original rationale -- anyhome's
+//! vendored libsql 0.10.0-pre.4 colliding with opencoder's crates.io 0.9.30
+//! at link time (`duplicate symbol: update_hook_cb`) -- died with the
+//! anyhome entity (Q66, S54), but the constraint itself is RETAINED as
+//! link-graph hygiene: the server binary must not link `agent`/opencoder
+//! (the Agent engine runs as a subprocess, Q35/Q37), while `common` is
+//! dependency-free and keeps the path shapes single-sourced.
 //!
 //! Deletion is DELIBERATELY ignored (escalation item **A5**): memory
 //! persistence beats GC. An object deleted (or a namespace torn down) keeps

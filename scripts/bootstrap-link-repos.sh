@@ -17,11 +17,12 @@
 #
 # Optional per-repo `also_link` (TOML string array, ';'-joined into one TSV
 # column) names EXTRA paths that must exist as RELATIVE symlinks to the
-# repo's MAIN target. Used when an upstream workspace references a pin
-# through its OWN internal relative path (any-home's Cargo.toml resolves
-# nfsserve at link_repos/nfsserve relative to the any-home root): without
-# the symlink that path would either not resolve or hold a SECOND,
-# divergent copy of the repo. Bootstrap creates missing links, verifies
+# repo's MAIN target. A generic capability for upstream workspaces that
+# reference a pin through their OWN internal relative path: without the
+# symlink that path would either not resolve or hold a SECOND, divergent
+# copy of the repo. No pin currently uses it (the only consumer, the
+# nested any-home layout, was decommissioned with Q66); the mechanism
+# stays. Bootstrap creates missing links, verifies
 # existing ones resolve to the main target, and migrates a legacy REAL
 # directory at an also_link path to the symlink — only when it is a git
 # repo at the pinned sha whose only dirt is the patch marker (link_repos

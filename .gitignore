@@ -47,7 +47,8 @@ __pycache__/
 # T0.2 vendored peer binaries (versions.toml is checked in)
 /vendor/bin/
 /vendor/cache/
-# Apache-2.0 text is checked in (NOTICE/decisions point at it); the rest of
-# LICENSES/ is generated (SBOM).
+# Apache-2.0 + BSD-3-Clause texts are checked in (NOTICE/decisions point
+# at them); the rest of LICENSES/ is generated (SBOM).
 LICENSES/*
 !LICENSES/Apache-2.0.txt
+!LICENSES/BSD-3-Clause.txt

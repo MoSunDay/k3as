@@ -1,29 +1,25 @@
-# link_repos.lock — pinned path-dependency manifest (T0.2b, Q38).
+# link_repos.lock — pinned path-dependency manifest (T0.2b, Q38; Q66
+# revision: any-home + libsql pins decommissioned, 6 pins remain).
 #
 # `link_repos/` is gitignored BY DESIGN: these are read-only build inputs,
 # materialized reproducibly by `scripts/bootstrap-link-repos.sh`
 # (git clone + `git checkout <sha>`). Never commit materialized trees.
 #
 # Rules:
-#   * Entries materialize IN LISTED ORDER — any-home precedes libsql, the
-#     one repo still pinned INSIDE the any-home tree. nfsserve is pinned
-#     TOP-LEVEL (default path link_repos/nfsserve); its AUTH_SYS
-#     caller-identity patch (Q37) is versioned in THIS repo at
-#     scripts/patches/ so the patch advances with its consumer
-#     commit-by-commit instead of riding the any-home pin.
+#   * Entries materialize IN LISTED ORDER. nfsserve is pinned TOP-LEVEL
+#     (default path link_repos/nfsserve); its AUTH_SYS caller-identity
+#     patch (Q37) is versioned in THIS repo at scripts/patches/ so the
+#     patch advances with its consumer commit-by-commit (Q66: the pin no
+#     longer rides inside an any-home tree).
 #   * `path` is repo-root relative; default `link_repos/<name>`.
 #   * `patch` (optional) is applied on top of the pinned checkout,
 #     idempotently (`patch_marker` file presence = already applied).
 #   * `also_link` (optional, string array) lists extra repo-root paths that
-#     must resolve to this repo's MAIN target as RELATIVE symlinks. Needed
-#     when an upstream workspace references a pin through its own internal
-#     relative path: any-home's Cargo.toml resolves nfsserve at
-#     link_repos/nfsserve relative to the any-home root, so that path must
-#     stay a symlink to the top-level checkout — otherwise the dependency
-#     graph holds two divergent nfsserve copies. The root Cargo.toml
-#     references that same nested path on purpose: cargo keys path deps by
-#     LEXICAL path (symlinks are never canonicalized), so keeping one
-#     lexical identity is what holds nfsserve to a single lockfile entry.
+#     must resolve to this repo's MAIN target as RELATIVE symlinks — a
+#     generic capability for upstream workspaces that reference a pin
+#     through their own internal relative path. Currently unused: no pin
+#     carries an also_link (the only consumer, the nested any-home layout,
+#     died with Q66); the mechanism stays in the bootstrap script.
 #   * The real directories link_repos/argo-workflows/, link_repos/flannel/
 #     and link_repos/kiri/ are REFERENCE CHECKOUTS ONLY (docs / e2e
 #     inspiration) — no Cargo.toml path dependency points at them;
@@ -35,13 +31,12 @@
 #     tips. rdb's validated line (8de5dcc) was rewritten out of upstream
 #     main (d52ef49 is a parallel rebase), so the pin is published as the
 #     dedicated branch `pin/init-pro` on MoSunDay/rdb — full clone +
-#     checkout reaches it. libsql/nfsserve pins are ancestors of (resp.
-#     tip of) their public upstreams. any-home was RE-PINNED to the
-#     reachable main tip 42b8d8e after upstream rewrote history (the old
-#     a1e2d9c line became unreachable; Q42 session, rdb precedent).
-#     arust-workflow (Q42) is the workflow engine+model extraction —
-#     origin/main tip, consumed as workspace path deps by crates/api
-#     and crates/controllers.
+#     checkout reaches it. nfsserve is the tip of its public upstream.
+#     Cold clones materialize 6 mandatory pins: openrusty, rdb,
+#     flannel-rust, opencoder, nfsserve, arust-workflow (Q66; the former
+#     any-home + libsql pair is decommissioned). arust-workflow (Q42) is
+#     the workflow engine+model extraction — origin/main tip, consumed as
+#     workspace path deps by crates/api and crates/controllers.
 
 [[repo]]
 name = "openrusty"
@@ -64,26 +59,11 @@ url  = "https://github.com/MoSunDay/opencoder.git"
 sha  = "c1a1b2e78e1ccd4a3cc2ac6dc408a76d30bf46e6"
 
 [[repo]]
-name = "any-home"
-url  = "https://github.com/MoSunDay/any-home.git"
-sha  = "42b8d8ea9bdab14c55a1a924654b709055dd2ee3"
-
-[[repo]]
 name = "nfsserve"
 url  = "https://github.com/huggingface/nfsserve.git"
 sha  = "c00c3614184bc79010c0aa3b69c2cdde1c5fca77"
 patch = "scripts/patches/nfsserve-auth-identity.patch"
 patch_marker = "src/identity.rs"
-# any-home's workspace resolves nfsserve at link_repos/nfsserve relative
-# to the any-home root; keep that path a relative symlink to the main
-# target so only ONE nfsserve copy exists in the dependency graph (Q38).
-also_link = ["link_repos/any-home/link_repos/nfsserve"]
-
-[[repo]]
-name = "libsql"
-url  = "https://github.com/tursodatabase/libsql.git"
-sha  = "6f451a1fabacbcbc9960b232b4c1605a5021979b"
-path = "link_repos/any-home/link_repos/libsql"
 
 [[repo]]
 name = "arust-workflow"

@@ -39,8 +39,11 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 sha2.workspace = true
 zstd.workspace = true
-# T-anyhome (Q36): anyhome NFSv3 memory service plus its nfsserve engine, to
-# be embedded by the anyhome workspace supervisor. Declared here so the
-# path deps stay in the build graph ahead of use.
-anyhome = { workspace = true }
+# T-anyhome (Q66): the workspace NFSv3 plane's engine — nfsserve is the
+# top-level pin (link_repos/nfsserve, AUTH_SYS patch Q37) behind DirFs.
 nfsserve = { workspace = true }
+# T-anyhome (Q66): SymbolTable for the mirrorfs-derived VFS port
+# (anyhome_vfs); inside nfsserve intaglio is only an optional demo feature.
+intaglio = "1.6"
+# T-anyhome (Q66): the `#[async_trait]` NFSFileSystem impl of DirFs.
+async-trait = { workspace = true }

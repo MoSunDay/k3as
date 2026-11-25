@@ -108,21 +108,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhome"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "home",
- "libsql 0.10.0-pre.4",
- "nfsserve",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -529,16 +514,17 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "cli"
 version = "0.2.0"
 dependencies = [
- "anyhome",
  "anyhow",
  "api",
  "apiserver",
+ "async-trait",
  "clap",
  "common",
  "controllers",
  "engine-client",
  "flanneld",
  "infra",
+ "intaglio",
  "k8s-openapi",
  "kubelet",
  "nfsserve",
@@ -1829,6 +1815,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "intaglio"
+version = "1.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca9188c1b20836bb561bc09bb2f54e9ca99b271031b5f3ff183a00c08c98c8"
+
+[[package]]
 name = "ipnet"
 version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2112,23 +2104,9 @@ dependencies = [
  "fallible-iterator",
  "futures",
  "libsql-sqlite3-parser",
- "libsql-sys 0.9.30",
+ "libsql-sys",
  "parking_lot",
  "serde",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "libsql"
-version = "0.10.0-pre.4"
-dependencies = [
- "async-trait",
- "bitflags 2.13.1",
- "bytes",
- "futures",
- "libsql-sys 0.10.0-pre.4",
- "parking_lot",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -2138,16 +2116,6 @@ name = "libsql-ffi"
 version = "0.9.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0be1da6f123ceb2cd23f469883415cab9ee963286a85d61e22afb8b12e15e681"
-dependencies = [
- "bindgen 0.66.1",
- "cc",
- "cmake",
- "glob",
-]
-
-[[package]]
-name = "libsql-ffi"
-version = "0.10.0-pre.4"
 dependencies = [
  "bindgen 0.66.1",
  "cc",
@@ -2180,18 +2148,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90725458cc4461bc82f8f7983e80b002ea4f64b5184e1462f252d0dd74b122f5"
 dependencies = [
  "bytes",
- "libsql-ffi 0.9.30",
- "once_cell",
- "tracing",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "libsql-sys"
-version = "0.10.0-pre.4"
-dependencies = [
- "bytes",
- "libsql-ffi 0.10.0-pre.4",
+ "libsql-ffi",
  "once_cell",
  "tracing",
  "zerocopy 0.7.35",
@@ -2616,7 +2573,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "libsql 0.9.30",
+ "libsql",
  "opencoder-core",
  "opencoder-dag",
  "serde",

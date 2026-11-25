@@ -20,6 +20,20 @@ recipe). The adaptation is documented in each module header as
 code is used; kiri's GPL-2.0-only `guest/kernel` tree is NOT copied,
 linked, or modified.
 
+nfsserve / mirrorfs — https://github.com/huggingface/nfsserve
+Pinned checkout: c00c3614184bc79010c0aa3b69c2cdde1c5fca77 (+ the
+AUTH_SYS caller-identity patch scripts/patches/nfsserve-auth-identity.patch)
+Copyright (c) 2023 XetData, Copyright (c) 2025 Hugging Face
+Licensed under the BSD 3-Clause License (full text:
+`LICENSES/BSD-3-Clause.txt`, verbatim from the upstream LICENSE).
+
+`crates/cli/src/anyhome_vfs.rs` and `crates/cli/src/anyhome_dirfs.rs`
+are adapted from nfsserve's `examples/mirrorfs.rs` (the FSMap/DirFs
+directory VFS behind the embedded workspace NFS plane, Q66). The
+adaptation is documented in each module header as "adapted from
+nfsserve mirrorfs @ c00c361". nfsserve is also consumed directly as
+the NFSv3 engine (NFSTcpListener) of that plane.
+
 Other bundled upstream artifacts (containerd, runc, cni-plugins,
 crictl) keep their own licenses and are recorded by the generated
 SPDX-2.3 SBOM in `LICENSES/spdx-2.3.json`.

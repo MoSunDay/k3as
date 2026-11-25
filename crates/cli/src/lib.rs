@@ -9,7 +9,9 @@
 #![forbid(unsafe_code)]
 
 mod anyhome;
+mod anyhome_dirfs;
 mod anyhome_keeper;
+mod anyhome_vfs;
 mod cmd;
 mod config_scan;
 pub mod discovery;

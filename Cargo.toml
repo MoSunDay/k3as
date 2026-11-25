@@ -85,22 +85,16 @@ opencoder-session = { path = "link_repos/opencoder/crates/session" }
 # LLM client exactly like upstream run.rs — `opencoder-llm` is already in
 # the closure via opencoder-session; declaring it keeps the version single-sourced.
 opencoder-llm = { path = "link_repos/opencoder/crates/llm" }
-# - anyhome: mountable NFSv3 memory service behind workflow/agent workspaces
-#   (T-anyhome, decision Q36). Default features only — the real semantic
-#   embedder (`embed-fastembed`) stays off, like rdb's `store`-only cut.
-anyhome = { path = "link_repos/any-home/crates/anyhome" }
 # - arust-workflow: the Argo Workflows controller core — argoproj.io model +
 #   reconciler engine over the Kube seam (T7.3 extraction, Q42).
 workflow-model = { path = "link_repos/arust-workflow/crates/workflow-model" }
 workflow-engine = { path = "link_repos/arust-workflow/crates/workflow-engine" }
-# - nfsserve: the NFSv3 engine anyhome multiplexes (Q36). The CHECKOUT is
-#   pinned top-level (link_repos/nfsserve, Q38); this path must stay
-#   LEXICALLY identical to any-home's internal `link_repos/nfsserve`
-#   reference — cargo keys path deps by lexical path (symlinks are never
-#   canonicalized), so a top-level path here would fork nfsserve into two
-#   lockfile entries. The path below is the `also_link` symlink bootstrap
-#   maintains to the top-level checkout.
-nfsserve = { path = "link_repos/any-home/link_repos/nfsserve" }
+# - nfsserve: the NFSv3 engine of the embedded workspace NFS plane (Q66),
+#   pinned TOP-LEVEL (link_repos/nfsserve, Q38); its AUTH_SYS
+#   caller-identity patch (Q37) is versioned in THIS repo at
+#   scripts/patches/, so the patch advances with its consumer
+#   commit-by-commit.
+nfsserve = { path = "link_repos/nfsserve" }
 
 # External
 anyhow = "1"
