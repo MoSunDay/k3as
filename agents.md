@@ -98,6 +98,10 @@ SSOT drift watch (reconciled in Sprints 10-12; re-check on touch):
   explicit permission.
 - Comment style: module-level `//!` doc comments reference task IDs
   (T1.1, T5.4) and decision codes (Q10, Q13).
+- `rules/` — operator rule cards distilled from the SSOT (clone3/
+  namespace isolation profiles; link_repos pin red lines). They restate,
+  never override, decisions.md; read the matching card BEFORE touching
+  `crates/nsrun`, `RunSpec`, `link_repos*`, or root path deps.
 
 ## Workspace map
 
