@@ -1885,6 +1885,27 @@ HTTP 错误状态不触发回退, 回退失败与直连失败同 502 形状, kub
   item A2 resolved, no upstream change needed), K1 keeper directory creation
   after a Workflow POST.
 
+**Superseded in implementation (Sprint 54 / Q66, 2026-11-25) — the anyhome
+entity is decommissioned, the workspace-NFS contract stands.** The plane
+this decision created is unchanged from the CONSUMER's point of view —
+flags (`--anyhome-addr`, `--disable-anyhome`), envs, the annotation
+strings, the volume names, the on-disk `<data-dir>/anyhome/fs` layout,
+the keeper, the path SSOT in `common::workspace`, and the single-port
+NFS/MOUNT/portmap posture all survive verbatim (Q43's injection chain
+rides it untouched). What dies is the implementation base: the any-home
+crate assembly (`RealFs` + `MemoryDb` + `DummyEmbedder`), the
+`anyhome.db` file, the EMBED_DIM drift guard, and the vendored libsql
+plane — none of the `MemoryDb` retrieval semantics (the `/search` RPC,
+the exact-match `DummyEmbedder`) ever had a consumer in init-pro, so
+nothing observable is lost. The plane is now served by an in-tree
+directory VFS (DirFs, adapted from nfsserve's mirrorfs example,
+Apache-2.0 attribution in NOTICE) mounted directly on `NFSTcpListener`
+— see Q66. D1 below loses its original rationale (the vendored
+libsql 0.10.0-pre.4 that collided with opencoder's crates.io 0.9.30 copy
+no longer exists in the binary's link graph); the constraint itself is
+RETAINED as link-graph hygiene — the server binary stays free of any
+`agent`/opencoder linkage, and the path SSOT stays in `common`.
+
 ## Q37 — T7.1 Phase B: node-side Agent execution (opencoder CLI subprocess) (2026-08-31)
 
 **Context** — Q35 shipped the `Agent` resource end-to-end (API, scheduler
@@ -2010,6 +2031,23 @@ single commit). Non-build reference checkouts (argo-workflows, flannel)
 stay unmanaged and are documented as such. Discovered during closure: the
 transitive anyhome->libsql path dep makes libsql a 7th mandatory pin (the
 6-repo assumption was wrong).
+
+**Revised (Sprint 54 / Q66, 2026-11-25) — mandatory pins 7 → 6, the
+also_link doctrine retires.** any-home and its nested libsql pin are
+REMOVED from `link_repos.lock` (the anyhome entity is dead, Q66);
+nfsserve loses its `also_link` entry because no consumer resolves
+nfsserve through any-home's internal path anymore — the root
+`Cargo.toml` now points at the TOP-LEVEL `link_repos/nfsserve`, and with
+it the "one lexical identity" nested-pin doctrine (lexical-path keying,
+the `link_repos/any-home/link_repos/nfsserve` symlink, the
+any-home-precedes-libsql ordering rule) is deleted from the manifest
+doctrine. The AUTH_SYS caller-identity patch stays exactly as is
+(canonical copy in this repo, marker `src/identity.rs`, Q37). The
+any-home reachability note (the 42b8d8e re-pin after the upstream
+history rewrite) is now historical. Cold-clone posture is otherwise
+unchanged: 6 mandatory pins — openrusty, rdb, flannel-rust, opencoder,
+nfsserve, arust-workflow — plus the reference-only checkouts
+(argo-workflows, flannel, kiri) documented above.
 
 ---
 
@@ -2365,6 +2403,17 @@ all landed the same day:
   can rw-mount any server path the annotation names — there is no
   per-path authz in v1, the same client-trust model as native k8s NFS;
   per-path ACLs would be a follow-up decision.
+
+**Rebase note (Sprint 54 / Q66, 2026-11-25).** T7.5's semantics are
+UNTOUCHED by the anyhome entity decommission (Q66): the annotation →
+volume defaulting chain, the collision disambiguation ladder, and the
+keeper pre-creation all ride the same single-port NFSv3 plane — only the
+plane's engine under the hood changed (any-home's AnyHomeFs → the
+in-tree DirFs). The decision above reads "anyhome" throughout as the
+plane's historical name; every user-facing surface it specifies (flags,
+annotations, volume names, server-path semantics) is byte-identical, and
+the pinning tests (`crates/apiserver/tests/anyhome_pod_mounts.rs`, e2e
+P3-P5) required zero changes.
 
 ## Q44 — T4.3 Scope C: ClusterIP 分配面 + Router VIP 承载面 (T4.3 Scope C / S51) (LOCKED 2026-11-22, S51 定稿即交付)
 
@@ -3357,3 +3406,76 @@ server）下隧道面 401（直连优先、隧道仅 transport 回退的 Q65 姿
 `crates/apiserver/tests/tunnel_auth.rs` 9 项 401 劫持拒绝矩阵; 上述
 fail-closed/单活跃轮换/版本偏斜姿态逐款兑现, Q31 单请求语义与 Q47
 bearer 认证层未动。）
+
+## Q66 — 工作区 NFS 平面去 anyhome 实体化: nfsserve 直连 + 内嵌 DirFs (T7.4 rebase / S54) (LOCKED 2026-11-25, S54 定稿即交付)
+
+**Context.** 用户指令 (2026-11-25): 「k3as 内置 rdb 存储, 集群内部的存储
+都可以直接使用它! 完全下线掉 anyhome, 使用 link_repos 下的 nfs 做内置
+存储能力」。平台侧结构化存储 rdb-only 已由 Q33 完成 (`rdb://` opt-in
+durable, 平台默认 embedded); 检视 anyhome 实体层的实际消费面后发现:
+init-pro 消费的只有其 NFSv3 文件平面 (`/workflow` / `/agent` / `/pod`
+子树 + 单口 NFS/MOUNT/portmap 复用), 而 any-home crate 的记忆/检索层
+(MemoryDb/libsql、DummyEmbedder、`/search` RPC、`anyhome.db`) 在
+init-pro 内**零消费者**——从未进入任何 TODO 或用户面契约。与此同时该
+实体带来三条结构成本: libsql 成为第 7 个 mandatory pin (Q38 收口时
+发现); Q36 D1 的双 libsql 符号冲突 workaround 以 vendor 副本为前提;
+嵌套 pin / also_link / 词法路径恒等教义整条链只为 any-home 存在。
+nfsserve 仓库的 `examples/mirrorfs.rs` (625 行, Apache-2.0, HuggingFace)
+是完整的生产级目录 VFS (FSMap/FSEntry/RefreshResult: intaglio
+SymbolTable 字符串驻留 + AtomicU64 fileid + tokio fs, 每次
+lookup/readdir 双 stat 的 mtime 失效刷新, 全写路径 setattr/write/
+create/remove/rename/mkdir/symlink), 正是「link_repos 下的 nfs 做内置
+存储能力」所需的可移植件。
+
+**Options.** (a) 保留 any-home crate、仅停用 MemoryDb —— 弃: 实体与两个
+pin 留存, 结构成本一条不减。(b) opencode store 换 rdb —— **明确不在
+范围**: opencoder 的 libsql 走 crates.io 0.9.30 (其 store 既有形态,
+mysql 为默认关闭的可选 feature), 用户指令指向的是「集群内部存储」平台
+面 (已 rdb), 不是 opencode 内部 store。(c) 移植 mirrorfs 为 cli 内嵌
+DirFs, `NFSTcpListener` 直挂导出 `/`, anyhome 实体死亡 —— **选**。
+
+**Decision (final).**
+- **用户面契约 100% 保留 (「anyhome」降级为该平面的历史命名)**: flags
+  `--anyhome-addr` (默认 `127.0.0.1:11111`, env `INIT_PRO_ANYHOME_ADDR`)
+  / `--disable-anyhome` (env `INIT_PRO_DISABLE_ANYHOME`); annotations
+  `init-pro.io/workspace` / `init-pro.io/anyhome` /
+  `init-pro.io/anyhome-mounts`; volume 名 `anyhome` /
+  `anyhome-<sanitized>`; 盘上布局 `<data-dir>/anyhome/fs` +
+  `workflow/` `agent/` `pod/` 根; keeper 脚手架 (skills/tools/mem/
+  prompt.md 喂 runner `--prompt-file`, Q37) 与
+  `spawn_anyhome(data_dir, addr, store, shutdown)` 签名; Q43 注入链
+  (create/apply/replace prepare) 与 kubelet 消费面 (父级 export 挂载 +
+  `vers=3,tcp,nolock,noacl,port=P,mountport=P`) 全部零改动。命名不改
+  是契约兼容的一部分——flags/annotations 是已发布的用户面。
+- **新底座**: `crates/cli/src/anyhome_vfs.rs` (FSMap 内核移植) +
+  `anyhome_dirfs.rs` (`DirFs` + `NFSFileSystem` trait impl 移植) +
+  `anyhome.rs` 收敛为装配层 (`NFSTcpListener::bind(addr, fs)` +
+  `with_export_name("/")` 单 TCP 口, serve 循环保留 `tokio::select!` +
+  `Shutdown` drain 姿势——nfsserve 无 cancel seam 的 Q36 理由仍成立)。
+  移植源在模块头 + NOTICE 归属 (mirrorfs/nfsserve, Apache-2.0, 仿 kiri
+  条目格式); `intaglio` 1.6 成为 cli 直接 crates.io 依赖 (在 nfsserve
+  里它只是 optional demo feature)。
+- **实体死亡**: any-home 与 libsql 两个 pin、root `Cargo.toml` 的
+  `anyhome` path dep、`crates/cli` 的 anyhome dep、`MemoryDb`/
+  `anyhome.db`/`EMBED_DIM`/WAL checkpoint/`anyhome::cli::port_of`、
+  逐层镜像上游 main.rs 的装配。存量 `<data-dir>/anyhome/fs` 是普通
+  目录树, DirFs 直接复用存量字节; 遗留 `anyhome.db` 成为无害死文件
+  (不再读写)。AUTH_SYS identity patch 保留不动 (Q37 caller-identity,
+  canonical copy 在本仓库 + marker `src/identity.rs`)。
+- **T7.4/T7.5 状态不变**: 语义与用户面不变、底座更换, 两行保持 done
+  (Q36 supersede-in-implementation + Q43 rebase note 记录承接); counts
+  43/4/7 不变。Q36 D1 约束保留 (server 二进制不链 `agent`, 路径 SSOT
+  在 `common`) 但 rationale 改写为 link-graph hygiene——vendor libsql
+  副本消失后符号冲突前提不复存在。
+
+**Consequences.** (+) pin 7→6, 嵌套 pin/also_link/词法恒等教义整体
+退役, bootstrap 冷克隆面简化; server 二进制的 libsql 链接面归零
+(opencoder 子进程侧不变, 其 store 仍走 crates.io libsql); 双 libsql
+符号冲突类问题永久关闭。(+) 数据面无迁移成本 (目录直通)。(−) DirFs 是
+in-tree 移植: nfsserve 上游 mirrorfs 演进不再自动跟进 (适配面记录在
+案; 单口/vers=3 契约由 e2e A1/P2/K1/P3-P5 + apiserver/kubelet 钉死
+测试零改动复跑保障)。(−) mirrorfs 继承 demo 出身的特性——VFS 语义
+(每次 lookup 双 stat 刷新、READDIR 全量重列) 与 any-home RealFs 同为
+目录直通, 无回归预期, 但性能特征未做专门基准。Gate: workspace tests
+(基线 1509/0)、golden 75/0、parity 31/31、clippy 0、
+`scripts/anyhome-e2e.sh` A1/P2/K1/P3-P5。
