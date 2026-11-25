@@ -7,6 +7,73 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sprint 53 — 评审修复批 I: Q64/Q65 面加固 (PATCH 写路径准入补全 + netpol fail-closed + 隧道 pending 取消清理 + iptables/drain 有界化) (2026-11-25)
+
+**Goal:** S52 收口后的边界执行评审落地批次 1（P1-①②⑤⑥——安全 ①、
+稳定性 ②⑤、一致性 ⑥；互不依赖、均可独立闭合）。无 TODO 状态变化
+（counts: 43 done · 4 in-progress · 7 not-started，纯加固批）；P1-③
+（隧道 park 身份绑定，涉 wire 字段扩展——先 Q65 决策修订再动协议）与
+P1-④（`nodePort:0` = unspecified）留 S53 主体批。commits: **bea37fb**
+（代码）+ **5cd7c12**（e2e 断言）+ **31a3229**（SSOT 锁步）+ 本条收口。
+
+**Changes**
+- **P1-① PATCH 写路径准入补全（Q64）**: `apiserver item.rs do_patch` 在
+  CAS 写前对 FINAL merged 对象补跑 `api::validate::admit`（与
+  create/replace 同一单点）——四写路径（create/put/patch/apply）中
+  此前唯一缺口，SCTP 端口 merge-patch 可绕过 supported-subset 准入
+  入库；现全部强制 admit。pods/status、nodes/status 走专用路由
+  （`app.rs`），kubelet 状态写不受影响。集成测试
+  `rest_crud.rs::patch_runs_subset_admission_netpol`（422 Invalid +
+  存量对象未被改写）。
+- **P1-① netpol 编译面 fail-closed（Q64）**: `netpol_compile.rs
+  port_entries` 未知 `protocol` 由静默按 TCP 编译（fail-open——事故性
+  tcp 放行）改为 WARN + 整条 skip；全 skip 时空端口集 ≠ 全放行
+  （`vec![]` 与 `vec![None]` 语义分离），链体仍终端 REJECT——防御
+  纵深（主门在准入层，此层兜 rdb 存量/绕过写入对象）。单测
+  `unknown_protocol_port_skipped_fail_closed`。
+- **P1-② 隧道 pending 取消清理（Q65）**: `tunnel_registry.rs` 新
+  `PendingGuard` RAII——`submit` future 在 SLA 前被取消（HTTP 调用方
+  断连、axum 丢 handler）时由 Drop 清理 pending 响应者条目（原仅超时
+  分支显式清理，取消路径泄漏至「可能永不到达的 agent 响应」）；
+  `submit` 改 `self: &Arc<Self>`（guard 持注册表句柄）。单测
+  `cancelled_submit_cleans_pending`。
+- **P1-⑤ iptables exec + keeper drain 有界化（Q64）**:
+  `netpol_iptables.rs` 全部 exec（`-C` 探针×2 / `-I FORWARD` /
+  `iptables-save` / `iptables-restore` 含 stdin 写与 wait）套 5s
+  `EXEC_TIMEOUT`（`kill_on_drop`；超时归一 `TimedOut` 走既有 WARN
+  降级路径——语义不变仅加界，不挂 resync）；`runtime.rs` netpol
+  keeper drain 10s 有界（对齐 `REGISTRY_DRAIN_TIMEOUT`，超时 abort +
+  WARN，不挂死 agent 退出；abort 可能留 NP4 残留为已文档化权衡）。
+- **P1-⑥ phase-4-closure 对账**: §2 T4.3/T4.4/T4.5 三行收口划线
+  （S51/S52 证据，对齐 index.md 与 §11/§12）+ §6 台账 netpol 移除
+  （余项收窄 Router TLS/SNI）；decisions.md Q64/Q65 Consequences
+  **S53 补记**（Q65 补记内显式记 P1-③ 留批）。
+- **证据门（commit 5cd7c12）**: netpol-e2e NP1 新增 PATCH 子集门
+  （SCTP merge-patch → 422，置于被测策略存活区间内、Q25 SKIP 姿态
+  不变）。
+- **环境脚注（环境卫生，非产品缺陷）**: 本轮宿主为在役租户节点
+  （node04 / `/root/k3as-d` agent 在跑，host-gw CNI 占用
+  cni0=10.244.0.1 并持有 host-global `INIT-PRO-NPOL-*` 链命名空间——
+  Q64 一 host 一 agent 姿态），netpol-e2e NP0-NP4 领域电池**环境性
+  未跑**：起第二个 agent 会互覆写/teardown 剥离在役链。补偿验证：
+  真机 API 面 scratch server（无 agent、不触 iptables）——CREATE
+  合法 TCP 策略 201 / SCTP merge-patch **422 Invalid（Q64 子集消息）**
+  / 存量对象未改写 / 合法 UDP merge-patch 200（无误伤）。**领域电池
+  完整证据待干净宿主或 node04 维护窗口补跑**（评审上线条件之一）。
+- **门禁**: fmt ✓; build ✓; workspace tests **1491/0**（S52: 1488，
+  +3 新测试）; clippy -D warnings 0; golden **75/0 + 6 行环境门控
+  SKIP**（g24 registry 不可达；G25/G26/G29/G30/G60-G66/G80-82——cni0
+  被在役租户 CNI 占用，Q25）; flag-parity **31/31**; unsafe-audit ✓;
+  engine-singlethread ✓（all-gates 代码面全绿，e2e 电池按环境脚注
+  跳过）。
+- 计数: **43 done / 4 in-progress / 7 not-started**（无 TODO 状态变化）。
+- **评审遗留（S53 主体批 backlog）**: P1-③ 隧道 park 身份绑定（先 Q65
+  决策修订再动 wire）；P1-④ `nodePort:0` = unspecified（评估 golden
+  fixture 是否涉及）；批次 3 P2 寄存器（endPort 形状 422、`spec.ports`
+  merge key、ExternalName clusterIP 释放、组帧后错误不重试中继、
+  k3s-parity 措辞降级、nodes map GC、`http.rs` watch read_timeout）；
+  ①③ 落地过门后触发聚焦外部审计（隧道中继面 + netpol 准入面）。
+
 ## Sprint 52 — 网络链 II: T4.4 + T4.5 done (netpol supported-subset Q64 + agent-dialed 代理隧道 Q65 + D0 Service 写路径校验) (2026-11-22)
 
 **Goal:** 网络链 II 收口——T4.4 NetworkPolicy（Q64）+ T4.5 代理隧道

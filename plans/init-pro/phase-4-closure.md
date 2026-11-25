@@ -289,3 +289,23 @@ c859072)。commits: c859072(审查债) + 855cb68(代码) + e0f76ef(证据门)。
 - 计数: **43 done / 4 in-progress / 7 not-started**。
 - **Q64/Q65 定稿 LOCKED** (2026-11-22 定稿即交付, decisions.md; Q31 增
   S52 对齐注记——中继只换传输, 单请求/响应语义不重开)。
+
+## 13. S53 执行记录 (2026-11-25)
+
+**评审修复批 I（P1-①②⑤⑥, Q64/Q65 面加固, counts 不变 43/4/7）**:
+S52 收口后的边界执行评审批次 1 落地——① `do_patch` 补
+`api::validate::admit`（四写路径准入单点闭合, SCTP merge-patch → 422,
+netpol-e2e NP1 增 PATCH 门）+ netpol 编译器未知 protocol fail-closed
+skip；② 隧道 `PendingGuard` 取消清理（Q65 补记在案, decisions.md）；
+⑤ iptables exec 5s `EXEC_TIMEOUT` + keeper drain 10s 有界；⑥ §2/§6
+对账（本文件, commit 31a3229）。门禁: tests **1491/0**, golden
+**75/0**, parity **31/31**, clippy 0（all-gates 代码面全绿）。
+
+**待条件（评审上线条件, 未消）**: netpol-e2e NP0-NP4 完整证据在本宿主
+被在役 node04 租户 agent 环境性阻塞（host-global `INIT-PRO-NPOL-*`
+归属冲突 + cni0 被其 CNI 占用, Q64 一 host 一 agent）——以真机 API 面
+验证（CREATE 201 / SCTP PATCH 422 / 存量不变 / 合法 PATCH 200）补偿,
+**完整电池留干净宿主或 node04 维护窗口补跑**。P1-③（park 身份绑定,
+先 Q65 决策修订再动 wire）+ P1-④（`nodePort:0` = unspecified）进
+S53 主体批; ①③ 落地过门后触发聚焦外部审计（隧道中继面 + netpol
+准入面）。
