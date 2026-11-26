@@ -24,10 +24,11 @@ pub use disk::{
     CRITICAL_RATIO_PERCENT, GRACE, PRESSURE_MIN_AVAILABLE, PRESSURE_RATIO_PERCENT,
     REF_VICTIM_LIMIT,
 };
+pub(crate) use layers::is_staging_name;
 pub use layers::ViewPaths;
 pub use manifest::{
     parse_manifest, select_manifest, select_platform, sha256_digest, Descriptor, Manifest,
     ManifestIndex, ParsedManifest, Platform,
 };
-pub use pull::Puller;
+pub use pull::{Puller, MAX_MANIFEST_BYTES};
 pub use reference::parse_ref;

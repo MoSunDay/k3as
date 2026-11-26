@@ -115,3 +115,14 @@ fn desired_nodeport_service_with_clusterip_contributes() {
     assert_eq!(d.len(), 1);
     assert!(d.contains_key(&SocketAddr::new(IpAddr::V4(vip()), 80)));
 }
+
+/// T5.4 hardening: the bind retry tick is armed only while some desired
+/// VIP listener is still unbound (a fully bound plane stays quiet).
+#[test]
+fn retry_tick_only_while_listeners_are_missing() {
+    use crate::clusterip::retry_pending;
+    assert!(retry_pending(2, 0), "nothing bound yet");
+    assert!(retry_pending(2, 1), "one still missing");
+    assert!(!retry_pending(2, 2), "fully bound: stay quiet");
+    assert!(!retry_pending(0, 0), "empty plane: stay quiet");
+}

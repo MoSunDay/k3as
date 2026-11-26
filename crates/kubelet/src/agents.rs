@@ -33,6 +33,7 @@ use crate::agent_objects as objs;
 use crate::agent_sandbox::sweep_stale_attempt_dirs;
 use crate::agent_sandbox_plan::retry_delay;
 use crate::http::HttpJson;
+use crate::watch_backoff::{log_watch_pause, watch_pause};
 
 /// One execution attempt budget (Q37 fault surface); overridable via
 /// `INIT_PRO_AGENT_EXEC_TIMEOUT_SECS` (tests/e2e knob).
@@ -269,6 +270,10 @@ pub fn spawn_agent_runner(
 }
 
 /// Task 1: LIST + watch the agent collection (client-side nodeName filter).
+/// D (K10): the re-LIST pause backs off along the shared curve
+/// ([`watch_pause`]: 500 ms doubling to 5 min, reset by a cycle that ran
+/// over a minute) instead of a flat 500 ms -- an apiserver that is down
+/// costs one request per pause, not two per second.
 async fn watch_task(
     client: Arc<HttpJson>,
     node_name: String,
@@ -276,19 +281,25 @@ async fn watch_task(
     killers: Killers,
     shutdown: infra::Shutdown,
 ) {
+    let mut failures = 0u32;
     loop {
         if shutdown.is_triggered() {
             return;
         }
-        if let Err(e) = watch_cycle(&client, &node_name, &desired, &killers, &shutdown).await {
-            if shutdown.is_triggered() {
-                return;
-            }
-            tracing::debug!(target: "init-pro", error = %e, "agent runner: watch cycle ended; re-LIST in 500ms");
+        let started = Instant::now();
+        let ended = match watch_cycle(&client, &node_name, &desired, &killers, &shutdown).await {
+            Ok(()) => None,
+            Err(_) if shutdown.is_triggered() => return,
+            Err(e) => Some(e),
+        };
+        let (streak, pause) = watch_pause(failures, started.elapsed());
+        failures = streak;
+        if let Some(e) = ended {
+            log_watch_pause("agent runner: watch", &e, failures, pause);
         }
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = tokio::time::sleep(pause) => {}
         }
     }
 }

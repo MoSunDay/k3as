@@ -177,8 +177,21 @@ push_image() {
     || bimg_fail "manifest PUT $repo:$tag -> $code (expected 201): $(head -c 200 "$DD/manifest-put.out")"
 }
 
-delete_registry_blob() { # REPO DIGEST -> status (202 = accepted, T6.3 CAS)
+delete_registry_blob() { # REPO DIGEST -> status (202 = accepted, T6.3 CAS; 409 BLOB_REFERENCED while a manifest lists it, batch D B2)
   curl -s -o /dev/null -w '%{http_code}' -X DELETE "$REG/v2/$1/blobs/$2"
+}
+
+registry_manifest_digest() { # REPO TAG -> Docker-Content-Digest of the tagged manifest ("" when unknown)
+  curl -sI -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+    "$REG/v2/$1/manifests/$2" | tr -d '\r' \
+    | awk 'tolower($1) == "docker-content-digest:" { print $2 }'
+}
+
+delete_registry_manifest() { # REPO TAG -> status (202 = accepted; the v2 API is digest-only, so resolve first)
+  local d
+  d="$(registry_manifest_digest "$1" "$2")"
+  [[ -n "$d" ]] || { echo 404; return; }
+  curl -s -o /dev/null -w '%{http_code}' -X DELETE "$REG/v2/$1/manifests/$d"
 }
 
 # --- pod helpers -----------------------------------------------------------

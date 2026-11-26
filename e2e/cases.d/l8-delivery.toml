@@ -1,0 +1,12 @@
+# Layer 8 -- delivery plane (T8.1-T8.5): certs.d trust, registry push client
+# + docker-save importer, TrafficSplit, ServicePipeline/Build, canary.
+
+[[suite]]
+id = "delivery-e2e"
+script = "scripts/delivery-e2e.sh"
+runner = "battery"
+layer = 8
+todos = ["T8.1", "T8.2", "T8.3", "T8.4", "T8.5"]
+cases = ["DL1", "DL2", "DL3", "DL4", "DL5", "DL6", "DL7", "DL8", "DL9", "DL10"]
+skip = ["no-binary", "no-curl", "no-python3"]
+title = "ServicePipeline build->publish->promote, canary steps/promote/abort, TrafficSplit weights, docker-save importer, archive mode (Q56-Q58)"

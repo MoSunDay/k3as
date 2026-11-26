@@ -33,7 +33,7 @@ use super::manifest::{
     Manifest, ParsedManifest, MANIFEST_TYPES,
 };
 use super::reference::{host_port, normalized, parse_ref};
-use crate::http::{get_raw, read_body_with_deadline};
+use crate::http::get_raw;
 
 /// C2: overall budget for ONE image pull (manifest chain + every blob). A
 /// stalled registry used to hang the sync worker indefinitely; past this
@@ -41,6 +41,12 @@ use crate::http::{get_raw, read_body_with_deadline};
 /// retries. Generous on purpose -- a slow-but-flowing blob never trips it,
 /// only a registry that stops delivering.
 pub const PULL_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
+/// D: the most `fetch_manifest` will buffer. A manifest document is tiny
+/// (KiB); the cap is what keeps an untrusted registry from sizing the
+/// kubelet's heap -- `Content-Length` past it fails before a byte is read,
+/// a body that grows past it while streaming fails mid-read.
+pub const MAX_MANIFEST_BYTES: usize = 4 << 20;
 
 /// The "timed out" error string for an expired pull budget (C2). The words
 /// matter: the sync loop's error dedup and the e2e gates match on them.
@@ -59,9 +65,11 @@ pub struct Puller {
     quota: u64,
     /// Single-flight map: concurrent pulls of the same normalized ref
     /// collapse onto one in-progress pull (the second waiter re-checks the
-    /// ref file after the lock releases). Entries persist — bounded by the
-    /// distinct refs ever pulled, never by transfer volume.
-    in_flight: Arc<std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// ref file after the lock releases). D: the entries are `Weak`, so
+    /// the map is bounded by the refs IN FLIGHT, not by the distinct refs
+    /// ever pulled -- once every guard is gone the entry is dead and the
+    /// next `flight_lock` prunes it.
+    in_flight: Arc<std::sync::Mutex<BTreeMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 impl Puller {
@@ -88,15 +96,24 @@ impl Puller {
     }
 
     /// Acquire the per-ref in-flight lock. The guard is OWNED (`Arc`-based)
-    /// so it can outlive this borrow — the entry stays in the map for the
-    /// next pull of the same ref.
+    /// so it can outlive this borrow; while it (or a waiter) lives, the
+    /// weak map entry upgrades and the pull shares one lock. Dead entries
+    /// (every holder gone) are pruned first (D).
     async fn flight_lock(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut map = self
                 .in_flight
                 .lock()
                 .expect("pull single-flight map poisoned");
-            map.entry(key.to_string()).or_default().clone()
+            map.retain(|_, weak| weak.strong_count() > 0);
+            match map.get(key).and_then(std::sync::Weak::upgrade) {
+                Some(held) => held,
+                None => {
+                    let fresh = Arc::new(tokio::sync::Mutex::new(()));
+                    map.insert(key.to_string(), Arc::downgrade(&fresh));
+                    fresh
+                }
+            }
         };
         lock.lock_owned().await
     }
@@ -233,9 +250,19 @@ impl Puller {
             return Err(format!("GET {path}: unexpected status {}", resp.status));
         }
         let reported = resp.docker_content_digest.clone();
-        let bytes = read_body_with_deadline(&mut resp.body, deadline)
-            .await
-            .map_err(|e| format!("read manifest body ({path}): {e}"))?;
+        // D: an oversized Content-Length fails before a byte is read; the
+        // streamed bytes are capped the same way while they land.
+        if resp.content_length.unwrap_or(0) > MAX_MANIFEST_BYTES as u64 {
+            return Err(format!(
+                "manifest {path}: Content-Length {} exceeds the {MAX_MANIFEST_BYTES}-byte cap",
+                resp.content_length.unwrap_or(0)
+            ));
+        }
+        let bytes =
+            tokio::time::timeout_at(deadline, resp.body.read_to_end_capped(MAX_MANIFEST_BYTES))
+                .await
+                .map_err(|_| pull_timed_out(&format!("read manifest body ({path})")))?
+                .map_err(|e| format!("read manifest body ({path}): {e}"))?;
         let computed = sha256_digest(&bytes);
         if let Some(d) = reported.as_deref() {
             if d != computed {
@@ -449,6 +476,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// D: a manifest body is capped -- by the announced `Content-Length`
+    /// before any read, and by the streamed bytes when there is no length.
+    #[tokio::test]
+    async fn oversized_manifest_is_capped_in_head_and_stream() {
+        let root = temp_root("big-manifest");
+        let store = ImageStore::open(&root).unwrap();
+        let puller = Puller::new("127.0.0.1:15000", store);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MAX_MANIFEST_BYTES + 1
+        );
+        let (host, port) = one_shot_registry(head.into_bytes(), false).await;
+        let err = puller
+            .fetch_manifest(&host, port, "repo", "latest", &None, deadline)
+            .await
+            .expect_err("an oversized manifest must not buffer");
+        assert!(err.contains("exceeds"), "{err}");
+        let payload = vec![b'm'; MAX_MANIFEST_BYTES + 1];
+        // No Content-Length: chunked framing, so only the streamed cap
+        // sees the overflow.
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:x}\r\n", payload.len()).as_bytes());
+        response.extend_from_slice(&payload);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (host, port) = one_shot_registry(response, false).await;
+        let err = puller
+            .fetch_manifest(&host, port, "repo", "latest", &None, deadline)
+            .await
+            .expect_err("a chunked body past the cap must not buffer");
+        assert!(err.contains("exceeds"), "{err}");
+        assert!(tmp_is_empty(&root), "nothing was staged (C11)");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn a_good_blob_commits_and_tmp_stays_clean() {
         let root = temp_root("commit");
@@ -479,7 +541,35 @@ mod tests {
         assert_eq!(puller.in_flight.lock().unwrap().len(), 1);
         drop(g1);
         let _g2 = puller.flight_lock("h/r:v1").await; // reusable after release
+        assert_eq!(puller.in_flight.lock().unwrap().len(), 1);
         drop(_g2);
+        // D: the released ref is a dead weak now -- the NEXT lock (any key)
+        // prunes it, so the map tracks what is in flight, not history.
+        let g3 = puller.flight_lock("h/other:v2").await;
+        {
+            let map = puller.in_flight.lock().unwrap();
+            assert_eq!(map.len(), 1, "the dead entry was pruned");
+            assert!(!map.contains_key("h/r:v1"));
+            assert!(map.contains_key("h/other:v2"));
+        }
+        drop(g3);
+        // Single-flight itself still holds: a second taker of a HELD ref
+        // waits on the same lock instead of racing a fresh one.
+        let g4 = puller.flight_lock("h/s:v3").await;
+        let mut waiter = Box::pin(puller.flight_lock("h/s:v3"));
+        tokio::select! {
+            _ = &mut waiter => panic!("a held ref must not hand out a second lock"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        {
+            let map = puller.in_flight.lock().unwrap();
+            assert_eq!(map.len(), 1, "the holder and the waiter share one entry");
+            assert_eq!(map["h/s:v3"].strong_count(), 2, "holder + waiter");
+        }
+        drop(g4);
+        let g5 = waiter.await; // handed over on release
+        assert_eq!(puller.in_flight.lock().unwrap()["h/s:v3"].strong_count(), 1);
+        drop(g5);
         let _ = std::fs::remove_dir_all(&root);
     }
 

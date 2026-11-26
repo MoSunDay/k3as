@@ -107,6 +107,29 @@ impl WorkQueue {
         self.inner.processing.lock().unwrap().remove(key);
     }
 
+    /// A5: move every in-flight key back to `dirty` and re-send it.
+    ///
+    /// The queues outlive any one worker set (leadership hand-off, set
+    /// abort), so a key whose worker was aborted mid-reconcile would stay in
+    /// `processing` forever: `add` defers it into `dirty` without a send,
+    /// `done` is never called, and the key is undeliverable until restart.
+    /// Same lock order as `add`/`done` (`dirty` before `processing`), and
+    /// the whole hand-off happens under both locks so a concurrent `add`
+    /// cannot observe a key in neither set.
+    pub fn reset_processing(&self) {
+        let mut dirty = self.inner.dirty.lock().unwrap();
+        let mut processing = self.inner.processing.lock().unwrap();
+        let in_flight: Vec<String> = processing.drain().collect();
+        for key in in_flight {
+            // Invariant (see `add`): a key that sits in `processing` has NO
+            // pending send -- a re-`add` only marks it dirty and leaves the
+            // delivery to `done`. So every handed-back key needs a send,
+            // whether or not it is already marked dirty.
+            dirty.insert(key.clone());
+            let _ = self.inner.tx.send(key);
+        }
+    }
+
     /// Count (and return) one failure for `key`.
     pub fn note_failure(&self, key: &str) -> u32 {
         let mut f = self.inner.failures.lock().unwrap();
@@ -223,6 +246,63 @@ mod tests {
         q.done("ns/a");
         assert_eq!(q.next().await.as_deref(), Some("ns/a"));
         q.done("ns/a");
+    }
+
+    /// A5: a worker aborted mid-reconcile never calls `done`, so its key is
+    /// stuck in `processing` and `add` only re-marks it dirty -- without a
+    /// redelivery. `reset_processing` hands every in-flight key back.
+    #[tokio::test]
+    async fn reset_processing_redelivers_in_flight_keys() {
+        let q = WorkQueue::new();
+        q.add("ns/a".into());
+        assert_eq!(q.next().await.as_deref(), Some("ns/a"));
+        q.add("ns/b".into());
+        assert_eq!(q.next().await.as_deref(), Some("ns/b"));
+        // Both keys are in `processing`: a plain `add` is deferred only.
+        q.add("ns/a".into());
+        assert_eq!(q.len(), 1);
+        assert!(tokio::time::timeout(Duration::from_millis(30), q.next())
+            .await
+            .is_err());
+
+        q.reset_processing();
+        assert_eq!(q.len(), 2, "every in-flight key returns to dirty");
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            got.push(
+                tokio::time::timeout(Duration::from_millis(500), q.next())
+                    .await
+                    .expect("redelivered")
+                    .expect("channel open"),
+            );
+        }
+        got.sort();
+        assert_eq!(got, vec!["ns/a", "ns/b"]);
+        // Idempotent: nothing in flight -> nothing re-queued.
+        q.done("ns/a");
+        q.done("ns/b");
+        q.reset_processing();
+        assert!(q.is_empty());
+    }
+
+    /// A5: a key already re-added while processing keeps exactly ONE pending
+    /// delivery (no duplicate send from `reset_processing`).
+    #[tokio::test]
+    async fn reset_processing_does_not_duplicate_a_deferred_key() {
+        let q = WorkQueue::new();
+        q.add("ns/a".into());
+        assert_eq!(q.next().await.as_deref(), Some("ns/a"));
+        q.add("ns/a".into()); // deferred into `dirty`, no send yet
+        q.reset_processing();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.next().await.as_deref(), Some("ns/a"));
+        q.done("ns/a");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), q.next())
+                .await
+                .is_err(),
+            "no second copy may be in flight"
+        );
     }
 
     #[test]

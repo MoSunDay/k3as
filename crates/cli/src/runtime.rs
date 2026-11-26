@@ -121,6 +121,11 @@ const NETPOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// through child processes; a wedged `iptables` (xtables lock) must not hang
 /// agent exit. Same posture as the registry/anyhome drains: abort + WARN.
 const FLANNEL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Batch D (C6), T4.2/Q31: the kubelet's shutdown teardown (stopp+rmp of
+/// every sandbox) is bounded work -- a pause child parked in D-state must
+/// not hang agent exit. Longer than the others: a full sandbox list is
+/// stopped here. Same posture: abort + WARN.
+const KUBELET_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
 /// B12 (long-run bug sweep): the NFS data plane (Q36) joins unbounded today --
 /// an NFS client holding a handle open past the listener close must not hang
 /// server exit. Same budget and posture as the registry drain: abort + WARN.
@@ -593,8 +598,16 @@ pub(crate) fn run_supervised(
         // Sprint 28: stopp+rmp of every sandbox, bounded), so CRI work is
         // finished, not merely stopped, before containerd goes away.
         if let Some(handles) = kubelet_drain {
-            for h in handles {
-                let _ = h.await;
+            for mut h in handles {
+                // Batch D (C6): bounded like the flannel block below.
+                if tokio::time::timeout(KUBELET_DRAIN_TIMEOUT, &mut h).await.is_err() {
+                    h.abort();
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "kubelet drain timed out; loop task aborted"
+                    );
+                }
             }
             tracing::info!(target: "init-pro", role, "kubelet drained");
             // T4.1 follow-up (Sprint 28): confirm CRI reports no sandboxes

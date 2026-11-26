@@ -1,0 +1,12 @@
+# Layer 6 -- addons (T6.1-T6.3): embedded registry. T6.1/T6.2 are
+# not-started (HelmChart auto-deploy, DNS/local-path draft ADRs).
+
+[[suite]]
+id = "registry-e2e"
+script = "scripts/registry-e2e.sh"
+runner = "battery"
+layer = 6
+todos = ["T6.3"]
+cases = ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7"]
+skip = ["flags-unwired", "no-containerd:R7"]
+title = "registry V2 ping/push/pull/retention/keep/delete + opt-in crictl pull (Q40)"

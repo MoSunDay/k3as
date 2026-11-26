@@ -14,6 +14,7 @@ use rdb::store::ops;
 use tokio::time::timeout;
 
 use super::keys;
+use super::scan;
 use crate::backend::{StorageBackend, Watch};
 use crate::entry::{Revision, WatchEvent};
 use crate::error::StorageError;
@@ -200,6 +201,57 @@ async fn revision_helper_matches_the_trait() {
             .unwrap(),
         1
     );
+    drop(store);
+    cleanup(&path);
+}
+
+/// T2.3 hardening: the `obj/` prefix scan (blocking-pool twin of `list`)
+/// is RV-ordered and honors the namespace segment delimiter --
+/// `/pods/default/` never matches a sibling namespace's `/pods/default-x/`.
+/// Runs on a current-thread runtime, which is exactly where a
+/// `block_in_place` hop would have panicked.
+#[tokio::test]
+async fn list_scan_is_rv_ordered_and_namespace_delimited() {
+    let path = temp_data_dir();
+    let store = RdbStorage::open(&path).await.expect("open");
+    // Created out of name order on purpose: LIST order is by mod_revision.
+    put_pods(&store, &["c", "a", "b"]).await;
+    let sibling = Key::new("", "pods", "default-x", "z");
+    store
+        .create(&sibling, pod_value("z"))
+        .await
+        .expect("create");
+    let lo = keys::obj_list_prefix(&format!("{}/", pods_prefix().as_path()));
+    let names: Vec<String> = scan::scan_entries(&store.db, &lo)
+        .expect("scan")
+        .into_iter()
+        .map(|e| e.value["metadata"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec!["c", "a", "b"]);
+    // The trait path (blocking pool) agrees with the pure scan.
+    let listed = store.list(&pods_prefix()).await.unwrap();
+    assert_eq!(listed.len(), 3, "the sibling namespace stays out");
+    assert_eq!(listed[0].mod_revision, 1);
+    drop(store);
+    cleanup(&path);
+}
+
+/// T2.3 hardening: the `log/` replay scan (blocking-pool twin of the watch
+/// replay) is inclusive at the start revision, revision-ordered and
+/// filtered by prefix -- the synchronous scan's contract, unchanged.
+#[tokio::test]
+async fn replay_scan_is_inclusive_ordered_and_prefix_filtered() {
+    let path = temp_data_dir();
+    let store = RdbStorage::open(&path).await.expect("open");
+    put_pods(&store, &["a", "b", "c"]).await;
+    let watch_path = format!("{}/", pods_prefix().as_path());
+    let evs = scan::scan_replay(&store.db, &keys::log_key(2), &watch_path).expect("scan");
+    assert_eq!(evs.len(), 2, "revisions 2 and 3 only (start is inclusive)");
+    assert!(matches!(evs[0], WatchEvent::Put(ref e) if e.mod_revision == 2));
+    assert!(matches!(evs[1], WatchEvent::Put(ref e) if e.mod_revision == 3));
+    let none =
+        scan::scan_replay(&store.db, &keys::log_key(2), "/registry/services/").expect("scan");
+    assert!(none.is_empty(), "another resource prefix replays nothing");
     drop(store);
     cleanup(&path);
 }

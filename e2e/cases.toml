@@ -1,0 +1,55 @@
+# e2e/cases.toml -- the e2e case registry (SSOT for the e2e battery).
+#
+# Batch E (长稳清扫 2026-11-26): one machine-readable registry of every
+# verification script, keyed by layer, so that:
+#   * `scripts/all-gates.sh` BATTERY is cross-checked against it (both
+#     directions) by `scripts/e2e-coverage.sh` (gate 9);
+#   * every `done` TODO in plans/init-pro/index.md must map to at least one
+#     suite (or carry an explicit exemption below with a reason);
+#   * every declared case id must actually appear in the gate's e2e log
+#     (`--logs <dir>`, i.e. the registry cannot drift from the scripts).
+#
+# Layout: this file holds [meta] + [coverage_exemptions]; the suites live in
+# one file per layer under e2e/cases.d/ (l0-foundation ... l8-delivery, plus
+# xc-longrun for cross-cutting profiles). The gate globs cases.d/*.toml.
+#
+# Suite record (TOML subset the gate parses -- keep it line-oriented):
+#   [[suite]]
+#   id       = "unique-registry-id"          # golden shards: "golden:<suite>"
+#   script   = "scripts/<name>.sh"           # repo-relative, must exist
+#   runner   = "battery|golden|gate|ci|manual|unwired|tool"
+#   layer    = 0..9                          # primary TODO layer (informational)
+#   todos    = ["T4.2", ...]                 # TODO ids from index.md
+#   cases    = ["ST1", "ST2", ...]           # ids printed as OK/SKIP by the script
+#   skip     = ["foreign-cni0", ...]         # precondition tokens (free-form)
+#   title    = "one-line description"
+# `cases = []` means the script prints free-form OK lines (no case ids).
+#
+# runner kinds:
+#   battery  in scripts/all-gates.sh BATTERY (gate 8, Q25 SKIP doctrine)
+#   golden   sourced by scripts/golden-conformance.sh (gate 7, T0.6)
+#   gate     a static/non-e2e gate in all-gates.sh (fmt/unsafe/parity/...)
+#   ci       only in .github/workflows/ci.yml (not in all-gates.sh)
+#   manual   drives a LIVE cluster / needs a second node -- never a gate
+#   unwired  exists but no runner executes it (must be justified in title)
+#   tool     dev-loop helper, never a gate (local-up, spikes, builders)
+
+[meta]
+version = 1
+status_table = "plans/init-pro/index.md"
+gate_runner = "scripts/all-gates.sh"
+coverage_gate = "scripts/e2e-coverage.sh"
+# runner kinds that count as e2e coverage of a TODO
+covering_runners = ["battery", "golden", "gate"]
+# runner kinds that only count as weak (reported, never fatal) coverage
+weak_runners = ["ci", "manual", "unwired"]
+
+# Done TODOs with NO e2e suite on purpose. Each entry needs a reason that
+# names where the behaviour IS verified; remove the entry when a suite lands.
+[coverage_exemptions]
+"T0.2b" = "bootstrap-link-repos.sh is the environment bootstrap that runs BEFORE the gates (Q38); every CI build is its verification"
+"T0.5" = "manual SSOT row by design (all-gates gate 10, never automatable)"
+"T4.6" = "pod-log date dirs + 100 MiB copytruncate rotation are unit-only (kubelet/src/log_rotate.rs tests); no wire-visible behaviour"
+"T5.1" = "openrusty embed is unit-only (router/src/gate.rs); served behaviour is exercised end-to-end by G70-G72 + ST1-ST6"
+"T5.2" = "phase hooks are unit-only (router/src/route.rs compile tests)"
+"T5.3" = "RouteTable is unit-only (router/src/serve.rs + tests/nodeport_plane.rs)"

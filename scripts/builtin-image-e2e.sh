@@ -344,8 +344,18 @@ grep -q "builtin image GC" "$AGENT_LOG" \
 bimg_ok "I7 startup GC swept whtwo's unique layer; shared base + in-use pod survived"
 
 # --- I8a: CAS persistence across restart (no re-pull) ----------------------
+# B2 (batch D): a blob some live manifest still lists answers 409
+# BLOB_REFERENCED (a blind delete would hollow out the image), so the
+# registry is emptied the supported way: manifest DELETE by digest (202,
+# B1 cascade + GC), after which the layer is unreferenced (202) or still
+# shared with another live manifest (409) -- either way a re-pull 404s.
 code="$(delete_registry_blob test/httpd "$HTTPD_LAYER")"
-[[ "$code" == "202" ]] || bimg_fail "I8a registry blob DELETE -> $code (expected 202)"
+[[ "$code" == "409" ]] || bimg_fail "I8a referenced blob DELETE -> $code (expected 409 BLOB_REFERENCED)"
+code="$(delete_registry_manifest test/httpd v1)"
+[[ "$code" == "202" ]] || bimg_fail "I8a manifest DELETE -> $code (expected 202)"
+code="$(delete_registry_blob test/httpd "$HTTPD_LAYER")"
+[[ "$code" == "202" || "$code" == "409" ]] || bimg_fail "I8a unreferenced blob DELETE -> $code (expected 202)"
+BLOB_DEL="$code"
 code="$(post_pod_json img-cas '{"apiVersion":"v1","kind":"Pod","metadata":{"name":"img-cas","namespace":"default"},"spec":{"containers":[{"name":"c","image":"127.0.0.1:'"$REG_PORT"'/test/httpd:v1"}]}}')"
 [[ "$code" == "201" ]] || bimg_fail "I8a pod POST -> $code"
 PHASE="$(wait_phase img-cas Running 120)"
@@ -358,7 +368,7 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [[ "$BODY" == "IMG-ENTRYPOINT" ]] || bimg_fail "I8a CAS pod never served (got: ${BODY:-<empty>})"
-bimg_ok "I8a CAS hit: pod ran with the registry blob deleted (no re-pull)"
+bimg_ok "I8a CAS hit: pod ran with the registry manifest gone (blob DELETE $BLOB_DEL; no re-pull)"
 delete_pod img-cas; wait_port_free "$HTTPD_PORT"
 
 # --- I8b: quota soft cap -> clean pull failure, agent survives -------------

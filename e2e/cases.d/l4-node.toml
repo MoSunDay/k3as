@@ -1,0 +1,133 @@
+# Layer 4 -- node (T4.1-T4.15): runtime/containerd, kubelet, CNI, netpol,
+# built-in engine, resources, probes, env, 2-node acceptance. T4.10 is
+# not-started (no suite); T4.6 is unit-only (see cases.toml exemptions).
+
+[[suite]]
+id = "golden:nodes"
+script = "scripts/golden/suites/nodes.sh"
+runner = "golden"
+layer = 4
+todos = ["T4.1", "T4.2"]
+cases = ["G24", "G25", "G26", "G30"]
+skip = ["no-vendor-bundle", "no-cc", "foreign-cni0"]
+title = "containerd/CRI supervision, kubelet pod lifecycle, probes/volumes/hostname, logs/exec (Q31)"
+
+[[suite]]
+id = "engine-selftest"
+script = "scripts/engine-selftest.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.11", "T4.15"]
+cases = ["E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11", "E12", "E12b"]
+skip = ["no-root", "no-static-busybox"]
+title = "engine-run matrix: exit codes, caps, netns, cgroup, --host-root (Q48/Q60)"
+
+[[suite]]
+id = "builtin-runtime-e2e"
+script = "scripts/builtin-runtime-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.11", "T4.12"]
+cases = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12", "B13", "B14", "N1", "N2", "N3", "N4", "N5"]
+skip = ["no-root", "no-static-busybox", "no-python3"]
+title = "frame protocol + host-netns pod plane over the built-in engine (Q48-Q52)"
+
+[[suite]]
+id = "resources-e2e"
+script = "scripts/resources-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.9"]
+cases = ["R1a", "R1b", "R1c", "R1d", "R2a", "R2b", "R2c", "R3a", "R3b", "R3c", "R4a", "R4b"]
+skip = ["no-cgroup-v2", "no-vendor-bundle", "no-cc", "foreign-cni0"]
+title = "in-container cgroup assertions for requests/limits + qosClass (T4.9)"
+
+[[suite]]
+id = "flannel-e2e"
+script = "scripts/flannel-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.3"]
+cases = ["F1", "F2", "F3", "F3a", "F4", "F6a", "F6b", "F6c", "F6d", "F7", "F8", "F9"]
+skip = ["no-root", "no-cc", "no-tun", "no-vendor-bundle", "foreign-cni0", "env-gated-remote-node"]
+title = "vxlan F1-F5, host-gw config F6, 2-node F7/F8 (env-gated), wireguard note F9 (Q34)"
+
+[[suite]]
+id = "netpol-e2e"
+script = "scripts/netpol-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.4"]
+cases = ["NP0", "NP1", "NP2", "NP3", "NP4"]
+skip = ["no-root", "no-cc", "no-tun", "no-vendor-bundle", "foreign-cni0"]
+title = "default-deny, allow, egress ipBlock, zero-residue teardown (Q64)"
+
+[[suite]]
+id = "builtin-image-e2e"
+script = "scripts/builtin-image-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.13"]
+cases = ["I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8a", "I8b"]
+skip = ["no-root", "no-static-busybox", "no-curl", "no-python3"]
+title = "pull chain, whiteouts, image env, NodePort, GC, CAS/quota (Q52-Q54)"
+
+[[suite]]
+id = "builtin-hostroot-e2e"
+script = "scripts/builtin-hostroot-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.14", "T4.13"]
+cases = ["H1a", "H1b", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "HD1", "HD2", "HD3", "HD4", "HD4a", "HD5", "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8a", "I8b"]
+skip = ["no-root", "no-static-busybox", "no-curl", "no-python3"]
+title = "host-rootfs runtime profile + image chain re-run in hostroot mode (Q60)"
+
+[[suite]]
+id = "probe-e2e"
+script = "scripts/probe-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.8"]
+cases = ["P1", "P2", "P3", "P4"]
+skip = ["no-vendor-bundle", "no-cc"]
+title = "tcpSocket/exec probe quadrants over the real kubelet (T4.8; batch E: wired into the battery)"
+
+[[suite]]
+id = "pod-env-e2e"
+script = "scripts/pod-env-e2e.sh"
+runner = "battery"
+layer = 4
+todos = ["T4.7"]
+cases = ["E1", "E2", "E3", "E4a", "E4b"]
+skip = ["no-vendor-bundle", "no-cc"]
+title = "literal env / envFrom CM+Secret / optional-missing negative (T4.7; batch E: wired into the battery)"
+
+[[suite]]
+id = "acceptance-2node"
+script = "scripts/acceptance-2node-e2e.sh"
+runner = "manual"
+layer = 4
+todos = ["T4.5", "T4.2", "T7.1", "T7.3"]
+cases = ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A12", "A13", "T1", "T2", "T3"]
+skip = ["needs-live-2node-cluster"]
+title = "2-node acceptance against a LIVE cluster: pods/logs/exec, distinct /24 podCIDRs, tunnel (Q65)"
+
+[[suite]]
+id = "t41-containerd-spike"
+script = "scripts/t41-containerd-spike.sh"
+runner = "tool"
+layer = 4
+todos = ["T4.1"]
+cases = []
+skip = []
+title = "historical Q24 vendor->stage->supervise->CRI spike (exit 1, no SKIP; superseded by G24-G26)"
+
+[[suite]]
+id = "local-up"
+script = "scripts/local-up.sh"
+runner = "tool"
+layer = 4
+todos = ["T4.2", "T4.3", "T2.3"]
+cases = []
+skip = []
+title = "interactive single-node cluster for the dev loop (Ctrl-C); never a gate"

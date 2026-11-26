@@ -165,6 +165,12 @@ impl TunnelRegistry {
     /// same critical section that seats the park (no TOCTOU: lock ->
     /// check token -> seat, all under the one lock). A missing node entry
     /// fails too (the Default entry carries an empty token).
+    ///
+    /// A8: the lookup must not insert. `entry().or_default()` ran BEFORE the
+    /// token check, so an unauthenticated
+    /// `GET .../tunnel/next?parkToken=x` with a random node name grew the
+    /// map forever (one `NodeTunnel` per distinct attacker-chosen name).
+    /// Unknown node -> the same `InvalidParkToken` error, no entry.
     pub(crate) fn park_checked(
         &self,
         node: &str,
@@ -172,7 +178,9 @@ impl TunnelRegistry {
     ) -> Result<Park, TunnelAuthError> {
         let (tx, rx) = oneshot::channel();
         let mut nodes = self.nodes.lock().expect("tunnel registry poisoned");
-        let entry = nodes.entry(node.to_string()).or_default();
+        let entry = nodes
+            .get_mut(node)
+            .ok_or(TunnelAuthError::InvalidParkToken)?;
         if park_token_mismatch(entry, token) {
             return Err(TunnelAuthError::InvalidParkToken);
         }
@@ -182,6 +190,21 @@ impl TunnelRegistry {
             generation: entry.generation,
             rx,
         })
+    }
+
+    /// A8: drop a node's tunnel state (token, generation and any parked
+    /// poll). Called when the apiserver observes the Node go away so a
+    /// decommissioned node cannot be re-parked with a stale token and its
+    /// entry does not linger for the life of the process.
+    pub(crate) fn forget(&self, node: &str) {
+        let mut nodes = self.nodes.lock().expect("tunnel registry poisoned");
+        nodes.remove(node);
+    }
+
+    /// A8: number of tracked nodes (tests + leak introspection).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.lock().expect("tunnel registry poisoned").len()
     }
 
     /// A long-poll ended without a request: clear the seat only when it is
@@ -385,6 +408,80 @@ mod tests {
             content_type: Some("text/plain".to_string()),
             body: body.as_bytes().to_vec(),
         }
+    }
+
+    /// A8 regression: `park_checked` used to `or_default()` the node entry
+    /// BEFORE the token check, so an unauthenticated park with a random node
+    /// name grew the map forever. An unknown node must leave no trace.
+    #[test]
+    fn park_checked_with_unknown_node_leaves_no_entry() {
+        let reg = TunnelRegistry::new_shared();
+        for name in ["ghost-1", "ghost-2", "../../etc", ""] {
+            assert!(
+                matches!(
+                    reg.park_checked(name, Some("x")),
+                    Err(TunnelAuthError::InvalidParkToken)
+                ),
+                "an unknown node must fail closed"
+            );
+        }
+        assert_eq!(
+            reg.len(),
+            0,
+            "no node entry may be created by a failed park"
+        );
+        assert!(!reg.is_live("ghost-1"));
+    }
+
+    /// A8: a registered node whose token does not match is rejected the same
+    /// way, and its (single) entry is neither duplicated nor re-seated.
+    #[test]
+    fn park_checked_with_a_wrong_token_does_not_seat_or_grow() {
+        let reg = TunnelRegistry::new_shared();
+        let tok = reg.register("n1");
+        assert!(matches!(
+            reg.park_checked("n1", Some("not-the-token")),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        assert!(matches!(
+            reg.park_checked("n1", None),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        assert_eq!(reg.len(), 1);
+        assert!(!reg.is_live("n1"), "a rejected park must not go live");
+        // The genuine credential still seats.
+        assert!(reg.park_checked("n1", Some(&tok)).is_ok());
+        assert!(reg.is_live("n1"));
+    }
+
+    /// A8: `forget` drops a node's tunnel state -- its token dies with the
+    /// Node object, so a stale credential cannot re-park afterwards.
+    #[test]
+    fn forget_drops_the_node_tunnel_state() {
+        let reg = TunnelRegistry::new_shared();
+        let tok = reg.register("n1");
+        assert!(reg.park_checked("n1", Some(&tok)).is_ok());
+        assert!(reg.is_live("n1"));
+        reg.forget("n1");
+        assert_eq!(reg.len(), 0);
+        assert!(!reg.is_live("n1"));
+        // The pre-forget token is dead: the entry (and its parkToken) is gone.
+        assert!(matches!(
+            reg.park_checked("n1", Some(&tok)),
+            Err(TunnelAuthError::InvalidParkToken)
+        ));
+        assert_eq!(
+            reg.len(),
+            0,
+            "a rejected re-park must not resurrect the entry"
+        );
+        // Idempotent on an unknown node.
+        reg.forget("n1");
+        assert_eq!(reg.len(), 0);
+        // Unrelated nodes are untouched.
+        reg.register("n2");
+        reg.forget("n1");
+        assert_eq!(reg.len(), 1);
     }
 
     #[tokio::test]

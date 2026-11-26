@@ -116,6 +116,20 @@ pub(super) fn latest_build<'a>(builds: &[&'a Value]) -> Option<&'a Value> {
         .max_by(|a, b| sort_key(a).cmp(&sort_key(b)))
 }
 
+/// Newest owned build whose `spec.image.tag` is `tag`. Filtering by tag
+/// FIRST is load-bearing: the apiserver stamps no creationTimestamp, so the
+/// name is the effective order key and `p-b9-x` sorts above `p-b10-x` -- a
+/// plain "newest child" would never match the desired tag after the 9->10
+/// rollover and storm one Build per resync (scripts/soak-e2e.sh, batch F).
+pub(super) fn latest_build_for_tag<'a>(builds: &[&'a Value], tag: &str) -> Option<&'a Value> {
+    let same_tag: Vec<&Value> = builds
+        .iter()
+        .copied()
+        .filter(|b| str_at(b, "/spec/image/tag").trim() == tag)
+        .collect();
+    latest_build(&same_tag)
+}
+
 pub(super) fn sort_key(build: &Value) -> (String, String) {
     (
         str_at(build, "/metadata/creationTimestamp").to_string(),

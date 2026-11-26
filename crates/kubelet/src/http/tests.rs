@@ -128,6 +128,15 @@ async fn raw_body_chunked_decodes_extensions_and_trailers() {
     let rest = b"\r\n3\r\n1}\n\r\n0\r\n\r\n".to_vec();
     let body = raw_body_bytes(rest, true, None, leftover).await;
     assert_eq!(body, b"{\"a\":1}\n".to_vec());
+    // D: chunk-size is HEX (RFC 7230) -- "1a" is 26 bytes and "10" is 16
+    // (a decimal parse read "1a" as 0, truncating, and "10" as 10).
+    let framed = b"1a\r\nabcdefghijklmnopqrstuvwxyz\r\n10\r\n0123456789abcdef\r\n0\r\n\r\n";
+    let body = raw_body_bytes(framed.to_vec(), true, None, Vec::new()).await;
+    assert_eq!(
+        body,
+        b"abcdefghijklmnopqrstuvwxyz0123456789abcdef".to_vec(),
+        "both chunk sizes follow hex"
+    );
 }
 
 #[tokio::test]
@@ -187,6 +196,36 @@ async fn read_body_with_deadline_fails_fast_and_keeps_a_flowing_body() {
     assert_eq!(
         read_body_with_deadline(&mut body, deadline).await.unwrap(),
         b"manifest-bytes".to_vec()
+    );
+}
+
+#[tokio::test]
+async fn read_to_end_capped_rejects_an_oversized_body() {
+    // D: a body past the cap fails with InvalidData instead of growing
+    // the buffer without bound; a body exactly at the cap reads whole.
+    let (mut writer, reader) = tokio::io::duplex(64);
+    let mut body = RawBody::from_parts(reader, false, None, Vec::new());
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt as _;
+        let _ = writer.write_all(&[b'x'; 4096]).await;
+        let _ = writer.shutdown().await;
+    });
+    let err = body
+        .read_to_end_capped(1024)
+        .await
+        .expect_err("over the cap must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("1024"), "{err}");
+    let (mut writer, reader) = tokio::io::duplex(64);
+    let mut body = RawBody::from_parts(reader, false, None, Vec::new());
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt as _;
+        let _ = writer.write_all(b"0123456789").await;
+        let _ = writer.shutdown().await;
+    });
+    assert_eq!(
+        body.read_to_end_capped(10).await.unwrap(),
+        b"0123456789".to_vec()
     );
 }
 

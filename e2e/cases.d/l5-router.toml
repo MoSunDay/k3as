@@ -1,0 +1,23 @@
+# Layer 5 -- built-in Router (T5.1-T5.6): served NodePort/ClusterIP planes,
+# TrafficSplit folding. T5.1-T5.3 are unit-only (exemptions); T5.5/T5.7 are
+# not-started.
+
+[[suite]]
+id = "golden:realtraffic"
+script = "scripts/golden/suites/realtraffic.sh"
+runner = "golden"
+layer = 5
+todos = ["T5.4", "T5.6"]
+cases = ["G70", "G71", "G72"]
+skip = ["foreign-cni0"]
+title = "served NodePort plane + Ingress host-plane gap pin (Q32 openrusty data plane)"
+
+[[suite]]
+id = "service-traffic-e2e"
+script = "scripts/service-traffic-e2e.sh"
+runner = "battery"
+layer = 5
+todos = ["T5.4", "T5.6", "T8.2", "T4.2", "T4.3"]
+cases = ["ST1", "ST2", "ST3", "ST4", "ST5", "ST6", "ST7", "ST8", "ST9", "ST10", "ST10b"]
+skip = ["needs-root", "no-vendor-bundle", "no-cc", "foreign-cni0"]
+title = "NodePort plane ST1-ST6, ClusterIP/VIP ST7-ST10, TrafficSplit fold ST10/ST10b (Q57)"

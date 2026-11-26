@@ -62,7 +62,9 @@ pub fn parse_cidr(s: &str) -> Option<ClusterCidr> {
     }
     let host_bits = 32 - u32::from(prefix);
     Some(ClusterCidr {
-        base: base & (u32::MAX << host_bits),
+        // `/0` masks every bit: `u32::MAX << 32` panics in debug builds
+        // (and mis-masks in release), so shift defensively.
+        base: base & u32::MAX.checked_shl(host_bits).unwrap_or(0),
         prefix,
     })
 }
@@ -128,21 +130,28 @@ pub fn used_subnets(nodes: &[Value]) -> Vec<u32> {
 
 /// First free per-node subnet inside `cluster` (`None` = exhausted: the
 /// k8s error shape, surfaced as [`ControllerError::Internal`]).
+///
+/// Offset walk bounded by the cluster size in addresses, never an exclusive
+/// `end` bound: for a `/0` cluster the end address `base + 2^32` wraps back
+/// onto `base`, so a `while subnet != end` loop would never terminate (and
+/// the `/0` space could not be enumerated at all).
 pub fn next_free(cluster: &ClusterCidr, used: &[u32]) -> Option<u32> {
     let node_prefix = cluster.node_prefix();
     if node_prefix < cluster.prefix || node_prefix > 32 {
         return None;
     }
-    let step = 1u32 << (32 - u32::from(node_prefix));
-    let mut subnet = cluster.base;
-    let end = cluster
-        .base
-        .wrapping_add(1u32 << (32 - u32::from(cluster.prefix)));
-    while subnet != end {
-        if !used.contains(&subnet) {
+    let total = 1u64 << (32 - u32::from(cluster.prefix)); // addresses in the cluster CIDR
+    let per_node = 1u64 << (32 - u32::from(node_prefix)); // addresses per Node subnet
+    let mut sorted = used.to_vec();
+    sorted.sort_unstable();
+    let mut offset = 0u64;
+    while offset < total {
+        // `offset < total <= 2^32`, so the narrowing is exact.
+        let subnet = cluster.base.wrapping_add(offset as u32);
+        if sorted.binary_search(&subnet).is_err() {
             return Some(subnet);
         }
-        subnet = subnet.wrapping_add(step);
+        offset += per_node;
     }
     None
 }
@@ -301,6 +310,51 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A2: a `/0` prefix shifts the mask by 32, which used to panic in debug
+    /// builds (`u32::MAX << 32`) -- every host bit must mask away instead.
+    #[test]
+    fn zero_prefix_masks_to_the_whole_address_space() {
+        assert_eq!(
+            parse_cidr("10.0.0.0/0"),
+            Some(ClusterCidr { base: 0, prefix: 0 })
+        );
+        assert_eq!(
+            parse_cidr("255.255.255.255/0"),
+            Some(ClusterCidr { base: 0, prefix: 0 })
+        );
+        // Sanity: the untouched non-degenerate paths still mask host bits.
+        assert_eq!(parse_cidr("10.42.7.9/16").unwrap().base, 0x0a2a_0000);
+        assert_eq!(parse_cidr("10.42.7.9/32").unwrap().base, 0x0a2a_0709);
+    }
+
+    /// A2: a `/0` cluster holds 2^32 addresses, so an exclusive `end` bound
+    /// (`base + 2^32`) wrapped onto `base` and the walk never returned.
+    #[test]
+    fn zero_prefix_cluster_allocates_the_first_free_subnet() {
+        let cluster = parse_cidr("10.0.0.0/0").unwrap();
+        assert_eq!(next_free(&cluster, &[]), Some(0));
+        // A Node already holding the 0th /24 is skipped, in offset order.
+        assert_eq!(next_free(&cluster, &[0]), Some(0x0000_0100));
+        assert_eq!(
+            next_free(&cluster, &[0x0000_0200, 0x0000_0100]),
+            Some(0x0000_0000)
+        );
+    }
+
+    /// A2: `used_subnets` parses Node-supplied `spec.podCIDR`; a stored
+    /// `"1.2.3.4/0"` must not panic the allocator.
+    #[test]
+    fn used_subnets_tolerates_a_zero_prefix_node_cidr() {
+        let nodes = vec![
+            node_with_cidr("wide", "1.2.3.4/0"),
+            node_with_cidr("b", "10.42.1.0/24"),
+        ];
+        assert_eq!(used_subnets(&nodes), vec![0, 0x0a2a_0100]);
+        // ...and the allocator still walks past it.
+        let cluster = parse_cidr("10.42.0.0/16").unwrap();
+        assert_eq!(next_free(&cluster, &[0, 0x0a2a_0100]), Some(0x0a2a_0000));
     }
 
     #[tokio::test]

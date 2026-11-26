@@ -83,6 +83,7 @@ pub mod status;
 pub mod sync;
 pub mod volumes;
 pub mod watch;
+mod watch_backoff;
 
 pub use agent_sandbox::{select_sandbox, SandboxNodeConfig, SandboxSelection};
 pub use agents::spawn_agent_runner;

@@ -14,8 +14,10 @@
 #   6. scripts/engine-singlethread-check.sh (Q48: engine stays fork-safe)
 #   7. scripts/golden-conformance.sh     (T0.6 merge gate, Q2)
 #   8. domain e2e battery                (Q25 SKIP-not-fail doctrine)
-#   9. scripts/cli-flag-parity-test.sh   (T0.4, Q9)
-#  10. SSOT lock-step row                (manual; never fails the run)
+#   9. scripts/e2e-coverage.sh --logs    (e2e/cases.toml registry <-> BATTERY,
+#                                         index.md done-TODOs, case ids in logs)
+#  10. scripts/cli-flag-parity-test.sh   (T0.4, Q9)
+#  11. SSOT lock-step row                (manual; never fails the run)
 #
 # Notes:
 # - CI orders `cargo fmt --all --check` BEFORE scripts/bootstrap-link-repos.sh
@@ -39,7 +41,8 @@
 #   kept when any gate FAILs (or KEEP_LOGS=1), removed otherwise.
 #
 # Usage: scripts/all-gates.sh [--no-e2e] [--list]
-#   --no-e2e   skip gate 8 (the domain e2e battery)
+#   --no-e2e   skip gate 8 (the domain e2e battery); gate 9 then runs the
+#              e2e/cases.toml registry checks structurally (no log evidence)
 #   --list     print the gate list without running anything
 set -euo pipefail
 
@@ -70,7 +73,9 @@ done
 # (exit-1, no SKIP, superseded by golden G24-G26), stage-fresh-dir-test.sh
 # (needs an INIT_PRO_EMBED=1 build), the image-builder helpers, and
 # bootstrap-link-repos.sh (an environment bootstrap that runs BEFORE gates,
-# never as one) are deliberately excluded.
+# never as one) are deliberately excluded. The order is mirrored by
+# e2e/cases.d/*.toml (runner = "battery"); scripts/e2e-coverage.sh (gate 9)
+# fails on drift in either direction.
 BATTERY=(
   multicall-selftest.sh
   apiserver-discovery-parity-test.sh
@@ -79,17 +84,25 @@ BATTERY=(
   builtin-runtime-e2e.sh
   durability-e2e.sh
   registry-e2e.sh
+  delivery-e2e.sh
   anyhome-e2e.sh
   agent-exec-e2e.sh
   resources-e2e.sh
+  probe-e2e.sh
+  pod-env-e2e.sh
   service-traffic-e2e.sh
   flannel-e2e.sh
   netpol-e2e.sh
   builtin-image-e2e.sh
   builtin-hostroot-e2e.sh
   sandbox-e2e.sh
+  inference-fake-e2e.sh
   auth-e2e.sh
+  soak-e2e.sh
 )
+# Battery profile knobs (exported for the children only): soak-e2e.sh runs a
+# short churn inside the battery; standalone it defaults to 600 s.
+BATTERY_ENV=(SOAK_SECONDS=45)
 # Scripts that would FAIL (not SKIP) without root -> pre-gated here.
 # Keep this list minimal: engine-selftest.sh and builtin-runtime-e2e.sh already
 # self-SKIP on `id -u != 0` (their own SKIP line is the honest verdict), so
@@ -100,6 +113,9 @@ GATE_NO=0
 E2E_IDX=0
 FAILS=0
 SKIPS=0
+# Space-separated battery scripts that FAILED this run; gate 9 (e2e-coverage)
+# reads it so a failed suite's log is judged by its own row, not double-reported.
+E2E_FAILED_SCRIPTS=""
 ROW_NO=()
 ROW_NAME=()
 ROW_STATUS=()
@@ -161,6 +177,8 @@ e2e_row() {
   if [[ "$RC" -ne 0 ]]; then
     record "$label" "FAIL (exit $RC)" "${dt}s" "$no"
     FAILS=$((FAILS + 1))
+    E2E_FAILED_SCRIPTS="$E2E_FAILED_SCRIPTS $s"
+    export E2E_FAILED_SCRIPTS
     return 0
   fi
   local first why
@@ -221,8 +239,9 @@ gate_battery() {
     SKIPS=$((SKIPS + 1))
     return 0
   fi
-  local t0="$SECONDS" s f0="$FAILS"
+  local t0="$SECONDS" s f0="$FAILS" kv
   E2E_IDX=0
+  for kv in "${BATTERY_ENV[@]}"; do export "${kv?}"; done
   for s in "${BATTERY[@]}"; do
     e2e_row "$s"
   done
@@ -254,8 +273,8 @@ summary() {
 
 # --- --list: print the gate list without running anything -------------------
 if [[ "$LIST_ONLY" -eq 1 ]]; then
-  e2e_note=""
-  if [[ "$RUN_E2E" -eq 0 ]]; then e2e_note="  [skipped via --no-e2e]"; fi
+  e2e_note=" --logs <gate log dir>"
+  if [[ "$RUN_E2E" -eq 0 ]]; then e2e_note=" (structural only; no battery logs)"; fi
   cat <<LIST
 gate 1: cargo fmt --check (workspace members)
 gate 2: cargo build --workspace --locked
@@ -264,15 +283,16 @@ gate 4: cargo clippy --workspace --all-targets --locked -- -D warnings
 gate 5: scripts/unsafe-audit.sh (Q48 unsafe boundary)
 gate 6: scripts/engine-singlethread-check.sh (Q48 fork-safe engine)
 gate 7: scripts/golden-conformance.sh
-gate 8: domain e2e battery${e2e_note}:
+gate 8: domain e2e battery${e2e_note/ \(structural only; no battery logs\)/  [skipped via --no-e2e]}:
 LIST
   for s in "${BATTERY[@]}"; do
     extra=""
     if [[ " $ROOT_GATED " == *" $s "* ]]; then extra="  (root-gated here)"; fi
     echo "  - scripts/$s$extra"
   done
-  echo "gate 9: scripts/cli-flag-parity-test.sh"
-  echo "gate 10: SSOT lock-step row (index.md + plan/*.md + decisions.md) [manual]"
+  echo "gate 9: scripts/e2e-coverage.sh${e2e_note}"
+  echo "gate 10: scripts/cli-flag-parity-test.sh"
+  echo "gate 11: SSOT lock-step row (index.md + plan/*.md + decisions.md) [manual]"
   exit 0
 fi
 
@@ -320,9 +340,18 @@ gate "unsafe-audit (Q48)" "05-unsafe-audit" "$SCRIPT_DIR/unsafe-audit.sh"
 gate "engine-singlethread (Q48)" "06-engine-singlethread" "$SCRIPT_DIR/engine-singlethread-check.sh"
 gate "golden-conformance (T0.6)" "07-golden-conformance" "$SCRIPT_DIR/golden-conformance.sh"
 gate_battery
-gate "cli-flag-parity (T0.4)" "09-cli-flag-parity" "$SCRIPT_DIR/cli-flag-parity-test.sh"
+# Gate 9: the e2e case registry gate. With --no-e2e there are no battery logs,
+# so it runs structural-only (BATTERY parity, on-disk parity, SSOT coverage).
+if [[ "$RUN_E2E" -eq 1 ]]; then
+  gate "e2e-coverage (e2e/cases.toml registry)" "08-e2e-coverage" \
+    "$SCRIPT_DIR/e2e-coverage.sh" --logs "$LOGDIR"
+else
+  gate "e2e-coverage (e2e/cases.toml registry; structural, --no-e2e)" "08-e2e-coverage" \
+    "$SCRIPT_DIR/e2e-coverage.sh"
+fi
+gate "cli-flag-parity (T0.4)" "10-cli-flag-parity" "$SCRIPT_DIR/cli-flag-parity-test.sh"
 
-# Gate 10: SSOT lock-step (plans/init-pro/index.md + plan/*.md + decisions.md
+# Gate 11: SSOT lock-step (plans/init-pro/index.md + plan/*.md + decisions.md
 # + CHANGELOG.md must move together). Not automatable: a MANUAL row.
 GATE_NO=$((GATE_NO + 1))
 echo

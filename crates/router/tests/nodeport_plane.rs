@@ -377,3 +377,59 @@ async fn service_delete_retires_the_listener() {
     teardown(p).await;
     echo_h.abort();
 }
+
+/// T5.4 hardening: a nodePort that cannot bind at fold time (another
+/// process holds the port) is retried on the bind tick once the port frees
+/// up -- with NO Services/Endpoints change to trigger a fold.
+#[tokio::test]
+async fn bind_failure_is_retried_once_the_port_frees() {
+    let (echo, echo_h) = spawn_echo("retry-me").await;
+    // Squat the nodePort: accept and drop, never answer.
+    let squatter = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = squatter.local_addr().unwrap();
+    let squatter = tokio::spawn(async move {
+        while let Ok((s, _)) = squatter.accept().await {
+            drop(s);
+        }
+    });
+
+    let p = boot(std::net::Ipv4Addr::LOCALHOST.into()).await;
+    let svc = Key::new("", "services", "default", "retry");
+    let ep = Key::new("", "endpoints", "default", "retry");
+    p.store
+        .create(&svc, service_doc("retry", addr.port(), echo.port()))
+        .await
+        .unwrap();
+    p.store
+        .create(&ep, endpoints_doc("retry", echo))
+        .await
+        .unwrap();
+    // Both reflectors folded; the plane's bind pass ran against the squatter.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let st = p.resolver.snapshot();
+        if st.services.contains_key("default/retry") && !st.endpoints.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reflectors never folded"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status = http_get(addr).await.map(|(s, _)| s).unwrap_or_default();
+    assert!(
+        !status.contains("200"),
+        "the plane must not serve while the port is squatted: {status}"
+    );
+
+    // Free the port: the retry tick (5s) binds it with no store write.
+    squatter.abort();
+    let (status, body) = wait_http(addr, |(_, b)| b.contains("retry-me")).await;
+    assert!(status.contains("200"), "status line: {status}");
+    assert_eq!(body, "retry-me");
+
+    teardown(p).await;
+    echo_h.abort();
+}

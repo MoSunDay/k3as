@@ -201,7 +201,7 @@ impl EngineBackend {
         // chain): no live overlay view can reference a swept layer. If
         // engines ever outlive the agent, this must first confirm no
         // live views (review follow-up note, Sprint 43).
-        match self.store.gc() {
+        match super::image::gc::gc_offload(self.store.clone()).await {
             Ok((blobs, merged, layers)) => tracing::info!(
                 target: "init-pro", blobs, layers, merged,
                 "builtin image GC: {blobs} blob(s), {layers} layer dir(s), {merged} merged dir(s) removed"
@@ -340,11 +340,11 @@ impl EngineBackend {
         };
         if !signalled {
             if let Ok(client) = EngineClient::connect(&socket).await {
-                let _ = client.shutdown().await;
+                let _ = tokio::time::timeout(STOP_GRACE, client.shutdown()).await;
             }
         }
-        if let Some(mut child) = self.registry.take_child(id) {
-            let _ = launch::reap(&mut child, STOP_GRACE);
+        if let Some(child) = self.registry.take_child(id) {
+            let _ = launch::reap_offload(child, STOP_GRACE).await;
         }
         let _ = std::fs::remove_file(&socket);
         self.registry.set_sandbox_notready(id);
@@ -512,13 +512,13 @@ impl CriBackend for EngineBackend {
             }
         }
         self.store.remove_ref(&img.reference);
-        self.store.gc()?;
+        super::image::gc::gc_offload(self.store.clone()).await?;
         Ok(())
     }
 
     /// C3: one statvfs per cycle; only a pressured root walks the store.
-    fn image_gc(&self, in_use: &[String]) -> ImageGcStats {
-        pressure::pass(self, in_use)
+    async fn image_gc(&self, in_use: &[String]) -> ImageGcStats {
+        pressure::pass(self, in_use).await
     }
 
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String> {
@@ -554,9 +554,7 @@ impl CriBackend for EngineBackend {
         // Q52: builtin pause sandbox = host netns (no fresh netns, no CNI).
         let child = launch::spawn_engine(&socket, true, true)
             .map_err(|e| format!("spawn pause engine: {e}"))?;
-        launch::wait_socket(&socket)
-            .await
-            .map_err(|e| format!("pause engine never came up: {e}"))?;
+        let child = launch::settle(child, &socket, "pause engine").await?;
         let pause_pid = EngineClient::connect(&socket)
             .await
             .map_err(|e| format!("pause engine ping: {e}"))?
@@ -643,9 +641,8 @@ impl CriBackend for EngineBackend {
         let wrap = |stage: &str, e: String| host_direct_run::maybe_failure(host_direct, stage, &e);
         let child = launch::spawn_engine(&socket, false, false)
             .map_err(|e| wrap("engine spawn", format!("spawn engine: {e}")))?;
-        launch::wait_socket(&socket)
-            .await
-            .map_err(|e| wrap("engine boot", format!("engine never came up: {e}")))?;
+        let child = launch::settle(child, &socket, "engine").await;
+        let child = child.map_err(|e| wrap("engine boot", e))?;
         let client = EngineClient::connect(&socket)
             .await
             .map_err(|e| wrap("engine connect", format!("connect engine: {e}")))?;

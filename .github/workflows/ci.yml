@@ -71,6 +71,11 @@ jobs:
       - name: e2e — durability across restart (T2.3, Q33)
         run: scripts/durability-e2e.sh
 
+      # Batch E of the 长稳清扫: the e2e case registry gate (all-gates gate 9),
+      # structural only here (CI runs a subset of the battery, so no --logs).
+      - name: e2e registry — cases.toml parity + done-TODO coverage (structural)
+        run: scripts/e2e-coverage.sh
+
   bundle:
     name: INIT_PRO_EMBED=1 build + stage test
     runs-on: ubuntu-latest

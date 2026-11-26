@@ -80,10 +80,10 @@ pub trait CriBackend: Send + Sync {
     /// loop once per cycle with every image its desired pod set still
     /// needs; a backend answers with what it freed. Backends without an
     /// image store of their own (the containerd adapter: `crictl` owns
-    /// image GC, T4.2 route B) keep this no-op default. Deliberately NOT
-    /// `async`: the builtin engine does blocking filesystem work, so the
-    /// caller keeps it off the awaits.
-    fn image_gc(&self, in_use: &[String]) -> ImageGcStats {
+    /// image GC, T4.2 route B) keep this no-op default. `async` since D:
+    /// the builtin engine moves its blocking filesystem work (the usage
+    /// walk) onto the blocking pool from inside the pass.
+    async fn image_gc(&self, in_use: &[String]) -> ImageGcStats {
         let _ = in_use;
         ImageGcStats::default()
     }

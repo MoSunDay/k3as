@@ -72,22 +72,25 @@ pub struct ProbeSpec {
 impl ProbeSpec {
     /// Parse one probe object (`startupProbe`/`readinessProbe`/
     /// `livenessProbe`); `None` without a recognized, well-formed
-    /// handler (httpGet / tcpSocket / exec, T4.8).
+    /// handler (httpGet / tcpSocket / exec, T4.8). The four period/threshold
+    /// knobs are clamped into `1..=u32::MAX` (D: upstream requires >= 1 --
+    /// a 0 period or threshold would spin the tracker); only
+    /// `initialDelaySeconds` keeps 0 as legal.
     pub fn from_json(v: &Value) -> Option<ProbeSpec> {
         let handler = parse_handler(v)?;
-        let num = |k: &str, d: u32| {
+        let num = |k: &str, d: u32, floor: u64| {
             v.get(k)
                 .and_then(Value::as_u64)
-                .map(|x| x.min(u64::from(u32::MAX)) as u32)
+                .map(|x| x.clamp(floor, u64::from(u32::MAX)) as u32)
                 .unwrap_or(d)
         };
         Some(ProbeSpec {
             handler,
-            initial_delay_seconds: num("initialDelaySeconds", 0),
-            period_seconds: num("periodSeconds", 10),
-            timeout_seconds: num("timeoutSeconds", 1),
-            failure_threshold: num("failureThreshold", 3),
-            success_threshold: num("successThreshold", 1),
+            initial_delay_seconds: num("initialDelaySeconds", 0, 0),
+            period_seconds: num("periodSeconds", 10, 1),
+            timeout_seconds: num("timeoutSeconds", 1, 1),
+            failure_threshold: num("failureThreshold", 3, 1),
+            success_threshold: num("successThreshold", 1, 1),
         })
     }
 }
@@ -419,6 +422,28 @@ mod tests {
                 port: 9
             })
         );
+    }
+
+    /// D: a 0 period/timeout/threshold is clamped to 1 (upstream
+    /// requires >= 1); the initial delay keeps 0, and an out-of-range
+    /// value saturates at u32::MAX instead of wrapping.
+    #[test]
+    fn parse_clamps_zero_period_and_thresholds_to_one() {
+        let p = ProbeSpec::from_json(&json!({
+            "httpGet": {"path": "/z"},
+            "periodSeconds": 0,
+            "timeoutSeconds": 0,
+            "failureThreshold": 0,
+            "successThreshold": 0
+        }))
+        .unwrap();
+        assert_eq!(p.period_seconds, 1);
+        assert_eq!(p.timeout_seconds, 1);
+        assert_eq!(p.failure_threshold, 1);
+        assert_eq!(p.success_threshold, 1);
+        assert_eq!(p.initial_delay_seconds, 0, "a zero delay is legal");
+        let p = ProbeSpec::from_json(&json!({"httpGet": {}, "periodSeconds": u64::MAX})).unwrap();
+        assert_eq!(p.period_seconds, u32::MAX);
     }
 
     #[test]

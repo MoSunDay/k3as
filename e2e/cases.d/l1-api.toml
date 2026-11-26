@@ -1,0 +1,62 @@
+# Layer 1 -- api + apiserver (T1.1-T1.3): discovery, CRUD/watch/SSA, negative
+# wire cases, authn/authz. Golden shards are sourced by golden-conformance.sh.
+
+[[suite]]
+id = "golden:storage"
+script = "scripts/golden/suites/storage.sh"
+runner = "golden"
+layer = 1
+todos = ["T1.2", "T2.1", "T2.2"]
+cases = ["G06", "G07", "G08", "G09", "G10", "G11", "G12", "G13", "G14", "G15"]
+skip = []
+title = "CRUD + watch open + SSA + rv=0 replay over the storage trait (Q10 JSON)"
+
+[[suite]]
+id = "golden:resources"
+script = "scripts/golden/suites/resources.sh"
+runner = "golden"
+layer = 1
+todos = ["T1.2", "T2.2"]
+cases = ["G32", "G33", "G34", "G35", "G36", "G37", "G38", "G39", "G40", "G41", "G42", "G43", "G44", "G45", "G46"]
+skip = []
+title = "table-driven per-resource CRUD/CAS/patch/Delete + watch ADDED/DELETED/replay/generateName/SSA"
+
+[[suite]]
+id = "golden:negative"
+script = "scripts/golden/suites/negative.sh"
+runner = "golden"
+layer = 1
+todos = ["T1.2", "T2.3"]
+cases = ["G50", "G51", "G52", "G53", "G54", "G55"]
+skip = []
+title = "eviction 404 / deletecollection 405 / https reject / sqlite:// Unsupported / dup binding 409 (Q33)"
+
+[[suite]]
+id = "golden:networking"
+script = "scripts/golden/suites/networking.sh"
+runner = "golden"
+layer = 1
+todos = ["T1.1", "T5.4"]
+cases = ["G31"]
+skip = []
+title = "networking.k8s.io/v1 discovery byte-lock (Ingress is first-class, Q32)"
+
+[[suite]]
+id = "golden:auth"
+script = "scripts/golden/suites/auth.sh"
+runner = "golden"
+layer = 1
+todos = ["T1.3"]
+cases = ["G107", "G108", "G109", "G110", "G111", "G112", "G113"]
+skip = []
+title = "authn 401 / RBAC 403 / kubelet chain / non-resource allow / armed discovery / TLS (Q47)"
+
+[[suite]]
+id = "auth-e2e"
+script = "scripts/auth-e2e.sh"
+runner = "battery"
+layer = 1
+todos = ["T1.3"]
+cases = ["A1", "A2", "A3", "A4", "A5", "A6", "A7"]
+skip = ["no-curl", "no-python3", "no-openssl"]
+title = "full-stack token-file + RBAC + TLS posture against a live server (Q47)"

@@ -44,6 +44,7 @@ use crate::key::{validate, Key, KeyPrefix};
 
 mod compaction;
 mod keys;
+mod scan;
 #[cfg(test)]
 mod tests;
 mod watch;
@@ -224,31 +225,10 @@ impl StorageBackend for RdbStorage {
         // Append "/" to delimit path segments so "/registry/pods" does not
         // match "/registry/podsabc" (embedded parity).
         let lo = keys::obj_list_prefix(&format!("{}/", prefix.as_path()));
-        let mut out: Vec<StoredEntry> = Vec::new();
-        let mut bad: Option<StorageError> = None;
-        let scan = ops::for_each_from(&self.db, &lo, false, &mut |k, v| {
-            if !k.starts_with(&lo) {
-                return false;
-            }
-            match keys::decode_entry(v) {
-                Ok(e) => {
-                    out.push(e);
-                    true
-                }
-                Err(e) => {
-                    bad = Some(e);
-                    false
-                }
-            }
-        });
-        if let Some(e) = bad {
-            return Err(e);
-        }
-        scan.map_err(StorageError::Backend)?;
-        // Key-sorted scan; sort by mod_revision for the stable,
-        // resourceVersion-ordered list (matches k8s LIST ordering by RV).
-        out.sort_by_key(|e| e.mod_revision);
-        Ok(out)
+        // The scan is a synchronous RocksDB iterator: it runs on the
+        // blocking pool so a large LIST never stalls the reactor (no lock
+        // is involved -- `obj/` records commit atomically, see `get`).
+        scan::list_entries(Arc::clone(&self.db), lo).await
     }
 
     async fn update(
@@ -344,8 +324,10 @@ impl StorageBackend for RdbStorage {
                 // Snapshot history AND subscribe under one lock: events
                 // committed after this point flow via the broadcast only, so
                 // the replay -> live seam is lossless and duplicate-free.
+                // The guard is deliberately held across the await: only the
+                // `log/` iterator moved to the blocking pool (see `scan`).
                 let st = self.state.lock().await;
-                watch::replay(&self.db, &self.tx, &path, n, st.watermark)
+                watch::replay(Arc::clone(&self.db), &self.tx, &path, n, st.watermark).await
             }
         }
     }

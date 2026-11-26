@@ -1,0 +1,92 @@
+# Layer 0 -- foundation (T0.1-T0.6): multicall, config/shutdown, flag parity,
+# static gates and the golden harness itself. Loaded by scripts/e2e-coverage.sh.
+
+[[suite]]
+id = "multicall-selftest"
+script = "scripts/multicall-selftest.sh"
+runner = "battery"
+layer = 0
+todos = ["T0.1"]
+cases = ["init-pro", "kubectl", "ctr", "crictl", "containerd", "server", "agent", "etcd", "flannel", "engine", "init-pro-server", "init-pro-agent", "engine-run"]
+skip = []
+title = "argv[0] alias table + symlink deployment + unknown-alias help (Q1)"
+
+[[suite]]
+id = "apiserver-discovery-parity"
+script = "scripts/apiserver-discovery-parity-test.sh"
+runner = "battery"
+layer = 0
+todos = ["T1.1", "T1.2"]
+cases = []
+skip = ["no-binary"]
+title = "discovery documents match the golden fixtures byte-for-byte (free-form path lines)"
+
+[[suite]]
+id = "graceful-shutdown"
+script = "scripts/graceful-shutdown-test.sh"
+runner = "battery"
+layer = 0
+todos = ["T0.3"]
+cases = []
+skip = []
+title = "server drains on SIGTERM within the deadline (infra signal + drain)"
+
+[[suite]]
+id = "cli-flag-parity"
+script = "scripts/cli-flag-parity-test.sh"
+runner = "gate"
+layer = 0
+todos = ["T0.4"]
+cases = []
+skip = []
+title = "k3s flag-parity strip filter + help snapshots (Q9; gate row in all-gates)"
+
+[[suite]]
+id = "unsafe-audit"
+script = "scripts/unsafe-audit.sh"
+runner = "gate"
+layer = 0
+todos = ["T4.11"]
+cases = []
+skip = []
+title = "the token lives only in crates/nsrun, every item SAFETY-tagged (Q48)"
+
+[[suite]]
+id = "engine-singlethread"
+script = "scripts/engine-singlethread-check.sh"
+runner = "gate"
+layer = 0
+todos = ["T4.11"]
+cases = []
+skip = []
+title = "engine dep closure + source stay thread-free (Q48 fork safety)"
+
+[[suite]]
+id = "golden-conformance"
+script = "scripts/golden-conformance.sh"
+runner = "gate"
+layer = 0
+todos = ["T0.6"]
+cases = ["G01", "G02", "G03", "G04", "G05"]
+skip = ["no-binary", "no-curl"]
+title = "T0.6 supported-subset golden harness: discovery byte-diff + 15 sourced suites (Q59)"
+
+[[suite]]
+id = "stage-fresh-dir"
+script = "scripts/stage-fresh-dir-test.sh"
+runner = "ci"
+layer = 0
+todos = ["T0.2"]
+cases = []
+skip = ["needs-embedded-build"]
+title = "vendor stage() fresh-dir + idempotence (needs INIT_PRO_EMBED=1; CI bundle job)"
+
+[[suite]]
+id = "bootstrap-link-repos"
+script = "scripts/bootstrap-link-repos.sh"
+runner = "tool"
+layer = 0
+todos = ["T0.2b"]
+cases = []
+skip = []
+title = "materialize the 6 pinned path deps from link_repos.lock (Q38); runs before gates"

@@ -24,9 +24,13 @@
 //! TLS termination, active health probes); the wire behavior gated by
 //! `scripts/service-traffic-e2e.sh` (ST1-ST6) is preserved.
 //!
-//! Threading: the whole plane runs on ONE dedicated thread with a
-//! current-thread runtime (`router::supervise` + `router::spawn_nodeport_plane`
-//! from the CLI `server` runtime); every connection task is plain `Send`.
+//! Threading: the reflectors ([`endpoints_watch::supervise`]) run on the
+//! CLI `server` runtime, which is a multi-thread runtime
+//! (`cli/src/runtime.rs`, `new_multi_thread`; spawned from
+//! `cli/src/runtime_server.rs`). Only the listener planes -- NodePort
+//! ([`spawn_nodeport_plane`]) and ClusterIP ([`spawn_clusterip_plane`]) --
+//! each get their own dedicated thread with a current-thread runtime;
+//! every connection task is plain `Send`.
 
 #![forbid(unsafe_code)]
 

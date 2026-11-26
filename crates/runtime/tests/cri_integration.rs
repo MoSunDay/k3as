@@ -80,6 +80,13 @@ async fn cri_driver_round_trips_against_live_containerd() {
         "fresh daemon has no sandboxes: {sandboxes:?}"
     );
 
+    // Batch D (C7): `ever_healthy` is set by the SUPERVISOR's own 100 ms
+    // `wait_socket` poll (supervisor.rs), phased differently from the test's
+    // `wait_socket` above; a shutdown fired right after four fast crictl
+    // calls can win the race against that poll's first healthy answer and
+    // take the select's shutdown arm with the flag still false. Settle one
+    // beat first, so the assertion below is about the session, not phase.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     shutdown.trigger();
     let stats = tokio::time::timeout(Duration::from_secs(30), task)
         .await

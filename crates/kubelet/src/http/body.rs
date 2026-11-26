@@ -148,14 +148,27 @@ impl<S: tokio::io::AsyncRead + Unpin> RawBody<S> {
     /// Convenience for SMALL bodies (manifests, configs): buffers the whole
     /// entity, one bounded read at a time (C2). Blobs must stream through
     /// [`AsyncRead`] or [`Self::read_chunk`] instead. An overall deadline
-    /// comes from [`read_body_with_deadline`].
+    /// comes from [`read_body_with_deadline`]; a byte cap from
+    /// [`Self::read_to_end_capped`] (D).
     pub async fn read_to_end(&mut self) -> std::io::Result<Vec<u8>> {
+        self.read_to_end_capped(usize::MAX).await
+    }
+
+    /// [`Self::read_to_end`] under a byte `cap` (D): an untrusted registry
+    /// cannot size the kubelet's heap -- `InvalidData` once the bytes pass `cap`.
+    pub async fn read_to_end_capped(&mut self, cap: usize) -> std::io::Result<Vec<u8>> {
         let mut out = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
             let n = self.read_chunk(&mut buf).await?;
             if n == 0 {
                 return Ok(out);
+            }
+            if out.len() + n > cap {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("response body exceeds the {cap}-byte cap"),
+                ));
             }
             out.extend_from_slice(&buf[..n]);
         }
@@ -232,13 +245,11 @@ impl<S: tokio::io::AsyncRead + Unpin> RawBody<S> {
                         };
                         let token = String::from_utf8_lossy(&self.raw[..pos]).into_owned();
                         self.raw.drain(..pos + 2);
-                        let size = token
-                            .split(';')
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .parse::<u64>()
-                            .unwrap_or(0);
+                        // D: chunk-size is HEX (RFC 7230) -- "1a" is 26
+                        // bytes, not a parse failure that ends the body.
+                        let size =
+                            u64::from_str_radix(token.split(';').next().unwrap_or("").trim(), 16)
+                                .unwrap_or(0);
                         self.chunk = if size == 0 {
                             ChunkState::Done
                         } else {

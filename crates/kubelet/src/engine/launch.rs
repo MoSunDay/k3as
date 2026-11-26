@@ -24,6 +24,9 @@ const SOCKET_WAIT: Duration = Duration::from_secs(5);
 const SOCKET_POLL: Duration = Duration::from_millis(50);
 /// Reap poll period (`reap` / `kill_and_reap`).
 const REAP_POLL: Duration = Duration::from_millis(20);
+/// D: how long an ABANDONED child (boot failure) gets between the SIGKILL
+/// and "left to init" ([`settle`]).
+const ABANDON_GRACE: Duration = Duration::from_secs(5);
 /// H5 (C14): `<id>.engine.log` is opened in append mode and attempt ids
 /// are deterministic, so re-runs of the same object would grow the file
 /// for weeks. Over this size the log is truncated at launch: only the
@@ -105,7 +108,12 @@ fn engine_stderr_path(socket: &Path) -> PathBuf {
 /// Waits for the listener path to exist (the engine binds before its
 /// first accept; a ping after this proves liveness).
 pub(crate) async fn wait_socket(socket: &Path) -> io::Result<()> {
-    let deadline = tokio::time::Instant::now() + SOCKET_WAIT;
+    wait_socket_within(socket, SOCKET_WAIT).await
+}
+
+/// [`wait_socket`] with an explicit budget (the unit-test seam).
+async fn wait_socket_within(socket: &Path, wait: Duration) -> io::Result<()> {
+    let deadline = tokio::time::Instant::now() + wait;
     while !socket.exists() {
         if tokio::time::Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -152,6 +160,54 @@ pub(crate) fn reap(child: &mut Child, grace: Duration) -> io::Result<()> {
 pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) -> bool {
     let _ = child.kill();
     wait_bounded(child, grace).unwrap_or(false)
+}
+
+/// D: [`reap`] off the async workers. The bounded wait sleeps and blocks
+/// for up to the whole grace period, so the async callers (the sandbox
+/// stop, the pump teardown) run it on the blocking pool instead of
+/// parking a tokio worker. Consumes the child: there is nothing left to
+/// reap once this returns.
+pub(crate) async fn reap_offload(child: Child, grace: Duration) -> io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut child = child;
+        reap(&mut child, grace)
+    })
+    .await
+    .unwrap_or_else(|e| Err(io::Error::other(format!("reap task failed: {e}"))))
+}
+
+/// D: [`kill_and_reap`] off the workers -- for a child nobody will keep
+/// (SIGKILL first, then the bounded reap); `true` = gone and reaped.
+async fn kill_and_reap_offload(child: Child, grace: Duration) -> bool {
+    tokio::task::spawn_blocking(move || {
+        let mut child = child;
+        kill_and_reap(&mut child, grace)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Spawn-settle: wait for `socket` ([`wait_socket`], [`SOCKET_WAIT`]) and
+/// hand the child back. When the engine never binds, the child is killed
+/// AND reaped off the workers and the error is returned -- a boot failure
+/// never drops a live `Child` (a zombie until the kubelet exits) behind
+/// it (D). `what` names the engine in the error.
+pub(crate) async fn settle(child: Child, socket: &Path, what: &str) -> Result<Child, String> {
+    settle_within(child, socket, what, SOCKET_WAIT).await
+}
+
+/// [`settle`] with an explicit socket budget (the unit-test seam).
+async fn settle_within(
+    child: Child,
+    socket: &Path,
+    what: &str,
+    wait: Duration,
+) -> Result<Child, String> {
+    if let Err(e) = wait_socket_within(socket, wait).await {
+        let _ = kill_and_reap_offload(child, ABANDON_GRACE).await;
+        return Err(format!("{what} never came up: {e}"));
+    }
+    Ok(child)
 }
 
 #[cfg(test)]

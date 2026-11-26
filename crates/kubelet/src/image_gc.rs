@@ -37,10 +37,11 @@ pub(crate) fn desired_images(desired: &BTreeMap<String, PodView>) -> Vec<String>
 }
 
 /// One GC pass per sync cycle. Cheap by contract: `Healthy` costs a single
-/// statvfs, and a pressured root is the only case that walks the store.
-/// Never fails the reconcile -- the backend logs its own summary line.
-pub(crate) fn pass(cri: &dyn CriBackend, desired: &BTreeMap<String, PodView>) {
-    cri.image_gc(&desired_images(desired));
+/// statvfs, and a pressured root is the only case that walks the store
+/// (on the blocking pool -- D). Never fails the reconcile -- the backend
+/// logs its own summary line.
+pub(crate) async fn pass(cri: &dyn CriBackend, desired: &BTreeMap<String, PodView>) {
+    cri.image_gc(&desired_images(desired)).await;
 }
 
 #[cfg(test)]
@@ -150,14 +151,14 @@ mod tests {
 
     /// The default `image_gc` is a no-op, so the containerd adapter and
     /// the in-memory test fakes never fail a sync cycle over GC.
-    #[test]
-    fn default_backend_gc_is_a_noop() {
+    #[tokio::test]
+    async fn default_backend_gc_is_a_noop() {
         let other = OtherBackend;
         assert_eq!(
-            other.image_gc(&["a:1".to_string()]),
+            other.image_gc(&["a:1".to_string()]).await,
             crate::cri_backend::ImageGcStats::default()
         );
         // The wiring itself does not panic on an empty desired set.
-        pass(&other, &BTreeMap::new());
+        pass(&other, &BTreeMap::new()).await;
     }
 }

@@ -10,9 +10,19 @@
 //! Failures are values, not `Err`: spawn errors, non-zero exits and timeouts
 //! all come back as a [`CmdOutput`] whose `log` already starts with the
 //! rendered command line (so a failure status carries what was attempted).
+//!
+//! Bounded capture (batch D / B3): both pipes are drained in 8 KiB reads
+//! and only the LAST [`OUTPUT_CAP`] bytes of each stream survive; the rest
+//! is counted and discarded while the child is still running, so a build
+//! that talks for gigabytes neither grows the controller's RSS (the old
+//! `wait_with_output` buffered everything before trimming) nor blocks on a
+//! full pipe.
 
+use std::collections::VecDeque;
+use std::io;
 use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 /// Outcome of one CLI invocation.
@@ -30,6 +40,69 @@ pub struct CmdOutput {
 
 /// Run `bin` with `args`, bounded by `timeout`; never returns `Err`.
 pub async fn run(bin: &str, args: &[String], timeout: Duration) -> CmdOutput {
+    run_with(bin, args, timeout, OUTPUT_CAP).await
+}
+
+/// Bytes of ONE stream (stdout or stderr) that survive into the log: the
+/// last `OUTPUT_CAP` bytes. 256 KiB is far beyond any useful docker error
+/// and small enough that a status object stays bounded (`status::bounded_log`
+/// applies the final 4 KiB tail on top).
+pub const OUTPUT_CAP: usize = 256 * 1024;
+
+/// Pipe read granularity.
+const READ_CHUNK: usize = 8 * 1024;
+
+/// The drained tail of one pipe: its last bytes plus how many bytes were
+/// discarded ahead of them.
+#[derive(Debug, Default)]
+struct Capped {
+    kept: VecDeque<u8>,
+    dropped: usize,
+}
+
+impl Capped {
+    /// Append one chunk, evicting the oldest bytes past `cap`.
+    fn push(&mut self, chunk: &[u8], cap: usize) {
+        self.kept.extend(chunk.iter().copied());
+        let overflow = self.kept.len().saturating_sub(cap);
+        if overflow > 0 {
+            self.kept.drain(..overflow);
+            self.dropped += overflow;
+        }
+    }
+
+    /// Lossy UTF-8 text, prefixed with a marker when bytes were dropped.
+    fn render(&self) -> String {
+        let mut out = String::new();
+        if self.dropped > 0 {
+            out.push_str(&format!("...(truncated {} bytes)\n", self.dropped));
+        }
+        let bytes: Vec<u8> = self.kept.iter().copied().collect();
+        out.push_str(&String::from_utf8_lossy(&bytes));
+        out
+    }
+}
+
+/// Drain one pipe to EOF in [`READ_CHUNK`] reads, keeping only its last
+/// `cap` bytes. Discarding instead of stopping is what keeps a child that
+/// talks past the ceiling from blocking on a full pipe.
+async fn read_capped<R: AsyncRead + Unpin>(pipe: Option<R>, cap: usize) -> io::Result<Capped> {
+    let mut capped = Capped::default();
+    let Some(mut reader) = pipe else {
+        return Ok(capped);
+    };
+    let mut buf = vec![0u8; READ_CHUNK];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(capped);
+        }
+        capped.push(&buf[..n], cap);
+    }
+}
+
+/// [`run`] with an explicit per-stream capture ceiling `cap` (bytes).
+pub async fn run_with(bin: &str, args: &[String], timeout: Duration, cap: usize) -> CmdOutput {
     let header = format!("$ {bin} {}", args.join(" ")).trim_end().to_string();
     let child = Command::new(bin)
         .args(args)
@@ -38,7 +111,7 @@ pub async fn run(bin: &str, args: &[String], timeout: Duration) -> CmdOutput {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn();
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         Err(e) => {
             return CmdOutput {
@@ -49,8 +122,16 @@ pub async fn run(bin: &str, args: &[String], timeout: Duration) -> CmdOutput {
             };
         }
     };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        // Dropping `wait_with_output` drops the child: `kill_on_drop` reaps it.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // `child` MOVES into the future: when the budget elapses, dropping the
+    // future drops the child and `kill_on_drop` reaps it.
+    let collected = async move {
+        let (out, err) = tokio::try_join!(read_capped(stdout, cap), read_capped(stderr, cap))?;
+        let status = child.wait().await?;
+        Ok::<_, io::Error>((out, err, status))
+    };
+    match tokio::time::timeout(timeout, collected).await {
         Err(_) => CmdOutput {
             success: false,
             code: None,
@@ -63,14 +144,14 @@ pub async fn run(bin: &str, args: &[String], timeout: Duration) -> CmdOutput {
             log: format!("{header}\nwait failed: {e}\n"),
             timed_out: false,
         },
-        Ok(Ok(out)) => {
+        Ok(Ok((out, err, status))) => {
             let mut log = header;
             log.push('\n');
-            log.push_str(&String::from_utf8_lossy(&out.stdout));
-            log.push_str(&String::from_utf8_lossy(&out.stderr));
+            log.push_str(&out.render());
+            log.push_str(&err.render());
             CmdOutput {
-                success: out.status.success(),
-                code: out.status.code(),
+                success: status.success(),
+                code: status.code(),
                 log,
                 timed_out: false,
             }
@@ -128,5 +209,68 @@ mod tests {
         assert!(!out.success);
         assert!(!out.timed_out);
         assert!(out.log.contains("spawn failed"), "log: {}", out.log);
+    }
+
+    /// B3: the eviction math. Three 4-byte chunks against a 6-byte ceiling
+    /// keep exactly the last 6 bytes and count the 6 evicted ones.
+    #[test]
+    fn capped_keeps_only_the_last_bytes() {
+        let mut capped = Capped::default();
+        for chunk in ["wxyz", "abcd", "efgh"] {
+            capped.push(chunk.as_bytes(), 6);
+        }
+        let bytes: Vec<u8> = capped.kept.iter().copied().collect();
+        assert_eq!(bytes, b"cdefgh");
+        assert_eq!(capped.dropped, 6);
+        assert!(capped.render().starts_with("...(truncated 6 bytes)\n"));
+        let intact = Capped::default();
+        assert_eq!(intact.render(), "", "no marker without dropped bytes");
+    }
+
+    /// B3: output is capped WHILE it streams. 2 MiB on stdout + 1 MiB on
+    /// stderr against a 1 KiB ceiling leave two tails + two markers, and
+    /// the child still exits 0 (the pipes are drained to EOF, never left
+    /// full for the writer to block on).
+    #[tokio::test]
+    async fn huge_output_is_capped_while_streaming() {
+        let script = "head -c 2097152 /dev/zero | tr '\\000' a; \
+                      head -c 1048576 /dev/zero | tr '\\000' b >&2";
+        let out = run_with("/bin/sh", &sh(script), Duration::from_secs(30), 1024).await;
+        assert!(out.success, "log: {}", out.log);
+        assert_eq!(out.code, Some(0));
+        assert!(!out.timed_out);
+        assert!(
+            out.log.contains("...(truncated 2096128 bytes)"),
+            "log: {}",
+            out.log
+        );
+        assert!(
+            out.log.contains("...(truncated 1047552 bytes)"),
+            "log: {}",
+            out.log
+        );
+        // header + 2 x (marker + 1 KiB tail), nothing else.
+        let bound =
+            (out.log.len()).saturating_sub(2 * 1024 + 2 * "...(truncated NNNNNNN bytes)\n".len());
+        assert!(bound <= script.len() + 32, "log: {} bytes", out.log.len());
+        assert!(
+            out.log.ends_with(&"b".repeat(1024)),
+            "the stderr tail did not survive"
+        );
+    }
+
+    /// B3: a child that never stops talking is still killed by the budget.
+    #[tokio::test]
+    async fn elapsed_budget_kills_a_chatty_child() {
+        let out = run_with(
+            "/bin/sh",
+            &sh("while true; do echo spam; done"),
+            Duration::from_millis(150),
+            4096,
+        )
+        .await;
+        assert!(!out.success);
+        assert!(out.timed_out);
+        assert!(out.log.contains("timed out"), "log: {}", out.log);
     }
 }

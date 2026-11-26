@@ -239,25 +239,42 @@ pub(crate) async fn do_delete(
         Err(e) => return storage_error(e, &res.kind, name).into_response(),
     };
     if has_finalizers(&current.value) {
-        return soft_delete(st, &res, &key, current, cas_revision, name).await;
+        let response = soft_delete(st, &res, &key, current, cas_revision, name).await;
+        forget_node_tunnel(st, &res, name);
+        return response;
     }
     if params.propagation_policy.as_deref() == Some("Orphan") {
-        return orphan_delete(st, &res, &key, current, name).await;
+        let response = orphan_delete(st, &res, &key, current, name).await;
+        forget_node_tunnel(st, &res, name);
+        return response;
     }
     match st.store.delete(&key, cas_revision).await {
-        Ok(Some(entry)) => OkDeleted {
-            value: entry.value,
-            mod_revision: entry.mod_revision,
-            api_version: &res.api_version,
-            kind: &res.kind,
+        Ok(Some(entry)) => {
+            forget_node_tunnel(st, &res, name);
+            OkDeleted {
+                value: entry.value,
+                mod_revision: entry.mod_revision,
+                api_version: &res.api_version,
+                kind: &res.kind,
+            }
+            .response()
         }
-        .response(),
         Ok(None) => ApiError::NotFound {
             kind: res.kind,
             name: name.to_string(),
         }
         .into_response(),
         Err(e) => storage_error(e, &res.kind, name).into_response(),
+    }
+}
+
+/// A8 (T4.5 / Q65): a Node that leaves the API takes its reverse-relay
+/// tunnel state with it -- `parkToken` and generation die with the object,
+/// so a decommissioned node can neither re-park with a stale credential nor
+/// keep an entry alive for the life of the process.
+fn forget_node_tunnel(st: &AppState, res: &crate::state::Resolved, name: &str) {
+    if res.kind == "Node" {
+        st.tunnels.forget(name);
     }
 }
 

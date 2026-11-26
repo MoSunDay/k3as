@@ -38,6 +38,9 @@ pub mod executor;
 /// Pure decisions over raw JSON (naming, ownership, phases, image patch).
 mod plan;
 pub mod publish;
+/// Scratch sweeper (batch D / B4): reclaims `image.tar` / import staging
+/// dirs leaked by a crashed or killed worker.
+mod scratch;
 mod status;
 #[cfg(test)]
 mod tests;
@@ -52,8 +55,8 @@ use crate::error::ControllerError;
 use crate::id::add_label;
 use crate::object::{name, namespace, owner_reference, resource_version, semantic_eq};
 use plan::{
-    active_phase, build_name_with, build_ref, is_terminal, latest_build, owned_build, phase_of,
-    set_container_image, str_at, string_array,
+    active_phase, build_name_with, build_ref, is_terminal, latest_build_for_tag, owned_build,
+    phase_of, set_container_image, str_at, string_array,
 };
 use status::{condition, now, status_of, write_status};
 
@@ -89,9 +92,13 @@ pub async fn reconcile(
     sp: &Value,
     cfg: &Option<PipelineConfig>,
 ) -> Result<(), ControllerError> {
-    if cfg.is_none() {
+    let Some(cfg) = cfg else {
         return Ok(()); // pipeline plane disabled (no worker either)
-    }
+    };
+    // B4: reclaim scratch leaked by a crashed/killed worker. Throttled to
+    // one pass per SWEEP_INTERVAL process-wide; the first reconcile after
+    // boot is the start-up sweep. Best effort: never fails a reconcile.
+    scratch::sweep_due(&cfg.scratch_dir).await;
     let (Some(ns), Some(pipeline)) = (namespace(sp), name(sp)) else {
         return Ok(());
     };
@@ -155,23 +162,21 @@ pub async fn reconcile(
         return Ok(());
     }
 
-    if let Some(latest) = latest_build(&owned) {
-        if str_at(latest, "/spec/image/tag").trim() == tag {
-            if phase_of(latest) == api::build::PHASE_FAILED {
-                return hold_failure(client, &key, sp, latest, tag).await;
-            }
-            if phase_of(latest) == api::build::PHASE_SUCCEEDED {
-                // Q58: a canary release never patches the stable Deployment
-                // directly -- it rolls the canary and promotes on the last
-                // soaked step.
-                if canary::has_release(sp) {
-                    return canary::roll(
-                        client, &key, sp, latest, ns, pipeline, uid, tag, &reference,
-                    )
+    // The child for THIS tag (never "newest child of any tag": see
+    // `latest_build_for_tag`).
+    if let Some(latest) = latest_build_for_tag(&owned, tag) {
+        if phase_of(latest) == api::build::PHASE_FAILED {
+            return hold_failure(client, &key, sp, latest, tag).await;
+        }
+        if phase_of(latest) == api::build::PHASE_SUCCEEDED {
+            // Q58: a canary release never patches the stable Deployment
+            // directly -- it rolls the canary and promotes on the last
+            // soaked step.
+            if canary::has_release(sp) {
+                return canary::roll(client, &key, sp, latest, ns, pipeline, uid, tag, &reference)
                     .await;
-                }
-                return promote(client, &key, sp, latest, ns, tag, &reference).await;
             }
+            return promote(client, &key, sp, latest, ns, tag, &reference).await;
         }
     }
 
@@ -188,8 +193,14 @@ async fn hold_failure(
 ) -> Result<(), ControllerError> {
     let latest_name = name(latest).unwrap_or_default();
     let mut state = status_of(sp);
-    if state.pointer("/lastBuild/name").and_then(Value::as_str) == Some(latest_name) {
-        return Ok(()); // already reported: hold Failed (no rebuild loop)
+    // Already reported = same child AND phase Failed. The name alone is not
+    // enough: `create_build` stamps lastBuild while the phase is still
+    // Building, so a child that failed after creation must be reported once
+    // (scripts/delivery-e2e.sh, batch E) instead of holding Building forever.
+    let reported = state.get("phase").and_then(Value::as_str) == Some(api::pipeline::PHASE_FAILED)
+        && state.pointer("/lastBuild/name").and_then(Value::as_str) == Some(latest_name);
+    if reported {
+        return Ok(()); // hold Failed (no rebuild loop, no status churn)
     }
     let ts = now();
     state["phase"] = json!(api::pipeline::PHASE_FAILED);

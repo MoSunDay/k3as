@@ -1,0 +1,72 @@
+# Layer 7 -- Agent sandbox + host-native AI (T7.1-T7.7): Workflows, Agent
+# execution, workspace NFS, hardened sandbox, GPU/inference (fake scope).
+
+[[suite]]
+id = "golden:argoproj"
+script = "scripts/golden/suites/argoproj.sh"
+runner = "golden"
+layer = 7
+todos = ["T7.3"]
+cases = ["G27", "G28", "G29"]
+skip = ["foreign-cni0"]
+title = "argoproj discovery + CRUD/SSA + 2-step Workflow Succeeded (Q30)"
+
+[[suite]]
+id = "golden:phase3"
+script = "scripts/golden/suites/phase3.sh"
+runner = "golden"
+layer = 7
+todos = ["T4.15", "T7.2"]
+cases = ["G90", "G91", "G92", "G93", "G94", "G95", "G96", "G97", "G98"]
+skip = []
+title = "pull-policy + whole-GPU + host-direct admission 422s, annotation propagation (Q60/Q61)"
+
+[[suite]]
+id = "golden:sandbox"
+script = "scripts/golden/suites/sandbox.sh"
+runner = "golden"
+layer = 7
+todos = ["T7.7"]
+cases = ["G99", "G100", "G101", "G102", "G103", "G104", "G105", "G106"]
+skip = []
+title = "hardened Agent round-trip + 6 reject classes + legacy path + SSA (Q63)"
+
+[[suite]]
+id = "agent-exec-e2e"
+script = "scripts/agent-exec-e2e.sh"
+runner = "battery"
+layer = 7
+todos = ["T7.1"]
+cases = ["S1", "S2", "G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+skip = ["no-curl"]
+title = "Agent watch+execute loop, workspace, exit/timeout, RunnerMissing, --disable-agent-exec (Q37)"
+
+[[suite]]
+id = "anyhome-e2e"
+script = "scripts/anyhome-e2e.sh"
+runner = "battery"
+layer = 7
+todos = ["T7.4", "T7.5"]
+cases = ["A1", "P2", "K1", "P3", "P4", "P5"]
+skip = ["no-mount-nfs", "no-root", "no-curl", "no-python3"]
+title = "workspace-NFS mount, keeper, per-pod annotation defaulting (Q36/Q43, Q66 nfsserve plane)"
+
+[[suite]]
+id = "sandbox-e2e"
+script = "scripts/sandbox-e2e.sh"
+runner = "battery"
+layer = 7
+todos = ["T7.7"]
+cases = ["SA1a", "SA1b", "SA1c", "SA1d", "SA2", "SA3", "SA4a", "SA4b", "SA4c", "SA4d", "SA5", "SA6", "SA7", "SA8a", "SA8b", "SA8c", "SA8d", "SA8e", "SA8f"]
+skip = ["no-root"]
+title = "hardened Agent full stack: broker, private rootfs/netns, non-root, limits, descendant cleanup (Q63)"
+
+[[suite]]
+id = "inference-fake-e2e"
+script = "scripts/inference-fake-e2e.sh"
+runner = "battery"
+layer = 7
+todos = ["T7.6", "T7.2"]
+cases = ["IF1", "IF2", "IF3", "IF4", "IF5", "IF6", "IF7", "IF8"]
+skip = ["no-root", "no-gpu-inventory-flag"]
+title = "fake OpenAI serving through NodePort + GPU-fake ledger (Q61/Q62; batch E: wired into the battery)"

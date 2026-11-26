@@ -14,10 +14,10 @@
 //! `OnDelete` never deletes for update reasons. Status is write-if-changed
 //! via `semantic_eq` (the CAS pattern shared with the Deployment
 //! controller). v1 simplifications: scale-down deletes ALL surplus pods at
-//! once (upstream one at a time); PVCs are NEVER deleted
-//! (`persistentVolumeClaimRetentionPolicy: Retain`; the STS's own deletion
-//! leaves them to GC); old ControllerRevisions are kept forever (no
-//! `revisionHistoryLimit`). JSON-only wire (Q10); in-process storage (Q19).
+//! once (upstream one at a time); PVCs are NEVER deleted and outlive the
+//! StatefulSet (`persistentVolumeClaimRetentionPolicy: Retain` default — PVCs
+//! sit outside the gc sweep universe); old ControllerRevisions are kept forever
+//! (no `revisionHistoryLimit`). JSON-only wire (Q10); in-process storage (Q19).
 
 use std::collections::HashMap;
 use std::sync::Arc;

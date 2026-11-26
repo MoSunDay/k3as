@@ -1,0 +1,13 @@
+# Cross-cutting long-run profiles (batch F): bounded soak with churn +
+# resource sampling. Not tied to one TODO -- it exercises the control loops
+# of L2/L3/L8 together (watch replay, Build GC, registry retention, compaction).
+
+[[suite]]
+id = "soak-e2e"
+script = "scripts/soak-e2e.sh"
+runner = "battery"
+layer = 9
+todos = []
+cases = ["SK1", "SK2", "SK3", "SK4", "SK5", "SK6", "SK7"]
+skip = ["no-binary", "no-curl", "no-python3", "no-tar"]
+title = "bounded soak (SOAK_SECONDS, battery profile 45 s; standalone 600 s): churn + one-Build-per-tag invariant + RSS/fd/thread sampling + restart durability"

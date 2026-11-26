@@ -1,0 +1,11 @@
+# Layer 2 -- storage (T2.1-T2.3): the rdb:// durable datastore across restarts.
+
+[[suite]]
+id = "durability-e2e"
+script = "scripts/durability-e2e.sh"
+runner = "battery"
+layer = 2
+todos = ["T2.3"]
+cases = ["D1", "D2", "D3", "D4"]
+skip = []
+title = "rdb boot/seed/drain/restart, RV continuity + watch replay, compaction (Q33)"

@@ -2,8 +2,9 @@
 //! fetch by tag or digest (GET + HEAD, media type resolved from the
 //! tag metadata or the manifest's own `mediaType`), push (PUT with
 //! referential validation, digest re-check, tag write, then the
-//! retention pass), and delete (digest-only, tag scrub + blob GC; an
-//! unknown digest answers 404 `MANIFEST_UNKNOWN`, C4).
+//! retention pass), and delete (digest-only, tag scrub + index-children
+//! cascade + blob GC, batch D B1; an unknown digest answers 404
+//! `MANIFEST_UNKNOWN`, C4).
 //! Split out of `api/mod.rs` to keep every file inside the size budget;
 //! behaviour is unchanged.
 
@@ -302,7 +303,9 @@ pub(super) async fn delete(st: &RegState, repo: &str, reference: &str) -> Respon
             "manifest unknown to registry",
         );
     }
-    let _ = store::delete_manifest(&st.root, repo, reference).await;
+    // B1 (batch D): read-then-delete so an index cascades over the digest-
+    // only children nothing else reaches; the blob pass then reclaims them.
+    let _ = gc::delete_with_children(&st.root, repo, reference).await;
     let _ = gc::gc_blobs(&st.root).await;
     respond(StatusCode::ACCEPTED, &[], "{}")
 }

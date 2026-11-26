@@ -178,7 +178,7 @@ pub fn serve(socket: &Path, opts: &ServeOptions) -> i32 {
     loop {
         if nsrun::shutdown_requested(&SHUTDOWN) {
             eprintln!("engine: shutdown signal; exiting");
-            return 0;
+            return finish(socket, &mut pause_child);
         }
         // H6/C14: the kubelet parent tie -- EOF on the stdin pipe means the
         // spawner is gone. Exit like a shutdown (the pause child is reaped
@@ -186,19 +186,18 @@ pub fn serve(socket: &Path, opts: &ServeOptions) -> i32 {
         // stale file for a live engine.
         if tie.as_mut().is_some_and(StdinTie::closed) {
             eprintln!("engine: stdin EOF (spawner gone); exiting");
-            let _ = std::fs::remove_file(socket);
-            return 0;
+            return finish(socket, &mut pause_child);
         }
         if let Some(child) = pause_child.as_mut() {
             if let Ok(Some(nsrun::Output::Exited(_))) = child.next_event(Duration::ZERO) {
                 eprintln!("engine: sandbox exited; shutting down");
                 child.cleanup();
-                return 0;
+                return finish(socket, &mut pause_child);
             }
         }
         match listener.accept() {
             Ok((stream, _)) => match session::handle(stream, &listener, &ctx, &mut pause_child) {
-                Ok(Outcome::Exit) => return 0,
+                Ok(Outcome::Exit) => return finish(socket, &mut pause_child),
                 Ok(Outcome::Continue) => {}
                 Err(e) => eprintln!("engine: session ended: {e}"),
             },
@@ -207,10 +206,35 @@ pub fn serve(socket: &Path, opts: &ServeOptions) -> i32 {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
                 eprintln!("engine: accept: {e}");
+                teardown(socket, &mut pause_child);
                 return 1;
             }
         }
     }
+}
+
+/// Exit-path teardown shared by every way out of [`serve`] (batch D, C5):
+/// the pause sandbox is dropped -- its `Drop` IS the reap (`nsrun::Child`:
+/// SIGKILL + blocking waitpid when the exit was never reported, then the
+/// cgroup removal) -- and the two paths beside the socket go away so no
+/// sweep mistakes a stale `<socket>.pause-rootfs` or socket file for a
+/// live engine.
+fn teardown(socket: &Path, pause_child: &mut Option<Child>) {
+    drop(pause_child.take());
+    let _ = std::fs::remove_dir_all(pause_rootfs(socket));
+    let _ = std::fs::remove_file(socket);
+}
+
+/// [`teardown`] + the clean exit code.
+fn finish(socket: &Path, pause_child: &mut Option<Child>) -> i32 {
+    teardown(socket, pause_child);
+    0
+}
+
+/// The pause sandbox's rootfs dir beside the socket; an empty dir, since
+/// pause never execs.
+fn pause_rootfs(socket: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.pause-rootfs", socket.display()))
 }
 
 /// Spawns the Q49 sandbox child: a pause-mode container whose only job is
@@ -218,7 +242,7 @@ pub fn serve(socket: &Path, opts: &ServeOptions) -> i32 {
 /// netns with `--host-net`, Q52) open with PID 1 parked. The rootfs is
 /// an empty dir beside the socket — pause never execs.
 fn spawn_pause(socket: &Path, opts: &ServeOptions) -> io::Result<Child> {
-    let rootfs = PathBuf::from(format!("{}.pause-rootfs", socket.display()));
+    let rootfs = pause_rootfs(socket);
     std::fs::create_dir_all(&rootfs)?;
     let mut run = nsrun::RunSpec::new(rootfs, vec!["/pause".into()]);
     run.pause = true;
@@ -228,4 +252,35 @@ fn spawn_pause(socket: &Path, opts: &ServeOptions) -> io::Result<Child> {
     // new_net && netns.is_none(), so this stays a zero-config path.
     run.new_net = opts.netns.is_none() && !opts.host_net;
     nsrun::spawn(&run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A private socket path per test run (`std::env::temp_dir` is `/tmp`).
+    fn scratch() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!("engine-finish-{}-{nanos}.sock", std::process::id()))
+    }
+
+    /// Batch D (C5): every exit path leaves neither the socket file nor the
+    /// pause rootfs behind (a non-empty one), and reports a clean exit --
+    /// and is idempotent for a path that never bound.
+    #[test]
+    fn teardown_removes_the_socket_and_the_pause_rootfs() {
+        let socket = scratch();
+        let rootfs = pause_rootfs(&socket);
+        std::fs::create_dir_all(rootfs.join("nested")).expect("pause rootfs");
+        let _listener = UnixListener::bind(&socket).expect("bind");
+        assert!(socket.exists() && rootfs.exists());
+        let mut pause_child: Option<Child> = None;
+        assert_eq!(finish(&socket, &mut pause_child), 0);
+        assert!(!socket.exists(), "the socket file is unlinked");
+        assert!(!rootfs.exists(), "the pause rootfs is removed");
+        assert_eq!(finish(&socket, &mut pause_child), 0, "idempotent");
+        assert!(!socket.exists());
+    }
 }

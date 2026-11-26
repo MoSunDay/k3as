@@ -1,6 +1,7 @@
 //! Blob handlers (Docker Registry HTTP API V2; TODO **T6.3**, Q40):
 //! fetch by digest (GET + HEAD over the global content-addressed CAS,
-//! with `BLOB_UNKNOWN` for misses) and delete. Upload sessions live in
+//! with `BLOB_UNKNOWN` for misses) and delete (409 `BLOB_REFERENCED` while
+//! a manifest still lists the blob, batch D B2). Upload sessions live in
 //! `uploads.rs`; this module only reads and removes finished blobs.
 //! Split out of `api/mod.rs` to keep every file inside the size budget.
 //!
@@ -90,6 +91,20 @@ pub(super) async fn delete(st: &RegState, repo: &str, digest: &str) -> Response 
             StatusCode::BAD_REQUEST,
             "DIGEST_INVALID",
             "malformed digest",
+        );
+    }
+    // B2 (batch D): the CAS is global and every manifest sharing this blob
+    // still lists it, so a blind delete would hollow out a live image (its
+    // manifest would point at a layer that no longer exists). Referenced ->
+    // 409; the client deletes the manifest and lets GC reclaim the blob.
+    if store::referenced_blob_digests(&st.root)
+        .await
+        .contains(digest)
+    {
+        return v2_error(
+            StatusCode::CONFLICT,
+            "BLOB_REFERENCED",
+            "blob is referenced by a manifest; delete the manifest first",
         );
     }
     let _ = store::delete_blob(&st.root, digest).await;

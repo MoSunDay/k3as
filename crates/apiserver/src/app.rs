@@ -11,9 +11,16 @@
 //!  - grouped:           `/apis/<g>/<v>/<r>` + `/apis/<g>/<v>/namespaces/<ns>/<r>`
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use axum::error_handling::HandleErrorLayer;
+use axum::http::StatusCode;
 use axum::routing::{get, post, put};
-use axum::Router;
+use axum::{BoxError, Router};
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower::load_shed::LoadShedLayer;
+use tower::timeout::TimeoutLayer;
+use tower::ServiceBuilder;
 
 use crate::collection;
 use crate::discovery_handlers::discovery_routes;
@@ -73,12 +80,76 @@ pub fn api_app_full(
     router(state)
 }
 
+/// A7: request deadline, outermost over the whole router (upstream
+/// `--min-request-timeout` parity). Long enough that watch streams and the
+/// reverse-relay tunnel park survive; `TimeoutLayer` bounds time-to-response
+/// only, and a watch handler hands back its chunked body (Q10) immediately.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// A7: in-flight request cap (upstream `--max-requests-in-flight` shape).
+pub(crate) const MAX_IN_FLIGHT: usize = 1024;
+
+/// A7: a request that blew the deadline answers `504 GATEWAY_TIMEOUT`.
+fn timeout_failure(err: BoxError) -> std::future::Ready<axum::response::Response> {
+    tracing::debug!(error = %err, "apiserver request deadline exceeded");
+    std::future::ready(crate::error::status_failure(
+        StatusCode::GATEWAY_TIMEOUT,
+        "Timeout",
+        "request exceeded the apiserver request timeout".to_string(),
+    ))
+}
+
+/// A7: a request shed at the in-flight cap answers `503 SERVICE_UNAVAILABLE`.
+fn overload_failure(err: BoxError) -> std::future::Ready<axum::response::Response> {
+    tracing::debug!(error = %err, "apiserver shed an overloaded request");
+    std::future::ready(crate::error::status_failure(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "ServiceUnavailable",
+        "server is overloaded: max in-flight requests reached".to_string(),
+    ))
+}
+
+/// A7: wrap `routes` in the deadline + concurrency-cap layers, OUTERMOST of
+/// everything (`authn`/`authz` included).
+///
+/// [`GlobalConcurrencyLimitLayer`], not [`tower::limit::ConcurrencyLimitLayer`]:
+/// axum's `Router::layer` maps the layer over EVERY route endpoint, and the
+/// plain layer mints a fresh semaphore per service, so the cap would silently
+/// become per-route instead of a global in-flight budget. The global layer
+/// clones one `Arc<Semaphore>`.
+///
+/// Each `HandleErrorLayer` must sit outside its fallible layer in the SAME
+/// `ServiceBuilder` stack: axum's [`Router::layer`] requires an infallible
+/// service, so `Timeout`/`LoadShed` errors have to be folded into a response
+/// before the next `Router::layer` boundary. `ServiceBuilder` applies its
+/// first layer outermost, and a later `Router::layer` wraps the earlier ones,
+/// so the deadline ends up outside the cap (a queued request still carries a
+/// deadline). `max_in_flight` is a parameter only so the test can pin the
+/// 503 path; production passes [`MAX_IN_FLIGHT`].
+fn hardened(routes: Router, max_in_flight: usize) -> Router {
+    routes
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(overload_failure))
+                .layer(LoadShedLayer::new())
+                .layer(GlobalConcurrencyLimitLayer::new(max_in_flight)),
+        )
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(timeout_failure))
+                .layer(TimeoutLayer::new(REQUEST_TIMEOUT)),
+        )
+}
+
 /// Assemble the router over a ready [`AppState`] (shared with [`crate::serve`]).
 ///
 /// T1.3a/b (Q47): when `state.auth` is armed the `authn` -> `authz`
 /// middleware pair wraps every route (axum layers added later run earlier,
 /// so authz is added first and authn runs first on the wire). The default
 /// anonymous plane stays layer-free — identical bytes to pre-T1.3.
+///
+/// A7: the assembled routes (auth pair included) are then wrapped by
+/// [`hardened`] -- deadline and in-flight cap are outermost on the wire.
 pub(crate) fn router(state: AppState) -> Router {
     let auth_armed = state.auth.is_some();
     let routes = Router::new()
@@ -175,7 +246,7 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .with_state(state.clone());
 
-    if auth_armed {
+    let routes = if auth_armed {
         routes
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -187,5 +258,97 @@ pub(crate) fn router(state: AppState) -> Router {
             ))
     } else {
         routes
+    };
+    hardened(routes, MAX_IN_FLIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    async fn body_json(resp: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    /// A7: the production constants are the documented parity values.
+    #[test]
+    fn deadline_and_cap_constants() {
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(1800));
+        assert_eq!(MAX_IN_FLIGHT, 1024);
+    }
+
+    /// A7: an ordinary request passes through both layers untouched.
+    #[tokio::test]
+    async fn hardened_router_serves_normal_requests() {
+        let routes = Router::new().route("/ok", get(|| async { "ok" }));
+        let app = hardened(routes, MAX_IN_FLIGHT);
+        let resp = app
+            .oneshot(Request::builder().uri("/ok").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A7: with the in-flight cap saturated the router sheds immediately with
+    /// a `503 SERVICE_UNAVAILABLE` Status body instead of queueing forever.
+    #[tokio::test]
+    async fn saturated_cap_sheds_with_service_unavailable() {
+        let routes = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    "slow"
+                }),
+            )
+            .route("/fast", get(|| async { "fast" }));
+        let app = hardened(routes, 1);
+        let holder = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(Request::builder().uri("/slow").body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            })
+        };
+        // Let the first request take the only permit.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let resp = app
+            .oneshot(Request::builder().uri("/fast").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["kind"], "Status");
+        assert_eq!(body["reason"], "ServiceUnavailable");
+        assert_eq!(body["code"], 503);
+        // The in-flight request is unaffected by the shed.
+        let resp = holder.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A7: both error mappers emit the canonical `metav1.Status` envelope.
+    #[tokio::test]
+    async fn error_mappers_emit_status_envelopes() {
+        let err: BoxError = "boom".into();
+        let resp = timeout_failure(err).await.into_response();
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = body_json(resp).await;
+        assert_eq!(body["reason"], "Timeout");
+        assert_eq!(body["code"], 504);
+        let err: BoxError = "overloaded".into();
+        let resp = overload_failure(err).await.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["reason"], "ServiceUnavailable");
+        assert_eq!(body["code"], 503);
     }
 }

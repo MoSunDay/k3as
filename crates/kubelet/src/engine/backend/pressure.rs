@@ -19,7 +19,11 @@
 //!
 //! Every deletion is best-effort: a failed unlink is a `warn!`, never a
 //! failed reconcile. `views/` (live per-container overlay scratch) and
-//! `tmp/` (in-flight downloads) are never walked here.
+//! `tmp/` (in-flight downloads) are never walked here, and neither are the
+//! `.tmp-*` staging dirs of an unpack in progress (D: a sweep racing it
+//! would delete the tree under the writer). The pass is `async` (D): the
+//! usage walk is a full `std::fs` tree walk and runs on the blocking pool
+//! ([`usage_offload`]), never on the sync loop's tokio worker.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -29,21 +33,32 @@ use nix::sys::statvfs::statvfs;
 
 use crate::cri_backend::ImageGcStats;
 use crate::engine::image::disk::{self, DiskPressure, Entry, InUse, RefEntry};
-use crate::engine::image::ImageStore;
+use crate::engine::image::{is_staging_name, ImageStore};
 
 use super::EngineBackend;
 
 /// One pass over `backend`'s store: measure, decide, sweep best-effort.
 /// Never fails and never panics on I/O -- the answer is in the stats.
-pub(super) fn pass(backend: &EngineBackend, in_use: &[String]) -> ImageGcStats {
+pub(super) async fn pass(backend: &EngineBackend, in_use: &[String]) -> ImageGcStats {
     let (available, total) = measure(backend.store.root());
-    pass_at(backend, in_use, available, total, SystemTime::now())
+    pass_at(backend, in_use, available, total, SystemTime::now()).await
+}
+
+/// D: the store usage walk (`blobs/` + `layers/` + `merged/`, every file
+/// stat-ed) on the blocking pool -- it is the one unbounded piece of I/O in
+/// a pressured pass. A join failure reads as 0 (the number only feeds the
+/// "bytes freed" log line).
+async fn usage_offload(store: &ImageStore) -> u64 {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || store.usage_bytes())
+        .await
+        .unwrap_or(0)
 }
 
 /// The deterministic core of [`pass`]: the measurement and the clock are
 /// arguments, so the tests can drive a pressured root without filling a
 /// disk. Everything else (store walks, deletion, logging) is the real path.
-pub(super) fn pass_at(
+pub(super) async fn pass_at(
     backend: &EngineBackend,
     in_use: &[String],
     available_bytes: u64,
@@ -74,7 +89,7 @@ pub(super) fn pass_at(
         .chain(in_use.iter().cloned())
         .collect();
     let in_use = InUse::new(images.iter().map(String::as_str), backend.puller.host());
-    let before = store.usage_bytes();
+    let before = usage_offload(store).await;
     let mut stats = ImageGcStats {
         pressure,
         ..Default::default()
@@ -106,7 +121,7 @@ pub(super) fn pass_at(
         stats.entries_removed += remove_digest(store, digest);
     }
 
-    stats.bytes_freed = before.saturating_sub(store.usage_bytes());
+    stats.bytes_freed = before.saturating_sub(usage_offload(store).await);
     log_summary(pressure, &stats, available_bytes, total_bytes, in_use.len());
     stats
 }
@@ -202,7 +217,8 @@ fn ref_path(store: &ImageStore, reference: &str) -> std::path::PathBuf {
 /// Every on-disk digest no surviving ref owns, with its mtime: CAS blobs
 /// (`blobs/<algo>/<hex>`), unpacked per-layer dirs and fused `merged/`
 /// dirs (the last two are keyed by bare hex, so they read `sha256:<hex>`,
-/// exactly like `gc::sweep` marks them).
+/// exactly like `gc::sweep` marks them). `.tmp-*` staging dirs are not
+/// digests and never surface here (D).
 fn orphan_entries(store: &ImageStore) -> Vec<Entry> {
     let mut marked = BTreeSet::new();
     for img in store.list_refs() {
@@ -294,7 +310,8 @@ fn sub_files(dir: &Path) -> Vec<String> {
     entries(dir).1
 }
 
-/// One `read_dir`, split into `(dirs, files)` names.
+/// One `read_dir`, split into `(dirs, files)` names; in-flight staging
+/// dirs (`.tmp-*`, D) are dropped from the dir half.
 fn entries(dir: &Path) -> (Vec<String>, Vec<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return (Vec::new(), Vec::new());
@@ -306,7 +323,9 @@ fn entries(dir: &Path) -> (Vec<String>, Vec<String>) {
             continue;
         };
         if entry.path().is_dir() {
-            dirs.push(name);
+            if !is_staging_name(&name) {
+                dirs.push(name);
+            }
         } else if entry.path().is_file() {
             files.push(name);
         }

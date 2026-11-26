@@ -4,7 +4,10 @@
 //! [`ObjectStore`] cache and fires synthetic initial events (so handlers
 //! enqueue every existing object), then a replaying WATCH streams deltas.
 //! When the watch closes (`recv() == None`: lag or backend shutdown) the
-//! informer re-LISTs from scratch -- the upstream resync path.
+//! informer re-LISTs from scratch -- the upstream resync path. A6: the
+//! re-LIST is paced by [`relist_delay`] (50ms doubling to a 5s cap, reset
+//! once a watch proves healthy), so an unreachable apiserver is not
+//! hammered by every informer at a fixed 50ms cadence.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -227,6 +230,8 @@ impl Informer {
         handler: EventHandler,
         stop: Stop,
     ) {
+        // A6: consecutive failed attempts drive the re-LIST pacing below.
+        let mut failures = 0u32;
         loop {
             // A2: until this LIST lands, an absent owner means "not yet
             // listed", never "deleted" -- the GC reads this flag.
@@ -239,7 +244,7 @@ impl Informer {
                     Err(e) => {
                         tracing::warn!(prefix = %self.prefix.as_path(), error = %e,
                             "informer list failed; retrying");
-                        pause(&stop).await;
+                        retry_pause(&stop, &mut failures).await;
                         continue;
                     }
                 },
@@ -282,7 +287,7 @@ impl Informer {
                     Err(e) => {
                         tracing::warn!(prefix = %self.prefix.as_path(), error = %e,
                             "informer watch failed; re-listing");
-                        pause(&stop).await;
+                        retry_pause(&stop, &mut failures).await;
                         continue;
                     }
                 },
@@ -292,6 +297,8 @@ impl Informer {
                     _ = stop.cancelled() => return,
                     ev = w.recv() => match ev {
                         Some(ev) => {
+                            // A6: a delivered event proves the stream healthy.
+                            failures = 0;
                             let ev = normalize_event_namespace(ev, &self.prefix);
                             let rev = ev.revision();
                             store.apply_event(&ev);
@@ -306,7 +313,9 @@ impl Informer {
                     },
                 }
             }
-            pause(&stop).await; // pace the re-list (avoids a hot loop on fast closes)
+            // Pace the re-list by the observed failure count (A6): avoids a
+            // hot loop on fast closes without hammering a down apiserver.
+            retry_pause(&stop, &mut failures).await;
         }
     }
 
@@ -324,9 +333,82 @@ impl Informer {
     }
 }
 
-async fn pause(stop: &Stop) {
+/// A6: re-LIST backoff -- 50ms doubling per consecutive failure, capped at
+/// 5s. Pure so tests can pin it. With ~14 informers x 2 calls each, the old
+/// fixed 50ms paced ~560 requests/s against an apiserver that is down.
+pub fn relist_delay(failures: u32) -> Duration {
+    Duration::from_millis((50u64 << failures.min(7)).min(5_000))
+}
+
+/// Sleep `d` unless `stop` fires first (shutdown stays responsive).
+async fn pause(stop: &Stop, d: Duration) {
     tokio::select! {
         _ = stop.cancelled() => {}
-        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        _ = tokio::time::sleep(d) => {}
+    }
+}
+
+/// Wait out the current backoff, then count the attempt. The first retry is
+/// paced at `relist_delay(0)` and the delay grows only while attempts keep
+/// failing.
+async fn retry_pause(stop: &Stop, failures: &mut u32) {
+    let d = relist_delay(*failures);
+    *failures = failures.saturating_add(1);
+    pause(stop, d).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A6: 50ms base, doubling, capped at 5s (never the old fixed 50ms).
+    #[test]
+    fn relist_backoff_doubles_to_a_cap() {
+        assert_eq!(relist_delay(0), Duration::from_millis(50));
+        assert_eq!(relist_delay(1), Duration::from_millis(100));
+        assert_eq!(relist_delay(3), Duration::from_millis(400));
+        assert_eq!(relist_delay(7), Duration::from_secs(5));
+        assert_eq!(relist_delay(10), Duration::from_secs(5));
+        assert_eq!(relist_delay(u32::MAX), Duration::from_secs(5));
+        // Monotonic across the whole range.
+        let mut prev = Duration::ZERO;
+        for n in 0..12u32 {
+            let d = relist_delay(n);
+            assert!(d >= prev, "relist delay must not shrink at {n}");
+            prev = d;
+        }
+    }
+
+    /// A6: the counter is counted AFTER the wait, so the first retry is the
+    /// base delay and growth only accumulates while attempts keep failing.
+    #[tokio::test]
+    async fn retry_pause_counts_after_the_wait() {
+        let mut failures = 0u32;
+        retry_pause(&Stop::new(), &mut failures).await;
+        assert_eq!(failures, 1);
+        retry_pause(&Stop::new(), &mut failures).await;
+        assert_eq!(failures, 2);
+        assert_eq!(relist_delay(failures - 1), Duration::from_millis(100));
+    }
+
+    /// A6: shutdown awareness is preserved -- a triggered `Stop` ends the
+    /// pace immediately instead of sleeping the whole backoff.
+    #[tokio::test]
+    async fn pause_returns_as_soon_as_stop_fires() {
+        let stop = Stop::new();
+        let started = std::time::Instant::now();
+        let trigger = {
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                stop.trigger();
+            })
+        };
+        pause(&stop, Duration::from_secs(5)).await;
+        trigger.await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a triggered Stop must cut the pause short"
+        );
     }
 }

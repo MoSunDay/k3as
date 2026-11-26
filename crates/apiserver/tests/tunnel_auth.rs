@@ -251,3 +251,74 @@ async fn responses_with_valid_token_but_unknown_id_answers_404() {
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert_eq!(body["reason"], "NotFound");
 }
+
+/// A8 (P2 hardening): an unauthenticated park with an arbitrary node name
+/// must not grow the tunnel registry. Before the fix `park_checked` inserted
+/// the node entry BEFORE the token check, so a spray of random names leaked
+/// one `NodeTunnel` per request for the life of the process.
+#[tokio::test]
+async fn park_with_an_unknown_node_name_leaves_no_state_behind() {
+    let r = app();
+    for name in ["ghost-a", "ghost-b", "ghost-c"] {
+        let (st, body) = send(
+            r.clone(),
+            "GET",
+            &format!("/api/v1/nodes/{name}/tunnel/next?parkToken=deadbeef"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{name} must fail closed");
+        assert_eq!(body["reason"], "Unauthorized");
+    }
+    // Nothing was seated: no node answers as live, and a submit through any
+    // of the sprayed names still reports "no tunnel".
+    let (st, _) = send(
+        r.clone(),
+        "GET",
+        &format!("/api/v1/nodes/{}/pods/u/containers/c/log", "ghost-a"),
+        None,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "a ghost node must never be relayed to");
+}
+
+/// A8: deleting the Node object drops its tunnel state, so the pre-delete
+/// `parkToken` dies with it (a decommissioned node cannot re-park).
+#[tokio::test]
+async fn deleting_the_node_kills_its_park_token() {
+    let r = app();
+    let (st, _) = send(
+        r.clone(),
+        "POST",
+        "/api/v1/nodes",
+        json_body(&json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "n1"},
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let token = register_token(&r, "n1").await;
+    // The credential is live while the Node exists.
+    let (st, _) = post_relay_response(&r, "n1", "no-such-id", Some(&token)).await;
+    assert_eq!(
+        st,
+        StatusCode::NOT_FOUND,
+        "auth passed (only the id is unknown)"
+    );
+
+    let (st, _) = send(r.clone(), "DELETE", "/api/v1/nodes/n1", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, body) = send(
+        r.clone(),
+        "GET",
+        &format!("/api/v1/nodes/n1/tunnel/next?parkToken={token}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "the pre-delete token must be dead: {body}"
+    );
+}

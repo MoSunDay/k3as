@@ -499,3 +499,38 @@ async fn watch_agents_events() {
         });
     assert_eq!(deleted["object"]["kind"], "Agent");
 }
+
+/// Batch F soak finding (scripts/soak-e2e.sh): `timeoutSeconds` used to be
+/// ignored, so every watch pinned a connection until the peer closed it.
+/// The server now ends the body with 200 once the budget elapses (clients
+/// re-watch from their last resourceVersion, as client-go always does).
+#[tokio::test(flavor = "current_thread")]
+async fn watch_timeout_seconds_ends_the_stream_server_side() {
+    let addr = spawn_server().await;
+    post_configmap(addr, "alpha", "v").await;
+
+    // Bounded watch: the chunked body terminates (EOF with `connection:
+    // close`) within the guard, and not before the asked-for second.
+    let mut watch = open_watch(addr, "&timeoutSeconds=1").await;
+    let started = std::time::Instant::now();
+    let mut raw = Vec::new();
+    let eof = tokio::time::timeout(Duration::from_secs(5), watch.read_to_end(&mut raw)).await;
+    assert!(
+        eof.is_ok(),
+        "server never closed the watch after timeoutSeconds=1"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "closed too early ({elapsed:?})"
+    );
+    assert!(
+        raw.starts_with(b"HTTP/1.1 200"),
+        "watch must end as a 200, got: {}",
+        String::from_utf8_lossy(&raw[..raw.len().min(40)])
+    );
+    assert!(
+        raw.ends_with(b"0\r\n\r\n"),
+        "chunked body must terminate cleanly"
+    );
+}

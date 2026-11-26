@@ -7,9 +7,148 @@
 
 mod support;
 
+use serde_json::json;
 use support::*;
 
+// ---- B1 fixtures: digest-only children + indexes --------------------------
+
+const IMAGE: &str = "application/vnd.docker.distribution.manifest.v2+json";
+const LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
+
+/// Push a digest-only image child (config + one layer + manifest, NO tag);
+/// returns (manifest digest, layer digest).
+async fn push_child(addr: &str, repo: &str, arch: &str) -> (String, String) {
+    let cfg = format!(r#"{{"architecture":"{arch}","os":"linux"}}"#);
+    let cfg_digest = sha256_hex(cfg.as_bytes());
+    let layer = format!("layer-of-{arch}");
+    let layer_digest = sha256_hex(layer.as_bytes());
+    assert_eq!(push_blob(addr, repo, cfg.as_bytes()).await.status, 201);
+    assert_eq!(push_blob(addr, repo, layer.as_bytes()).await.status, 201);
+    let manifest = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{IMAGE}","config":{{"mediaType":"application/vnd.docker.container.image.v1+json","size":{},"digest":"{cfg_digest}"}},"layers":[{{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","size":{},"digest":"{layer_digest}"}}]}}"#,
+        cfg.len(),
+        layer.len()
+    );
+    let digest = sha256_hex(manifest.as_bytes());
+    let r = req(
+        addr,
+        "PUT",
+        &format!("/v2/{repo}/manifests/{digest}"),
+        &[("content-type", IMAGE)],
+        manifest.as_bytes(),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body_str());
+    (digest, layer_digest)
+}
+
+/// Push an index listing `children` under `tag`; returns its digest.
+async fn push_index(addr: &str, repo: &str, tag: &str, children: &[&str]) -> String {
+    let body = json!({
+        "schemaVersion": 2,
+        "mediaType": LIST,
+        "manifests": children
+            .iter()
+            .map(|d| json!({"mediaType": IMAGE, "size": 1, "digest": d}))
+            .collect::<Vec<_>>(),
+    });
+    let r = req(
+        addr,
+        "PUT",
+        &format!("/v2/{repo}/manifests/{tag}"),
+        &[("content-type", LIST)],
+        body.to_string().as_bytes(),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.body_str());
+    r.header("docker-content-digest").unwrap().to_string()
+}
+
+fn blob_file(root: &std::path::Path, digest: &str) -> std::path::PathBuf {
+    root.join("blobs").join(digest.replace(':', "-"))
+}
+
+/// Rewind every CAS blob by `secs` (the GC grace window protects fresh ones).
+fn age_blobs(root: &std::path::Path, secs: u64) {
+    for entry in std::fs::read_dir(root.join("blobs")).unwrap() {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(entry.unwrap().path())
+            .unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+}
+
 // ---- tests -----------------------------------------------------------------
+
+/// B1 (batch D): children that only a deleted index listed are pruned with
+/// it (manifest + blobs once past the grace window); a child a surviving
+/// index still lists stays, and goes when that one goes too.
+#[tokio::test]
+async fn deleting_an_index_prunes_its_orphaned_children() {
+    let (addr, root) = boot(10).await;
+    let (amd64, amd64_layer) = push_child(&addr, "multi/arch", "amd64").await;
+    let (arm64, arm64_layer) = push_child(&addr, "multi/arch", "arm64").await;
+    let release = push_index(&addr, "multi/arch", "release", &[&amd64, &arm64]).await;
+    let shared = push_index(&addr, "multi/arch", "shared", &[&amd64]).await;
+    age_blobs(&root, registry::gc::BLOB_GC_GRACE_SECS * 2);
+
+    let r = req(
+        &addr,
+        "DELETE",
+        &format!("/v2/multi/arch/manifests/{release}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 202, "{}", r.body_str());
+    let r = req(
+        &addr,
+        "GET",
+        &format!("/v2/multi/arch/manifests/{arm64}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 404, "the orphaned child survived its index");
+    assert!(
+        !blob_file(&root, &arm64_layer).exists(),
+        "the orphaned child's layer blob survived"
+    );
+    let r = req(
+        &addr,
+        "GET",
+        &format!("/v2/multi/arch/manifests/{amd64}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 200, "a child still listed by `shared` was pruned");
+    assert!(blob_file(&root, &amd64_layer).exists());
+
+    let r = req(
+        &addr,
+        "DELETE",
+        &format!("/v2/multi/arch/manifests/{shared}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 202, "{}", r.body_str());
+    let r = req(
+        &addr,
+        "GET",
+        &format!("/v2/multi/arch/manifests/{amd64}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 404, "the last child survived the last index");
+    assert!(!blob_file(&root, &amd64_layer).exists());
+
+    std::fs::remove_dir_all(root.parent().unwrap()).ok();
+}
 
 #[tokio::test]
 async fn manifest_roundtrip_and_retention() {

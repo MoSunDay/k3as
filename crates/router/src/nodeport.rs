@@ -12,10 +12,17 @@
 //! SWRR), same 503-while-empty, same listener lifecycle on Service
 //! create/delete/nodePort change. Deviations are documented in
 //! [`crate::gateway_config`] (passive-only health) and [`crate::gate`].
+//!
+//! Bind lifecycle (T5.4 hardening): a failed bind is logged WITH its cause
+//! at the bind site and retried on a slow tick ([`RETRY_TICK`]) for as long
+//! as the materialized set is short of the desired one -- a nodePort that
+//! frees later (another process exiting) is picked up without waiting for an
+//! unrelated fold. A fully bound plane stays quiet: no periodic churn.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use infra::Shutdown;
 use openrusty_server::state::{self as or_state, AppState};
@@ -27,6 +34,10 @@ use crate::gateway_config;
 use crate::route::{PortRef, UpstreamRef};
 use crate::serve;
 use crate::split::PeerWeight;
+
+/// Bind retry cadence while some desired nodePort is still unbound (T5.4
+/// hardening); see [`retry_pending`].
+const RETRY_TICK: Duration = Duration::from_secs(5);
 
 /// Bind configuration for the nodePort listeners.
 #[derive(Clone, Copy, Debug)]
@@ -145,16 +156,26 @@ async fn reconcile_loop(
     }
     let mut state_rx = resolver.subscribe();
     loop {
-        {
+        let counts = {
             let state = state_rx.borrow_and_update().clone();
-            reconcile(&mut listeners, &mut reaped, config, &resolver, &state).await;
-        }
+            reconcile(&mut listeners, &mut reaped, config, &resolver, &state).await
+        };
+        let retry = retry_pending(counts.0, counts.1);
         tokio::select! {
             _ = shutdown.cancelled() => break,
             changed = state_rx.changed() => {
                 if changed.is_err() {
                     break; // resolver channel dropped
                 }
+            }
+            // Only armed while a desired nodePort is still unbound: the
+            // (cause-logging) bind step re-runs until the port frees up.
+            _ = tokio::time::sleep(RETRY_TICK), if retry => {
+                tracing::debug!(
+                    target: "init-pro",
+                    missing = counts.0 - counts.1,
+                    "nodePort bind retry tick"
+                );
             }
         }
     }
@@ -167,15 +188,22 @@ async fn reconcile_loop(
     }
 }
 
+/// Arm the bind retry tick only while the materialized set is smaller than
+/// the desired one (a fully bound plane stays quiet). Pure; unit-tested.
+fn retry_pending(desired: usize, have: usize) -> bool {
+    have < desired
+}
+
 /// One reconcile step: refresh endpoint sets, drop stale listeners, start
-/// missing ones.
+/// missing ones. Returns `(desired, materialized)` listener counts so the
+/// loop knows whether a retry tick is due.
 async fn reconcile(
     listeners: &mut BTreeMap<u16, Listener>,
     reaped: &mut Vec<JoinHandle<()>>,
     config: NodePortConfig,
     resolver: &EndpointsResolver,
     state: &ResolverState,
-) {
+) -> (usize, usize) {
     let desired = desired_listeners(state);
     reaped.retain(|h| !h.is_finished());
     let stale: Vec<u16> = listeners
@@ -205,11 +233,12 @@ async fn reconcile(
                 None => tracing::warn!(
                     target: "init-pro",
                     node_port = np,
-                    "nodePort bind failed; retrying on next state change"
+                    "nodePort listener not started; retrying on the bind tick"
                 ),
             },
         }
     }
+    (desired.len(), listeners.len())
 }
 
 /// Hot-apply the plan's weighted peer set (openrusty in-memory reload).
@@ -261,7 +290,15 @@ async fn start_listener(
     resolver: &EndpointsResolver,
 ) -> Option<Listener> {
     let listen = SocketAddr::new(addr, node_port);
-    let listener = serve::bind(listen).await.ok()?;
+    let listener = match serve::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Cause at the bind site (AddrInUse, EACCES, ...); the loop's
+            // retry tick re-attempts while the listener stays missing.
+            tracing::warn!(target: "init-pro", node_port, %listen, error = %e, "nodePort bind failed");
+            return None;
+        }
+    };
     let state = resolver.snapshot();
     let plan = crate::split::plan_for(&state, &upstream);
     let peers = plan.peers;
@@ -413,6 +450,15 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d[&30090].service, "default/lb");
         assert_eq!(d[&30090].port, PortRef::Number(80));
+    }
+
+    /// T5.4 hardening: the retry tick is armed only for a short plane.
+    #[test]
+    fn retry_tick_only_while_listeners_are_missing() {
+        assert!(retry_pending(3, 0), "nothing bound yet");
+        assert!(retry_pending(3, 2), "one still missing");
+        assert!(!retry_pending(3, 3), "fully bound: stay quiet");
+        assert!(!retry_pending(0, 0), "empty plane: stay quiet");
     }
 
     /// NodePortConfig keeps the frozen CLI field and the opt-in gateway.

@@ -39,7 +39,7 @@ pub(crate) fn spawn_pump(
     id: String,
     socket: PathBuf,
     mut stream: RunStream,
-    mut child: Child,
+    child: Child,
 ) -> mpsc::Sender<Ctrl> {
     let (tx, mut rx) = mpsc::channel::<Ctrl>(8);
     registry.set_engine_pid(&id, child.id());
@@ -125,8 +125,10 @@ pub(crate) fn spawn_pump(
             }
         }
         // Teardown: the engine exits on Bye after Shutdown (EOF here
-        // means it already did or died); reap, clear socket + registry.
-        let _ = launch::reap(&mut child, Duration::from_secs(5));
+        // means it already did or died); reap (off the workers -- D, the
+        // bounded wait must not park this task's worker), clear socket +
+        // registry.
+        let _ = launch::reap_offload(child, Duration::from_secs(5)).await;
         let _ = std::fs::remove_file(&socket);
         registry.set_exited_if_running(&id);
         registry.clear_ctrl(&id);

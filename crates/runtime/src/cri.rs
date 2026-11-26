@@ -4,8 +4,8 @@
 //! Every CRI call is one short-lived `crictl --runtime-endpoint unix://<sock>`
 //! subprocess (~20ms, spawn-dominated — measured in the Q26 spike). argv
 //! construction is pure ([`CriCtl::argv`]) and unit-tested without spawning;
-//! sandbox/container configs cross the process boundary as temp JSON files
-//! with unique, pid+counter-suffixed names that are removed even on error.
+//! sandbox/container configs cross the process boundary as owner-only (0600,
+//! `O_EXCL`) temp JSON files with unique names, removed even on error.
 //! Route A (native gRPC) only lands if T4.2 ever needs streaming/watch.
 //!
 //! Every invocation is bounded by `bounded_output` (item **C13**): the
@@ -69,12 +69,21 @@ fn cmd_args<'a>(sub: &'a str, extra: &'a [&'a str]) -> Vec<&'a str> {
     args
 }
 
-/// Unique temp path for one crictl config file:
-/// `<tmp>/init-pro-cri-<tag>-<pid>-<counter>.json`.
-fn temp_config_path(tag: &str) -> PathBuf {
+/// Wall-clock nonce (`-<nanos>`) for the C2 retry name, unpredictable when planted.
+fn nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("-{nanos}")
+}
+
+/// `<tmp>/init-pro-cri-<tag>-<pid>-<counter>[-<nanos>].json`; `retry` is
+/// the C2 second name after a `create_new` collision.
+fn temp_config_path(tag: &str, retry: bool) -> PathBuf {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let suffix = if retry { nonce() } else { String::new() };
     std::env::temp_dir().join(format!(
-        "init-pro-cri-{tag}-{}-{n}.json",
+        "init-pro-cri-{tag}-{}-{n}{suffix}.json",
         std::process::id()
     ))
 }
@@ -124,13 +133,36 @@ fn output_error(err: io::Error) -> CriError {
     }
 }
 
-/// Serialize `value` to a fresh unique temp file; the caller must remove it.
+/// Create `path` (`O_CREAT|O_EXCL`, mode 0600) + write `json` (C2); `Ok(false)` = name taken.
+async fn create_private(path: &Path, json: &[u8]) -> io::Result<bool> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true).mode(0o600);
+    let mut file = match options.open(path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    file.write_all(json).await?;
+    file.flush().await?;
+    Ok(true)
+}
+
+/// Serialize `value` to a fresh temp file; the caller must remove it.
+/// Batch D (C2): it carries Secret envs -- created `O_EXCL` + 0600, and a
+/// taken name is skipped for the nonce-suffixed retry name, never reused.
 async fn write_temp_config<T: serde::Serialize>(tag: &str, value: &T) -> Result<PathBuf, CriError> {
     let json = serde_json::to_vec(value)
         .map_err(|e| CriError::Parse(format!("config serialize failed: {e}")))?;
-    let path = temp_config_path(tag);
-    tokio::fs::write(&path, &json).await.map_err(CriError::Io)?;
-    Ok(path)
+    let mut path = temp_config_path(tag, false);
+    for _ in 0..2 {
+        if create_private(&path, &json).await.map_err(CriError::Io)? {
+            return Ok(path);
+        }
+        path = temp_config_path(tag, true);
+    }
+    let taken = io::Error::new(io::ErrorKind::AlreadyExists, "name taken twice");
+    Err(CriError::Io(taken))
 }
 
 impl CriCtl {
@@ -354,6 +386,7 @@ impl CriCtl {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
 
@@ -362,6 +395,12 @@ mod tests {
             PathBuf::from("/x/crictl"),
             "unix:///dd/run/containerd/containerd.sock".into(),
         )
+    }
+
+    fn name_shape_ok(name: &str) -> bool {
+        name.starts_with("init-pro-cri-runp-")
+            && name.contains(&format!("-{}-", std::process::id()))
+            && name.ends_with(".json")
     }
 
     #[test]
@@ -455,16 +494,29 @@ mod tests {
 
     #[test]
     fn temp_config_paths_are_unique_and_well_formed() {
-        let a = temp_config_path("runp");
-        let b = temp_config_path("runp");
+        let a = temp_config_path("runp", false);
+        let b = temp_config_path("runp", false);
         assert_ne!(a, b, "atomic counter prevents collisions");
         let name = a.file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.starts_with("init-pro-cri-runp-"), "{name}");
-        assert!(
-            name.contains(&format!("-{}-", std::process::id())),
-            "{name}"
-        );
-        assert!(name.ends_with(".json"), "{name}");
+        assert!(name_shape_ok(&name), "{name}");
+        let retry = temp_config_path("runp", true);
+        let rname = retry.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name_shape_ok(&rname) && retry != temp_config_path("runp", true));
+    }
+
+    /// Batch D (C2): owner-only + intact; a taken name is never written through.
+    #[tokio::test]
+    async fn temp_config_is_owner_only_and_skips_a_taken_name() {
+        let taken = std::env::temp_dir();
+        assert!(!create_private(&taken, b"payload").await.unwrap() && taken.is_dir());
+        let path = write_temp_config("c2", &serde_json::json!({ "envs": [{ "value": "v" }] }))
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "Secret envs stay owner-only");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""value":"v""#), "content intact: {text}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

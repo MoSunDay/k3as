@@ -20,6 +20,12 @@
 //! durable state diverges. Fine-grained solid/weak owner graphs, uid-based
 //! tombstones and foreground (blocking) deletion are not modeled in v1.
 //!
+//! A3 (P2 hardening): `persistentvolumeclaims` is NOT in the sweep universe.
+//! StatefulSet claims carry a controller ownerRef for ownership
+//! bookkeeping, but upstream keeps them across STS deletion
+//! (`persistentVolumeClaimRetentionPolicy` defaults to Retain) -- sweeping
+//! them was silent data loss.
+//!
 //! JSON-only wire (Q10); pure functions + storage-side effects, no classes.
 
 use std::sync::Arc;
@@ -41,11 +47,14 @@ pub(crate) const ORPHAN_ANNOTATION: &str = "init-pro.io/deletion-propagation";
 /// step Agent children) join the sweep universe (Q35); T8.3/Q56 adds
 /// `init-pro.io/builds` (ServicePipeline children); T8.5/Q58 adds the canary
 /// `apps/deployments` + core `services` children a pipeline owns.
-pub(crate) const DEPENDENT_KINDS: [(&str, &str); 10] = [
+pub(crate) const DEPENDENT_KINDS: [(&str, &str); 9] = [
     ("", "pods"),
     ("apps", "replicasets"),
     ("", "endpoints"),
-    ("", "persistentvolumeclaims"),
+    // A3: `persistentvolumeclaims` is deliberately NOT swept. StatefulSet
+    // PVCs carry a controller ownerRef for ownership bookkeeping, but
+    // upstream keeps them alive across STS deletion
+    // (`persistentVolumeClaimRetentionPolicy` defaults to Retain).
     ("apps", "controllerrevisions"),
     ("argoproj.io", "workflows"),
     ("init-pro.io", "agents"),
@@ -89,11 +98,15 @@ pub async fn sweep(client: &Arc<dyn Client>, caches: &Arc<Caches>) -> Result<(),
             ) else {
                 continue;
             };
+            let owner_uid = owner.get("uid").and_then(Value::as_str).unwrap_or("");
             if !MANAGED_OWNER_KINDS.contains(&owner_kind) {
                 continue; // unknown owner kind: skip (upstream parity)
             }
             let ns = namespace(&obj).unwrap_or("default");
-            if owner_in_cache(caches, owner_kind, ns, owner_name) {
+            // A4: the cached owner must be the SAME object, not merely a
+            // same-named successor -- a deleted-then-recreated owner leaves
+            // its predecessor's dependents dangling.
+            if owner_in_cache(caches, owner_kind, ns, owner_name, owner_uid) {
                 continue;
             }
             let Some(obj_name) = name(&obj) else { continue };
@@ -193,19 +206,47 @@ pub(crate) fn strip_controller_owner_ref(
     before != refs.len()
 }
 
-/// Cache lookup for one managed owner kind (`owner_in_cache` == exists).
-fn owner_in_cache(caches: &Caches, kind: &str, ns: &str, owner_name: &str) -> bool {
+/// Cache lookup for one managed owner kind: the cached owner object (the
+/// sweep needs `/metadata/uid`, not just existence).
+fn cached_owner(caches: &Caches, kind: &str, ns: &str, owner_name: &str) -> Option<Value> {
     match kind {
-        "Deployment" => caches.deployments.get(ns, owner_name).is_some(),
-        "ReplicaSet" => caches.replicasets.get(ns, owner_name).is_some(),
-        "Service" => caches.services.get(ns, owner_name).is_some(),
-        "StatefulSet" => caches.statefulsets.get(ns, owner_name).is_some(),
-        "DaemonSet" => caches.daemonsets.get(ns, owner_name).is_some(),
-        "Workflow" => caches.workflows.get(ns, owner_name).is_some(),
-        "CronWorkflow" => caches.cronworkflows.get(ns, owner_name).is_some(),
-        "ServicePipeline" => caches.servicepipelines.get(ns, owner_name).is_some(),
-        _ => false,
+        "Deployment" => caches.deployments.get(ns, owner_name),
+        "ReplicaSet" => caches.replicasets.get(ns, owner_name),
+        "Service" => caches.services.get(ns, owner_name),
+        "StatefulSet" => caches.statefulsets.get(ns, owner_name),
+        "DaemonSet" => caches.daemonsets.get(ns, owner_name),
+        "Workflow" => caches.workflows.get(ns, owner_name),
+        "CronWorkflow" => caches.cronworkflows.get(ns, owner_name),
+        "ServicePipeline" => caches.servicepipelines.get(ns, owner_name),
+        _ => None,
     }
+    .map(|o| o.as_ref().clone())
+}
+
+/// A4: does the cached owner satisfy the dependent's ownerReference uid?
+///
+/// An ownerReference without a uid (or an owner object stored without one)
+/// falls back to the kind+name identity that placed it in the cache -- the
+/// same convention as [`crate::controllers::owned_by`]. Pure (unit-tested).
+pub(crate) fn owner_alive(cached_owner: &Value, owner_uid: &str) -> bool {
+    if owner_uid.is_empty() {
+        return true;
+    }
+    cached_owner
+        .pointer("/metadata/uid")
+        .and_then(Value::as_str)
+        .is_some_and(|uid| uid == owner_uid)
+}
+
+/// `owner_in_cache` == a live owner (A4: same name AND same uid).
+fn owner_in_cache(
+    caches: &Caches,
+    kind: &str,
+    ns: &str,
+    owner_name: &str,
+    owner_uid: &str,
+) -> bool {
+    cached_owner(caches, kind, ns, owner_name).is_some_and(|o| owner_alive(&o, owner_uid))
 }
 
 #[cfg(test)]
@@ -240,11 +281,13 @@ mod tests {
 
     #[test]
     fn dependent_kinds_are_the_sweep_universe() {
-        assert_eq!(DEPENDENT_KINDS.len(), 10);
+        assert_eq!(DEPENDENT_KINDS.len(), 9);
         assert!(DEPENDENT_KINDS.contains(&("", "pods")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "replicasets")));
         assert!(DEPENDENT_KINDS.contains(&("", "endpoints")));
-        assert!(DEPENDENT_KINDS.contains(&("", "persistentvolumeclaims")));
+        // A3: PVCs are Retain -- a StatefulSet delete must NOT cascade to
+        // its claims, so they stay out of the sweep universe.
+        assert!(!DEPENDENT_KINDS.contains(&("", "persistentvolumeclaims")));
         assert!(DEPENDENT_KINDS.contains(&("apps", "controllerrevisions")));
         assert!(DEPENDENT_KINDS.contains(&("argoproj.io", "workflows")));
         assert!(DEPENDENT_KINDS.contains(&("init-pro.io", "agents")));
@@ -259,13 +302,109 @@ mod tests {
         }
     }
 
+    /// A3 regression: StatefulSet claims are Retain (upstream
+    /// `persistentVolumeClaimRetentionPolicy` default) -- a sweep must never
+    /// delete a PVC, even one whose controller ownerReference is dangling.
+    #[tokio::test]
+    async fn sweep_never_deletes_statefulset_claims() {
+        let client: Arc<dyn Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        let pvc_key = Key::new("", "persistentvolumeclaims", "default", "data-web-0");
+        client
+            .create(
+                &pvc_key,
+                json!({"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+                       "metadata": {"name": "data-web-0", "namespace": "default",
+                                    "ownerReferences": [{"kind": "StatefulSet", "name": "web",
+                                                         "uid": "u-sts", "controller": true}]},
+                       "spec": {}}),
+            )
+            .await
+            .unwrap();
+        let caches = Arc::new(Caches::new());
+        sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&pvc_key).await.unwrap().is_some(),
+            "A3: PVCs must survive their StatefulSet (Retain)"
+        );
+    }
+
     #[test]
     fn unknown_owner_kind_is_recognized_as_unmanaged() {
         // sweep()'s guard expressed through the table: a Job-owned pod must
         // never be judged by these caches.
         assert!(!MANAGED_OWNER_KINDS.contains(&"Job"));
         let caches = Caches::new();
-        assert!(!owner_in_cache(&caches, "Job", "default", "any"));
+        assert!(!owner_in_cache(&caches, "Job", "default", "any", ""));
+    }
+
+    /// A4: the uid comparison is the identity test; an ownerReference (or a
+    /// cached object) without a uid falls back to kind+name, matching
+    /// `owned_by`.
+    #[test]
+    fn owner_alive_requires_the_same_uid() {
+        let owner = json!({"metadata": {"name": "web", "uid": "u-new"}});
+        assert!(owner_alive(&owner, "u-new"));
+        assert!(!owner_alive(&owner, "u-old"));
+        // No uid on the reference -> name identity is all we have.
+        assert!(owner_alive(&owner, ""));
+        // Reference names a uid the cached object does not carry -> stale.
+        assert!(!owner_alive(&json!({"metadata": {"name": "web"}}), "u-new"));
+    }
+
+    /// A4 regression: an owner deleted and recreated under the same name is
+    /// a different object -- its predecessor's dependents must be swept,
+    /// while a dependent pointing at the live uid survives.
+    #[tokio::test]
+    async fn sweep_compares_the_owner_uid_not_only_the_name() {
+        let client: Arc<dyn Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        let caches = Arc::new(Caches::new());
+        caches
+            .deployments
+            .apply_event(&WatchEvent::Put(Arc::new(StoredEntry {
+                key: "/registry/deployments/default/web".into(),
+                value: json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                          "metadata": {"name": "web", "namespace": "default",
+                                       "uid": "u-new"}}),
+                create_revision: 1,
+                mod_revision: 1,
+                version: 1,
+            })));
+        let rs_key = Key::new("apps", "replicasets", "default", "web-1");
+        client
+            .create(
+                &rs_key,
+                json!({"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                       "metadata": {"name": "web-1", "namespace": "default",
+                                    "ownerReferences": [{"kind": "Deployment", "name": "web",
+                                                         "uid": "u-old", "controller": true}]}}),
+            )
+            .await
+            .unwrap();
+        sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&rs_key).await.unwrap().is_none(),
+            "A4: a same-name owner with a new uid must not keep stale dependents"
+        );
+
+        // Same uid -> the owner is really there: the dependent survives.
+        let live_key = Key::new("apps", "replicasets", "default", "web-2");
+        client
+            .create(
+                &live_key,
+                json!({"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                       "metadata": {"name": "web-2", "namespace": "default",
+                                    "ownerReferences": [{"kind": "Deployment", "name": "web",
+                                                         "uid": "u-new", "controller": true}]}}),
+            )
+            .await
+            .unwrap();
+        sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&live_key).await.unwrap().is_some(),
+            "a dependent owned by the live uid is kept"
+        );
     }
 
     #[test]

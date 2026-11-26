@@ -45,7 +45,16 @@ pub(crate) struct ListParams {
     /// only, `0` = replay retained history, `N` = events after N.
     #[serde(default, rename = "resourceVersion")]
     pub resource_version: Option<String>,
+    /// Watch stream lifetime (Q10 wire name `timeoutSeconds`): the server
+    /// closes the stream after N seconds so clients re-watch (client-go and
+    /// kubectl always send it); absent = live until the client disconnects.
+    #[serde(default, rename = "timeoutSeconds")]
+    pub timeout_seconds: Option<u64>,
 }
+
+/// Upper bound on a client-asked watch lifetime (a typo must not pin a
+/// stream for days; Kubernetes clamps the same way via --request-timeout).
+const MAX_WATCH_SECONDS: u64 = 3600;
 
 impl ListParams {
     fn is_watch(&self) -> bool {
@@ -207,7 +216,7 @@ pub(crate) async fn do_list(st: &AppState, loc: &Loc, params: &ListParams) -> Re
         return do_watch(st, &res, &prefix, params).await;
     }
     let entries = match st.store.list(&prefix).await {
-        Ok(v) => v,
+        Ok(v) => sorted_by_key(v),
         Err(e) => return storage_error(e, &res.kind, "").into_response(),
     };
     let rev = st.store.current_revision().await.unwrap_or(0);
@@ -250,7 +259,18 @@ fn ensure_namespace_finalizer(body: &mut Value) {
     }
 }
 
-/// Key-cursor pagination over a list sorted by storage key.
+/// A1 (pagination cursor): order listed entries by storage key -- upstream
+/// etcd key order, which the `continue` cursor is defined over. The storage
+/// trait lists by `mod_revision` (storage/src/backend.rs), so slicing an
+/// RV-ordered page and resuming "at the first key >= cursor" re-serves or
+/// skips entries (RV order `[b, a, c]` + `limit=1` used to loop on `b`).
+fn sorted_by_key(mut entries: Vec<StoredEntry>) -> Vec<StoredEntry> {
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    entries
+}
+
+/// Key-cursor pagination over a list sorted by storage key (callers go
+/// through [`sorted_by_key`] first: the cursor is a key, not a revision).
 fn paginate<'a>(entries: &'a [StoredEntry], params: &ListParams) -> (&'a [StoredEntry], String) {
     let start = match &params.continue_token {
         Some(c) if !c.is_empty() => entries
@@ -297,18 +317,35 @@ async fn do_watch(
     let api_version = res.api_version.clone();
     let kind = res.kind.clone();
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+    let budget = params
+        .timeout_seconds
+        .map(|s| std::time::Duration::from_secs(s.min(MAX_WATCH_SECONDS)));
     tokio::spawn(async move {
-        let mut w = watch;
-        while let Some(ev) = w.recv().await {
-            let Some(line) = watch_event_line(&ev, &api_version, &kind) else {
-                continue;
-            };
-            let mut bytes = line.into_bytes();
-            bytes.push(b'\n');
-            if tx.send(Ok(Bytes::from(bytes))).await.is_err() {
-                break; // client disconnected
+        let forward = async move {
+            let mut w = watch;
+            while let Some(ev) = w.recv().await {
+                let Some(line) = watch_event_line(&ev, &api_version, &kind) else {
+                    continue;
+                };
+                let mut bytes = line.into_bytes();
+                bytes.push(b'\n');
+                if tx.send(Ok(Bytes::from(bytes))).await.is_err() {
+                    break; // client disconnected
+                }
             }
+        };
+        // Deadline reached: the stream ends with 200 and the client
+        // re-watches from its last resourceVersion (standard reflector
+        // behavior); `timeoutSeconds` found unimplemented by the batch F
+        // soak (scripts/soak-e2e.sh) -- every watch used to pin a
+        // connection until the peer closed it.
+        match budget {
+            Some(d) => {
+                let _ = tokio::time::timeout(d, forward).await;
+            }
+            None => forward.await,
         }
+        // Dropping the timed-out future drops `tx` -> the body ends (200).
     });
     let stream = ReceiverStream::new(rx);
     match axum::response::Response::builder()
@@ -430,4 +467,80 @@ pub(crate) async fn grp_list_ns(
     Query(q): Query<ListParams>,
 ) -> Response {
     do_list(&st, &Loc::new(&group, &version, resource, Some(ns)), &q).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PREFIX: &str = "/registry/configmaps/default";
+
+    fn entry(name: &str, rev: u64) -> StoredEntry {
+        StoredEntry {
+            key: format!("{PREFIX}/{name}"),
+            value: json!({"metadata": {"name": name}}),
+            create_revision: rev,
+            mod_revision: rev,
+            version: 1,
+        }
+    }
+
+    /// Last key segment (the object name) of every entry on a page.
+    fn names(page: &[StoredEntry]) -> Vec<String> {
+        page.iter()
+            .map(|e| e.key.rsplit('/').next().unwrap_or("").to_string())
+            .collect()
+    }
+
+    fn params(limit: i64, cont: Option<String>) -> ListParams {
+        ListParams {
+            limit: Some(limit),
+            continue_token: cont,
+            ..Default::default()
+        }
+    }
+
+    /// Walk every page of `entries` with `limit`; bails out after 8 pages so
+    /// a non-advancing cursor fails the test instead of hanging it.
+    fn walk(entries: &[StoredEntry], limit: i64) -> Vec<Vec<String>> {
+        let mut cursor = None;
+        let mut pages = Vec::new();
+        loop {
+            let (page, cont) = paginate(entries, &params(limit, cursor));
+            pages.push(names(page));
+            assert!(pages.len() < 8, "cursor must terminate");
+            if cont.is_empty() {
+                return pages;
+            }
+            cursor = Some(cont);
+        }
+    }
+
+    /// A1 regression: storage lists in `mod_revision` order while the
+    /// `continue` cursor is a *key* cursor. RV order `[b, a, c]` with
+    /// `limit=1` must page `[a]`, `[b]`, `[c]` and terminate with an empty
+    /// `continue` (it used to re-serve `[b]` on every page).
+    #[test]
+    fn pagination_follows_key_order_not_revision_order() {
+        let entries = sorted_by_key(vec![entry("b", 1), entry("a", 2), entry("c", 3)]);
+        assert_eq!(walk(&entries, 1), vec![vec!["a"], vec!["b"], vec!["c"]]);
+        assert_eq!(walk(&entries, 2), vec![vec!["a", "b"], vec!["c"]]);
+        // No limit -> one page, no cursor (upstream `limit=0` semantics).
+        let (page, cont) = paginate(&entries, &ListParams::default());
+        assert_eq!(names(page), vec!["a", "b", "c"]);
+        assert!(cont.is_empty(), "a full page carries no continue token");
+    }
+
+    /// A1: pins the bug the sort fixes -- an RV-ordered list re-serves the
+    /// same entry because the key cursor never advances.
+    #[test]
+    fn revision_order_alone_cannot_drive_a_key_cursor() {
+        let raw = vec![entry("b", 1), entry("a", 2), entry("c", 3)];
+        let (p1, c1) = paginate(&raw, &params(1, None));
+        assert_eq!(names(p1), vec!["b"]);
+        assert_eq!(c1, format!("{PREFIX}/a"));
+        let (p2, c2) = paginate(&raw, &params(1, Some(c1)));
+        assert_eq!(names(p2), vec!["b"], "page 2 re-serves page 1");
+        assert_eq!(c2, format!("{PREFIX}/a"), "and the cursor never moves");
+    }
 }

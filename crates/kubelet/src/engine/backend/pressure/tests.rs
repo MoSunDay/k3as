@@ -83,13 +83,13 @@ fn references(backend: &EngineBackend) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn healthy_root_touches_nothing() {
+#[tokio::test]
+async fn healthy_root_touches_nothing() {
     let (backend, dir) = backend("gc-healthy");
     let digest = format!("sha256:{}", "a".repeat(64));
     blob(&backend.store, &digest, std::time::Duration::from_secs(0));
     let (available, total) = healthy_reading();
-    let stats = pass_at(&backend, &[], available, total, now());
+    let stats = pass_at(&backend, &[], available, total, now()).await;
     assert_eq!(stats.pressure, DiskPressure::Healthy);
     assert_eq!(
         (stats.entries_removed, stats.refs_removed, stats.bytes_freed),
@@ -99,8 +99,8 @@ fn healthy_root_touches_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn pressure_sweeps_only_aged_orphans() {
+#[tokio::test]
+async fn pressure_sweeps_only_aged_orphans() {
     let (backend, dir) = backend("gc-pressure");
     let store = &backend.store;
     let img = image("registry.local:5000/lib/keep:1", "1");
@@ -130,7 +130,7 @@ fn pressure_sweeps_only_aged_orphans() {
     let young = format!("sha256:{}", "c".repeat(64));
     blob(store, &young, std::time::Duration::from_secs(0));
 
-    let stats = pass_at(&backend, &[], 5 * GIB, 100 * GIB, now());
+    let stats = pass_at(&backend, &[], 5 * GIB, 100 * GIB, now()).await;
     assert_eq!(stats.pressure, DiskPressure::Pressure);
     assert_eq!(stats.refs_removed, 0, "Pressure keeps every pull record");
     assert_eq!(stats.entries_removed, 3, "blob + layer dir + merged dir");
@@ -150,8 +150,31 @@ fn pressure_sweeps_only_aged_orphans() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn critical_drops_oldest_unused_refs_and_keeps_in_use() {
+/// D: a `.tmp-*` staging dir (an unpack in flight, even an aged one) is
+/// not a digest and never an orphan -- the pressured pass leaves it alone.
+#[tokio::test]
+async fn pressure_pass_leaves_staging_dirs_alone() {
+    let (backend, dir) = backend("gc-staging");
+    let store = &backend.store;
+    let staging = store
+        .root()
+        .join("layers")
+        .join(format!(".tmp-{}", "d".repeat(64)));
+    std::fs::create_dir_all(staging.join("bin")).unwrap();
+    set_age(&staging, std::time::Duration::from_secs(9_000));
+    let merged_staging = store.root().join("merged").join(".tmp-e-1");
+    std::fs::create_dir_all(&merged_staging).unwrap();
+    set_age(&merged_staging, std::time::Duration::from_secs(9_000));
+    let stats = pass_at(&backend, &[], 5 * GIB, 100 * GIB, now()).await;
+    assert_eq!(stats.pressure, DiskPressure::Pressure);
+    assert_eq!(stats.entries_removed, 0, "a staging dir is not an orphan");
+    assert!(staging.join("bin").exists(), "layer staging swept");
+    assert!(merged_staging.exists(), "merged staging swept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn critical_drops_oldest_unused_refs_and_keeps_in_use() {
     let (backend, dir) = backend("gc-critical");
     let store = &backend.store;
     let mut images = Vec::new();
@@ -177,7 +200,7 @@ fn critical_drops_oldest_unused_refs_and_keeps_in_use() {
     // kubelet's desired pod set, `fresh` by the grace age.
     let in_use = vec!["registry.local:5000/lib/used:1".to_string()];
     let (available, total) = critical_reading();
-    let stats = pass_at(&backend, &in_use, available, total, now());
+    let stats = pass_at(&backend, &in_use, available, total, now()).await;
     assert_eq!(stats.pressure, DiskPressure::Critical);
     assert_eq!(stats.refs_removed, 2, "oldest first, unused only");
     let left = references(&backend);
@@ -193,8 +216,8 @@ fn critical_drops_oldest_unused_refs_and_keeps_in_use() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn critical_never_drops_the_pause_image_or_a_live_container_image() {
+#[tokio::test]
+async fn critical_never_drops_the_pause_image_or_a_live_container_image() {
     let (backend, dir) = backend("gc-live");
     let store = &backend.store;
     let pause = image("registry.local/pause:0", "p");
@@ -210,7 +233,7 @@ fn critical_never_drops_the_pause_image_or_a_live_container_image() {
     backend.registry.insert(entry);
 
     let (available, total) = critical_reading();
-    let stats = pass_at(&backend, &[], available, total, now());
+    let stats = pass_at(&backend, &[], available, total, now()).await;
     let left = references(&backend);
     assert!(
         left.contains(&pause.reference),
@@ -225,8 +248,8 @@ fn critical_never_drops_the_pause_image_or_a_live_container_image() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn critical_leaves_shared_layers_to_the_surviving_ref() {
+#[tokio::test]
+async fn critical_leaves_shared_layers_to_the_surviving_ref() {
     let (backend, dir) = backend("gc-shared");
     let store = &backend.store;
     let gone = image("registry.local:5000/lib/gone:1", "g");
@@ -246,7 +269,7 @@ fn critical_leaves_shared_layers_to_the_surviving_ref() {
 
     let in_use = vec!["registry.local:5000/lib/kept:1".to_string()];
     let (available, total) = critical_reading();
-    let stats = pass_at(&backend, &in_use, available, total, now());
+    let stats = pass_at(&backend, &in_use, available, total, now()).await;
     assert_eq!(stats.refs_removed, 1, "only `gone` is dropped");
     assert!(store.has_blob(shared), "dedupe survives the pressure pass");
     assert!(store.layer_dir(shared).is_dir());

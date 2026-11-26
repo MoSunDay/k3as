@@ -117,6 +117,31 @@ pub(crate) struct Queues {
     pub(crate) builds: Arc<WorkQueue>,
 }
 
+impl Queues {
+    /// Every workqueue of the controller set, in a stable order.
+    ///
+    /// A5: the queues outlive every worker set (the supervisor aborts the
+    /// set on leadership loss / shutdown and rebuilds it on the next
+    /// acquisition), so the teardown must hand each queue's in-flight keys
+    /// back -- see [`release_inflight`].
+    pub(crate) fn each(&self) -> Vec<&WorkQueue> {
+        vec![
+            &self.cronworkflows,
+            &self.deployments,
+            &self.replicasets,
+            &self.statefulsets,
+            &self.daemonsets,
+            &self.services,
+            &self.namespaces,
+            &self.workflows,
+            &self.node_cidrs,
+            &self.service_lbs,
+            &self.servicepipelines,
+            &self.builds,
+        ]
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Kind {
     CronWorkflow,
@@ -234,19 +259,23 @@ impl ControllerManager {
                     tokio::select! {
                         _ = stop.cancelled() => {
                             abort_set(&set);
+                            release_inflight(&queues);
                             return;
                         }
                         r = leader_rx.changed() => {
                             if r.is_err() {
                                 abort_set(&set);
+                                release_inflight(&queues);
                                 return;
                             }
                             if !*leader_rx.borrow_and_update() {
                                 tracing::info!("lost leadership; stopping controller set");
-                                // Accept: aborting workers mid-processing can
-                                // leak an in-flight key; the whole set is
-                                // rebuilt on the next acquisition.
+                                // A5: an aborted worker never calls `done`, so
+                                // its key stays in `processing` forever (the
+                                // queues outlive the set). Hand every
+                                // in-flight key back before the rebuild.
                                 abort_set(&set);
+                                release_inflight(&queues);
                                 break;
                             }
                         }
@@ -277,5 +306,57 @@ async fn bootstrap_namespaces(client: &Arc<dyn Client>) {
 fn abort_set(set: &[JoinHandle<()>]) {
     for h in set {
         h.abort();
+    }
+}
+
+/// A5 (T3.1a): companion to [`abort_set`] -- requeue every in-flight key of
+/// every queue. `WorkQueue::add` defers a key that is still in `processing`
+/// without sending it, so an aborted worker's key would never be redelivered
+/// until process restart.
+fn release_inflight(queues: &Queues) {
+    for q in queues.each() {
+        q.reset_processing();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// A5: the teardown must reach EVERY queue of the set -- a queue missing
+    /// from `each()` would strand its in-flight keys across a set rebuild.
+    #[test]
+    fn each_enumerates_every_queue_exactly_once() {
+        let queues = Queues {
+            cronworkflows: Arc::new(WorkQueue::new()),
+            deployments: Arc::new(WorkQueue::new()),
+            replicasets: Arc::new(WorkQueue::new()),
+            statefulsets: Arc::new(WorkQueue::new()),
+            daemonsets: Arc::new(WorkQueue::new()),
+            services: Arc::new(WorkQueue::new()),
+            namespaces: Arc::new(WorkQueue::new()),
+            workflows: Arc::new(WorkQueue::new()),
+            node_cidrs: Arc::new(WorkQueue::new()),
+            service_lbs: Arc::new(WorkQueue::new()),
+            servicepipelines: Arc::new(WorkQueue::new()),
+            builds: Arc::new(WorkQueue::new()),
+        };
+        let all = queues.each();
+        assert_eq!(all.len(), 12, "one entry per workqueue of the set");
+        // Identity, not equality: `WorkQueue` has no `PartialEq`, so the
+        // queues are told apart by address.
+        let addrs: HashSet<usize> = all
+            .iter()
+            .map(|q| *q as *const WorkQueue as usize)
+            .collect();
+        assert_eq!(addrs.len(), all.len(), "no queue may be listed twice");
+        // Every enumerated queue really is one of the set's queues.
+        assert!(all
+            .iter()
+            .any(|q| std::ptr::eq(*q, queues.node_cidrs.as_ref())));
+        assert!(all.iter().any(|q| std::ptr::eq(*q, queues.builds.as_ref())));
+        release_inflight(&queues); // no in-flight keys: a no-op
+        assert!(queues.deployments.is_empty());
     }
 }

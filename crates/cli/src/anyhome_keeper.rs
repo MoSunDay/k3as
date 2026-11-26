@@ -236,12 +236,22 @@ pub async fn run_workspace_keeper(
                 }
             }
         }
-        if let Err(e) = sync_workspaces(&fs_root, &workflow_ids, &agent_ids, &pod_dirs) {
+        // Batch D (C4): the beat's mkdir/write syscalls are blocking -- run
+        // the sync on the blocking pool so a slow fs root never stalls this
+        // worker thread (the lists move into the closure; counts first).
+        let (workflows, agents, pod_dirs_n) = (workflow_ids.len(), agent_ids.len(), pod_dirs.len());
+        let root = fs_root.clone();
+        let sync = tokio::task::spawn_blocking(move || {
+            sync_workspaces(&root, &workflow_ids, &agent_ids, &pod_dirs)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = sync {
             tracing::warn!(target: "init-pro", error = %e, "workspace keeper: sync failed");
             continue;
         }
-        tracing::debug!(target: "init-pro", workflows = workflow_ids.len(), agents = agent_ids.len(),
-            pod_dirs = pod_dirs.len(), "workspace keeper: synced");
+        tracing::debug!(target: "init-pro", workflows, agents, pod_dirs = pod_dirs_n,
+            "workspace keeper: synced");
     }
 }
 

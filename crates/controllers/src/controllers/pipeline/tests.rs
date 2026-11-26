@@ -244,6 +244,43 @@ async fn failed_child_is_reported_without_rebuilding() {
     assert_eq!(children(&client).await.len(), 1);
 }
 
+/// Batch E (delivery-e2e finding): `create_build` stamps `status.lastBuild`
+/// while the phase is Building; when that child fails the pipeline must
+/// still be reported Failed once -- the name-only "already reported" guard
+/// used to hold Building forever.
+#[tokio::test]
+async fn failed_child_is_reported_even_when_last_build_was_stamped_at_creation() {
+    let client = client();
+    let sp = create_pipeline(&client, "v1").await;
+    let build = create_build(&client, &sp, "web-v1-ab12c", "v1", "Failed").await;
+    // What create_build leaves behind on the pipeline before the worker ran.
+    let mut stamped = sp.clone();
+    stamped["status"] = json!({
+        "phase": "Building",
+        "lastBuild": {"name": build["metadata"]["name"], "image": "team/web:v1"},
+    });
+    client.update(&sp_key(), stamped, None).await.unwrap();
+
+    let sp = stored_pipeline(&client).await;
+    reconcile(&client, &sp, &cfg()).await.unwrap();
+
+    let stored = stored_pipeline(&client).await;
+    assert_eq!(stored["status"]["phase"], json!("Failed"));
+    assert_eq!(
+        stored["status"]["conditions"][0]["reason"],
+        json!("BuildFailed")
+    );
+    assert_eq!(children(&client).await.len(), 1, "no rebuild loop");
+
+    // A second pass holds the report (no churn, still one child).
+    reconcile(&client, &stored, &cfg()).await.unwrap();
+    assert_eq!(
+        stored_pipeline(&client).await["status"]["phase"],
+        json!("Failed")
+    );
+    assert_eq!(children(&client).await.len(), 1);
+}
+
 #[tokio::test]
 async fn disabled_plane_reconciles_to_nothing() {
     let client = client();

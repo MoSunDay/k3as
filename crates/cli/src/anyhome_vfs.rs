@@ -19,6 +19,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -190,7 +191,10 @@ impl FSMap {
         }
         // inplace modification.
         // update metadata
-        self.id_to_path.get_mut(&id).unwrap().fsmeta = meta;
+        self.id_to_path
+            .get_mut(&id)
+            .ok_or(nfsstat3::NFS3ERR_NOENT)?
+            .fsmeta = meta;
         debug!("Reloading entry {:?}: {:?}. Ent: {:?}", id, path, entry);
         Ok(RefreshResult::Reload)
     }
@@ -218,12 +222,16 @@ impl FSMap {
                 .await
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?
             {
-                let sym = self.intern.intern(entry.file_name()).unwrap();
-                cur_path.push(sym);
-                let meta = entry.metadata().await.unwrap();
-                let next_id = self.create_entry(&cur_path, meta).await;
-                new_children.push(next_id);
-                cur_path.pop();
+                // Batch D (C3): a name that raced away between the listing
+                // and its stat (ENOENT), or failed to intern, is skipped --
+                // the next lookup refreshes it in. Never a panic: that
+                // would take the FSMap task (and the NFS connection) down.
+                if let Some(next_id) = self
+                    .list_child(&mut cur_path, entry.file_name(), entry.metadata().await)
+                    .await
+                {
+                    new_children.push(next_id);
+                }
             }
             self.id_to_path
                 .get_mut(&id)
@@ -232,6 +240,23 @@ impl FSMap {
         }
 
         Ok(())
+    }
+
+    /// One `read_dir` entry -> child entry (C3): `None` when its stat
+    /// failed (it raced away) or `name` cannot be interned -- skipped
+    /// before anything is interned or pushed, `cur_path` stays as it was.
+    async fn list_child(
+        &mut self,
+        cur_path: &mut Vec<Symbol>,
+        name: OsString,
+        meta: io::Result<Metadata>,
+    ) -> Option<fileid3> {
+        let meta = meta.ok()?;
+        let sym = self.intern.intern(name).ok()?;
+        cur_path.push(sym);
+        let id = self.create_entry(cur_path, meta).await;
+        cur_path.pop();
+        Some(id)
     }
 
     pub(crate) async fn create_entry(&mut self, fullpath: &Vec<Symbol>, meta: Metadata) -> fileid3 {
@@ -302,7 +327,12 @@ impl FSMap {
         }
 
         let _ = self.refresh_entry(dirid).await;
-        let sym = self.intern.intern(objectname_osstr).unwrap();
+        // C3: not an I/O race (intern only fails on capacity) but the same
+        // posture -- an error reply, never a panic in the FSMap task.
+        let sym = self
+            .intern
+            .intern(objectname_osstr)
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         let mut name = ent.name.clone();
         name.push(sym);
         let meta = path.symlink_metadata().map_err(|_| nfsstat3::NFS3ERR_IO)?;
@@ -317,5 +347,56 @@ impl FSMap {
             children.insert(fileid);
         }
         Ok((fileid, metadata_to_fattr3(fileid, &meta)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_root() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("init-pro-fsmap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Batch D (C3): a directory entry whose stat raced away (ENOENT) is
+    /// skipped -- not a panic -- leaving no half-built path behind; a live
+    /// entry still registers as before.
+    #[tokio::test]
+    async fn relisting_skips_a_child_that_raced_away() {
+        let root = tmp_root();
+        std::fs::write(root.join("kept"), b"k").unwrap();
+        let mut map = FSMap::new(root.clone());
+        map.refresh_dir_list(0).await.unwrap();
+        let mut ids = Vec::new();
+        map.collect_all_children(0, &mut ids);
+        assert_eq!(ids.len(), 2, "root + the kept file");
+        // The ENOENT half of the race: the stat fails after the listing.
+        let mut cur_path = Vec::new();
+        let gone = map
+            .list_child(
+                &mut cur_path,
+                OsString::from("gone"),
+                Err(io::Error::from(io::ErrorKind::NotFound)),
+            )
+            .await;
+        assert_eq!(gone, None, "skipped");
+        assert!(cur_path.is_empty(), "cur_path left as it was");
+        assert!(
+            map.intern.check_interned(OsStr::new("gone")).is_none(),
+            "a skipped name leaves no interned symbol behind"
+        );
+        // The live half: a stat that works registers the child.
+        let meta = std::fs::metadata(root.join("kept")).unwrap();
+        let id = map
+            .list_child(&mut cur_path, OsString::from("kept"), Ok(meta))
+            .await
+            .unwrap();
+        let kept = map.intern.check_interned(OsStr::new("kept")).unwrap();
+        assert!(cur_path.is_empty(), "cur_path restored after the live call");
+        assert_eq!(map.path_to_id.get(&vec![kept]), Some(&id));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

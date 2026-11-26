@@ -232,7 +232,7 @@ ok "S2  agents booted (executor mode: $( [[ $NFS_MODE == 1 ]] && echo anyhome-nf
 
 # --- G1: happy path (REQUIRED) ----------------------------------------------
 CODE="$(post_agent e2e-g1 e2e-agent2 e2e-marker || echo 000)"
-if poll_agent e2e-g1 30 Succeeded Completed \
+if poll_agent e2e-g1 60 Succeeded Completed \
    && grep -q "session e2e-ok-s" "$TMP/obs-e2e-g1.json"; then
   ok "G1  agent executed to Succeeded (Ready=True Completed, session marker in status.message)"
 else

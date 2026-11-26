@@ -8,24 +8,27 @@
 //! holds the backend state mutex (see [`super`]), which is what makes the
 //! replay -> live seam lossless: post-COMMIT broadcasts happen under that
 //! same mutex, so no event can fall between the subscription and the scan.
+//! The synchronous iterators themselves run on the blocking pool
+//! ([`super::scan`]): only the reactor hop changed, not the locking.
 
 use std::sync::Arc;
 
 use rdb::store::ops;
 use rdb::store::Store;
-use rocksdb::WriteBatch;
 use tokio::sync::broadcast;
 
-use super::keys::{self, LogRecord, META_COMPACT};
-use crate::backend::{event_in_prefix, Watch};
+use super::keys::{self, META_COMPACT};
+use super::scan;
+use crate::backend::Watch;
 use crate::entry::{Revision, WatchEvent};
 use crate::error::StorageError;
 
 /// Build a replay-then-live watch starting at revision `n` (inclusive),
 /// mirroring the shared backend semantics 1:1. The caller holds the
-/// state mutex: subscribe-before-scan plus commit-then-broadcast under the
-/// same mutex keep the seam duplicate-free and gap-free (ordering ==
-/// revision order).
+/// state mutex -- across this `.await` too: subscribe-before-scan plus
+/// commit-then-broadcast under the same mutex keep the seam duplicate-free
+/// and gap-free (ordering == revision order), whether the scan runs on the
+/// calling thread or on the blocking pool (T2.3 hardening).
 ///
 /// The watermark gate runs FIRST, before the subscription: once
 /// [`super::compaction_plan`] has dropped `log/` records at or below the
@@ -35,8 +38,8 @@ use crate::error::StorageError;
 /// resourceVersion. Answering with a partial replay would silently lose the
 /// events between the watermark and `n` -- the failure mode production
 /// compaction (B3) has to rule out.
-pub(super) fn replay(
-    db: &Store,
+pub(super) async fn replay(
+    db: Arc<Store>,
     tx: &broadcast::Sender<WatchEvent>,
     path: &str,
     n: Revision,
@@ -54,29 +57,7 @@ pub(super) fn replay(
     // mutex until the scan completes), so nothing is replayed twice.
     let rx = tx.subscribe();
     let from = keys::log_key(n); // inclusive lower bound: `start_revision` inclusive
-    let mut replayed: Vec<WatchEvent> = Vec::new();
-    let mut bad: Option<StorageError> = None;
-    let scan = ops::for_each_from(db, &from, false, &mut |k, v| {
-        if !k.starts_with(keys::LOG_PREFIX) {
-            return false; // ran past the log range
-        }
-        match keys::decode_record(v).map(LogRecord::into_event) {
-            Ok(ev) => {
-                if event_in_prefix(&ev, path) {
-                    replayed.push(ev);
-                }
-                true
-            }
-            Err(e) => {
-                bad = Some(e);
-                false
-            }
-        }
-    });
-    if let Some(e) = bad {
-        return Err(e);
-    }
-    scan.map_err(|e| StorageError::Backend(format!("watch replay scan: {e}")))?;
+    let replayed = scan::replay_events(db, from, path.to_string()).await?;
     Ok(Watch::with_replay(rx, path.to_string(), replayed, n))
 }
 
@@ -89,19 +70,11 @@ pub(super) fn replay(
 /// The caller folds `target` to the current revision (monotonic, never
 /// lowered) and bumps the in-memory watermark only after this commit wins.
 pub(super) async fn compact(db: Arc<Store>, target: Revision) -> Result<(), StorageError> {
-    let upper = keys::log_key(target); // inclusive upper bound
-    let mut batch = WriteBatch::default();
-    let scan = ops::for_each_from(&db, keys::LOG_PREFIX, false, &mut |k, _| {
-        if !k.starts_with(keys::LOG_PREFIX) {
-            return false;
-        }
-        if *k > *upper {
-            return false; // first record above the new watermark
-        }
-        batch.delete(k);
-        true
-    });
-    scan.map_err(|e| StorageError::Backend(format!("compaction scan: {e}")))?;
+    // Inclusive upper bound of the range to drop.
+    let upper = keys::log_key(target);
+    // Range scan on the blocking pool (the caller still holds the state
+    // mutex across this await); the fsync-ed commit stays off-worker too.
+    let mut batch = scan::compaction_batch(Arc::clone(&db), upper).await?;
     batch.put(keys::meta_key(META_COMPACT), target.to_be_bytes());
     // Same commit discipline as the CRUD path: one synchronous batch, fsync
     // parked on the blocking pool, broadcast-free (compaction emits no event).

@@ -17,8 +17,15 @@
 //! `uploads::append_body` handles the common case (a failed PATCH), the
 //! boot-time [`sweep_uploads`] handles a killed server, and this sweep is
 //! the belt-and-braces for anything that slipped between them.
+//!
+//! Index children (batch D / **B1**): a multi-arch index names its platform
+//! manifests by digest only, so retention (tags) never reached them and a
+//! deleted index left its children -- and their config/layer blobs -- behind
+//! forever. Every index deletion now cascades through
+//! [`delete_with_children`]: a child goes when no surviving manifest of the
+//! repo lists it and no tag points at it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -77,7 +84,7 @@ pub async fn apply_retention(
         .collect();
     for d in dropped_digests {
         if !survivors.contains(&d) {
-            let _ = store::delete_manifest(root, name, &d).await;
+            delete_with_children(root, name, &d).await;
         }
     }
     tracing::info!(
@@ -89,6 +96,116 @@ pub async fn apply_retention(
         "registry: tag retention applied"
     );
     gc_blobs(root).await
+}
+
+/// Deepest index-of-index nesting [`prune_index_children`] follows.
+const MAX_INDEX_DEPTH: usize = 3;
+
+/// Child manifest digests (`manifests[].digest`) listed by one stored
+/// manifest; empty for an image manifest. Only grammatically valid digests
+/// are returned: they become path segments downstream.
+pub fn child_digests(manifest_bytes: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(manifest_bytes) else {
+        return Vec::new();
+    };
+    v["manifests"]
+        .as_array()
+        .map(|kids| {
+            kids.iter()
+                .filter_map(|c| c["digest"].as_str())
+                .filter(|d| crate::validate::valid_digest(d))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Remove a manifest and cascade over the index children it named (B1).
+/// The bytes are read BEFORE the delete -- they are what names the
+/// children. Returns how many child manifests were removed.
+pub async fn delete_with_children(root: &Path, repo: &str, digest: &str) -> usize {
+    let bytes = store::read_manifest(root, repo, digest)
+        .await
+        .unwrap_or_default();
+    let _ = store::delete_manifest(root, repo, digest).await;
+    prune_index_children(root, repo, &bytes).await
+}
+
+/// After an index was deleted, delete each child it named that no stored
+/// manifest of the repo still lists and no tag points at; a child that is
+/// itself an index cascades (bounded by [`MAX_INDEX_DEPTH`]). Returns how
+/// many manifests were removed. Nothing here touches blobs: the caller's
+/// `gc_blobs` pass reclaims them once unreferenced.
+pub async fn prune_index_children(root: &Path, repo: &str, deleted: &[u8]) -> usize {
+    let children = child_digests(deleted);
+    if children.is_empty() {
+        return 0; // image manifest (or unreadable): nothing hangs off it
+    }
+    // Reference counts over the SURVIVING manifests: when a child index is
+    // removed its own references retire with it.
+    let mut refs = child_ref_counts(root, repo).await;
+    let tagged: HashSet<String> = store::list_tags(root, repo)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, m)| m.digest)
+        .collect();
+    let mut pruned = 0;
+    for child in children {
+        pruned += prune_child(root, repo, &child, &tagged, &mut refs, 1).await;
+    }
+    pruned
+}
+
+/// `child digest -> number of stored manifests of the repo listing it`.
+async fn child_ref_counts(root: &Path, repo: &str) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for d in store::repo_manifest_digests(root, repo)
+        .await
+        .unwrap_or_default()
+    {
+        let Ok(bytes) = store::read_manifest(root, repo, &d).await else {
+            continue;
+        };
+        for c in child_digests(&bytes) {
+            *counts.entry(c).or_default() += 1;
+        }
+    }
+    counts
+}
+
+/// One cascade step: drop `digest` when unreferenced and untagged, then
+/// follow its own children one level deeper.
+async fn prune_child(
+    root: &Path,
+    repo: &str,
+    digest: &str,
+    tagged: &HashSet<String>,
+    refs: &mut HashMap<String, usize>,
+    depth: usize,
+) -> usize {
+    if tagged.contains(digest) || refs.get(digest).copied().unwrap_or(0) > 0 {
+        return 0; // still reachable: it and everything below it stays
+    }
+    let Ok(bytes) = store::read_manifest(root, repo, digest).await else {
+        return 0; // never stored here (or already pruned)
+    };
+    let _ = store::delete_manifest(root, repo, digest).await;
+    tracing::info!(target: "init-pro", repo, child = %digest, "registry: orphaned index child pruned");
+    let grandchildren = child_digests(&bytes);
+    if depth >= MAX_INDEX_DEPTH || grandchildren.is_empty() {
+        return 1;
+    }
+    for g in &grandchildren {
+        if let Some(n) = refs.get_mut(g) {
+            *n = n.saturating_sub(1); // this manifest no longer pins it
+        }
+    }
+    let mut pruned = 1;
+    for g in grandchildren {
+        pruned += Box::pin(prune_child(root, repo, &g, tagged, refs, depth + 1)).await;
+    }
+    pruned
 }
 
 /// Reclaim blobs referenced by no stored manifest (grace-windowed).
@@ -183,6 +300,7 @@ pub async fn sweep_stale_uploads(root: &Path, older_than_secs: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::path::PathBuf;
 
     /// Scratch registry root for one test (unique per process+test name).
@@ -231,5 +349,159 @@ mod tests {
             std::env::temp_dir().join(format!("init-pro-registry-gc-{}-none", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&root).await;
         assert_eq!(sweep_stale_uploads(&root, STALE_UPLOAD_SECS).await, 0);
+    }
+
+    // ---- B1: index children ---------------------------------------------------
+
+    const IMG_CT: &str = "application/vnd.docker.distribution.manifest.v2+json";
+
+    fn meta(digest: &str, pushed_at: u64) -> store::TagMeta {
+        store::TagMeta {
+            digest: digest.to_string(),
+            media_type: Some(IMG_CT.to_string()),
+            pushed_at,
+            seq: 0,
+            size: 0,
+        }
+    }
+
+    /// Store one image manifest (config + one layer blob in the CAS) under
+    /// `repo`; returns its digest and the layer digest.
+    async fn put_image(root: &Path, repo: &str, unique: &str) -> (String, String) {
+        let cfg = format!("{{\"unique\":\"{unique}\"}}");
+        let cfg_digest = store::sha256_hex(cfg.as_bytes());
+        let layer = format!("layer-of-{unique}");
+        let layer_digest = store::sha256_hex(layer.as_bytes());
+        for (d, bytes) in [
+            (cfg_digest.as_str(), cfg.as_bytes()),
+            (layer_digest.as_str(), layer.as_bytes()),
+        ] {
+            tokio::fs::write(store::blob_path(root, d), bytes)
+                .await
+                .unwrap();
+        }
+        let manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"{IMG_CT}","config":{{"digest":"{cfg_digest}"}},"layers":[{{"digest":"{layer_digest}"}}]}}"#
+        );
+        let digest = store::sha256_hex(manifest.as_bytes());
+        store::put_manifest(root, repo, &digest, manifest.as_bytes())
+            .await
+            .unwrap();
+        (digest, layer_digest)
+    }
+
+    /// Store an index listing `children` under `repo`; returns its digest.
+    async fn put_index(root: &Path, repo: &str, children: &[&str]) -> String {
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "manifests": children.iter().map(|d| json!({"digest": d, "size": 1})).collect::<Vec<_>>(),
+        });
+        let manifest = serde_json::to_string(&body).unwrap();
+        let digest = store::sha256_hex(manifest.as_bytes());
+        store::put_manifest(root, repo, &digest, manifest.as_bytes())
+            .await
+            .unwrap();
+        digest
+    }
+
+    /// B1: `child_digests` reads `manifests[].digest` only, and only
+    /// grammatically valid digests (they become path segments).
+    #[test]
+    fn child_digests_reads_only_valid_index_entries() {
+        let good = format!("sha256:{}", "a".repeat(64));
+        let index = format!(
+            r#"{{"manifests":[{{"digest":"{good}"}},{{"digest":"../../etc"}},{{"size":3}}]}}"#
+        );
+        assert_eq!(child_digests(index.as_bytes()), vec![good.clone()]);
+        let image =
+            format!(r#"{{"config":{{"digest":"{good}"}},"layers":[{{"digest":"{good}"}}]}}"#);
+        assert!(child_digests(image.as_bytes()).is_empty());
+        assert!(child_digests(b"not json").is_empty());
+    }
+
+    /// B1: deleting an index prunes the children nothing else reaches (one
+    /// level down through a nested index) and, past the grace window, their
+    /// blobs; the child a surviving index still lists stays.
+    #[tokio::test]
+    async fn deleting_an_index_prunes_orphaned_children_and_their_blobs() {
+        let root = scratch("index-children").await;
+        store::prepare(&root).unwrap();
+        let (amd64, amd64_layer) = put_image(&root, "multi", "amd64").await;
+        let (arm64, arm64_layer) = put_image(&root, "multi", "arm64").await;
+        let (s390x, s390x_layer) = put_image(&root, "multi", "s390x").await;
+        let nested = put_index(&root, "multi", &[&s390x]).await;
+        let release = put_index(&root, "multi", &[&amd64, &arm64, &nested]).await;
+        let shared = put_index(&root, "multi", &[&amd64]).await;
+
+        assert_eq!(
+            delete_with_children(&root, "multi", &release).await,
+            3,
+            "arm64 + the nested index + its child"
+        );
+        for gone in [&arm64, &nested, &s390x] {
+            assert!(
+                !store::manifest_exists(&root, "multi", gone).await,
+                "{gone}"
+            );
+        }
+        assert!(
+            store::manifest_exists(&root, "multi", &amd64).await,
+            "still listed by `shared`"
+        );
+        assert!(store::manifest_exists(&root, "multi", &shared).await);
+
+        for d in [&amd64_layer, &arm64_layer, &s390x_layer] {
+            age(&store::blob_path(&root, d), BLOB_GC_GRACE_SECS * 2);
+        }
+        gc_blobs(&root).await.unwrap();
+        assert!(!store::blob_exists(&root, &arm64_layer).await);
+        assert!(!store::blob_exists(&root, &s390x_layer).await);
+        assert!(store::blob_exists(&root, &amd64_layer).await);
+
+        assert_eq!(delete_with_children(&root, "multi", &shared).await, 1);
+        assert!(!store::manifest_exists(&root, "multi", &amd64).await);
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// B1: a tag on the child keeps it when its parent index goes.
+    #[tokio::test]
+    async fn tagged_index_child_survives_its_parent() {
+        let root = scratch("index-tagged").await;
+        store::prepare(&root).unwrap();
+        let (child, _) = put_image(&root, "multi", "amd64").await;
+        store::write_tag(&root, "multi", "v1", &meta(&child, 1))
+            .await
+            .unwrap();
+        let index = put_index(&root, "multi", &[&child]).await;
+        assert_eq!(delete_with_children(&root, "multi", &index).await, 0);
+        assert!(store::manifest_exists(&root, "multi", &child).await);
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    /// B1: the retention pass drops the index that lost its tag AND the
+    /// digest-only child that lost its last parent.
+    #[tokio::test]
+    async fn retention_prunes_children_of_a_dropped_index() {
+        let root = scratch("index-retention").await;
+        store::prepare(&root).unwrap();
+        let (a, _) = put_image(&root, "multi", "amd64").await;
+        let (b, _) = put_image(&root, "multi", "arm64").await;
+        let old = put_index(&root, "multi", &[&a]).await;
+        let new = put_index(&root, "multi", &[&b]).await;
+        for (tag, digest, at) in [("v1", &old, 1), ("v2", &new, 2)] {
+            store::write_tag(&root, "multi", tag, &meta(digest, at))
+                .await
+                .unwrap();
+        }
+        apply_retention(&root, "multi", &[], 1).await.unwrap();
+        assert!(!store::manifest_exists(&root, "multi", &old).await);
+        assert!(
+            !store::manifest_exists(&root, "multi", &a).await,
+            "the dropped index's orphaned child must go"
+        );
+        assert!(store::manifest_exists(&root, "multi", &new).await);
+        assert!(store::manifest_exists(&root, "multi", &b).await);
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }

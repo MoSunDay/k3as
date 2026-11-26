@@ -6,6 +6,12 @@
 //! fake binaries in tests (and, on some filesystems, real helpers) can
 //! still be marked busy by the writer at first exec. Tests never mutate
 //! the process env - they pass explicit fake-binary paths instead.
+//!
+//! D: every exec is a `tokio::process::Command` under [`MOUNT_TIMEOUT`]
+//! with `kill_on_drop` -- a helper wedged on a dead NFS server is killed
+//! and reported as `TimedOut`, and neither the wait nor the retry backoff
+//! blocks a tokio worker (the callers are the volume sync / Agent exec
+//! loops).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -15,6 +21,10 @@ use std::time::Duration;
 /// and how long it waits between attempts.
 const EXEC_BUSY_ATTEMPTS: usize = 4;
 const EXEC_BUSY_BACKOFF: Duration = Duration::from_millis(25);
+/// D: budget for ONE helper exec. `mount.nfs` against a wedged server can
+/// sit in the kernel for minutes; past this it is killed and the mount
+/// reported as timed out (the caller's retry loop owns the next attempt).
+pub(crate) const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Mount a `server:path` export at `dir` with `bin` (prod: the bare
 /// `mount.nfs` name so PATH lookup resolves; tests pass a fake script).
@@ -22,7 +32,7 @@ const EXEC_BUSY_BACKOFF: Duration = Duration::from_millis(25);
 /// the mount and NFS services when the server carries an explicit port.
 pub async fn mount_nfs(bin: &Path, server: &str, path: &str, dir: &Path) -> Result<(), String> {
     let args = mount_args(server, path, dir);
-    let output = run(bin, &args).map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    let output = run(bin, &args).await.map_err(|e| spawn_error(bin, e))?;
     if output.status.success() {
         return Ok(());
     }
@@ -44,7 +54,7 @@ pub async fn mount_nfs(bin: &Path, server: &str, path: &str, dir: &Path) -> Resu
 pub async fn unmount_under(bin: &Path, mounts_text: &str, root: &Path) -> Result<(), String> {
     for mp in mountpoints_under(mounts_text, root) {
         let args = vec![mp.display().to_string()];
-        let output = run(bin, &args).map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+        let output = run(bin, &args).await.map_err(|e| spawn_error(bin, e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
@@ -149,20 +159,54 @@ fn unescape_mnt(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Spawn + wait, retrying `ETXTBSY` (see module docs).
-fn run(bin: &Path, args: &[String]) -> std::io::Result<std::process::Output> {
+/// Spawn + wait, retrying `ETXTBSY` (see module docs), under
+/// [`MOUNT_TIMEOUT`] (D).
+async fn run(bin: &Path, args: &[String]) -> std::io::Result<std::process::Output> {
+    run_within(bin, args, MOUNT_TIMEOUT).await
+}
+
+/// [`run`] with an explicit per-exec budget (the unit-test seam). The
+/// helper is killed when the budget expires (`kill_on_drop` on the dropped
+/// future); `ETXTBSY` retries sleep on the runtime, never
+/// `thread::sleep` on a worker (D).
+async fn run_within(
+    bin: &Path,
+    args: &[String],
+    budget: Duration,
+) -> std::io::Result<std::process::Output> {
     let mut last: Option<std::io::Error> = None;
     for attempt in 0..EXEC_BUSY_ATTEMPTS {
-        match std::process::Command::new(bin).args(args).output() {
-            Ok(output) => return Ok(output),
-            Err(e) if attempt + 1 < EXEC_BUSY_ATTEMPTS && is_exec_busy(&e) => {
+        let mut cmd = tokio::process::Command::new(bin);
+        cmd.args(args).kill_on_drop(true);
+        match tokio::time::timeout(budget, cmd.output()).await {
+            Ok(Ok(output)) => return Ok(output),
+            Ok(Err(e)) if attempt + 1 < EXEC_BUSY_ATTEMPTS && is_exec_busy(&e) => {
                 last = Some(e);
-                std::thread::sleep(EXEC_BUSY_BACKOFF);
+                tokio::time::sleep(EXEC_BUSY_BACKOFF).await;
             }
-            Err(e) => return Err(e),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "{} did not finish within {budget:?} (killed)",
+                        bin.display()
+                    ),
+                ))
+            }
         }
     }
     Err(last.unwrap_or_else(|| std::io::Error::other("exec busy")))
+}
+
+/// The failure line of one helper run: a spawn error, or (D) the timeout
+/// kill -- the latter must not read as a spawn failure.
+fn spawn_error(bin: &Path, e: std::io::Error) -> String {
+    if e.kind() == ErrorKind::TimedOut {
+        format!("{}: {e}", bin.display())
+    } else {
+        format!("spawn {}: {e}", bin.display())
+    }
 }
 
 /// `ETXTBSY` via the stable enum kind when available, plus the raw
@@ -328,6 +372,44 @@ mod tests {
             .expect_err("umount should fail");
         assert!(err.contains("device busy"), "stderr lost: {err}");
         assert!(err.contains("/root/mp"), "target lost: {err}");
+    }
+
+    /// D: a helper that never exits is killed at the budget and reported
+    /// as a timeout -- never as a spawn failure -- and nothing is left
+    /// behind (the fake records its pid; `exec sleep` keeps it).
+    #[tokio::test]
+    async fn hung_helper_is_killed_at_the_budget() {
+        let bin = fake_bin("mnfs-hang", "echo $$ > \"$0.pid\"\nexec sleep 30\n");
+        let started = std::time::Instant::now();
+        let err = run_within(&bin, &["/mnt/x".to_string()], Duration::from_millis(300))
+            .await
+            .expect_err("a hung helper must fail");
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        assert!(err.to_string().contains("killed"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded by the budget, not the 30s default"
+        );
+        let pid = std::fs::read_to_string(bin.with_extension("pid"))
+            .unwrap()
+            .trim()
+            .to_string();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(std::time::Instant::now() < deadline, "helper {pid} leaked");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let line = spawn_error(Path::new("mount.nfs"), err);
+        assert!(
+            line.starts_with("mount.nfs: ") && line.contains("killed"),
+            "{line}"
+        );
+        assert!(!line.contains("spawn"), "{line}");
+        let spawn = spawn_error(
+            Path::new("mount.nfs"),
+            std::io::Error::from(ErrorKind::NotFound),
+        );
+        assert!(spawn.starts_with("spawn mount.nfs: "), "{spawn}");
     }
 
     #[test]

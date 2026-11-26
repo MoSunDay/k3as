@@ -1,6 +1,7 @@
 //! H5/H6 (C14) launch-helper cases split out of `launch.rs` (file size
 //! limit; the `gpu_tests.rs` precedent): the engine log cap, the parent
-//! tie flag on the engine command line, and the bounded reaps.
+//! tie flag on the engine command line, and the bounded reaps -- plus the
+//! D offloaded reap / spawn-settle cases.
 
 use std::io::Write;
 use std::path::Path;
@@ -100,4 +101,82 @@ fn reap_returns_once_the_child_exits() {
     };
     reap(&mut child, Duration::from_secs(5)).unwrap();
     assert!(child.try_wait().unwrap().is_some());
+}
+
+/// D: the offloaded reap (the async callers' path) is the same bounded
+/// reap -- a `sleep` stand-in is gone and reaped, never parked on a
+/// tokio worker.
+#[tokio::test]
+async fn reap_offload_reaps_a_real_child() {
+    let Ok(child) = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::piped())
+        .spawn()
+    else {
+        return;
+    };
+    let pid = child.id();
+    reap_offload(child, Duration::from_millis(100))
+        .await
+        .unwrap();
+    assert_gone(pid).await;
+}
+
+/// D: an engine that never binds fails `settle` within the socket budget
+/// AND is killed + reaped (no zombie until the kubelet exits); an engine
+/// that bound hands the very same child back to its owner.
+#[tokio::test]
+async fn settle_kills_an_engine_that_never_binds() {
+    let dir = std::env::temp_dir().join(format!("ip-launch-settle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("never.sock");
+    let Ok(child) = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::piped())
+        .spawn()
+    else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    let pid = child.id();
+    let started = Instant::now();
+    let err = settle_within(child, &socket, "pause engine", Duration::from_millis(200))
+        .await
+        .expect_err("the socket never appears");
+    assert!(
+        err.contains("pause engine never came up: engine never bound"),
+        "{err}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "bounded by the socket budget"
+    );
+    assert_gone(pid).await;
+    // Bound: the child comes back untouched for its owner.
+    let bound = dir.join("bound.sock");
+    let child = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::fs::write(&bound, b"").unwrap();
+    let mut child = settle_within(child, &bound, "engine", Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert_eq!(child.id(), pid, "the very same child");
+    assert!(child.try_wait().unwrap().is_none(), "still running");
+    reap_offload(child, Duration::ZERO).await.unwrap();
+    assert_gone(pid).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `/proc/<pid>` disappears within a generous budget: the SIGKILL was
+/// delivered AND the exit waited on (a zombie would keep the entry).
+async fn assert_gone(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(Instant::now() < deadline, "pid {pid} left behind (zombie?)");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }

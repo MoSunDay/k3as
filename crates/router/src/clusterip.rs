@@ -12,10 +12,16 @@
 //! never fatal. The listener struct is a slimmer copy of nodeport.rs's
 //! private one on purpose (Q28 wire behavior gated by ST1-ST6): this plane
 //! shares the seams (gate, split, serve), not code.
+//!
+//! Bind lifecycle (T5.4 hardening, same as the nodePort plane): a failed
+//! bind is logged WITH its cause at the bind site and retried on a slow tick
+//! ([`RETRY_TICK`]) for as long as the materialized set is short of the
+//! desired one; a fully bound plane stays quiet (no periodic churn).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use infra::Shutdown;
 use openrusty_server::state::{self as or_state, AppState};
@@ -28,6 +34,10 @@ use crate::route::{PortRef, UpstreamRef};
 use crate::serve;
 use crate::split::PeerWeight;
 use crate::vip;
+
+/// Bind retry cadence while some desired VIP listener is still unbound
+/// (T5.4 hardening); see [`retry_pending`].
+const RETRY_TICK: Duration = Duration::from_secs(5);
 
 /// One live VIP listener: bound address, openrusty runtime (hot-reloaded
 /// on endpoint changes), the weighted peer set baked into it (empty = gate
@@ -82,7 +92,7 @@ async fn reconcile_loop(resolver: EndpointsResolver, shutdown: Shutdown) {
     let mut warned: BTreeSet<Ipv4Addr> = BTreeSet::new();
     let mut state_rx = resolver.subscribe();
     loop {
-        {
+        let counts = {
             let state = state_rx.borrow_and_update().clone();
             reconcile(
                 &mut listeners,
@@ -92,14 +102,24 @@ async fn reconcile_loop(resolver: EndpointsResolver, shutdown: Shutdown) {
                 &resolver,
                 &state,
             )
-            .await;
-        }
+            .await
+        };
+        let retry = retry_pending(counts.0, counts.1);
         tokio::select! {
             _ = shutdown.cancelled() => break,
             changed = state_rx.changed() => {
                 if changed.is_err() {
                     break; // resolver channel dropped
                 }
+            }
+            // Only armed while a desired VIP listener is still unbound: the
+            // (cause-logging) bind step re-runs until the port frees up.
+            _ = tokio::time::sleep(RETRY_TICK), if retry => {
+                tracing::debug!(
+                    target: "init-pro",
+                    missing = counts.0 - counts.1,
+                    "clusterIP bind retry tick"
+                );
             }
         }
     }
@@ -125,8 +145,20 @@ fn v4_of(sa: SocketAddr) -> Ipv4Addr {
     }
 }
 
+/// Arm the bind retry tick only while the materialized set is smaller than
+/// the bindable one (a fully bound -- or alias-degraded -- plane stays
+/// quiet). Pure; unit-tested.
+pub(crate) fn retry_pending(desired: usize, have: usize) -> bool {
+    have < desired
+}
+
 /// One reconcile step: refresh endpoint sets, drop stale listeners (and
-/// aliases whose desired refcount hit 0), start missing ones.
+/// aliases whose desired refcount hit 0), start missing ones. Returns
+/// `(bindable, materialized)` listener counts so the loop knows whether a
+/// retry tick is due: `bindable` counts only the desired VIPs whose alias
+/// is in place -- a failed alias is a standing condition (no `ip(1)` / no
+/// `NET_ADMIN`) that a 5s tick cannot fix and must not re-spawn for, while
+/// a failed bind (port still taken) can.
 async fn reconcile(
     listeners: &mut BTreeMap<SocketAddr, Listener>,
     reaped: &mut Vec<JoinHandle<()>>,
@@ -134,7 +166,7 @@ async fn reconcile(
     warned: &mut BTreeSet<Ipv4Addr>,
     resolver: &EndpointsResolver,
     state: &ResolverState,
-) {
+) -> (usize, usize) {
     let desired = desired_vip_listeners(state);
     // Desired refcount per VIP: how many listeners still want the alias.
     let mut want: BTreeMap<Ipv4Addr, usize> = BTreeMap::new();
@@ -173,14 +205,18 @@ async fn reconcile(
                 match vip::ensure_alias(ip).await {
                     Ok(_) => {
                         warned.remove(&ip);
-                        *aliased.entry(ip).or_insert(0) += 1;
+                        // We added the alias: record it at once so drain /
+                        // the no-longer-desired sweep remove it even if the
+                        // bind keeps failing. Only a started listener counts.
+                        aliased.entry(ip).or_insert(0);
                         match start_listener(*k, up.clone(), resolver).await {
                             Some(l) => {
+                                *aliased.entry(ip).or_insert(0) += 1;
                                 tracing::info!(target: "init-pro", vip = %ip, port = k.port(), service = %up.service, "clusterIP listener up");
                                 listeners.insert(*k, l);
                             }
                             None => {
-                                tracing::warn!(target: "init-pro", vip = %ip, port = k.port(), "clusterIP bind failed; retrying on next state change")
+                                tracing::warn!(target: "init-pro", vip = %ip, port = k.port(), "clusterIP listener not started; retrying on the bind tick")
                             }
                         }
                     }
@@ -194,6 +230,11 @@ async fn reconcile(
             }
         }
     }
+    let bindable = desired
+        .keys()
+        .filter(|k| aliased.contains_key(&v4_of(**k)))
+        .count();
+    (bindable, listeners.len())
 }
 
 /// Hot-apply the plan's weighted peer set (same semantics as the nodePort
@@ -232,7 +273,15 @@ async fn start_listener(
     upstream: UpstreamRef,
     resolver: &EndpointsResolver,
 ) -> Option<Listener> {
-    let listener = serve::bind(listen).await.ok()?;
+    let listener = match serve::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Cause at the bind site (AddrInUse, EADDRNOTAVAIL, ...); the
+            // loop's retry tick re-attempts while the listener stays missing.
+            tracing::warn!(target: "init-pro", %listen, error = %e, "clusterIP bind failed");
+            return None;
+        }
+    };
     let state = resolver.snapshot();
     let plan = crate::split::plan_for(&state, &upstream);
     let peers = plan.peers;

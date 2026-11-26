@@ -206,13 +206,25 @@ pub async fn detect_host_gpus() -> BTreeMap<String, u64> {
     out
 }
 
+/// Budget of one vendor-CLI probe (`nvidia-smi` / `rocm-smi` must answer
+/// or be assumed wedged).
+const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Run one vendor CLI with a bounded timeout; `None` on any failure
-/// (missing binary, non-zero exit, timeout, utf8 noise).
+/// (missing binary, non-zero exit, timeout, utf8 noise). D: `kill_on_drop`
+/// -- dropping the timed-out future SIGKILLs the helper, so a hung
+/// `nvidia-smi` no longer leaks one process per heartbeat.
 async fn run_tool(argv: &[&str], count: fn(&str) -> u64) -> Option<u64> {
+    run_tool_within(argv, TOOL_TIMEOUT, count).await
+}
+
+/// [`run_tool`] with an explicit budget (the unit-test seam).
+async fn run_tool_within(argv: &[&str], budget: Duration, count: fn(&str) -> u64) -> Option<u64> {
     let out = tokio::time::timeout(
-        Duration::from_secs(3),
+        budget,
         tokio::process::Command::new(argv[0])
             .args(&argv[1..])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -354,5 +366,50 @@ mod tests {
         assert_eq!(classify_vendor_id("0x10de\n"), Some("nvidia.com/gpu"));
         assert_eq!(classify_vendor_id("0x1002\n"), Some("amd.com/gpu"));
         assert_eq!(classify_vendor_id("0x8086\n"), None); // i915: not a GPU vendor we track
+    }
+
+    /// D: a vendor CLI that never answers is killed with the timed-out
+    /// future (`kill_on_drop`), not left behind once per heartbeat; a CLI
+    /// that answers inside the budget is still counted.
+    #[tokio::test]
+    async fn gpu_t72_run_tool_kills_a_hung_helper() {
+        let pid_file =
+            std::env::temp_dir().join(format!("init-pro-gpu-run-tool-{}", std::process::id()));
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let started = Instant::now();
+        assert_eq!(
+            run_tool_within(
+                &["sh", "-c", &script],
+                Duration::from_millis(300),
+                count_lines
+            )
+            .await,
+            None,
+            "a hung helper is a failed probe"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "bounded by the budget"
+        );
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        let _ = std::fs::remove_file(&pid_file);
+        // SIGKILLed on drop and reaped by tokio: the /proc entry goes away.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(Instant::now() < deadline, "hung helper {pid} leaked");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            run_tool_within(
+                &["sh", "-c", "echo 0; echo 1"],
+                Duration::from_secs(5),
+                count_lines
+            )
+            .await,
+            Some(2)
+        );
     }
 }

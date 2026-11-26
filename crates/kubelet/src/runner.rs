@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -28,6 +28,7 @@ use crate::probes::{
 use crate::status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 use crate::sync::{self, Snapshot};
 use crate::volumes;
+use crate::watch_backoff::{log_watch_pause, watch_pause};
 
 pub use crate::config::KubeletConfig;
 
@@ -163,25 +164,35 @@ async fn server_task(cfg: KubeletConfig, backend: Arc<dyn CriBackend>, shutdown:
 type Desired = Arc<Mutex<BTreeMap<String, PodView>>>;
 
 /// Task 1: LIST + watch `/api/v1/pods`, keeping the desired map current.
+/// D (K10): the re-LIST pause backs off along the shared curve
+/// ([`watch_pause`]: 500 ms doubling to 5 min, reset by a cycle that ran
+/// over a minute) instead of a flat 500 ms -- an apiserver that is down
+/// costs one request per pause, not two per second.
 async fn watch_task(
     client: Arc<HttpJson>,
     node_name: String,
     desired: Desired,
     shutdown: infra::Shutdown,
 ) {
+    let mut failures = 0u32;
     loop {
         if shutdown.is_triggered() {
             return;
         }
-        if let Err(e) = watch_cycle(&client, &node_name, &desired, &shutdown).await {
-            if shutdown.is_triggered() {
-                return;
-            }
-            tracing::debug!(target: "init-pro", error = %e, "kubelet: pod watch cycle ended; re-LIST in 500ms");
+        let started = Instant::now();
+        let ended = match watch_cycle(&client, &node_name, &desired, &shutdown).await {
+            Ok(()) => None,
+            Err(_) if shutdown.is_triggered() => return,
+            Err(e) => Some(e),
+        };
+        let (streak, pause) = watch_pause(failures, started.elapsed());
+        failures = streak;
+        if let Some(e) = ended {
+            log_watch_pause("kubelet: pod watch", &e, failures, pause);
         }
         tokio::select! {
             _ = shutdown.cancelled() => return,
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = tokio::time::sleep(pause) => {}
         }
     }
 }
@@ -504,8 +515,9 @@ async fn sync_once(
     }
     last_status.retain(|k, _| wanted.contains_key(k));
     // C3 (bug sweep): disk-pressure-aware image GC. One statvfs per cycle
-    // while the image root has space; a pressured root sweeps the CAS.
-    crate::image_gc::pass(cri, &wanted);
+    // while the image root has space; a pressured root sweeps the CAS
+    // (its walks run on the blocking pool -- D).
+    crate::image_gc::pass(cri, &wanted).await;
 }
 
 /// Drive due probes (httpGet / tcpSocket / exec — T4.8) for RUNNING

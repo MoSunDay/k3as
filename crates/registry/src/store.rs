@@ -300,7 +300,7 @@ async fn walk_repos(dir: &Path, prefix: String, out: &mut Vec<String>) {
 
 /// Blob digests referenced by every stored manifest across all repos
 /// (`config.digest` + `layers[].digest`). Index children point at
-/// manifests, which die with their last tag — not blobs.
+/// manifests, not blobs; they are pruned with their index (gc.rs, B1).
 pub async fn referenced_blob_digests(root: &Path) -> HashSet<String> {
     let mut refs = HashSet::new();
     let Ok(repos) = list_repos(root).await else {

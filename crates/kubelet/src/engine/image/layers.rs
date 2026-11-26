@@ -5,10 +5,28 @@
 //! <id>/{merged,upper,work}` is per-container overlayfs scratch, and
 //! `merged/<manifest-hex>/` is the whiteout-aware fused fallback rootfs.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::cas::{ImageStore, PulledImage};
 use super::unpack;
+
+/// Prefix of every publish-by-rename staging dir under `layers/` and
+/// `merged/`: [`ImageStore::ensure_layers`] and `ensure_merged_fused`
+/// write into it and rename it onto the digest name when complete. The
+/// sweeps (`gc.rs`, the disk-pressure pass) skip these names (D): a GC
+/// racing an in-flight unpack must never delete the tree being written.
+pub(crate) const STAGING_PREFIX: &str = ".tmp-";
+
+/// Pure: whether a `layers/` / `merged/` entry is an in-flight staging dir.
+pub(crate) fn is_staging_name(name: &str) -> bool {
+    name.starts_with(STAGING_PREFIX)
+}
+
+/// The staging dir of one digest under `parent` (pid-suffixed, so two
+/// agents sharing a root never stage into the same tree).
+fn staging_dir(parent: &Path, hex: &str) -> PathBuf {
+    parent.join(format!("{STAGING_PREFIX}{hex}-{}", std::process::id()))
+}
 
 /// A per-container overlayfs view (Q53 M3): the overlay is mounted at
 /// `mountpoint` with `upper`/`work` scratch on top of the shared layer
@@ -42,10 +60,7 @@ impl ImageStore {
                 continue;
             }
             let hex = layer.digest.rsplit(':').next().unwrap_or(&layer.digest);
-            let staging = self
-                .root()
-                .join("layers")
-                .join(format!(".tmp-{hex}-{}", std::process::id()));
+            let staging = staging_dir(&self.root().join("layers"), hex);
             match unpack::unpack_layer(&self.blob_path(&layer.digest), &staging, &layer.media_type)
             {
                 Ok(()) => std::fs::rename(&staging, &dir).map_err(|e| {
@@ -70,10 +85,7 @@ impl ImageStore {
             return Ok(merged);
         }
         let hex = img.digest.rsplit(':').next().unwrap_or(&img.digest);
-        let staging = self
-            .root()
-            .join("merged")
-            .join(format!(".tmp-{hex}-{}", std::process::id()));
+        let staging = staging_dir(&self.root().join("merged"), hex);
         let blobs: Vec<PathBuf> = img
             .layers
             .iter()
@@ -226,7 +238,7 @@ mod tests {
         let stray: Vec<_> = std::fs::read_dir(root.join("layers"))
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+            .filter(|e| is_staging_name(&e.file_name().to_string_lossy()))
             .collect();
         assert!(stray.is_empty());
         let _ = std::fs::remove_dir_all(&root);

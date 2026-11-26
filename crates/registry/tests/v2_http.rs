@@ -151,3 +151,62 @@ async fn blob_get_streams_large_payload() {
     assert_eq!(r.body.len(), payload.len());
     assert!(r.body == payload, "streamed body differs from upload");
 }
+
+/// B2 (batch D): a blob some manifest still lists is not deletable -- a
+/// stray DELETE could hollow out a live image -- while an unreferenced
+/// blob goes.
+#[tokio::test]
+async fn referenced_blob_delete_is_409_and_orphans_are_removed() {
+    let (addr, root) = boot(10).await;
+    push_image(&addr, "app/guarded", "v1", "b2").await;
+    let r = req(&addr, "GET", "/v2/app/guarded/manifests/v1", &[], b"").await;
+    let manifest: serde_json::Value = serde_json::from_str(r.body_str()).unwrap();
+    let layer = manifest["layers"][0]["digest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = req(
+        &addr,
+        "DELETE",
+        &format!("/v2/app/guarded/blobs/{layer}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 409, "{}", r.body_str());
+    assert!(r.body_str().contains("BLOB_REFERENCED"));
+    let r = req(
+        &addr,
+        "HEAD",
+        &format!("/v2/app/guarded/blobs/{layer}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 200, "a referenced layer was deleted");
+
+    let orphan = b"orphan-blob-b2".to_vec();
+    let orphan_digest = sha256_hex(&orphan);
+    assert_eq!(push_blob(&addr, "app/guarded", &orphan).await.status, 201);
+    let r = req(
+        &addr,
+        "DELETE",
+        &format!("/v2/app/guarded/blobs/{orphan_digest}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 202, "{}", r.body_str());
+    let r = req(
+        &addr,
+        "HEAD",
+        &format!("/v2/app/guarded/blobs/{orphan_digest}"),
+        &[],
+        b"",
+    )
+    .await;
+    assert_eq!(r.status, 404);
+
+    std::fs::remove_dir_all(root.parent().unwrap()).ok();
+}

@@ -1,0 +1,52 @@
+# Layer 3 -- control plane (T3.1-T3.2): controllers, scheduler, workloads,
+# namespace cascade. T3.3/T3.4 are not-started (no suites yet).
+
+[[suite]]
+id = "golden:controllers"
+script = "scripts/golden/suites/controllers.sh"
+runner = "golden"
+layer = 3
+todos = ["T3.1"]
+cases = ["G16", "G17", "G18", "G19", "G20", "G21"]
+skip = []
+title = "apps discovery, scale, rollout + kubectl rollout status, STS, DS, GC/drain (Q18)"
+
+[[suite]]
+id = "golden:scheduler"
+script = "scripts/golden/suites/scheduler.sh"
+runner = "golden"
+layer = 3
+todos = ["T3.2"]
+cases = ["G22", "G23"]
+skip = []
+title = "nodeSelector/Unschedulable placement + HTTP extender steering (Q23)"
+
+[[suite]]
+id = "golden:workloads"
+script = "scripts/golden/suites/workloads.sh"
+runner = "golden"
+layer = 3
+todos = ["T3.1", "T7.3"]
+cases = ["G60", "G61", "G62", "G63", "G64", "G65", "G66"]
+skip = ["no-vendor-bundle", "no-cc", "foreign-cni0"]
+title = "real STS/DS/CronWorkflow behaviour on agent+containerd (T3.1b, T7.3C)"
+
+[[suite]]
+id = "golden:cronworkflows"
+script = "scripts/golden/suites/cronworkflows.sh"
+runner = "golden"
+layer = 3
+todos = []
+cases = []
+skip = []
+title = "reserved overflow valve (G66-G68 consumed by workloads.sh); zero cases today"
+
+[[suite]]
+id = "golden:nscascade"
+script = "scripts/golden/suites/nscascade.sh"
+runner = "golden"
+layer = 3
+todos = ["T3.1"]
+cases = ["G80", "G81", "G82"]
+skip = ["foreign-cni0"]
+title = "live namespace terminal-delete cascade: 2 Running pods -> 0 containers (Q19/Q20)"

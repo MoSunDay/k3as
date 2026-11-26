@@ -155,6 +155,26 @@ fn latest_build_orders_by_creation_timestamp_then_name() {
 }
 
 #[test]
+fn latest_build_for_tag_ignores_other_tags_regardless_of_name_order() {
+    // Batch F soak finding: without creationTimestamp `p-b9-x` sorts above
+    // `p-b10-x`; the desired tag must still resolve to its own child.
+    let b9 = json!({"metadata": {"name": "p-b9-x"}, "spec": {"image": {"tag": "b9"}}});
+    let b10 = json!({"metadata": {"name": "p-b10-x"}, "spec": {"image": {"tag": "b10"}}});
+    let b10_dup = json!({"metadata": {"name": "p-b10-y"}, "spec": {"image": {"tag": "b10"}}});
+    let owned = vec![&b9, &b10, &b10_dup];
+    assert_eq!(name(latest_build(&owned).unwrap()), Some("p-b9-x")); // the trap
+    assert_eq!(
+        name(latest_build_for_tag(&owned, "b10").unwrap()),
+        Some("p-b10-y")
+    );
+    assert_eq!(
+        name(latest_build_for_tag(&owned, "b9").unwrap()),
+        Some("p-b9-x")
+    );
+    assert!(latest_build_for_tag(&owned, "b11").is_none());
+}
+
+#[test]
 fn phases_mirror_and_terminate() {
     let publishing = json!({"status": {"phase": "Publishing"}});
     let building = json!({"status": {"phase": "Pending"}});
