@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use infra::{Config, Shutdown};
 
 use crate::runtime::run_supervised;
-use crate::storage_dsn::open_store;
+use crate::storage_dsn::{classify_dsn, open_store, spawn_compaction};
 
 /// Server-only wiring: where to bind the discovery API + which in-process
 /// control-plane components are enabled (Q19).
@@ -120,7 +120,9 @@ pub fn run_server(cfg: Config, bind: ServerBind) -> ExitCode {
 /// per local `run_supervised` used to assign in place — the drain sequence
 /// there consumes them in the exact same order.
 pub(crate) struct ServerPlaneDrains {
-    pub(crate) server_join: Option<tokio::task::JoinHandle<()>>,
+    /// The apiserver task; its `Err` is the surface's own failure (B11:
+    /// the caller maps it to a non-zero exit after the drain).
+    pub(crate) server_join: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     pub(crate) controllers: Option<(Vec<tokio::task::JoinHandle<()>>, controllers::Stop)>,
     pub(crate) scheduler: Option<(Vec<tokio::task::JoinHandle<()>>, controllers::Stop)>,
     pub(crate) service_plane: Option<(
@@ -130,6 +132,8 @@ pub(crate) struct ServerPlaneDrains {
     )>,
     pub(crate) anyhome: Option<tokio::task::JoinHandle<()>>,
     pub(crate) registry: Option<tokio::task::JoinHandle<()>>,
+    /// B3: the rdb-only periodic history compaction (`None` otherwise).
+    pub(crate) compaction: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Spawn the server plane (**T1.3a** pre-split, decision **Q47**): discovery
@@ -151,6 +155,7 @@ pub(crate) async fn spawn_server_plane(
         service_plane: None,
         anyhome: None,
         registry: None,
+        compaction: None,
     };
     let reg = crate::discovery::served_schema(b.token_file.is_some());
     // T4.3 Scope C (Q44): parse --service-cidr once, up front — a
@@ -178,6 +183,14 @@ pub(crate) async fn spawn_server_plane(
             return Err(e);
         }
     };
+    // B3: rdb's kine-style `log/<rev>` records grow forever on their own --
+    // compact the durable history on a timer (the embedded default keeps a
+    // bounded ring and spawns nothing).
+    drains.compaction = spawn_compaction(
+        &classify_dsn(b.datastore_endpoint.as_deref()),
+        store.clone(),
+        shutdown,
+    );
     // T3.1a: spawn the controller manager against the same
     // storage Arc (Q19); leader-elected via a Lease + CAS (Q18).
     // Only the full apiserver path runs controllers —
@@ -296,6 +309,9 @@ pub(crate) async fn spawn_server_plane(
             "clusterIP plane started: Router carries ClusterIP VIP traffic (T4.3 Scope C, Q44)");
     }
     let server_shutdown = shutdown.clone();
+    // B11: kept for the failure branch -- the serve future's cancellation
+    // handle is moved into the signal future below.
+    let server_failure = shutdown.clone();
     let addr = b.addr;
     // T7.5 (Q43): thread the anyhome endpoint into the
     // apiserver so the per-Pod anyhome defaulting is armed iff
@@ -348,7 +364,7 @@ pub(crate) async fn spawn_server_plane(
         }
     };
     drains.server_join = Some(tokio::spawn(async move {
-        if let Err(e) = apiserver::serve(
+        let served = apiserver::serve(
             reg,
             store,
             addr,
@@ -365,10 +381,18 @@ pub(crate) async fn spawn_server_plane(
                 server_shutdown.cancelled().await;
             },
         )
-        .await
-        {
-            tracing::error!(target: "init-pro", role, "apiserver exited: {e}");
+        .await;
+        if let Err(e) = &served {
+            // B11 (long-run bug sweep): a failed API surface is a dead
+            // server -- a listener that cannot bind or a serve loop that
+            // died used to leave the process idling with no API until the
+            // next signal. Fire the run_supervised drain so the node
+            // planes wind down; the error rides out of the join so the
+            // process exits non-zero and a supervisor restarts it.
+            tracing::error!(target: "init-pro", role, "apiserver exited; draining: {e}");
+            server_failure.trigger();
         }
+        served
     }));
     Ok(drains)
 }

@@ -15,10 +15,13 @@
 //!
 //! Status (full-object CAS, Q10): `Rolling` carries
 //! `status.rollout {step, weight, since, revision}`; `observedTag` only
-//! advances on promote (abort keeps it). Every failure mode writes
-//! `Failed` once with a named `Ready=False` reason (`ReleaseInvalid`,
+//! advances on promote (abort keeps it) and on a `Failed` release, so the
+//! failed tag is HELD instead of retried on every resync. Every failure mode
+//! reports `Failed` with a named `Ready=False` reason (`ReleaseInvalid`,
 //! `TrafficSplitMissing`, `StableDeploymentMissing`, `StableServiceMissing`,
-//! `CanaryConflict`).
+//! `CanaryConflict`) -- and only on the pass that first observes it: the
+//! 2s resync re-enters [`roll`] forever, so [`fail`] writes once per
+//! distinct failure instead of minting a fresh timestamp every pass.
 
 mod apply;
 mod children;
@@ -74,12 +77,13 @@ pub(super) async fn roll(
             sp,
             "ReleaseInvalid",
             "spec.release is not a PipelineRelease",
+            Some(tag),
         )
         .await;
     };
     let plan = match plan::validate(sp, &release, reference, tag) {
         Ok(plan) => plan,
-        Err(message) => return fail(client, key, sp, "ReleaseInvalid", &message).await,
+        Err(message) => return fail(client, key, sp, "ReleaseInvalid", &message, Some(tag)).await,
     };
     let split_key = apply::split_key(ns, &plan.traffic_split);
     if apply::get(client, &split_key).await?.is_none() {
@@ -89,6 +93,7 @@ pub(super) async fn roll(
             sp,
             "TrafficSplitMissing",
             &missing("TrafficSplit", ns, &plan.traffic_split),
+            Some(tag),
         )
         .await;
     }
@@ -100,6 +105,7 @@ pub(super) async fn roll(
             sp,
             "StableDeploymentMissing",
             &missing("Deployment", ns, &plan.stable_deployment),
+            Some(tag),
         )
         .await;
     };
@@ -111,6 +117,7 @@ pub(super) async fn roll(
             sp,
             "StableServiceMissing",
             &missing("Service", ns, &plan.stable_service),
+            Some(tag),
         )
         .await;
     };
@@ -137,6 +144,7 @@ pub(super) async fn roll(
             sp,
             "CanaryConflict",
             &conflict("Deployment", ns, &plan.canary_deployment),
+            Some(tag),
         )
         .await;
     }
@@ -151,6 +159,7 @@ pub(super) async fn roll(
             sp,
             "CanaryConflict",
             &conflict("Service", ns, &plan.canary_service),
+            Some(tag),
         )
         .await;
     }
@@ -227,12 +236,13 @@ pub(super) async fn abort(
             sp,
             "ReleaseInvalid",
             "spec.release is not a PipelineRelease",
+            None,
         )
         .await;
     };
     let plan = match plan::validate_names(sp, &release) {
         Ok(plan) => plan,
-        Err(message) => return fail(client, key, sp, "ReleaseInvalid", &message).await,
+        Err(message) => return fail(client, key, sp, "ReleaseInvalid", &message, None).await,
     };
     tracing::debug!(pipeline, uid, namespace = ns, "canary: abort requested");
     // Deployment first: stop the canary pods before its Service disappears.
@@ -280,17 +290,63 @@ fn now_secs() -> u64 {
 }
 
 /// One-shot `Failed` status write (`Ready=False` with `reason`).
+///
+/// Anti-churn (T8.5 bug fix): the pipeline worker resyncs every 2s and
+/// `now()` is a fresh timestamp on every pass, so an unconditional write
+/// minted ~43k revisions/day/pipeline. The write is therefore conditional --
+/// [`failure_recorded`] says the object already carries this exact failure
+/// (phase, reason, message and, for a `roll`, the observed tag) and the
+/// pass returns `Ok` without touching storage.
+///
+/// `tag` (`Some` from [`roll`], `None` from [`abort`]) advances
+/// `status.observedTag` so a failed release is HELD: the reconciler's
+/// `observedTag == spec.image.tag` short-circuit stops re-entering the
+/// release. An abort never touches it (Q58).
 async fn fail(
     client: &Arc<dyn Client>,
     key: &Key,
     sp: &Value,
     reason: &str,
     message: &str,
+    tag: Option<&str>,
 ) -> Result<(), ControllerError> {
+    if failure_recorded(sp, reason, message, tag) {
+        return Ok(()); // already reported: no status churn on the resync
+    }
     let mut state = status_of(sp);
     state["phase"] = json!(api::pipeline::PHASE_FAILED);
+    if let Some(tag) = tag {
+        state["observedTag"] = json!(tag);
+    }
     state["conditions"] = json!([condition("Ready", false, reason, message, &now())]);
     write_status(client, key, sp, state).await.map(|_| ())
+}
+
+/// True when `sp` already reports exactly this failure, i.e. the pass has
+/// nothing new to write. The condition timestamp is deliberately ignored
+/// (it is the only field that would differ on a plain resync).
+fn failure_recorded(sp: &Value, reason: &str, message: &str, tag: Option<&str>) -> bool {
+    let state = status_of(sp);
+    if state.get("phase").and_then(Value::as_str) != Some(api::pipeline::PHASE_FAILED) {
+        return false;
+    }
+    if let Some(tag) = tag {
+        if state.get("observedTag").and_then(Value::as_str) != Some(tag) {
+            return false; // a different tag failed since: re-report
+        }
+    }
+    let Some(ready) = state
+        .pointer("/conditions")
+        .and_then(Value::as_array)
+        .and_then(|conditions| conditions.first())
+    else {
+        return false;
+    };
+    let field = |key: &str| ready.get(key).and_then(Value::as_str);
+    field("type") == Some("Ready")
+        && field("status") == Some("False")
+        && field("reason") == Some(reason)
+        && field("message") == Some(message)
 }
 
 /// `"<kind> <ns>/<name> is missing"` for the failure messages.

@@ -15,12 +15,18 @@
 //!
 //! The drain table below covers EVERY namespaced kind the apiserver serves
 //! (the `cli::discovery::served_schema` registry): the core/v1 set incl.
-//! `events`, the apps/v1 workload set, `coordination.k8s.io/leases`, plus
-//! the served custom groups -- Workflows + CronWorkflows (T7.3, Q30),
-//! Agents (A3, Q35), LuaRouters + Ingresses (Q32) and Builds +
-//! ServicePipelines (T8.3, Q56). Missing one of these
-//! used to orphan the kind at the terminal delete (the ns object vanished
-//! while its contents survived).
+//! `events` and `serviceaccounts` (T1.3b, Q47), the apps/v1 workload set,
+//! `coordination.k8s.io/leases`, the `rbac.authorization.k8s.io` namespaced
+//! pair, plus the served custom groups -- Workflows + CronWorkflows (T7.3,
+//! Q30), Agents (A3, Q35), LuaRouters + TrafficSplits (T8.2, Q57) and
+//! Builds + ServicePipelines (T8.3, Q56), Ingresses + NetworkPolicies (Q32,
+//! T4.4/Q64). Missing one of these used to orphan the kind at the terminal
+//! delete: the ns object vanished while its contents survived, and a
+//! surviving object pins the namespace in `Terminating` forever.
+//!
+//! [`served_namespaced_kinds`] cross-validates the table against the served
+//! schema, so a newly served kind FAILS the build until it is drained here
+//! or explicitly exempted in [`DRAIN_EXEMPT_KINDS`] with a reason.
 
 use std::sync::Arc;
 
@@ -39,12 +45,13 @@ use crate::object::{name, resource_version};
 /// (a live CronWorkflow re-fires children), Builds before ServicePipelines
 /// (a live pipeline would recreate its child, T8.3/Q56), and leases
 /// (leader election) drain last.
-pub(crate) const DRAIN_KINDS: [(&str, &str); 20] = [
+pub(crate) const DRAIN_KINDS: [(&str, &str); 25] = [
     ("", "pods"),
     ("", "services"),
     ("", "endpoints"),
     ("", "configmaps"),
     ("", "secrets"),
+    ("", "serviceaccounts"),
     ("", "persistentvolumeclaims"),
     ("", "events"),
     ("apps", "deployments"),
@@ -58,9 +65,23 @@ pub(crate) const DRAIN_KINDS: [(&str, &str); 20] = [
     ("init-pro.io", "servicepipelines"),
     ("init-pro.io", "agents"),
     ("init-pro.io", "luarouters"),
+    ("init-pro.io", "trafficsplits"),
     ("networking.k8s.io", "ingresses"),
+    ("networking.k8s.io", "networkpolicies"),
+    ("rbac.authorization.k8s.io", "roles"),
+    ("rbac.authorization.k8s.io", "rolebindings"),
     ("coordination.k8s.io", "leases"),
 ];
+
+/// Namespaced served kinds the drain deliberately leaves alone, each with
+/// the reason it is safe to skip. Empty today: every namespaced kind the
+/// apiserver serves is drained (cluster-scoped kinds are out of scope by
+/// construction -- they carry no namespace). [`reconcile`] only ever
+/// iterates [`DRAIN_KINDS`], so an exemption is by construction not drained;
+/// this table exists so that the cross-validation test states the choice
+/// explicitly instead of silently ignoring an unknown kind.
+#[cfg(test)]
+pub(crate) const DRAIN_EXEMPT_KINDS: [(&str, &str); 0] = [];
 
 /// Reconcile one Namespace: no `deletionTimestamp` -> nothing to do;
 /// otherwise drain every kind under it, then finalize (clear finalizers +
@@ -123,20 +144,225 @@ pub(crate) fn clear_finalizers(obj: &mut Value) -> bool {
     true
 }
 
+/// Native kinds `cli::discovery::served_schema` registers on top of
+/// `SchemaRegistry::with_core_v1()` (the core/v1 + apps/v1 +
+/// coordination.k8s.io rows). Mirrored rather than imported: the `cli` crate
+/// depends on `controllers`, so the served registry cannot be a dependency
+/// here. `(group, version, kind, resource, scope)`.
+#[cfg(test)]
+const SERVED_NATIVE: [(&str, &str, &str, &str, api::Scope); 9] = [
+    ("", "v1", "Endpoints", "endpoints", api::Scope::Namespaced),
+    (
+        "",
+        "v1",
+        "PersistentVolumeClaim",
+        "persistentvolumeclaims",
+        api::Scope::Namespaced,
+    ),
+    (
+        "",
+        "v1",
+        "ServiceAccount",
+        "serviceaccounts",
+        api::Scope::Namespaced,
+    ),
+    (
+        "apps",
+        "v1",
+        "Deployment",
+        "deployments",
+        api::Scope::Namespaced,
+    ),
+    (
+        "apps",
+        "v1",
+        "ReplicaSet",
+        "replicasets",
+        api::Scope::Namespaced,
+    ),
+    (
+        "apps",
+        "v1",
+        "StatefulSet",
+        "statefulsets",
+        api::Scope::Namespaced,
+    ),
+    (
+        "apps",
+        "v1",
+        "ControllerRevision",
+        "controllerrevisions",
+        api::Scope::Namespaced,
+    ),
+    (
+        "apps",
+        "v1",
+        "DaemonSet",
+        "daemonsets",
+        api::Scope::Namespaced,
+    ),
+    (
+        "coordination.k8s.io",
+        "v1",
+        "Lease",
+        "leases",
+        api::Scope::Namespaced,
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use api::{self, SchemaRegistry, Scope};
     use serde_json::json;
+
+    /// The served schema, assembled exactly like
+    /// `cli::discovery::served_schema(true)` (auth armed: the RBAC group and
+    /// core ServiceAccount are served). The custom groups come from the
+    /// `api::*::register` calls -- the same ones `cli` uses -- so a new CRD
+    /// kind lands here automatically; a new NATIVE kind needs a row in
+    /// [`SERVED_NATIVE`] (and the two-way assertions below catch the typo).
+    fn served_registry() -> SchemaRegistry {
+        let mut reg = SchemaRegistry::with_core_v1();
+        for (group, version, kind, resource, scope) in SERVED_NATIVE {
+            reg.register(
+                group,
+                version,
+                kind,
+                resource,
+                &format!("{kind}List"),
+                scope,
+            );
+        }
+        api::argoproj::register(&mut reg);
+        api::initpro::register(&mut reg);
+        api::agent::register(&mut reg);
+        api::traffic::register(&mut reg);
+        api::pipeline::register(&mut reg);
+        api::build::register(&mut reg);
+        api::networking::register(&mut reg);
+        api::rbac::register(&mut reg);
+        reg
+    }
+
+    /// Every namespaced `(group, resource)` the served schema carries
+    /// (cluster-scoped kinds carry no namespace, so the drain ignores them).
+    fn served_namespaced_kinds() -> Vec<(String, String)> {
+        let mut kinds: Vec<(String, String)> = served_registry()
+            .iter()
+            .filter(|(_, info)| info.scope.is_namespaced())
+            .map(|(gvk, info)| (gvk.group.clone(), info.resource.clone()))
+            .collect();
+        kinds.sort();
+        kinds
+    }
+
+    /// Served kinds that are neither drained nor exempted -- the exact
+    /// predicate the drain coverage is judged by (pure, so the drift test
+    /// below can drive it with a synthetic kind).
+    fn undrained_kinds(
+        served: &[(String, String)],
+        drained: &[(&str, &str)],
+        exempt: &[(&str, &str)],
+    ) -> Vec<String> {
+        served
+            .iter()
+            .filter(|(group, resource)| {
+                let kind = (group.as_str(), resource.as_str());
+                !drained.contains(&kind) && !exempt.contains(&kind)
+            })
+            .map(|(group, resource)| format!("{group}/{resource}"))
+            .collect()
+    }
+
+    /// B5: every namespaced kind the apiserver serves is drained (or
+    /// explicitly exempted). A missing row is exactly the bug that pinned a
+    /// namespace in `Terminating` forever.
+    #[test]
+    fn drain_table_covers_every_served_namespaced_kind() {
+        let missing = undrained_kinds(
+            &served_namespaced_kinds(),
+            &DRAIN_KINDS,
+            &DRAIN_EXEMPT_KINDS,
+        );
+        assert!(
+            missing.is_empty(),
+            "served but neither drained nor exempted: {missing:?}"
+        );
+    }
+
+    /// The inverse guard: a drained kind the apiserver does not serve is a
+    /// typo or a stale row (it costs one list per namespace teardown).
+    #[test]
+    fn every_drained_kind_is_served() {
+        let served = served_namespaced_kinds();
+        for (group, resource) in DRAIN_KINDS {
+            assert!(
+                served.iter().any(|(g, r)| g == group && r == resource),
+                "DRAIN_KINDS row {group}/{resource} is not served"
+            );
+        }
+        assert_eq!(DRAIN_KINDS.len(), 25);
+    }
+
+    /// The cross-validation is load-bearing: serving a new namespaced kind
+    /// without draining it (or exempting it with a reason) FAILS the check.
+    #[test]
+    fn a_newly_served_kind_is_reported_until_registered_or_exempted() {
+        let mut reg = served_registry();
+        reg.register(
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            "WidgetList",
+            Scope::Namespaced,
+        );
+        let mut served: Vec<(String, String)> = reg
+            .iter()
+            .filter(|(_, info)| info.scope.is_namespaced())
+            .map(|(gvk, info)| (gvk.group.clone(), info.resource.clone()))
+            .collect();
+        served.sort();
+
+        assert_eq!(
+            undrained_kinds(&served, &DRAIN_KINDS, &DRAIN_EXEMPT_KINDS),
+            vec!["example.io/widgets".to_string()],
+            "the new kind must be reported"
+        );
+        // Registering it (or exempting it, with a reason) silences the guard.
+        let mut drained = DRAIN_KINDS.to_vec();
+        drained.push(("example.io", "widgets"));
+        assert!(undrained_kinds(&served, &drained, &DRAIN_EXEMPT_KINDS).is_empty());
+        assert!(undrained_kinds(&served, &DRAIN_KINDS, &[("example.io", "widgets")]).is_empty());
+        // A CLUSTER-scoped kind needs no drain row at all.
+        let mut reg = served_registry();
+        reg.register(
+            "example.io",
+            "v1",
+            "ClusterWidget",
+            "clusterwidgets",
+            "ClusterWidgetList",
+            Scope::Cluster,
+        );
+        let mut served: Vec<(String, String)> = reg
+            .iter()
+            .filter(|(_, info)| info.scope.is_namespaced())
+            .map(|(gvk, info)| (gvk.group.clone(), info.resource.clone()))
+            .collect();
+        served.sort();
+        assert!(undrained_kinds(&served, &DRAIN_KINDS, &DRAIN_EXEMPT_KINDS).is_empty());
+    }
 
     #[test]
     fn drain_kind_table_covers_the_controller_footprint() {
-        assert_eq!(DRAIN_KINDS.len(), 20);
         for kind in [
             ("", "pods"),
             ("", "services"),
             ("", "endpoints"),
             ("", "configmaps"),
             ("", "secrets"),
+            ("", "serviceaccounts"),
             ("", "persistentvolumeclaims"),
             ("", "events"),
             ("apps", "deployments"),
@@ -150,7 +376,11 @@ mod tests {
             ("init-pro.io", "builds"),
             ("init-pro.io", "servicepipelines"),
             ("init-pro.io", "luarouters"),
+            ("init-pro.io", "trafficsplits"),
             ("networking.k8s.io", "ingresses"),
+            ("networking.k8s.io", "networkpolicies"),
+            ("rbac.authorization.k8s.io", "roles"),
+            ("rbac.authorization.k8s.io", "rolebindings"),
             ("coordination.k8s.io", "leases"),
         ] {
             assert!(DRAIN_KINDS.contains(&kind), "missing {kind:?}");

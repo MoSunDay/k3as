@@ -63,9 +63,33 @@ impl Default for Shutdown {
     }
 }
 
+/// What the signal loop does for the Nth SIGTERM/SIGINT.
+///
+/// B12: the first signal fires the graceful drain; a SECOND one means the
+/// operator wants out now (a wedged drain must not hold the process
+/// hostage) and force-exits with the conventional 130.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalAction {
+    /// Fire the graceful shutdown token.
+    Trigger,
+    /// Exit the process immediately (`130`, SIGINT convention).
+    ForceExit,
+}
+
+/// Map a 1-based signal count to its action (pure, testable).
+pub fn action_for(count: u32) -> SignalAction {
+    if count <= 1 {
+        SignalAction::Trigger
+    } else {
+        SignalAction::ForceExit
+    }
+}
+
 /// Install signal handlers that fire `shutdown` on SIGTERM/SIGINT.
 ///
 /// Safe to call once per process. On non-unix targets this is a no-op success.
+/// B12: the loop stays armed after the first signal -- a second
+/// SIGTERM/SIGINT force-exits with 130 instead of waiting on a stuck drain.
 #[cfg(unix)]
 pub async fn install(shutdown: Shutdown) -> std::io::Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
@@ -74,15 +98,30 @@ pub async fn install(shutdown: Shutdown) -> std::io::Result<()> {
     let mut int = signal(SignalKind::interrupt())?;
 
     tokio::spawn(async move {
-        tokio::select! {
-            _ = term.recv() => {
-                tracing::info!(target: "init-pro", "received SIGTERM — shutting down");
+        let mut count = 0u32;
+        loop {
+            tokio::select! {
+                _ = term.recv() => {
+                    tracing::info!(target: "init-pro", "received SIGTERM — shutting down");
+                }
+                _ = int.recv() => {
+                    tracing::info!(target: "init-pro", "received SIGINT — shutting down");
+                }
             }
-            _ = int.recv() => {
-                tracing::info!(target: "init-pro", "received SIGINT — shutting down");
+            count += 1;
+            match action_for(count) {
+                SignalAction::Trigger => {
+                    shutdown.trigger();
+                    tracing::info!(target: "init-pro",
+                        "graceful drain started; send the signal again to force exit");
+                }
+                SignalAction::ForceExit => {
+                    tracing::error!(target: "init-pro",
+                        "second signal received — forcing exit(130)");
+                    std::process::exit(130);
+                }
             }
         }
-        shutdown.trigger();
     });
     Ok(())
 }
@@ -95,6 +134,13 @@ pub async fn install(_shutdown: Shutdown) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn b12_second_signal_forces_exit() {
+        assert_eq!(action_for(1), SignalAction::Trigger);
+        assert_eq!(action_for(2), SignalAction::ForceExit);
+        assert_eq!(action_for(9), SignalAction::ForceExit);
+    }
 
     #[tokio::test]
     async fn trigger_wakes_cancelled() {

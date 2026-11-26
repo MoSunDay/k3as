@@ -20,9 +20,18 @@
 //! (conflicts propagate and the worker requeues); log tails are bounded by
 //! [`super::status::bounded_log`]. A terminal build is never re-run -- the
 //! spec is immutable, a retry is a new tag.
+//!
+//! Host image hygiene (T8.3 bug fix, B8): every Build used to leave its
+//! image on the host docker daemon, so node disk only grew. Builds are now
+//! labeled with the owning pipeline ([`plan::IMAGE_LABEL`]), the pipeline's
+//! older images are pruned back to [`plan::BUILD_IMAGE_RETENTION`] before a
+//! build, and the just-pushed copy is dropped once the registry owns it
+//! (unless it is the promoted image). Every hygiene call is best effort:
+//! failures are logged and never fail the Build.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use storage::Key;
@@ -34,12 +43,20 @@ use crate::error::ControllerError;
 use crate::object::{name, namespace};
 
 use super::executor;
-use super::plan::{blank, build_args, join_logs, phase_of, str_at, timeout_for};
+use super::plan::{
+    blank, build_args, image_label_value, is_promoted, join_logs, list_images_args,
+    next_push_retry, phase_of, prune_targets, rmi_args, str_at, timeout_for, BUILD_IMAGE_RETENTION,
+    MAX_PUSH_RETRIES,
+};
 use super::publish;
 use super::status::{bounded_log, condition, now, status_of, write_status};
 use super::PipelineConfig;
 
 const API_GROUP: &str = "init-pro.io";
+
+/// Budget for the best-effort `docker images` / `docker rmi` hygiene calls:
+/// short on purpose, a wedged daemon must not stretch a Build pass.
+const HYGIENE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Reconcile one `Build` (raw JSON) against its phase machine.
 pub async fn reconcile(
@@ -111,6 +128,9 @@ async fn build_phase(
         // Archive-only (Q56 docker-free path): nothing to build locally.
         String::new()
     } else {
+        // B8: keep the host's copy of this pipeline bounded BEFORE adding
+        // one more image (best effort, never fatal).
+        prune_before_build(cfg, &current).await;
         let args = build_args(&current, reference);
         let budget = timeout_for(&current, cfg.default_timeout_seconds);
         let out = executor::run(&cfg.docker_bin, &args, budget).await;
@@ -216,13 +236,125 @@ async fn publish_phase(
         Ok(digest) => {
             let message = format!("published {addr}/{repo}:{tag}");
             let outcome = Outcome::succeeded(reference, &digest, message, &log);
-            finalize(client, key, &current, &outcome).await
+            let finalized = finalize(client, key, &current, &outcome).await;
+            // B8: the registry owns the image now -- drop the host copy.
+            prune_after_push(client, cfg, &current, reference).await;
+            finalized
         }
         Err(e) => {
-            let message = format!("push to {addr}/{repo}:{tag} failed: {e}");
+            // B10: a transport failure (connect/timeout/framing) is not a
+            // verdict on the image -- the embedded registry may be briefly
+            // unavailable (restart, drained listener). Count it in
+            // `status.pushRetries` and return Internal so the worker
+            // rate-limited-requeues the key; the next pass re-enters
+            // Publishing. Protocol/invalid answers stay terminal: a retry
+            // cannot change them. The counter survives in status, so the
+            // cap holds across controller restarts too.
+            let retry = matches!(e, registry::PushError::Io(_))
+                .then(|| next_push_retry(&status_of(&current)))
+                .flatten();
+            if let Some(n) = retry {
+                let line = format!("push attempt {n}/{MAX_PUSH_RETRIES} failed: {e}");
+                let mut state = status_of(&current);
+                state["pushRetries"] = json!(n);
+                state["logTail"] = json!(bounded_log(&join_logs(
+                    str_at(&current, "/status/logTail"),
+                    &line
+                )));
+                write_status(client, key, &current, state).await?;
+                return Err(ControllerError::Internal(format!(
+                    "pipeline push transport retry {n}/{MAX_PUSH_RETRIES}: {e}"
+                )));
+            }
+            let seen = status_of(&current)
+                .get("pushRetries")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let message = if seen == 0 {
+                format!("push to {addr}/{repo}:{tag} failed: {e}")
+            } else {
+                format!("push to {addr}/{repo}:{tag} failed after {seen} transport retries: {e}")
+            };
             let outcome = Outcome::failed(reference, message, &log);
             finalize(client, key, &current, &outcome).await
         }
+    }
+}
+
+/// B8 retention pass: prune the pipeline's images down to
+/// [`BUILD_IMAGE_RETENTION`] (newest kept) before a new `docker build`.
+async fn prune_before_build(cfg: &PipelineConfig, build: &Value) {
+    let Some(label) = image_label_value(build) else {
+        return; // no pipeline identity: nothing to select images by
+    };
+    let args = list_images_args(&label);
+    let out = executor::run(&cfg.docker_bin, &args, HYGIENE_TIMEOUT).await;
+    if !out.success {
+        tracing::warn!(
+            pipeline = %label,
+            "pipeline image retention: `docker images` failed; keeping the host images"
+        );
+        return;
+    }
+    for handle in prune_targets(&out.log, BUILD_IMAGE_RETENTION) {
+        rmi(cfg, &handle).await;
+    }
+}
+
+/// B8 post-push pass: drop the just-built image from the host docker unless
+/// it is the pipeline's currently-promoted image (that copy stays warm).
+async fn prune_after_push(
+    client: &Arc<dyn Client>,
+    cfg: &PipelineConfig,
+    build: &Value,
+    reference: &str,
+) {
+    // An archive-sourced Build never touched the host daemon (Q56
+    // docker-free path): there is no local copy to remove.
+    if !str_at(build, "/spec/source/archive").trim().is_empty() {
+        return;
+    }
+    if is_promoted(reference, &promoted_image(client, build).await) {
+        tracing::debug!(
+            image = reference,
+            "pipeline image kept: it is the promoted one"
+        );
+        return;
+    }
+    rmi(cfg, reference).await;
+}
+
+/// `status.lastBuild.image` of the owning ServicePipeline ("" when it is
+/// gone, unknown, or has promoted nothing yet).
+async fn promoted_image(client: &Arc<dyn Client>, build: &Value) -> String {
+    let ns = namespace(build).unwrap_or_default();
+    let pipeline = str_at(build, "/spec/pipeline").trim();
+    if ns.is_empty() || pipeline.is_empty() {
+        return String::new();
+    }
+    let key = Key::new(API_GROUP, "servicepipelines", ns, pipeline);
+    match client.get(&key).await {
+        Ok(Some(sp)) => str_at(&sp, "/status/lastBuild/image").trim().to_string(),
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, "pipeline image retention: pipeline read failed");
+            String::new()
+        }
+    }
+}
+
+/// Best-effort `docker rmi <handle>`: a failure is a warning, never a Build
+/// failure (an in-use or multiply-tagged image is simply kept).
+async fn rmi(cfg: &PipelineConfig, handle: &str) {
+    let args = rmi_args(handle);
+    let out = executor::run(&cfg.docker_bin, &args, HYGIENE_TIMEOUT).await;
+    if out.success {
+        tracing::debug!(image = handle, "pipeline image pruned from the host docker");
+    } else {
+        tracing::warn!(
+            image = handle,
+            "pipeline image retention: `docker rmi` failed; the host image is kept"
+        );
     }
 }
 

@@ -237,6 +237,75 @@ fn pause_signal(
     }
 }
 
+/// The slice of [`LogWriter`] the container loop needs: one chunked write
+/// per stdout/stderr event plus the final partial flush. A trait, not the
+/// concrete writer, so the C9 degrade path is unit-testable with a sink that
+/// fails on every write (no full disk needed).
+trait LogSink {
+    fn chunk(&mut self, stderr: bool, bytes: &[u8]) -> io::Result<()>;
+    fn finish(&mut self) -> io::Result<()>;
+}
+
+impl LogSink for LogWriter {
+    fn chunk(&mut self, stderr: bool, bytes: &[u8]) -> io::Result<()> {
+        LogWriter::chunk(self, stderr, bytes)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        LogWriter::finish(self)
+    }
+}
+
+/// Feed one container output chunk to the log writer (C9).
+///
+/// A log WRITE error -- ENOSPC, EIO, a filesystem remounted read-only, the
+/// log directory removed underneath us -- must never reach the session: the
+/// old `?` propagated it out of [`run_one`], the server dropped the
+/// connection and the container died with it, so ONE full disk killed every
+/// built-in container on the node. Degrade instead: [`stop_log_capture`]
+/// warns once and drops the writer, so this call becomes a no-op for the rest
+/// of the run, and the container keeps running -- its output still streams to
+/// the client on the socket, which is the one channel a session must protect.
+///
+/// Only a SOCKET error may abort a session, and those keep their `?` at the
+/// frame-writing call sites (`write_output` / `send_event` / `write_polled`).
+fn log_chunk<S: LogSink>(log: &mut Option<S>, id: &str, stderr: bool, bytes: &[u8]) {
+    let Some(sink) = log.as_mut() else {
+        return;
+    };
+    if let Err(e) = sink.chunk(stderr, bytes) {
+        stop_log_capture(log, id, e);
+    }
+}
+
+/// Flush the trailing partial line at container exit (C9): the same degrade
+/// rule as [`log_chunk`], so a full disk cannot turn a clean exit into a dead
+/// session either.
+fn log_finish<S: LogSink>(log: &mut Option<S>, id: &str) {
+    let Some(sink) = log.as_mut() else {
+        return;
+    };
+    if let Err(e) = sink.finish() {
+        stop_log_capture(log, id, e);
+    }
+}
+
+/// C9: stop capturing after the first failed log write. Idempotent by
+/// construction -- the writer becomes `None`, so every later chunk is a no-op
+/// and the operator sees exactly one warning per container.
+///
+/// The notice is `eprintln!` because the engine is a re-exec'd
+/// single-threaded process with no tracing subscriber (Q48); the kubelet
+/// captures engine stderr next to the socket, so this is the process's warn
+/// channel, exactly like `server.rs`. It is deliberately NOT an
+/// `Event::Error` on the wire: that frame is terminal on the run stream
+/// (`engine-client` sets `done`, the kubelet pump then tears the container
+/// down), i.e. emitting it here would reintroduce the very bug C9 fixes.
+fn stop_log_capture<S>(log: &mut Option<S>, id: &str, err: io::Error) {
+    eprintln!("engine: container {id}: log capture stopped: {err}; the container keeps running");
+    *log = None;
+}
+
 fn run_one(
     stream: &mut UnixStream,
     spec: ContainerSpec,
@@ -330,21 +399,17 @@ fn run_one(
         match child.next_event(slice) {
             Ok(Some(Output::Stdout(bytes))) => {
                 write_output(stream, FrameKind::Stdout, &bytes)?;
-                if let Some(l) = log.as_mut() {
-                    l.chunk(false, &bytes)?;
-                }
+                // Socket write first (a failure there aborts), then the
+                // best-effort log capture (C9: never fatal).
+                log_chunk(&mut log, &id, false, &bytes);
             }
             Ok(Some(Output::Stderr(bytes))) => {
                 write_output(stream, FrameKind::Stderr, &bytes)?;
-                if let Some(l) = log.as_mut() {
-                    l.chunk(true, &bytes)?;
-                }
+                log_chunk(&mut log, &id, true, &bytes);
             }
             Ok(Some(Output::Exited(code))) => {
                 finish_exec(stream, &mut live_exec);
-                if let Some(l) = log.as_mut() {
-                    l.finish()?;
-                }
+                log_finish(&mut log, &id);
                 child.cleanup();
                 send_event(stream, &Event::Exited { id, code })?;
                 return Ok(Outcome::Continue);
@@ -594,6 +659,86 @@ mod tests {
             .is_none());
         drop(client);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A sink whose every write fails, standing in for a full disk (C9).
+    struct FailingSink;
+
+    impl LogSink for FailingSink {
+        fn chunk(&mut self, _: bool, _: &[u8]) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "simulated ENOSPC",
+            ))
+        }
+
+        fn finish(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "simulated ENOSPC",
+            ))
+        }
+    }
+
+    #[test]
+    fn a_log_write_error_stops_capture_instead_of_the_session() {
+        let mut log = Some(FailingSink);
+        // C9: the failing write must fall through -- no Result to `?`, no
+        // panic -- and the session keeps running.
+        log_chunk(&mut log, "c1", false, b"hello\n");
+        assert!(log.is_none(), "capture must stop after the first failure");
+        // Idempotent: every later chunk is a no-op, so the operator gets one
+        // warning per container instead of one per output chunk.
+        log_chunk(&mut log, "c1", true, b"more\n");
+        assert!(log.is_none());
+    }
+
+    #[test]
+    fn a_log_finish_error_stops_capture_instead_of_the_session() {
+        let mut log = Some(FailingSink);
+        log_finish(&mut log, "c1");
+        assert!(
+            log.is_none(),
+            "a failed exit flush must not abort the session"
+        );
+        log_finish(&mut log, "c1");
+    }
+
+    #[test]
+    fn capture_survives_a_healthy_writer() {
+        // The degrade must be edge-triggered: a writer that works is kept.
+        let dir = std::env::temp_dir().join(format!("engine-session-log-{}", std::process::id()));
+        let path = dir.join("c.log");
+        let _ = std::fs::remove_file(&path);
+        let mut log = Some(LogWriter::open(&path).expect("open log"));
+        log_chunk(&mut log, "c1", false, b"line\n");
+        assert!(log.is_some(), "a working writer is never dropped");
+        log_finish(&mut log, "c1");
+        assert!(log.is_some());
+        let text = std::fs::read_to_string(&path).expect("log text");
+        assert!(text.ends_with(" stdout F line\n"), "got {text:?}");
+        drop(log);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The real failure mode from the field: the log file is on a full
+    /// filesystem. `/dev/full` answers every write with ENOSPC.
+    #[test]
+    fn a_full_disk_degrades_log_capture_instead_of_aborting() {
+        const FULL: &str = "/dev/full";
+        if !std::path::Path::new(FULL).exists() {
+            eprintln!("skipping: {FULL} is not present on this system");
+            return;
+        }
+        let mut log = Some(LogWriter::open(std::path::Path::new(FULL)).expect("open /dev/full"));
+        log_chunk(&mut log, "c-full", false, b"hello\n");
+        assert!(
+            log.is_none(),
+            "ENOSPC must stop capture, never the container"
+        );
+        // The writer is gone, so nothing is retried against the full disk.
+        log_chunk(&mut log, "c-full", true, b"more\n");
+        log_finish(&mut log, "c-full");
     }
 
     #[test]

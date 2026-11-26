@@ -26,6 +26,15 @@ use crate::error::StorageError;
 /// state mutex: subscribe-before-scan plus commit-then-broadcast under the
 /// same mutex keep the seam duplicate-free and gap-free (ordering ==
 /// revision order).
+///
+/// The watermark gate runs FIRST, before the subscription: once
+/// [`super::compaction_plan`] has dropped `log/` records at or below the
+/// watermark there is nothing left to replay from, so a start at or below it
+/// must fail loudly with [`StorageError::Compacted`] (etcd `ErrCompacted`,
+/// upstream watch `410 Gone`) and the client re-LISTs at the current
+/// resourceVersion. Answering with a partial replay would silently lose the
+/// events between the watermark and `n` -- the failure mode production
+/// compaction (B3) has to rule out.
 pub(super) fn replay(
     db: &Store,
     tx: &broadcast::Sender<WatchEvent>,

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::cri_backend::{ContainerView, CriBackend, SandboxView};
+use crate::cri_backend::{ContainerView, CriBackend, ImageGcStats, SandboxView};
 
 use super::host_direct_run;
 use super::image::pull::Puller;
@@ -516,6 +516,11 @@ impl CriBackend for EngineBackend {
         Ok(())
     }
 
+    /// C3: one statvfs per cycle; only a pressured root walks the store.
+    fn image_gc(&self, in_use: &[String]) -> ImageGcStats {
+        pressure::pass(self, in_use)
+    }
+
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String> {
         // Q52: builtin pods share the host netns — a READY sandbox's IP is
         // the node IP (registry views start ip:None; overlaid here).
@@ -780,6 +785,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+mod pressure; // C3 disk-pressure image GC (split out at the 800-line rule)
 
 /// T4.13 `remove_image` semantics (Q53 + review follow-up): split out
 /// of backend.rs at the 800-line rule, same shape as `image/unpack.rs`.

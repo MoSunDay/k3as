@@ -1,6 +1,8 @@
 //! T7.7 (Q63) hardened Agent sandbox: pure selection + spec contract.
 //! Mirrors the T4.15 host_direct selection pattern: fail-closed, never a
-//! silent fallback to the legacy Q37 subprocess path.
+//! silent fallback to the legacy Q37 subprocess path. The per-attempt dir
+//! lifecycle (H4, C14) is the one impure corner: create, remove after
+//! reap, boot sweep -- all planned by the pure fns in `agent_sandbox_plan`.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -357,16 +359,72 @@ pub fn sanitize_env(plan_envs: &[(String, String)], broker_socket: Option<&Path>
 /// it is opened to the sandbox uid (Q63); `rootfs/` STAYS root-owned 0755 —
 /// writes outside workspace/scratch must fail for the non-root identity.
 pub fn prepare_sandbox_dirs(data_dir: &Path, attempt_id: &str) -> io::Result<(PathBuf, PathBuf)> {
-    let base = data_dir
-        .join("agent-sandbox")
-        .join(sanitize_attempt_id(attempt_id));
-    let rootfs = base.join("rootfs");
-    let scratch = base.join("scratch");
+    let base = crate::agent_sandbox_plan::attempt_dir(data_dir, attempt_id);
+    let rootfs = base.join(crate::agent_sandbox_plan::ROOTFS_SUBDIR);
+    let scratch = base.join(crate::agent_sandbox_plan::SCRATCH_SUBDIR);
     std::fs::create_dir_all(&rootfs)?;
     std::fs::create_dir_all(&scratch)?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o777))?;
     Ok((rootfs, scratch))
+}
+
+/// H4 (C14): delete one attempt's private dirs after its engine is reaped
+/// (the sandbox mount namespace died with the container; nothing under the
+/// attempt dir is a host mount point -- the workspace root stays pinned
+/// under `<data>/agent-ws/`). `rootfs/` and `scratch/` go recursively (the
+/// staged runner copy is the bulk), then the attempt dir only once empty.
+/// Best-effort: failures are logged at debug, never surfaced. Returns
+/// `true` when the attempt dir is gone afterwards.
+pub(crate) fn remove_attempt_dirs(data_dir: &Path, attempt_id: &str) -> bool {
+    let (subdirs, dir) = crate::agent_sandbox_plan::attempt_cleanup_paths(data_dir, attempt_id);
+    for sub in subdirs {
+        rm_best_effort(&sub, true);
+    }
+    rm_best_effort(&dir, false); // `remove_dir`: refuses a non-empty parent
+    !dir.exists()
+}
+
+/// `recursive` = `remove_dir_all` (the per-attempt subdirs), otherwise
+/// `remove_dir` (only an already-empty attempt dir).
+fn rm_best_effort(path: &Path, recursive: bool) {
+    let res = match std::fs::symlink_metadata(path) {
+        Err(_) => return, // absent: nothing to do
+        Ok(_) if recursive => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_dir(path),
+    };
+    if let Err(e) = res {
+        tracing::debug!(target: "init-pro", dir = %path.display(), error = %e,
+            "T7.7 attempt dir cleanup skipped (C14)");
+    }
+}
+
+/// H4 (C14): boot-time sweep of `<data>/agent-sandbox/`: every attempt dir
+/// whose engine socket is absent (`agent_sandbox_plan::stale_attempt_dirs`
+/// is the pure plan) is removed -- the previous kubelet's attempts never
+/// clean up after a crash. Runs before any attempt of this boot exists.
+/// Returns how many stale dirs were found.
+pub(crate) fn sweep_stale_attempt_dirs(data_dir: &Path) -> usize {
+    let root = data_dir.join(crate::agent_sandbox_plan::AGENT_SANDBOX_DIR);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return 0; // no sandbox ever ran here
+    };
+    let found: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let engine_dir = crate::engine::launch::engine_dir(data_dir);
+    let live: Vec<String> = found
+        .iter()
+        .filter(|name| engine_dir.join(format!("{name}.sock")).exists())
+        .cloned()
+        .collect();
+    let stale = crate::agent_sandbox_plan::stale_attempt_dirs(&found, &live);
+    for name in &stale {
+        remove_attempt_dirs(data_dir, name);
+    }
+    stale.len()
 }
 
 /// Best-effort recursive chmod opening the per-agent workspace tree to the

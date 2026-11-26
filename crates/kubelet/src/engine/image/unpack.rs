@@ -3,7 +3,9 @@
 //! per-container overlayfs views (kernel char-device whiteouts +
 //! `trusted.overlay.opaque` xattrs, containerd-style) or the fused-copy
 //! fallback (logical whiteout application, pure fs ops). Image contents
-//! are never trusted: every entry is traversal-guarded first.
+//! are never trusted: every entry is traversal-guarded first -- lexically
+//! (no absolute paths, no `..`) AND on disk (no write may travel through a
+//! symlink that leaves the layer root, see [`guard_ancestors`]).
 
 use std::fs::Permissions;
 use std::io::Read;
@@ -90,6 +92,9 @@ fn apply_archive(
     comp: Compression,
     mode: WhiteoutMode,
 ) -> Result<(), String> {
+    // `dest` must exist: the on-disk symlink guard resolves the layer root
+    // canonically, and a root that does not exist yet cannot be resolved.
+    std::fs::create_dir_all(dest).map_err(|e| format!("create layer dir: {e}"))?;
     let file = std::fs::File::open(blob).map_err(|e| format!("open layer: {e}"))?;
     let mut arch: tar::Archive<Box<dyn Read>> = match comp {
         Compression::Gzip => tar::Archive::new(Box::new(flate2::read::GzDecoder::new(file))),
@@ -112,8 +117,10 @@ fn apply_archive(
 }
 
 /// `dest.join(name)` after rejecting traversal: the entry must be a
-/// relative path with no `..` component, and the join must stay under
-/// `dest`. Image bytes are untrusted (Q54 consequence).
+/// relative path with no `..` component, the join must stay under `dest`,
+/// and no already-existing component of the joined path may be a symlink
+/// pointing out of the layer root. Image bytes are untrusted (Q54
+/// consequence).
 fn safe_join(dest: &Path, name: &Path) -> Result<PathBuf, String> {
     let raw = name.to_string_lossy();
     let escapes = raw.is_empty()
@@ -128,7 +135,61 @@ fn safe_join(dest: &Path, name: &Path) -> Result<PathBuf, String> {
     if escapes || !joined.starts_with(dest) {
         return Err(format!("layer entry escapes root: {raw}"));
     }
+    guard_ancestors(dest, &joined)?;
     Ok(joined)
+}
+
+/// Canonical layer root, or the path itself when it does not exist (the
+/// callers create `dest` first, so the fallback is a belt-and-braces case).
+fn canonical_root(dest: &Path) -> PathBuf {
+    std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf())
+}
+
+/// On-disk half of the traversal guard (C1, Q54): every ALREADY-existing
+/// component between `dest` and the leaf is inspected with
+/// `std::fs::symlink_metadata` -- never followed. A symlink is tolerated
+/// only while it resolves back INSIDE the layer root: an earlier layer (or
+/// an earlier entry of the same archive) can plant `evil -> /etc`, and a
+/// later `evil/passwd` write would then follow it and overwrite an
+/// arbitrary host file. A DANGLING link is tolerated (nothing can be
+/// written through a target that does not exist, and the entry arms that
+/// land on a leaf link remove it first). Legitimate images keep working:
+/// relative links that stay inside the layer, hardlinks and whiteouts are
+/// unaffected.
+fn guard_ancestors(dest: &Path, joined: &Path) -> Result<(), String> {
+    let Ok(rel) = joined.strip_prefix(dest) else {
+        return Err(format!(
+            "layer entry escapes root: {} is outside {}",
+            joined.display(),
+            dest.display()
+        ));
+    };
+    let root = canonical_root(dest);
+    let mut cur = dest.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        let meta = match std::fs::symlink_metadata(&cur) {
+            // Nothing on this level: no deeper component can exist either.
+            Err(_) => return Ok(()),
+            Ok(m) => m,
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        // A dangling (or unresolvable) link has no target to escape to:
+        // every write below it fails on its own.
+        let Ok(real) = std::fs::canonicalize(&cur) else {
+            continue;
+        };
+        if !real.starts_with(&root) {
+            return Err(format!(
+                "layer entry escapes root: {} is a symlink to {}",
+                cur.display(),
+                real.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The entry's dir inside dest, treating a root-level entry as dest.
@@ -154,6 +215,15 @@ fn apply_entry<R: Read>(
         return apply_opaque(&entry_dir(dest, name)?, mode);
     }
     if let Some(hidden) = base.strip_prefix(".wh.").filter(|h| !h.is_empty()) {
+        // The hidden name is a LEAF: `.wh...` would otherwise name `..` and
+        // turn a whiteout into a delete of the layer root's parent (C1).
+        if hidden == "." || hidden == ".." || hidden.contains('/') {
+            return Err(format!(
+                "layer entry escapes root: whiteout {} names {}",
+                name.display(),
+                hidden
+            ));
+        }
         let target = entry_dir(dest, name)?.join(hidden);
         return apply_whiteout(&target, mode);
     }
@@ -241,6 +311,16 @@ fn write_entry<R: Read>(
                 .flatten()
                 .unwrap_or_default()
                 .into_owned();
+            if header.entry_type() == tar::EntryType::Symlink && link.is_absolute() {
+                // An absolute link target leaves the layer root by
+                // construction (C1): the link itself is the escape hatch a
+                // later layer would write through.
+                return Err(format!(
+                    "layer entry escapes root: symlink {} -> {}",
+                    target.display(),
+                    link.display()
+                ));
+            }
             replace_any(&target)?;
             if header.entry_type() == tar::EntryType::Link {
                 let source = safe_join(dest, &link)?;

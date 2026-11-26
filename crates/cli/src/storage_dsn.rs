@@ -4,6 +4,9 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+use infra::Shutdown;
 
 /// `--datastore-endpoint` classification (**T2.3**, decision **Q29**): the
 /// pure DSN-to-backend selector [`open_store`] switches on.
@@ -63,6 +66,63 @@ pub(crate) async fn open_store(
     }
 }
 
+/// B3 (long-run bug sweep): how often the durable history is compacted.
+/// etcd keeps a 5-minute cadence; what bounds replay is the retain count
+/// ([`storage::DEFAULT_RETAIN`]), not time.
+const COMPACTION_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Pure gate (B3): only `rdb://` accumulates `log/<rev>` history on disk --
+/// the embedded store already keeps a bounded in-memory ring.
+pub(crate) fn compaction_enabled(dsn: &Dsn) -> bool {
+    matches!(dsn, Dsn::Rdb(_))
+}
+
+/// Spawn the periodic history compaction (B3) for the selected DSN: `None`
+/// when there is nothing to compact, a task handle the caller joins on
+/// shutdown otherwise. The first pass runs one interval after boot.
+pub(crate) fn spawn_compaction(
+    dsn: &Dsn,
+    store: Arc<dyn storage::StorageBackend>,
+    shutdown: &Shutdown,
+) -> Option<tokio::task::JoinHandle<()>> {
+    compaction_enabled(dsn).then(|| {
+        tokio::spawn(compact_periodically(
+            store,
+            shutdown.clone(),
+            COMPACTION_INTERVAL,
+            storage::DEFAULT_RETAIN,
+        ))
+    })
+}
+
+/// One [`storage::compact_retaining`] pass per `interval` until the token
+/// fires. Compaction is hygiene: a failed pass is logged and retried at the
+/// next tick, never fatal.
+async fn compact_periodically(
+    store: Arc<dyn storage::StorageBackend>,
+    shutdown: Shutdown,
+    interval: Duration,
+    retain: u64,
+) {
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep(interval) => {
+                match storage::compact_retaining(&*store, retain).await {
+                    Ok(watermark) => {
+                        tracing::debug!(target: "init-pro", watermark, "durable history compacted");
+                    }
+                    Err(e) => tracing::warn!(
+                        target: "init-pro",
+                        error = %e,
+                        "durable history compaction failed; retrying next tick"
+                    ),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +165,78 @@ mod tests {
             classify_dsn(Some("postgres://y")),
             Dsn::Unsupported("postgres://y".to_string())
         );
+    }
+
+    /// B3: the loop is rdb-only, and once running it bounds the on-disk
+    /// history exactly like `compact_retaining` -- a watcher starting below
+    /// the watermark is refused with `Compacted` (the 410 posture).
+    #[tokio::test]
+    async fn compaction_loop_is_rdb_only_and_bounds_history() {
+        assert!(!compaction_enabled(&Dsn::Embedded));
+        assert!(compaction_enabled(&Dsn::Rdb(PathBuf::from("/tmp/a.rdb"))));
+        assert!(!compaction_enabled(&Dsn::Unsupported("x".into())));
+
+        let shutdown = Shutdown::new();
+        assert!(
+            spawn_compaction(
+                &Dsn::Embedded,
+                Arc::new(storage::EmbeddedStorage::new()),
+                &shutdown,
+            )
+            .is_none(),
+            "the embedded store keeps a bounded ring: nothing to compact"
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "init-pro-cli-compaction-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rdb = storage::RdbStorage::open(&dir).await.unwrap();
+        let store: Arc<dyn storage::StorageBackend> = Arc::new(rdb);
+        let prefix = storage::KeyPrefix::new("", "pods", Some("default".to_string()));
+        for i in 1..=5u32 {
+            store
+                .create(
+                    &storage::Key::new("", "pods", "default", format!("p{i}")),
+                    serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": format!("p{i}")}}),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.current_revision().await.unwrap(), 5);
+
+        let loop_task = tokio::spawn(compact_periodically(
+            store.clone(),
+            shutdown.clone(),
+            Duration::from_millis(20),
+            2,
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match store.watch(&prefix, Some(1)).await {
+                Err(storage::StorageError::Compacted { .. }) => break,
+                Ok(_) => {}
+                Err(e) => panic!("unexpected watch error: {e}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "compaction loop never reached the watermark"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Revisions above the watermark still replay.
+        assert!(store.watch(&prefix, Some(4)).await.is_ok());
+
+        shutdown.trigger();
+        tokio::time::timeout(Duration::from_secs(5), loop_task)
+            .await
+            .expect("loop must stop on shutdown")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

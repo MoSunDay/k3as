@@ -154,3 +154,106 @@ fn kernel_whiteout_translation_when_root() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A hand-rolled SYMLINK entry (`typeflag 2`): the target lands VERBATIM
+/// in the `linkname` field, exactly as a hostile archive would spell it.
+fn symlink_entry(name: &str, target: &str) -> Vec<u8> {
+    let mut h = vec![0u8; 512];
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    h[100..108].copy_from_slice(b"0000777\0");
+    h[108..116].copy_from_slice(b"0000000\0");
+    h[116..124].copy_from_slice(b"0000000\0");
+    h[124..136].copy_from_slice(b"00000000000\0");
+    h[136..148].copy_from_slice(b"00000000000\0");
+    h[156] = b'2'; // symlink
+    h[157..157 + target.len()].copy_from_slice(target.as_bytes());
+    h[148..156].copy_from_slice(b"        ");
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    h[148..156].copy_from_slice(format!("{:06o}\0 ", sum).as_bytes());
+    h
+}
+
+/// `entries` + the two zero blocks that terminate a tar stream.
+fn tar_of(entries: &[Vec<u8>]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for e in entries {
+        v.extend_from_slice(e);
+    }
+    v.extend_from_slice(&[0u8; 1024]);
+    v
+}
+
+#[test]
+fn rejects_deep_traversal_and_dotted_whiteout_names() {
+    // (a) `../../../etc/passwd` -- three levels up, still refused.
+    let root = temp_dir("deep-traversal");
+    let blob = gz_raw(hostile_entry("../../../etc/passwd", "pwned"));
+    let err = unpack_layer(&blob, &root, GZ).unwrap_err();
+    assert!(err.contains("layer entry escapes root"), "{err}");
+    // `.wh...` names `..`: a whiteout must never delete above the root.
+    let blob = gz_raw(tar_of(&[hostile_entry(".wh...", "")]));
+    let err = unpack_layer(&blob, &root.join("wo"), GZ).unwrap_err();
+    assert!(err.contains("layer entry escapes root"), "{err}");
+    assert!(root.is_dir(), "the layer root survives a hostile whiteout");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rejects_absolute_symlink_target() {
+    // (b) `evil -> /etc/passwd`: the link itself is the escape hatch.
+    let root = temp_dir("abs-symlink");
+    let blob = gz_raw(tar_of(&[symlink_entry("evil", "/etc/passwd")]));
+    let dest = root.join("layer");
+    let err = unpack_layer(&blob, &dest, GZ).unwrap_err();
+    assert!(err.contains("layer entry escapes root"), "{err}");
+    assert!(err.contains("/etc/passwd"), "target named: {err}");
+    assert!(
+        std::fs::symlink_metadata(dest.join("evil")).is_err(),
+        "the link must never land"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rejects_write_through_a_planted_symlink() {
+    // (b, fused path) layer 1 plants a link to a dir OUTSIDE the layer
+    // root, layer 2 writes through it.
+    let root = temp_dir("planted");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let l1 = gz_raw(tar_of(&[symlink_entry("evil", outside.to_str().unwrap())]));
+    let l2 = gz_blob(&[("evil/passwd", "pwned")]);
+    let dest = root.join("merged");
+    let err = fused_layers(&[l1, l2], &[GZ.to_string(), GZ.to_string()], &dest).unwrap_err();
+    assert!(err.contains("layer entry escapes root"), "{err}");
+    assert!(
+        std::fs::read_dir(&outside).unwrap().count() == 0,
+        "nothing may be written through the planted link"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn relative_symlink_inside_the_layer_still_extracts() {
+    // (c) Legit images: a relative link pointing INSIDE the layer is
+    // created verbatim, and a later layer may even write through it.
+    let root = temp_dir("legit-symlink");
+    let l1 = gz_raw(tar_of(&[
+        hostile_entry("real/.keep", ""),
+        symlink_entry("sub/link", "../real"),
+        symlink_entry("libfoo.so", "libfoo.so.1"),
+    ]));
+    let dest = root.join("layer");
+    unpack_layer(&l1, &dest, GZ).unwrap();
+    let link = std::fs::read_link(dest.join("libfoo.so")).unwrap();
+    assert_eq!(link, PathBuf::from("libfoo.so.1"), "relative target kept");
+
+    let l2 = gz_blob(&[("sub/link/f.txt", "through-link")]);
+    fused_layers(&[l1.clone(), l2], &[GZ.to_string(), GZ.to_string()], &dest).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dest.join("real/f.txt")).unwrap(),
+        "through-link",
+        "a link that resolves inside the root stays usable"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

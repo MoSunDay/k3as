@@ -32,4 +32,5 @@ pub use host_direct::{
     host_direct_requested, pod_gpu_requests, pod_uses_gpu, select_host_direct, HostDirectSelection,
     HOST_DIRECT_ROOT,
 };
+pub use image::disk::{classify, DiskPressure, InUse};
 pub use rootfs::{resolve_mode, RootfsMode, ROOTFS_ANNOTATION};

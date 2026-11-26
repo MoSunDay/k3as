@@ -117,6 +117,14 @@ const REGISTRY_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// S53 / T4.4 (Q64) review P1-⑤: teardown is the NP4 zero-residue drain, but a wedged keeper must not hang agent exit — abort + WARN (mirrors REGISTRY_DRAIN_TIMEOUT).
 const NETPOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// C8 (long-run bug sweep): flanneld's drain runs the iptables teardown
+/// through child processes; a wedged `iptables` (xtables lock) must not hang
+/// agent exit. Same posture as the registry/anyhome drains: abort + WARN.
+const FLANNEL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// B12 (long-run bug sweep): the NFS data plane (Q36) joins unbounded today --
+/// an NFS client holding a handle open past the listener close must not hang
+/// server exit. Same budget and posture as the registry drain: abort + WARN.
+const ANYHOME_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Poll the CRI sandbox list until it is empty (bounded by `max`). An empty
 /// list means every shim of this run is gone, so stopping containerd cannot
@@ -535,6 +543,8 @@ pub(crate) fn run_supervised(
         // runtime, before the API surface. T-anyhome (Q36): embedded NFSv3
         // workspace plane (server-only), drained after flanneld; T6.3
         // (Q40): embedded image registry, drained right after anyhome.
+        // B10 (long-run bug sweep): the controller manager is SIGNALED at
+        // the very start of the drain (below) and only JOINED at the end.
         let (
             server_join,
             controllers_drain,
@@ -542,6 +552,7 @@ pub(crate) fn run_supervised(
             service_plane_drain,
             anyhome_drain,
             registry_drain,
+            compaction_drain,
         ) = match server_plane {
             Some(p) => (
                 p.server_join,
@@ -550,8 +561,9 @@ pub(crate) fn run_supervised(
                 p.service_plane,
                 p.anyhome,
                 p.registry,
+                p.compaction,
             ),
-            None => (None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None),
         };
 
         tracing::info!(
@@ -564,6 +576,18 @@ pub(crate) fn run_supervised(
 
         shutdown.cancelled().await;
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining");
+        // B10: signal the controller manager BEFORE any data plane drains
+        // -- no reconciler may start a new registry push, image pull or
+        // child create against a listener that is about to close, and the
+        // in-flight passes get the whole node-plane drain to finish. Only
+        // the signal moves: the task join stays at the end of the sequence
+        // (after the API surface) so a wedged reconciler cannot block
+        // teardown. A push still cut by the registry's bounded drain
+        // surfaces as a transport error, which the Build retries on the
+        // next pass (status.pushRetries, B10).
+        if let Some((_, cm_stop)) = controllers_drain.as_ref() {
+            cm_stop.trigger();
+        }
         // T4.2: drain the kubelet loops BEFORE the runtime — this join now
         // WAITS for the sync task's shutdown teardown (T4.1 follow-up,
         // Sprint 28: stopp+rmp of every sandbox, bounded), so CRI work is
@@ -598,9 +622,18 @@ pub(crate) fn run_supervised(
         // T4.3 (Q34): flanneld after the runtime — the kubelet's sandbox
         // teardown (CNI DEL) ran while it was still up; its task exits on
         // the shared token, this join only confirms.
-        if let Some(h) = flannel_drain {
-            let _ = h.await;
-            tracing::info!(target: "init-pro", role, "flannel drained");
+        if let Some(mut h) = flannel_drain {
+            match tokio::time::timeout(FLANNEL_DRAIN_TIMEOUT, &mut h).await {
+                Ok(_) => tracing::info!(target: "init-pro", role, "flannel drained"),
+                Err(_) => {
+                    h.abort();
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "flannel drain timed out; daemon task aborted"
+                    );
+                }
+            }
         }
         // T4.4 (Q64): the netpol keeper right after flanneld — its exit
         // is the zero-residue teardown (jump + every INIT-PRO-NPOL-*
@@ -628,9 +661,18 @@ pub(crate) fn run_supervised(
         }
         // T-anyhome (Q36): drain the NFS data plane here too (data plane,
         // before the API surface) so no workspace IO survives the drain.
-        if let Some(h) = anyhome_drain {
-            let _ = h.await;
-            tracing::info!(target: "init-pro", role, "anyhome drained");
+        if let Some(mut h) = anyhome_drain {
+            match tokio::time::timeout(ANYHOME_DRAIN_TIMEOUT, &mut h).await {
+                Ok(_) => tracing::info!(target: "init-pro", role, "anyhome drained"),
+                Err(_) => {
+                    h.abort();
+                    tracing::warn!(
+                        target: "init-pro",
+                        role,
+                        "anyhome drain timed out; NFS plane aborted"
+                    );
+                }
+            }
         }
         // T6.3 (Q40): drain the image registry alongside the NFS data plane
         // (data plane, before the API surface) so no blob IO survives it.
@@ -660,14 +702,23 @@ pub(crate) fn run_supervised(
             }
             tracing::info!(target: "init-pro", role, "service plane drained");
         }
-        if let Some(jh) = server_join {
-            let _ = jh.await;
-        }
-        // T3.1a: after the API surface has drained, stop the controllers and
-        // join their tasks (leadership elector + supervisor; the supervisor
-        // aborts the worker/informer set). `let _ =` tolerates aborted tasks.
-        if let Some((cm_handles, cm_stop)) = controllers_drain {
-            cm_stop.trigger();
+        // B11: the API surface's own outcome rides out of the join -- a
+        // bind failure, a died serve loop or a panicked task exits
+        // non-zero AFTER the full drain (a supervisor restarts on it); a
+        // graceful shutdown answers Ok.
+        let api_exit = match server_join {
+            Some(jh) => match jh.await {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e),
+                Err(join) => Some(std::io::Error::other(join.to_string())),
+            },
+            None => None,
+        };
+        // T3.1a: after the API surface has drained, join the controller
+        // tasks (leadership elector + supervisor; the supervisor aborts the
+        // worker/informer set). The stop itself fired before the data-plane
+        // drains (B10). `let _ =` tolerates aborted tasks.
+        if let Some((cm_handles, _)) = controllers_drain {
             for h in cm_handles {
                 let _ = h.await;
             }
@@ -682,8 +733,16 @@ pub(crate) fn run_supervised(
             }
             tracing::info!(target: "init-pro", role, "scheduler drained");
         }
+        // B3: the compaction timer shares the shutdown token; join it after
+        // the controllers so no pass races the store teardown.
+        if let Some(h) = compaction_drain {
+            let _ = h.await;
+        }
         tracing::info!(target: "init-pro", role, "init-pro {role}: draining complete");
-        Ok::<(), std::io::Error>(())
+        match api_exit {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     });
 
     match result {

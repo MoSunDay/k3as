@@ -5,6 +5,12 @@
 //! parsing lives in `reference.rs`; plain HTTP only (Q21: TLS arrives
 //! with T1.3).
 //!
+//! C2 bounds every registry read: each wire chunk carries a per-read budget
+//! (`http::BODY_READ_TIMEOUT`) and ONE pull carries an overall budget
+//! ([`PULL_DEADLINE`]). A registry that accepts the connection and then
+//! stalls therefore fails the pull with a "timed out" error instead of
+//! parking the sync worker forever.
+//!
 //! M5 adds the two operator knobs: a soft QUOTA (`with_quota`, checked
 //! before any blob/layer download — a pull that would exceed the cap
 //! fails cleanly, the agent survives) and env-var pull credentials
@@ -17,9 +23,9 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sha2::Digest as _;
-use tokio::io::AsyncReadExt as _;
 
 use super::cas::{ImageStore, PulledImage};
 use super::manifest::{
@@ -27,7 +33,20 @@ use super::manifest::{
     Manifest, ParsedManifest, MANIFEST_TYPES,
 };
 use super::reference::{host_port, normalized, parse_ref};
-use crate::http::get_raw;
+use crate::http::{get_raw, read_body_with_deadline};
+
+/// C2: overall budget for ONE image pull (manifest chain + every blob). A
+/// stalled registry used to hang the sync worker indefinitely; past this
+/// deadline the pull fails with a "timed out" error and the next sync cycle
+/// retries. Generous on purpose -- a slow-but-flowing blob never trips it,
+/// only a registry that stops delivering.
+pub const PULL_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
+/// The "timed out" error string for an expired pull budget (C2). The words
+/// matter: the sync loop's error dedup and the e2e gates match on them.
+fn pull_timed_out(what: &str) -> String {
+    format!("{what}: pull timed out after {PULL_DEADLINE:?} (stalled registry?)")
+}
 
 /// Registry pull client: one configured default registry + the CAS. Cheap
 /// to construct; share one per backend so the single-flight map dedupes.
@@ -100,6 +119,8 @@ impl Puller {
             }
         }
         let (host, port) = host_port(&pr.host)?;
+        // C2: one budget for the whole pull (manifest chain + blobs).
+        let deadline = tokio::time::Instant::now() + PULL_DEADLINE;
         // T4.13 M5: env-var credentials (INIT_PRO_PULL_AUTH_<HOST>, then
         // the bare INIT_PRO_PULL_AUTH) ride every request of this pull.
         let auth = auth_header_for(&pr.host);
@@ -110,7 +131,7 @@ impl Puller {
             .or_else(|| pr.tag.clone())
             .unwrap_or_default();
         let mut current = self
-            .fetch_manifest(&host, port, &repo, &target, &auth)
+            .fetch_manifest(&host, port, &repo, &target, &auth, deadline)
             .await?;
         let single: Manifest;
         let mut depth = 0usize;
@@ -131,7 +152,7 @@ impl Puller {
                         .map_err(|e| format!("{image:?}: {e}"))?;
                     target = child.digest;
                     current = self
-                        .fetch_manifest(&host, port, &repo, &target, &auth)
+                        .fetch_manifest(&host, port, &repo, &target, &auth, deadline)
                         .await?;
                 }
                 Err(e) => return Err(format!("manifest for {image:?}: {e}")),
@@ -160,10 +181,10 @@ impl Puller {
                 ));
             }
         }
-        self.fetch_blob(&host, port, &repo, &single.config.digest, &auth)
+        self.fetch_blob(&host, port, &repo, &single.config.digest, &auth, deadline)
             .await?;
         for layer in &single.layers {
-            self.fetch_blob(&host, port, &repo, &layer.digest, &auth)
+            self.fetch_blob(&host, port, &repo, &layer.digest, &auth, deadline)
                 .await?;
         }
         // T4.13 M3 (Q53): per-layer unpack is the pull-side artifact —
@@ -191,6 +212,7 @@ impl Puller {
         repo: &str,
         target: &str,
         auth: &Option<String>,
+        deadline: tokio::time::Instant,
     ) -> Result<(Vec<u8>, String, String), String> {
         let path = format!("/v2/{repo}/manifests/{target}");
         let mut resp = get_raw(
@@ -211,9 +233,7 @@ impl Puller {
             return Err(format!("GET {path}: unexpected status {}", resp.status));
         }
         let reported = resp.docker_content_digest.clone();
-        let bytes = resp
-            .body
-            .read_to_end()
+        let bytes = read_body_with_deadline(&mut resp.body, deadline)
             .await
             .map_err(|e| format!("read manifest body ({path}): {e}"))?;
         let computed = sha256_digest(&bytes);
@@ -224,15 +244,20 @@ impl Puller {
                 ));
             }
         }
-        let tmp = self.store.tmp_file();
-        std::fs::write(&tmp, &bytes).map_err(|e| format!("stage manifest: {e}"))?;
-        self.store.commit(&tmp, &computed)?;
+        // C11: the staged bytes are guarded, so a failed commit leaves no
+        // `tmp/part-*` behind.
+        let guard = self.store.stage();
+        std::fs::write(guard.path(), &bytes)
+            .map_err(|e| format!("stage manifest {}: {e}", guard.path().display()))?;
+        self.store.commit(&guard.release(), &computed)?;
         Ok((bytes, computed, resp.content_type.unwrap_or_default()))
     }
 
-    /// GET one blob, streaming to a tmp file while hashing (64 KiB chunks —
+    /// GET one blob, streaming to a tmp file while hashing (64 KiB chunks --
     /// the blob is NEVER buffered whole), verify against the descriptor
-    /// digest, then commit into the CAS.
+    /// digest, then commit into the CAS. Every read is bounded by
+    /// `http::BODY_READ_TIMEOUT` and the whole body by `deadline` (C2); the
+    /// staged file is owned by a `PartGuard`, so no exit path leaks it (C11).
     async fn fetch_blob(
         &self,
         host: &str,
@@ -240,6 +265,7 @@ impl Puller {
         repo: &str,
         digest: &str,
         auth: &Option<String>,
+        deadline: tokio::time::Instant,
     ) -> Result<(), String> {
         if self.store.has_blob(digest) {
             return Ok(());
@@ -260,15 +286,19 @@ impl Puller {
         if resp.status != 200 {
             return Err(format!("GET {path}: unexpected status {}", resp.status));
         }
-        let tmp = self.store.tmp_file();
-        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("stage blob: {e}"))?;
+        // C11: `guard` owns the staged path; it deletes the file on every
+        // exit path (digest mismatch, IO error, timeout, panic unwind)
+        // unless `release` hands it to `commit`.
+        let guard = self.store.stage();
+        let mut file =
+            std::fs::File::create(guard.path()).map_err(|e| format!("stage blob: {e}"))?;
         let mut hasher = sha2::Sha256::new();
         let mut buf = [0u8; 65536];
         loop {
-            let n = resp
-                .body
-                .read(&mut buf)
+            // C2: per-read budget inside, the pull deadline outside.
+            let n = tokio::time::timeout_at(deadline, resp.body.read_chunk(&mut buf))
                 .await
+                .map_err(|_| pull_timed_out(&format!("download blob {digest}")))?
                 .map_err(|e| format!("download blob {digest}: {e}"))?;
             if n == 0 {
                 break;
@@ -281,12 +311,12 @@ impl Puller {
         drop(file);
         let computed = sha256_digest_of_hasher(hasher);
         if computed != digest {
-            let _ = std::fs::remove_file(&tmp);
+            // The guard drops here: the mismatched bytes never survive.
             return Err(format!(
                 "blob digest verification failed: descriptor says {digest}, downloaded bytes hash {computed}"
             ));
         }
-        self.store.commit(&tmp, digest)
+        self.store.commit(&guard.release(), digest)
     }
 }
 
@@ -336,6 +366,108 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    /// A one-shot fake registry (C2/C11 tests): reads the request, answers
+    /// with `response`, then either closes or -- with `stall` -- holds the
+    /// connection open without ever sending another byte, which is exactly
+    /// the shape of a registry that hangs a sync worker.
+    async fn one_shot_registry(response: Vec<u8>, stall: bool) -> (String, u16) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut req = [0u8; 1024];
+                let _ = sock.read(&mut req).await;
+                let _ = sock.write_all(&response).await;
+                let _ = sock.flush().await;
+                if stall {
+                    tokio::time::sleep(Duration::from_secs(120)).await;
+                }
+                let _ = sock.shutdown().await;
+            }
+        });
+        ("127.0.0.1".to_string(), addr.port())
+    }
+
+    /// C11: the staged `tmp/part-*` must be gone after any exit path.
+    fn tmp_is_empty(root: &std::path::Path) -> bool {
+        std::fs::read_dir(root.join("tmp"))
+            .map(|rd| rd.count() == 0)
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn stalled_registry_times_out_and_leaves_no_part_file() {
+        let root = temp_root("stalled");
+        let store = ImageStore::open(&root).unwrap();
+        let puller = Puller::new("127.0.0.1:15000", store);
+        // A head that promises 4 KiB, then silence forever.
+        let (host, port) = one_shot_registry(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n".to_vec(),
+            true,
+        )
+        .await;
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let err = puller
+            .fetch_blob(&host, port, "repo", &digest, &None, deadline)
+            .await
+            .expect_err("a stalled registry must fail the pull");
+        assert!(err.contains("timed out"), "mapped to a timeout: {err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "bounded by the deadline, not by the 30s per-read budget"
+        );
+        assert!(
+            tmp_is_empty(&root),
+            "no tmp/part-* survives a timed-out download (C11)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn digest_mismatch_leaves_no_part_file() {
+        let root = temp_root("mismatch");
+        let store = ImageStore::open(&root).unwrap();
+        let puller = Puller::new("127.0.0.1:15000", store);
+        let (host, port) = one_shot_registry(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nwrong".to_vec(),
+            false,
+        )
+        .await;
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let err = puller
+            .fetch_blob(&host, port, "repo", &digest, &None, deadline)
+            .await
+            .expect_err("wrong bytes must not commit");
+        assert!(err.contains("digest verification failed"), "{err}");
+        assert!(tmp_is_empty(&root), "mismatched bytes are swept (C11)");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_good_blob_commits_and_tmp_stays_clean() {
+        let root = temp_root("commit");
+        let store = ImageStore::open(&root).unwrap();
+        let puller = Puller::new("127.0.0.1:15000", store);
+        let body = b"a perfectly good blob".to_vec();
+        let digest = sha256_digest(&body);
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+        let mut response = head.into_bytes();
+        response.extend_from_slice(&body);
+        let (host, port) = one_shot_registry(response, false).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        puller
+            .fetch_blob(&host, port, "repo", &digest, &None, deadline)
+            .await
+            .unwrap();
+        assert!(puller.store.has_blob(&digest), "committed into the CAS");
+        assert!(tmp_is_empty(&root), "the guard released into the rename");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

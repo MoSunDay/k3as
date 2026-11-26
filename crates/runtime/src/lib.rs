@@ -34,7 +34,8 @@ pub use stage::{
     vendor_cache_dir, StageOutcome,
 };
 pub use supervisor::{
-    backoff_delay, supervise, supervisor_args, wait_socket, SuperviseStats, SupervisorSpec,
+    backoff_delay, spawn_error_is_fatal, spawn_retry_plan, supervise, supervisor_args, wait_socket,
+    SuperviseExit, SuperviseStats, SupervisorSpec,
 };
 
 /// k3s-style agent runtime paths under one data dir (single source for the
@@ -203,6 +204,11 @@ pub fn start_agent_runtime_with(
             .to_string(),
     )];
 
+    // C12: the receiver is intentionally dropped here: the supervisor only
+    // needs the sender side (the live containerd pid for the drain wiring).
+    // The task result (`SuperviseStats`) is discarded by the caller too, so
+    // `supervise` logs its own terminal stats + exit reason before returning
+    // (info on a clean drain, warn when containerd is left DOWN).
     let (pid_tx, _pid_rx) = watch::channel::<Option<u32>>(None);
     tracing::info!(
         target: "init-pro",

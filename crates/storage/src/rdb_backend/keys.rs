@@ -155,3 +155,12 @@ pub(super) fn decode_entry(bytes: &[u8]) -> Result<StoredEntry, StorageError> {
 pub(super) fn decode_record(bytes: &[u8]) -> Result<LogRecord, StorageError> {
     Ok(serde_json::from_slice(bytes)?)
 }
+
+/// Inverse of [`log_key`]: the revision carried by a `log/<rev BE u64>`
+/// physical key (`None` for anything else under the prefix). Test-only: the
+/// compaction cases assert on the physical `log/` set directly.
+#[cfg(test)]
+pub(super) fn log_revision(key: &[u8]) -> Option<Revision> {
+    let bytes = key.strip_prefix(LOG_PREFIX)?;
+    <[u8; 8]>::try_from(bytes).ok().map(Revision::from_be_bytes)
+}

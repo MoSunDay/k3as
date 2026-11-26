@@ -109,9 +109,11 @@ pub fn spawn(
     ]
 }
 
-/// Task 5: periodic [`crate::log_rotate::sweep`] under the kubelet log
-/// root. Individual file failures are logged inside the sweep and retried
-/// on the next tick; a join failure is logged and the loop continues.
+/// Task 5: periodic [`crate::log_rotate::sweep`] under the kubelet log root,
+/// plus -- since C4 -- the age-based retirement of per-date log dirs
+/// ([`crate::log_retention::sweep`]). Individual file failures are logged
+/// inside the sweeps and retried on the next tick; a join failure is logged
+/// and the loop continues.
 async fn log_rotate_task(cfg: KubeletConfig, shutdown: infra::Shutdown) {
     let policy = crate::log_rotate::LogRotatePolicy::default();
     let mut tick = tokio::time::interval(policy.scan_period);
@@ -121,9 +123,25 @@ async fn log_rotate_task(cfg: KubeletConfig, shutdown: infra::Shutdown) {
             _ = tick.tick() => {}
         }
         let root = cfg.log_root();
-        match tokio::task::spawn_blocking(move || crate::log_rotate::sweep(&root, &policy)).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(target: "init-pro", rotated = n, "kubelet: log rotation pass (T4.6)");
+        let pass = tokio::task::spawn_blocking(move || {
+            let rotated = crate::log_rotate::sweep(&root, &policy);
+            // C4: date dirs older than the retention window (and idle) go.
+            let now = SystemTime::now();
+            let retired = crate::log_retention::sweep(&root, now, &crate::log_rotate::today(now));
+            (rotated, retired)
+        })
+        .await;
+        match pass {
+            Ok((rotated, 0)) if rotated > 0 => {
+                tracing::info!(target: "init-pro", rotated, "kubelet: log rotation pass (T4.6)");
+            }
+            Ok((rotated, retired)) if retired > 0 => {
+                tracing::info!(
+                    target: "init-pro",
+                    rotated,
+                    retired,
+                    "kubelet: log rotation + stale-date-dir retirement pass (T4.6/C4)"
+                );
             }
             Ok(_) => {}
             Err(e) => {
@@ -303,19 +321,31 @@ async fn sync_task(
             }
             _ = tick.tick() => {}
         }
-        sync_once(
-            &client,
-            cri.as_ref(),
-            &cfg,
-            &desired,
-            &gpu,
-            &mut probes,
-            &mut last_status,
-            &mut last_env_events,
-            &mut last_host_events,
-            &mut last_action_events,
-        )
-        .await;
+        // C2: a cycle may be parked on a slow apiserver/CRI/registry call,
+        // and the caller's shutdown join must not wait for it -- race the
+        // cycle against the token, then fall through to the teardown arm
+        // above (which re-checks `cancelled`, so it always runs).
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::warn!(
+                    target: "init-pro",
+                    node = %cfg.node_name,
+                    "kubelet: sync cycle abandoned on shutdown"
+                );
+            }
+            _ = sync_once(
+                &client,
+                cri.as_ref(),
+                &cfg,
+                &desired,
+                &gpu,
+                &mut probes,
+                &mut last_status,
+                &mut last_env_events,
+                &mut last_host_events,
+                &mut last_action_events,
+            ) => {}
+        }
     }
 }
 
@@ -433,14 +463,17 @@ async fn sync_once(
         &now_str(),
     )
     .await;
-    // Volume cleanup (S2): pods whose sandbox is already gone release
-    // their volume root. The PRE-execute snap is used deliberately: a pod
-    // torn down this cycle still shows its sandbox there, so cleanup lands
-    // one cycle later — race-free. Pods that never existed simply have no
-    // dir (cleanup tolerates NotFound).
+    // Pod dir cleanup (S2 volumes + C4 date logs): deleted pods (their
+    // sandbox teardown ran in `execute` above) and orphaned sandboxes
+    // release `<log_root>/<uid>` -- `volumes/` AND the date-shaped log
+    // dirs, so a long-lived node does not keep one directory per pod ever
+    // scheduled. Pods that never existed simply have no dir (cleanup
+    // tolerates NotFound). Should a teardown have failed, the lingering
+    // container only loses its already-doomed logs (its writer fd stays
+    // valid, Q39) -- the same posture the S2 volume removal always had.
     for (key, uid) in cleanup_candidates(&wanted, &snap) {
         if let Err(e) = volumes::cleanup_volumes(&cfg.log_root(), &uid).await {
-            tracing::warn!(target: "init-pro", pod = %key, error = %e, "kubelet: volume cleanup failed");
+            tracing::warn!(target: "init-pro", pod = %key, error = %e, "kubelet: pod dir cleanup failed");
         }
     }
     // Status pass: PUT only when the semantic status actually changed.
@@ -470,6 +503,9 @@ async fn sync_once(
         }
     }
     last_status.retain(|k, _| wanted.contains_key(k));
+    // C3 (bug sweep): disk-pressure-aware image GC. One statvfs per cycle
+    // while the image root has space; a pressured root sweeps the CAS.
+    crate::image_gc::pass(cri, &wanted);
 }
 
 /// Drive due probes (httpGet / tcpSocket / exec — T4.8) for RUNNING

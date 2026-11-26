@@ -21,6 +21,55 @@ pub struct ChildIo {
     pub gate: libc::c_int,
 }
 
+/// Exit code for "the engine died before the container could exec" (C10).
+/// The child refuses to run orphaned instead of being reparented and living
+/// forever. Distinct from the nsrun conventions in `sys` (`125` post-report
+/// engine error, `126`/`127` exec failures) so an operator can tell an
+/// orphaned container from a broken exec.
+pub(crate) const PARENT_GONE_EXIT: libc::c_int = 124;
+
+/// C10 pure decision, taken right after the parent-death signal has been
+/// re-armed and immediately before `execve`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParentGate {
+    /// The engine is still alive: exec the container.
+    Exec,
+    /// Init (or a subreaper) already adopted us: the engine died in the
+    /// window before the re-arm, a death that raises NO signal at all.
+    /// Exit instead of exec.
+    Orphaned,
+}
+
+/// The orphan probe behind [`ParentGate`] (C10). `ppid` is the child's own
+/// `getppid()` reading:
+///
+/// * `1` -- init/subreaper adopted us, so the engine is gone. Refuse to exec.
+/// * `0` -- a fresh PID namespace: the engine has no pid in the child's view
+///   (`clone_flags` always sets `CLONE_NEWPID`), so the probe cannot see it
+///   and must not fire. Here the re-armed signal is the whole protection.
+/// * anything else -- the engine is alive and visible.
+///
+/// The probe is therefore conservative by construction: it never refuses a
+/// live parent, which is the property that matters (a false positive would
+/// turn every non-root container into a 124).
+pub(crate) fn parent_gate(ppid: libc::pid_t) -> ParentGate {
+    if ppid == 1 {
+        ParentGate::Orphaned
+    } else {
+        ParentGate::Exec
+    }
+}
+
+/// Reports an orphaned child on fd 2 (the container's stderr, which the
+/// engine forwards) and exits with [`PARENT_GONE_EXIT`] without ever reaching
+/// `execve` (C10).
+fn orphaned_exit() -> ! {
+    let msg =
+        "nsrun: cannot start container: the engine exited before exec; refusing to run orphaned\n";
+    let _ = sys::write_all(2, msg.as_bytes());
+    sys::exit_raw(PARENT_GONE_EXIT)
+}
+
 pub fn run_child(spec: &RunSpec, io: ChildIo) -> ! {
     // Before the start report the parent is still reading the report pipe.
     let fail = |what: &str, e: std::io::Error| -> ! { sys::child_fail(io.report, what, e) };
@@ -180,6 +229,21 @@ pub fn run_child(spec: &RunSpec, io: ChildIo) -> ! {
     let mut envp: Vec<*const libc::c_char> = env_c.iter().map(|a| a.as_ptr()).collect();
     envp.push(std::ptr::null());
 
+    // C10 (T4.11, Q48): re-arm PR_SET_PDEATHSIG as the LAST setup step. The
+    // kernel clears it in `commit_creds()` when the effective uid/gid
+    // change -- `setgid`/`setuid` above, i.e. every non-root container -- so
+    // the signal armed at the top of this function no longer covers the
+    // exec'd container. Without this re-arm, an engine that crashed later
+    // left the container reparented to init and running forever.
+    sys::set_pdeathsig().unwrap_or_else(|e| fail2("parent-death signal (pre-exec)", e));
+    // A parent that died BEFORE the re-arm raises no signal at all (the
+    // kernel only signals future deaths), so probe for it once here, after
+    // the signal is armed and before anything is exec'd. `parent_gate`
+    // documents why this cannot fire on a live engine.
+    if let ParentGate::Orphaned = parent_gate(sys::getppid()) {
+        orphaned_exit();
+    }
+
     let err = sys::execve(&exe, &argv, &envp);
     sys::exec_fail(2, &exe, err)
 }
@@ -200,5 +264,23 @@ mod tests {
     fn argv0_is_not_rewritten() {
         assert!(executable_is_absolute("/bin/echo"));
         assert!(!executable_is_absolute("echo"));
+    }
+
+    /// C10: the orphan probe is conservative -- only an adopted child (ppid
+    /// 1) refuses to exec; a fresh pidns (ppid 0) and a live parent never do.
+    #[test]
+    fn only_an_adopted_child_refuses_to_exec() {
+        assert_eq!(parent_gate(1), ParentGate::Orphaned);
+        assert_eq!(
+            parent_gate(0),
+            ParentGate::Exec,
+            "fresh pidns: engine has no pid here"
+        );
+        assert_eq!(parent_gate(2), ParentGate::Exec);
+        assert_eq!(parent_gate(4242), ParentGate::Exec);
+        // The refusal carries its own exit code, distinct from 125/126/127.
+        assert_ne!(PARENT_GONE_EXIT, 125);
+        assert_ne!(PARENT_GONE_EXIT, 126);
+        assert_ne!(PARENT_GONE_EXIT, 127);
     }
 }

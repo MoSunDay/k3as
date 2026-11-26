@@ -10,6 +10,11 @@
 //! The flannel CNI meta-plugin itself is the `flannel` multicall alias
 //! (Q1): containerd exec's it from the conflist (staged by runtime::stage).
 //!
+//! C8 (long-run bug sweep): the daemon task is a supervised restart loop,
+//! so a flanneld exit is never terminal - it comes back under backoff and
+//! the node's `NetworkUnavailable` condition tracks it both ways (see
+//! [`crate::flannel_keeper`]).
+//!
 //! Backend selection comes from net-conf.json (upstream semantics), which
 //! this module synthesizes from `--cluster-cidr` + `--flannel-backend`
 //! (`vxlan` default; `none` disables the daemon entirely, k3s parity).
@@ -152,12 +157,40 @@ pub fn ensure_net_conf(data_dir: &Path, net: &FlannelNet) -> io::Result<PathBuf>
     Ok(path)
 }
 
+/// C8: a flanneld run shorter than this is part of a crash loop; a run
+/// that stayed up this long resets the restart streak (and the backoff).
+const STABLE_RUN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// C8: consecutive-restart streak after a run that lasted `ran_for`.
+/// `prev + 1` inside a crash loop, `0` once the daemon proved stable, so
+/// the first retry after a healthy run is back at the base delay.
+pub(crate) fn next_restart_streak(prev: u32, ran_for: std::time::Duration) -> u32 {
+    if ran_for >= STABLE_RUN {
+        0
+    } else {
+        prev.saturating_add(1)
+    }
+}
+
+/// C8: delay before the next flanneld attempt - 250 ms doubling on the
+/// consecutive-restart streak, capped at 5 s. Reuses the pure
+/// `backoff_delay` the containerd supervisor already uses, so both
+/// planes back off alike (no second backoff implementation to drift).
+pub(crate) fn restart_delay(restarts: u32) -> std::time::Duration {
+    runtime::backoff_delay(
+        restarts,
+        std::time::Duration::from_millis(250),
+        std::time::Duration::from_secs(5),
+    )
+}
+
 /// Spawn flanneld as a supervised task. Sets `NODE_NAME` first (process
 /// env: the kube subnet manager resolves the node BEFORE its first API
 /// call), bridges the shared [`Shutdown`] onto a `CancellationToken`
 /// (flanneld has no infra::Shutdown seam), and never installs its own
 /// signal handlers (`install_signal_handlers: false` — this process owns
-/// SIGINT/SIGTERM).
+/// SIGINT/SIGTERM). C8: the returned handle drives a supervised restart
+/// loop, not one `flanneld::run` (see the loop body).
 pub fn spawn_flannel(
     data_dir: &Path,
     api_url: &str,
@@ -235,12 +268,6 @@ pub fn spawn_flannel(
         install_signal_handlers: false,
         ..flanneld::Options::default()
     };
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let bridge = cancel.clone();
-    tokio::spawn(async move {
-        shutdown.cancelled().await;
-        bridge.cancel();
-    });
     tracing::info!(
         target: "init-pro",
         node = %node_name,
@@ -252,139 +279,72 @@ pub fn spawn_flannel(
     );
     let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let alive_for_daemon = alive.clone();
+    let api = api_url.to_string();
+    let node = node_name.to_string();
+    let daemon_token = token.map(str::to_string);
+    let daemon_shutdown = shutdown.clone();
     let daemon = tokio::spawn(async move {
-        match flanneld::run(opts, cancel).await {
-            Ok(code) => {
-                tracing::info!(target: "init-pro", code, "flanneld exited");
+        // C8 (long-run bug sweep): a flanneld exit is NOT terminal. One
+        // `run` used to be the whole task, so a crashed daemon left the
+        // node without pod networking until agent restart while the Node
+        // object still advertised `NetworkUnavailable=False` (the scheduler
+        // kept placing pods there). The loop below restarts it in-place
+        // under one JoinHandle, so the caller's drain is unchanged; each
+        // attempt gets a fresh cancel token bridged onto the global
+        // shutdown, and the keeper flips the Node condition back once the
+        // daemon is up again.
+        let mut restarts: u32 = 0;
+        loop {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let bridge = cancel.clone();
+            let shutdown_waiter = daemon_shutdown.clone();
+            let bridger = tokio::spawn(async move {
+                shutdown_waiter.cancelled().await;
+                bridge.cancel();
+            });
+            alive_for_daemon.store(true, std::sync::atomic::Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            let outcome = flanneld::run(opts.clone(), cancel).await;
+            bridger.abort();
+            match outcome {
+                Ok(code) => {
+                    tracing::info!(target: "init-pro", code, "flanneld exited");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "init-pro",
+                        error = %e,
+                        "flanneld failed (networking degraded)"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!(target: "init-pro", error = %e, "flanneld failed (networking degraded)");
+            alive_for_daemon.store(false, std::sync::atomic::Ordering::Relaxed);
+            if daemon_shutdown.is_triggered() {
+                break;
+            }
+            // C8: best-effort immediate network-down patch, so the
+            // scheduler stops placing pods before the keeper's next beat.
+            crate::flannel_keeper::mark_network_down(&api, &node, daemon_token.as_deref()).await;
+            restarts = next_restart_streak(restarts, started.elapsed());
+            let delay = restart_delay(restarts);
+            tracing::warn!(
+                target: "init-pro",
+                node = %node,
+                restarts = restarts + 1,
+                backoff_ms = delay.as_millis() as u64,
+                "flanneld exited; restarting under supervision (C8)"
+            );
+            // C8: every retry sleep is bound to the shutdown token.
+            tokio::select! {
+                _ = daemon_shutdown.cancelled() => break,
+                _ = tokio::time::sleep(delay) => {}
             }
         }
-        alive_for_daemon.store(false, std::sync::atomic::Ordering::Relaxed);
     });
-    crate::flannel_keeper::spawn_condition_keeper(api_url, node_name, token, alive);
+    crate::flannel_keeper::spawn_condition_keeper(api_url, node_name, token, alive, shutdown);
     Ok(daemon)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("init-pro-flannel-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn kubeconfig_body_and_validation() {
-        // T1.3a (Q47 P3): token lands in `user.token`, server in the
-        // cluster; hostile tokens are rejected before any file write.
-        let body = kubeconfig_body("http://127.0.0.1:6443", "abc123");
-        assert!(body.contains("server: http://127.0.0.1:6443"));
-        assert!(body.contains("token: abc123"));
-        assert!(body.contains("current-context: init-pro"));
-
-        let d = tmp_dir("kc");
-        let p = ensure_kubeconfig(&d, "http://127.0.0.1:6443", "abc123").unwrap();
-        assert_eq!(p, kubeconfig_path(&d));
-        // Idempotent rewrite with the same content.
-        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "abc123").is_ok());
-        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "bad token").is_err());
-        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "").is_err());
-        assert!(ensure_kubeconfig(&d, "http://127.0.0.1:6443", "quote\"tok").is_err());
-    }
-
-    #[test]
-    fn backend_normalization_and_disabled() {
-        assert!(is_enabled(&FlannelNet::default()));
-        assert!(!is_enabled(&FlannelNet {
-            backend: Some("none".into()),
-            ..Default::default()
-        }));
-        assert_eq!(normalize_backend(&FlannelNet::default()), ("vxlan", None));
-        assert_eq!(
-            normalize_backend(&FlannelNet {
-                backend: Some("host-gw".into()),
-                ..Default::default()
-            }),
-            ("host-gw", None)
-        );
-        let (_, warn) = normalize_backend(&FlannelNet {
-            backend: Some("wireguard".into()),
-            ..Default::default()
-        });
-        assert_eq!(warn.as_deref(), Some("wireguard"));
-    }
-
-    #[test]
-    fn net_conf_body_default_and_custom() {
-        let body = net_conf_body(&FlannelNet::default());
-        assert_eq!(
-            body,
-            r#"{"Backend":{"Type":"vxlan"},"Network":"10.42.0.0/16"}"#
-        );
-        let body = net_conf_body(&FlannelNet {
-            cluster_cidr: Some("10.244.0.0/16".into()),
-            backend: Some("host-gw".into()),
-            ..Default::default()
-        });
-        assert_eq!(
-            body,
-            r#"{"Backend":{"Type":"host-gw"},"Network":"10.244.0.0/16"}"#
-        );
-    }
-
-    #[test]
-    fn paths_follow_agent_layout() {
-        let dd = Path::new("/tmp/dd");
-        assert_eq!(
-            net_conf_path(dd),
-            Path::new("/tmp/dd/agent/etc/flannel/net-conf.json")
-        );
-        assert_eq!(
-            subnet_env_path(dd),
-            Path::new("/tmp/dd/agent/flannel/subnet.env")
-        );
-    }
-
-    #[test]
-    fn ensure_net_conf_writes_idempotently_and_honors_user_file() {
-        let dd = tmp_dir("netconf");
-        let net = FlannelNet {
-            cluster_cidr: Some("10.43.0.0/16".into()),
-            ..Default::default()
-        };
-        let p = ensure_net_conf(&dd, &net).unwrap();
-        assert_eq!(p, net_conf_path(&dd));
-        let first = std::fs::read_to_string(&p).unwrap();
-        assert_eq!(first, net_conf_body(&net));
-        // Second call: no rewrite churn (content identical).
-        let mtime1 = std::fs::metadata(&p).unwrap().modified().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        ensure_net_conf(&dd, &net).unwrap();
-        let mtime2 = std::fs::metadata(&p).unwrap().modified().unwrap();
-        assert_eq!(mtime1, mtime2, "identical body must not rewrite");
-
-        // Changed flags DO rewrite.
-        let net2 = FlannelNet {
-            backend: Some("host-gw".into()),
-            ..net
-        };
-        ensure_net_conf(&dd, &net2).unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), net_conf_body(&net2));
-
-        // --flannel-conf passes a user file through verbatim (no write).
-        let user = dd.join("user-net-conf.json");
-        std::fs::write(&user, r#"{"Network":"192.168.0.0/16"}"#).unwrap();
-        let net3 = FlannelNet {
-            conf: Some(user.clone()),
-            ..Default::default()
-        };
-        assert_eq!(ensure_net_conf(&dd, &net3).unwrap(), user);
-
-        let _ = std::fs::remove_dir_all(&dd);
-    }
-}
+#[path = "flannel_tests.rs"]
+mod tests;

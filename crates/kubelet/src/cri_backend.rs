@@ -43,6 +43,21 @@ pub struct ContainerView {
     pub exit_code: i32,
 }
 
+/// What one disk-pressure image-GC pass did (C3, bug sweep). The sync loop
+/// only reads it for logging/tests; the pass itself never fails the
+/// reconcile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageGcStats {
+    /// Level the image root filesystem was classified at.
+    pub pressure: crate::engine::image::DiskPressure,
+    /// On-disk bytes released by the pass (`usage_bytes` delta).
+    pub bytes_freed: u64,
+    /// Blob / per-layer dir / fused `merged/` dir faces removed.
+    pub entries_removed: usize,
+    /// Pull records dropped (Critical only).
+    pub refs_removed: usize,
+}
+
 /// The CRI surface the kubelet equivalent drives. Implemented by
 /// [`CriCtlBackend`] in production and by in-memory fakes in tests.
 #[async_trait::async_trait]
@@ -60,6 +75,17 @@ pub trait CriBackend: Send + Sync {
     async fn remove_image(&self, image: &str) -> Result<(), String> {
         let _ = image;
         Err("remove_image not supported by this backend".to_string())
+    }
+    /// C3 (bug sweep): disk-pressure-aware image GC. Called by the sync
+    /// loop once per cycle with every image its desired pod set still
+    /// needs; a backend answers with what it freed. Backends without an
+    /// image store of their own (the containerd adapter: `crictl` owns
+    /// image GC, T4.2 route B) keep this no-op default. Deliberately NOT
+    /// `async`: the builtin engine does blocking filesystem work, so the
+    /// caller keeps it off the awaits.
+    fn image_gc(&self, in_use: &[String]) -> ImageGcStats {
+        let _ = in_use;
+        ImageGcStats::default()
     }
     /// All pod sandboxes, every state (`crictl pods`).
     async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, String>;

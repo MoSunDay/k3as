@@ -48,6 +48,7 @@ fn print_usage() {
          \n\
          init-pro engine serve --socket PATH [--pause] [--host-net] [--netns PATH]\n\
          \x20   [--log-path PATH] [--mount SRC:DST[:ro]]...\n\
+         \x20   [--exit-on-stdin-eof]\n\
          \n\
          The engine must run as real root on a single-threaded process; it\n\
          needs cgroup v2 only when limits are requested. --cgroup NAME only\n\

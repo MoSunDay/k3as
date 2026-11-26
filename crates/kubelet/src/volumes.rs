@@ -13,6 +13,13 @@
 //! `<log-root>/<uid>/volumes/nfs/<name>` via a host `mount.nfs` subprocess
 //! (mechanics live in [`crate::nfs_mount`]); cleanup unmounts BEFORE
 //! deleting the tree so the server-side files always survive.
+//!
+//! Cleanup (C4) releases the WHOLE per-pod directory `<log-root>/<uid>`,
+//! not only `volumes/`: once the pod's sandbox is gone the only other
+//! content is its date-shaped pod-log dirs (T4.6, Q39), which otherwise
+//! accumulated one directory per pod ever scheduled. The uid is validated
+//! as a bare path component BEFORE any filesystem action, and a per-pod
+//! dir that is not a plain directory is refused rather than followed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +39,34 @@ const FINGERPRINT_FILE: &str = ".fingerprint";
 /// `<log-root>/<uid>/volumes` — the root of every volume of one pod.
 pub fn volume_root(log_root: &Path, uid: &str) -> PathBuf {
     log_root.join(uid).join("volumes")
+}
+
+/// `<log-root>/<uid>` -- one pod's whole per-uid tree: the date-shaped
+/// pod-log dirs (T4.6, Q39) plus [`volume_root`]. Cleanup removes exactly
+/// this directory once the pod is gone (C4).
+pub fn pod_dir(log_root: &Path, uid: &str) -> PathBuf {
+    log_root.join(uid)
+}
+
+/// Longest uid accepted by [`is_safe_uid`] (a UUID is 36; the bound only
+/// keeps a hostile name from being a path-length edge case).
+const MAX_UID_LEN: usize = 128;
+
+/// A uid is only ever used as ONE path component under the log root and
+/// cleanup `remove_dir_all`s it (C4), so the accepted shape is a bare
+/// component: 1..=[`MAX_UID_LEN`] ASCII bytes of `[A-Za-z0-9._-]`, never
+/// `.` or `..`. The apiserver stamps UUIDs on create (T1.2), so anything
+/// else -- empty, `/`, `\`, NUL, the synthetic `no-uid-<ns>/<name>`
+/// fallback -- is refused BEFORE any filesystem action: a refused cleanup
+/// leaks a directory and surfaces a warning, it never deletes.
+fn is_safe_uid(uid: &str) -> bool {
+    !uid.is_empty()
+        && uid.len() <= MAX_UID_LEN
+        && uid != "."
+        && uid != ".."
+        && uid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 /// Directory of one emptyDir volume.
@@ -201,9 +236,10 @@ fn is_safe_key(key: &str) -> bool {
     !key.is_empty() && key != FINGERPRINT_FILE && !key.contains('/') && !key.contains('\0')
 }
 
-/// Remove one pod's whole volume root; NotFound is tolerated (the pod
-/// never materialized a volume, or was already cleaned). Live NFS mounts
-/// under the root are unmounted FIRST -- see [`cleanup_volumes_in`].
+/// Remove one pod's whole per-pod dir, `volumes/` included; NotFound is
+/// tolerated (the pod never materialized anything, or was already
+/// cleaned). Live NFS mounts under the volume root are unmounted FIRST --
+/// see [`cleanup_volumes_in`].
 pub async fn cleanup_volumes(log_root: &Path, uid: &str) -> Result<(), String> {
     let mounts =
         std::fs::read_to_string(PROC_MOUNTS).map_err(|e| format!("read {PROC_MOUNTS}: {e}"))?;
@@ -214,6 +250,37 @@ pub async fn cleanup_volumes(log_root: &Path, uid: &str) -> Result<(), String> {
 /// synthetic mounts text instead of touching the host mount table).
 const PROC_MOUNTS: &str = "/proc/self/mounts";
 
+/// `symlink_metadata` gate for a path cleanup is about to `remove_dir_all`
+/// (C4): absent is fine (`Ok(false)`), a plain directory is fine
+/// (`Ok(true)`), anything else -- a symlink or a plain file where the
+/// kubelet-owned tree should have a directory -- is an anomaly and is
+/// REFUSED: never followed, never unlinked.
+async fn removable_dir_state(dir: &Path) -> Result<bool, String> {
+    match tokio::fs::symlink_metadata(dir).await {
+        Ok(meta) if !meta.is_dir() => Err(format!(
+            "refusing to remove {}: not a plain directory",
+            dir.display()
+        )),
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("stat {}: {e}", dir.display())),
+    }
+}
+
+/// `remove_dir_all` behind the [`removable_dir_state`] gate; a directory
+/// that vanished between the two calls is tolerated (a concurrent sweep
+/// or an earlier cycle got there first).
+async fn remove_dir_all_if_present(dir: &Path) -> Result<(), String> {
+    if !removable_dir_state(dir).await? {
+        return Ok(());
+    }
+    match tokio::fs::remove_dir_all(dir).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove {}: {e}", dir.display())),
+    }
+}
+
 /// The cleanup BODY with the mounts text injected (T-anyhome, Q36): the
 /// `umount_bin` parameter is the prod PATH name (`umount`); tests inject
 /// a fake script. Safety ordering is the whole point -- a live NFS mount
@@ -221,19 +288,30 @@ const PROC_MOUNTS: &str = "/proc/self/mounts";
 /// the mount would destroy the SERVER-side files (anyhome memory). A
 /// umount failure leaves the tree in place and returns `Err` (the cycle
 /// retries).
+///
+/// Order (C4): uid check -> per-pod dir shape gate -> unmount under
+/// `volumes/` -> remove `volumes/` -> remove the whole per-pod dir
+/// `<log-root>/<uid>`, whose remaining content is only the pod's
+/// date-shaped log dirs (T4.6). A refused uid or a malformed per-pod dir
+/// fails before anything is unmounted or removed.
 async fn cleanup_volumes_in(
     umount_bin: &Path,
     mounts_text: &str,
     log_root: &Path,
     uid: &str,
 ) -> Result<(), String> {
+    if !is_safe_uid(uid) {
+        return Err(format!("refusing to clean pod dir: rejected uid {uid:?}"));
+    }
+    let pod = pod_dir(log_root, uid);
+    // Gate the per-pod dir FIRST: a symlinked `<log-root>/<uid>` would
+    // otherwise be followed by the volume removal underneath it.
+    removable_dir_state(&pod).await?;
     let root = volume_root(log_root, uid);
     nfs_mount::unmount_under(umount_bin, mounts_text, &root).await?;
-    match tokio::fs::remove_dir_all(&root).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("remove {}: {e}", root.display())),
-    }
+    remove_dir_all_if_present(&root).await?;
+    remove_dir_all_if_present(&pod).await?;
+    Ok(())
 }
 
 // ---- pure CRI resolution --------------------------------------------------
@@ -301,295 +379,6 @@ fn fnv1a(data: &[u8]) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::objects::pod_view;
-
-    fn temp_root(tag: &str) -> PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::env::temp_dir().join(format!("init-pro-volumes-{tag}-{}-{n}", std::process::id()))
-    }
-
-    fn pod_with_volumes(volumes: Value) -> PodView {
-        pod_view(&serde_json::json!({
-            "metadata": {"name": "p", "namespace": "default", "uid": "u1"},
-            "spec": {"nodeName": "n1", "volumes": volumes, "containers": [
-                {"name": "c", "image": "i", "volumeMounts": [
-                    {"name": "cache", "mountPath": "/data"},
-                    {"name": "cfg", "mountPath": "/etc/cm", "readOnly": true},
-                    {"name": "unknown", "mountPath": "/x"},
-                ]},
-            ]},
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn path_helpers_layout() {
-        let root = Path::new("/dd/pods");
-        assert_eq!(volume_root(root, "u1"), Path::new("/dd/pods/u1/volumes"));
-        assert_eq!(
-            empty_dir_path(root, "u1", "cache"),
-            Path::new("/dd/pods/u1/volumes/emptyDir/cache")
-        );
-        assert_eq!(
-            config_map_path(root, "u1", "cm", "greeting"),
-            Path::new("/dd/pods/u1/volumes/configMap/cm/greeting")
-        );
-        assert_eq!(
-            secret_path(root, "u1", "s1", "token"),
-            Path::new("/dd/pods/u1/volumes/secret/s1/token")
-        );
-    }
-
-    #[test]
-    fn resolve_mounts_maps_kinds_and_skips_unknown() {
-        let pod = pod_with_volumes(serde_json::json!([
-            {"name": "cache", "emptyDir": {}},
-            {"name": "cfg", "configMap": {"name": "cm1"}},
-        ]));
-        let mounts = resolve_mounts(
-            &pod.containers[0],
-            &pod.volumes,
-            &pod.uid,
-            Path::new("/dd/pods"),
-        );
-        assert_eq!(
-            mounts,
-            vec![
-                Mount {
-                    container_path: "/data".into(),
-                    host_path: "/dd/pods/u1/volumes/emptyDir/cache".into(),
-                    readonly: false,
-                },
-                Mount {
-                    container_path: "/etc/cm".into(),
-                    host_path: "/dd/pods/u1/volumes/configMap/cm1".into(),
-                    readonly: true,
-                },
-            ],
-            "emptyDir keeps the declared readOnly; configMap forces true; unknown name skipped"
-        );
-        // Secret mounts are read-only too.
-        let pod = pod_with_volumes(serde_json::json!([
-            {"name": "cfg", "secret": {"secretName": "s1"}},
-        ]));
-        let mounts = resolve_mounts(
-            &pod.containers[0],
-            &pod.volumes,
-            &pod.uid,
-            Path::new("/dd/pods"),
-        );
-        assert_eq!(mounts[0].host_path, "/dd/pods/u1/volumes/secret/s1");
-        assert!(mounts[0].readonly);
-    }
-
-    #[test]
-    fn resolve_mounts_nfs_readonly_or_folding() {
-        // Source readOnly=false: the volumeMount flag decides.
-        let pod = pod_with_volumes(serde_json::json!([
-            {"name": "cache", "nfs": {"server": "anyhome:2049", "path": "/exports/u1"}},
-        ]));
-        let mounts = resolve_mounts(
-            &pod.containers[0],
-            &pod.volumes,
-            &pod.uid,
-            Path::new("/dd/pods"),
-        );
-        assert_eq!(
-            mounts[0].host_path, "/dd/pods/u1/volumes/nfs/cache",
-            "nfs mounts the volume dir, not the export string"
-        );
-        assert!(!mounts[0].readonly, "rw source + rw mount -> rw");
-        // Source readOnly=true forces read-only even for a rw volumeMount...
-        let pod = pod_with_volumes(serde_json::json!([
-            {"name": "cache", "nfs": {"server": "anyhome", "path": "/r", "readOnly": true}},
-        ]));
-        let mounts = resolve_mounts(
-            &pod.containers[0],
-            &pod.volumes,
-            &pod.uid,
-            Path::new("/dd/pods"),
-        );
-        assert!(mounts[0].readonly, "source readOnly participates (Q36)");
-        // ...and the mount-level flag alone still forces it.
-        let pod = pod_with_volumes(serde_json::json!([
-            {"name": "cfg", "nfs": {"server": "anyhome", "path": "/r"}},
-        ]));
-        let mut c = pod.containers[0].clone();
-        c.volume_mounts[0].read_only = true;
-        let mounts = resolve_mounts(&c, &pod.volumes, &pod.uid, Path::new("/dd/pods"));
-        assert!(mounts[0].readonly, "mount readOnly still wins on its own");
-    }
-
-    /// A fake `umount` binary (executable script); the log path is baked
-    /// in so PATH/env is never touched (parallel-test race safety).
-    fn fake_umount(dir: &Path, tag: &str, exit: i32) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let log = dir.join(format!("{tag}.log"));
-        let script = dir.join(format!("fake-umount-{tag}.sh"));
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\necho 'umount: failed' >&2\nexit {exit}\n",
-                log.display()
-            ),
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
-        script
-    }
-
-    #[tokio::test]
-    async fn cleanup_umount_failure_preserves_tree_and_returns_err() {
-        let root = temp_root("umount-fail");
-        let nfs_dir = nfs_volume_path(&root, "u1", "x");
-        tokio::fs::create_dir_all(&nfs_dir).await.unwrap();
-        tokio::fs::write(nfs_dir.join("canary"), "server-side data")
-            .await
-            .unwrap();
-        let mounts = format!(
-            "anyhome:/exports /run/nfs nfs3 rw 0 0\nanyhome:/exports {} nfs3 rw 0 0\n",
-            nfs_dir.display()
-        );
-        let umount = fake_umount(&root, "fail", 16);
-        let err = cleanup_volumes_in(&umount, &mounts, &root, "u1")
-            .await
-            .unwrap_err();
-        assert!(err.contains("umount: failed"), "stderr surfaced: {err}");
-        assert!(
-            volume_root(&root, "u1").exists()
-                && tokio::fs::try_exists(nfs_dir.join("canary")).await.unwrap(),
-            "umount-before-rm: the tree (and canary) SURVIVE a failed umount -- \
-             deleting through a live NFS mount would destroy server-side memory (Q36)"
-        );
-    }
-
-    #[tokio::test]
-    async fn cleanup_successful_umount_then_removes_tree() {
-        let root = temp_root("umount-ok");
-        let nfs_dir = nfs_volume_path(&root, "u1", "x");
-        tokio::fs::create_dir_all(&nfs_dir).await.unwrap();
-        tokio::fs::write(nfs_dir.join("canary"), "server-side data")
-            .await
-            .unwrap();
-        let mounts = format!("anyhome:/exports {} nfs3 rw 0 0\n", nfs_dir.display());
-        let umount = fake_umount(&root, "ok", 0);
-        cleanup_volumes_in(&umount, &mounts, &root, "u1")
-            .await
-            .unwrap();
-        assert!(
-            !volume_root(&root, "u1").exists(),
-            "unmounted cleanly, tree removed"
-        );
-        // NotFound tolerance still holds with the mounts text present.
-        cleanup_volumes_in(&umount, &mounts, &root, "u1")
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn cleanup_without_mounts_still_removes_tree() {
-        let root = temp_root("plain");
-        let dir = volume_dir(&root, "u1", "emptyDir", "cache");
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let umount = fake_umount(&root, "none", 0);
-        cleanup_volumes_in(&umount, "nodev /proc procfs rw 0 0", &root, "u1")
-            .await
-            .unwrap();
-        assert!(
-            !volume_root(&root, "u1").exists(),
-            "no nfs mounts under root -> plain rmdir-all"
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_dir_created_and_cleanup_tolerates_not_found() {
-        let root = temp_root("ed");
-        let pod = pod_with_volumes(serde_json::json!([{"name": "cache", "emptyDir": {}}]));
-        let wanted = BTreeMap::from([(pod.key.clone(), pod)]);
-        // The emptyDir branch never touches the client (port 9: discard).
-        let client = HttpJson::parse_url("http://127.0.0.1:9").unwrap();
-        ensure_volumes(&client, &wanted, &root).await.unwrap();
-        assert!(empty_dir_path(&root, "u1", "cache").is_dir());
-        cleanup_volumes(&root, "u1").await.unwrap();
-        assert!(!volume_root(&root, "u1").exists(), "volume root removed");
-        cleanup_volumes(&root, "u1").await.unwrap(); // NotFound tolerated
-    }
-
-    #[tokio::test]
-    async fn fingerprint_gates_rewrites() {
-        let root = temp_root("fp");
-        let dir = volume_dir(&root, "u1", "configMap", "cm");
-        let data = BTreeMap::from([
-            ("greeting".to_string(), "hello".to_string()),
-            ("mode".to_string(), "prod".to_string()),
-        ]);
-        assert!(apply_if_changed(&dir, &data).await.unwrap(), "first write");
-        assert_eq!(
-            tokio::fs::read_to_string(config_map_path(&root, "u1", "cm", "greeting"))
-                .await
-                .unwrap(),
-            "hello"
-        );
-        // Same content -> no rewrite (proven by tamper persistence: the
-        // marker short-circuits before any file I/O).
-        let greeting = config_map_path(&root, "u1", "cm", "greeting");
-        tokio::fs::write(&greeting, "tampered").await.unwrap();
-        assert!(!apply_if_changed(&dir, &data).await.unwrap(), "unchanged");
-        assert_eq!(
-            tokio::fs::read_to_string(&greeting).await.unwrap(),
-            "tampered"
-        );
-        // Changed content -> files + marker rewritten.
-        let changed = BTreeMap::from([
-            ("greeting".to_string(), "bye".to_string()),
-            ("mode".to_string(), "prod".to_string()),
-        ]);
-        assert!(apply_if_changed(&dir, &changed).await.unwrap(), "changed");
-        assert_eq!(tokio::fs::read_to_string(&greeting).await.unwrap(), "bye");
-        // And the marker now matches, so the next pass is a no-op again.
-        assert!(!apply_if_changed(&dir, &changed).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn unsafe_keys_skipped_and_empty_data_writes_marker_only() {
-        let root = temp_root("keys");
-        let dir = volume_dir(&root, "u1", "configMap", "cm");
-        let data = BTreeMap::from([
-            ("ok".to_string(), "1".to_string()),
-            ("../escape".to_string(), "x".to_string()),
-            (".fingerprint".to_string(), "spoof".to_string()),
-        ]);
-        apply_if_changed(&dir, &data).await.unwrap();
-        let mut names: Vec<String> = Vec::new();
-        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
-        while let Some(e) = entries.next_entry().await.unwrap() {
-            names.push(e.file_name().to_string_lossy().into_owned());
-        }
-        names.sort();
-        assert_eq!(names, vec![".fingerprint".to_string(), "ok".to_string()]);
-        let marker = tokio::fs::read_to_string(dir.join(FINGERPRINT_FILE))
-            .await
-            .unwrap();
-        assert_eq!(
-            marker,
-            format!(
-                "{:016x}",
-                fingerprint(&BTreeMap::from([("ok".to_string(), "1".to_string())]))
-            )
-        );
-        // Empty data -> marker present, no key files.
-        let empty = volume_dir(&root, "u1", "configMap", "empty");
-        apply_if_changed(&empty, &BTreeMap::new()).await.unwrap();
-        let mut entries = tokio::fs::read_dir(&empty).await.unwrap();
-        let mut count = 0;
-        while entries.next_entry().await.unwrap().is_some() {
-            count += 1;
-        }
-        assert_eq!(count, 1, "marker only");
-    }
-}
+mod cleanup_tests;
+#[cfg(test)]
+mod tests;

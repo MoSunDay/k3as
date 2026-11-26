@@ -9,6 +9,11 @@
 //! mark-sweep GC in [`super::gc`]. Pure helpers are free functions;
 //! [`ImageStore`] is a cheap handle (root path + a tmp counter) safe to
 //! clone.
+//!
+//! C11: `open` sweeps leftover `tmp/part-*` files from a previous run
+//! ([`super::stage::sweep_part_files`]) and every staging site holds a
+//! [`super::stage::PartGuard`], so a failed or interrupted download leaves
+//! nothing behind.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use super::gc;
 use super::manifest::Descriptor;
+use super::stage::{sweep_part_files, PartGuard};
 
 /// A completed pull: the normalized reference, the manifest digest (the CAS
 /// identity `merged/` is keyed on), and the config/layer descriptors.
@@ -51,15 +57,38 @@ pub struct ImageStore {
 
 impl ImageStore {
     /// Open (idempotently create) the store at `root`: blobs/, refs/,
-    /// layers/, views/, merged/, tmp/ all spring into existence.
+    /// layers/, views/, merged/, tmp/ all spring into existence. Leftover
+    /// `tmp/part-*` downloads from a previous (crashed/killed) run are
+    /// swept here (C11): a partial blob is never a committed blob, so
+    /// dropping it is always safe.
     pub fn open(root: &Path) -> std::io::Result<Self> {
         for sub in ["blobs/sha256", "refs", "layers", "views", "merged", "tmp"] {
             std::fs::create_dir_all(root.join(sub))?;
+        }
+        match sweep_part_files(&root.join("tmp")) {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(
+                target: "init-pro",
+                swept = n,
+                "image store: swept leftover tmp/part-* files (C11)"
+            ),
+            Err(e) => tracing::warn!(
+                target: "init-pro",
+                error = %e,
+                "image store: could not sweep tmp/part-* files (C11)"
+            ),
         }
         Ok(Self {
             root: root.to_path_buf(),
             tmp_seq: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Stage one in-flight download: a unique `tmp/part-*` path plus its
+    /// [`PartGuard`] (C11). The guard deletes the file on every exit path
+    /// unless [`PartGuard::release`] hands it to [`Self::commit`].
+    pub fn stage(&self) -> PartGuard {
+        PartGuard::new(self.tmp_file())
     }
 
     pub fn root(&self) -> &Path {
@@ -116,16 +145,15 @@ impl ImageStore {
     /// Persist a pull record atomically (tmp + rename under refs/).
     pub fn put_ref(&self, img: &PulledImage) -> Result<(), String> {
         let bytes = serde_json::to_vec(img).map_err(|e| format!("serialize ref: {e}"))?;
-        let tmp = self.tmp_file();
-        std::fs::write(&tmp, &bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        let guard = self.stage();
+        std::fs::write(guard.path(), &bytes)
+            .map_err(|e| format!("write {}: {e}", guard.path().display()))?;
         let target = self
             .root
             .join("refs")
             .join(format!("{}.json", refkey(&img.reference)));
-        std::fs::rename(&tmp, &target).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("rename ref into {}: {e}", target.display())
-        })
+        std::fs::rename(guard.release(), &target)
+            .map_err(|e| format!("rename ref into {}: {e}", target.display()))
     }
 
     /// Read back a pull record by (normalized) reference.
@@ -263,6 +291,42 @@ mod tests {
         let refs = reopened.list_refs();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].reference, "127.0.0.1:15000/test/img:v1");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// C11: a `tmp/part-*` left by a killed run is swept at open, and only
+    /// part files are (a committed blob is untouchable).
+    #[test]
+    fn open_sweeps_leftover_part_files() {
+        let root = std::env::temp_dir().join(format!(
+            "init-pro-image-cas-sweep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Pre-seed what a crashed pull leaves behind: two partial blobs.
+        let tmp = root.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("part-1-0-1"), b"half").unwrap();
+        std::fs::write(tmp.join("part-2-7-9"), vec![0u8; 1024]).unwrap();
+
+        let store = ImageStore::open(&root).unwrap();
+        assert_eq!(
+            std::fs::read_dir(&tmp).unwrap().count(),
+            0,
+            "all parts swept"
+        );
+
+        // Committed blobs survive a reopen (the sweep is tmp/-scoped).
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let guard = store.stage();
+        std::fs::write(guard.path(), b"payload").unwrap();
+        store.commit(&guard.release(), &digest).unwrap();
+        let store = ImageStore::open(&root).unwrap();
+        assert!(store.has_blob(&digest), "committed blob survives the sweep");
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

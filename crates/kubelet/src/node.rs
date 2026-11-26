@@ -6,6 +6,12 @@
 //! status via a full PUT (resourceVersion preserved, so CAS; a 409 just
 //! retries on the next tick). All failures are logged and retried.
 //!
+//! B2 (long-run bug sweep): the status PUT is change-gated -- liveness is
+//! the Lease, so the Node object is only rewritten when its content changed
+//! (`node_status::semantically_equal`) or once per
+//! `node_status::STATUS_REFRESH_FLOOR`; a clock-only heartbeat is not a
+//! write. Unchanged conditions keep their `lastTransitionTime`.
+//!
 //! T4.2 hardening: the annotation `init-pro.io/kubelet-port` (the relay
 //! discovery key, T4.2 Scope C / Q31) is only set at Node creation, so an
 //! operator changing `--kubelet-port` and restarting the agent would leave
@@ -21,6 +27,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::http::HttpJson;
+use crate::node_status::{self, StatusGate};
 use crate::objects;
 use crate::runner::KubeletConfig;
 
@@ -50,12 +57,14 @@ pub(crate) async fn node_task(
         }
     }
     let mut tick = tokio::time::interval(cfg.heartbeat_period);
+    // B2: the status write gate rides the loop as a value.
+    let mut status_gate = StatusGate::default();
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {}
         }
-        heartbeat(&client, &cfg, &gpu).await;
+        status_gate = heartbeat(&client, &cfg, &gpu, status_gate).await;
     }
 }
 
@@ -84,8 +93,14 @@ async fn ensure_node(client: &HttpJson, cfg: &KubeletConfig) -> Result<(), Strin
     }
 }
 
-/// One heartbeat: renew (or create) the node lease, refresh node status.
-async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig, gpu: &crate::gpu::GpuHandle) {
+/// One heartbeat: renew (or create) the node lease, refresh node status
+/// when it changed. Returns the status gate for the next tick (B2).
+async fn heartbeat(
+    client: &HttpJson,
+    cfg: &KubeletConfig,
+    gpu: &crate::gpu::GpuHandle,
+    status_gate: StatusGate,
+) -> StatusGate {
     let name = cfg.node_name.as_str();
     let now = now_str();
     let lease_path =
@@ -95,11 +110,11 @@ async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig, gpu: &crate::gpu::Gpu
         Ok((404, _)) => None,
         Ok((code, resp)) => {
             tracing::warn!(target: "init-pro", code = %code, %resp, "kubelet: lease GET failed");
-            return;
+            return status_gate;
         }
         Err(e) => {
             tracing::warn!(target: "init-pro", error = %e, "kubelet: lease GET failed");
-            return;
+            return status_gate;
         }
     };
     let write = match lease {
@@ -125,22 +140,27 @@ async fn heartbeat(client: &HttpJson, cfg: &KubeletConfig, gpu: &crate::gpu::Gpu
         }
         Err(e) => tracing::warn!(target: "init-pro", error = %e, "kubelet: lease write failed"),
     }
-    refresh_node_status(client, cfg, gpu, &now).await;
+    refresh_node_status(client, cfg, gpu, &now, status_gate).await
 }
 
 /// GET the node, replace `.status` with fresh Ready/capacity, full PUT back
 /// (resourceVersion preserved -> CAS; a 409 just retries next tick). The
 /// same PUT also converges a stale kubelet-port annotation (T4.2 hardening).
+///
+/// B2: the PUT is skipped when the status is semantically unchanged and no
+/// port annotation repair is pending, unless the last write is older than
+/// the floor; returns the gate unchanged on a skipped/rejected write.
 async fn refresh_node_status(
     client: &HttpJson,
     cfg: &KubeletConfig,
     gpu: &crate::gpu::GpuHandle,
     now: &str,
-) {
+    gate: StatusGate,
+) -> StatusGate {
     let name = cfg.node_name.as_str();
     let path = format!("/api/v1/nodes/{name}");
     let Ok((200, mut node)) = client.get_json(&path).await else {
-        return;
+        return gate;
     };
     let Some(mut status) = objects::node_object(
         name,
@@ -151,14 +171,24 @@ async fn refresh_node_status(
     )
     .pointer("/status")
     .cloned() else {
-        return;
+        return gate;
     };
     // GPU publication (T7.2, Q61): auto mode detects once per heartbeat
     // (cache TTL = the heartbeat period), then the plane decorates
     // capacity/allocatable + the frozen initProRuntime extension in place.
     let _ = crate::gpu::refresh_totals(gpu, cfg.heartbeat_period).await;
     crate::gpu::publish_snapshot(&mut crate::gpu::lock(gpu), cfg, &mut status, unix_now());
-    if let Some(annotations) = reconciled_kubelet_port_annotation(&node, cfg.kubelet_port) {
+    // B2: unchanged conditions keep their transition stamp, then a
+    // clock-only difference is not a change (and so not a write).
+    node_status::carry_transition_times(node.get("status"), &mut status);
+    let annotations = reconciled_kubelet_port_annotation(&node, cfg.kubelet_port);
+    let changed =
+        !node_status::semantically_equal(node.get("status"), &status) || annotations.is_some();
+    let instant = std::time::Instant::now();
+    if !gate.due(changed, instant) {
+        return gate;
+    }
+    if let Some(annotations) = annotations {
         tracing::info!(
             target: "init-pro",
             node = name,
@@ -169,11 +199,15 @@ async fn refresh_node_status(
     }
     node["status"] = status;
     match client.put_json(&path, &node).await {
-        Ok((200, _)) => {}
+        Ok((200, _)) => gate.mark(instant),
         Ok((code, resp)) => {
             tracing::debug!(target: "init-pro", code = %code, %resp, "kubelet: node refresh rejected");
+            gate
         }
-        Err(e) => tracing::debug!(target: "init-pro", error = %e, "kubelet: node refresh failed"),
+        Err(e) => {
+            tracing::debug!(target: "init-pro", error = %e, "kubelet: node refresh failed");
+            gate
+        }
     }
 }
 

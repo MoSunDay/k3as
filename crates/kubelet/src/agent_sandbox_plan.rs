@@ -2,8 +2,14 @@
 //! (decode, attempt id, in-container argv/env plan) plus the runner
 //! staging into the private rootfs. Split from `agent_exec_sandbox.rs`
 //! to respect the 400-line file cap; no behavior change.
+//!
+//! Long-run sweep planners (C14) live here too because they are pure:
+//! the per-attempt dir layout + the stale-dir plan (H4) and the Pending
+//! retry backoff curve (H2).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -159,6 +165,79 @@ pub(crate) fn write_policy_file(ws_host: &Path, eff: &EffectivePolicy) -> std::i
     Ok(path)
 }
 
+/// `<data>/agent-sandbox/`: the root of the per-attempt private trees.
+pub(crate) const AGENT_SANDBOX_DIR: &str = "agent-sandbox";
+/// Per-attempt subdirs (Q63): the private rootfs and the writable scratch.
+pub(crate) const ROOTFS_SUBDIR: &str = "rootfs";
+pub(crate) const SCRATCH_SUBDIR: &str = "scratch";
+const ATTEMPT_SUBDIRS: [&str; 2] = [ROOTFS_SUBDIR, SCRATCH_SUBDIR];
+
+/// H4 (C14): the per-attempt dir `<base>/agent-sandbox/<id>` (`base` =
+/// node data dir; the id goes through the same sanitize rules as the
+/// engine socket name, so `<id>.sock` and the dir always agree). This is
+/// the ONLY tree a finished attempt deletes: the workspace root
+/// (`<base>/agent-ws/`, pinned per-address NFS mounts) and the runner
+/// staging are not under it.
+pub(crate) fn attempt_dir(base: &Path, id: &str) -> PathBuf {
+    base.join(AGENT_SANDBOX_DIR).join(sanitize_attempt_id(id))
+}
+
+/// H4 (C14): what a finished attempt deletes, in order: `rootfs/`, then
+/// `scratch/` (both recursive), then the attempt dir itself -- only once
+/// empty, so anything an operator parked next to them is never touched.
+pub(crate) fn attempt_cleanup_paths(base: &Path, id: &str) -> (Vec<PathBuf>, PathBuf) {
+    let dir = attempt_dir(base, id);
+    let subdirs = ATTEMPT_SUBDIRS.iter().map(|s| dir.join(s)).collect();
+    (subdirs, dir)
+}
+
+/// H4 (C14): the pure boot-sweep plan. `found` = entry names under
+/// `<data>/agent-sandbox/`; `live` = attempt ids whose engine socket
+/// `<data>/run/engine/<id>.sock` still exists (teardown unlinks it, and
+/// a tied engine unlinks it on the parent-gone exit path). Everything
+/// found but not live is stale, sorted and deduplicated.
+pub(crate) fn stale_attempt_dirs(found: &[String], live: &[String]) -> Vec<String> {
+    let live: BTreeSet<&str> = live.iter().map(String::as_str).collect();
+    let mut stale: Vec<String> = found
+        .iter()
+        .filter(|f| !live.contains(f.as_str()))
+        .cloned()
+        .collect();
+    stale.sort();
+    stale.dedup();
+    stale
+}
+
+/// H2 (C14): base and cap of the Pending retry backoff.
+const RETRY_BASE: Duration = Duration::from_millis(500);
+const RETRY_CAP: Duration = Duration::from_secs(300);
+
+/// H2 (C14): how long to wait before re-attempting an Agent that stayed
+/// Pending (`SandboxRequired`/`SandboxUnavailable`): `failures` is the
+/// number of CONSECUTIVE Pending outcomes so far (>= 1). 500 ms doubling
+/// per failure, capped at 5 min -- `500ms, 1s, 2s, ... 5m, 5m`.
+pub(crate) fn retry_delay(failures: u32) -> Duration {
+    let shift = failures.saturating_sub(1).min(10);
+    RETRY_BASE.saturating_mul(1u32 << shift).min(RETRY_CAP)
+}
+
+/// H2 (C14): pure half of the repeat detection -- the `reason` of the
+/// `Ready=False` condition of an already-written Pending status body
+/// (`None` when the body is not a Pending-with-Ready shape).
+pub(crate) fn pending_reason(body: &Value) -> Option<&str> {
+    let status = body.pointer("/status")?;
+    if status.pointer("/phase").and_then(Value::as_str) != Some(objs::PHASE_PENDING) {
+        return None;
+    }
+    status
+        .pointer("/conditions")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("type").and_then(Value::as_str) == Some(objs::COND_READY))
+        .and_then(|c| c.get("reason"))
+        .and_then(Value::as_str)
+}
+
 /// Advisory post-verdict denial count (T7.7 D7, Q63): lines of the
 /// in-workspace audit JSONL whose `type` is `ActionDenied` AND whose
 /// `attempt` matches this attempt. The file is agent-tamperable by
@@ -177,3 +256,7 @@ pub(crate) fn audit_denial_count(ws_host: &Path, attempt: &str) -> Option<usize>
     };
     Some(body.lines().filter(|l| is_denial(l.trim())).count())
 }
+
+#[cfg(test)] // H2/H4 (C14) pure planner cases split out (file size limit)
+#[path = "agent_sandbox_plan_tests.rs"]
+mod plan_tests;

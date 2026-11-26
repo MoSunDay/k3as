@@ -7,6 +7,10 @@
 //! sandbox/container configs cross the process boundary as temp JSON files
 //! with unique, pid+counter-suffixed names that are removed even on error.
 //! Route A (native gRPC) only lands if T4.2 ever needs streaming/watch.
+//!
+//! Every invocation is bounded by `bounded_output` (item **C13**): the
+//! child is `kill_on_drop`, so a timed-out crictl is SIGKILLed and reaped
+//! rather than left running as an orphan.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -83,6 +87,43 @@ async fn remove_quiet(path: &Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
 
+/// `Command::output` under a wall-clock budget (item **C13**).
+///
+/// `kill_on_drop(true)` is the load-bearing half: when the budget expires,
+/// `tokio::time::timeout` drops the `output()` future, which drops the
+/// `Child`; the dropped handle then (a) sends SIGKILL from tokio's `Drop`
+/// impl and (b) hands the corpse to tokio's orphan-queue reaper task, which
+/// `waitpid()`s it. So a slow `crictl pull` (30 s default, routinely
+/// exceeded under registry pressure) can no longer outlive its caller as an
+/// orphan holding pipes, a CRI lock and CPU.
+async fn bounded_output(
+    cmd: &mut Command,
+    budget: Duration,
+    what: &str,
+) -> io::Result<std::process::Output> {
+    cmd.kill_on_drop(true);
+    tokio::time::timeout(budget, cmd.output())
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{what} timed out after {budget:?}"),
+            )
+        })?
+}
+
+/// Error mapping shared by every crictl invocation: a budget expiry stays
+/// `CriError::Io(TimedOut)` (the caller may retry); anything else, notably
+/// an exec failure, stays `CriError::Spawn` (item C13 keeps the historical
+/// split so callers match on the same variants as before).
+fn output_error(err: io::Error) -> CriError {
+    if err.kind() == io::ErrorKind::TimedOut {
+        CriError::Io(err)
+    } else {
+        CriError::Spawn(err)
+    }
+}
+
 /// Serialize `value` to a fresh unique temp file; the caller must remove it.
 async fn write_temp_config<T: serde::Serialize>(tag: &str, value: &T) -> Result<PathBuf, CriError> {
     let json = serde_json::to_vec(value)
@@ -125,20 +166,15 @@ impl CriCtl {
         args
     }
 
-    /// One crictl invocation: piped stdout/stderr, timeout-guarded, stdout
-    /// returned as a String on exit 0.
+    /// One crictl invocation: piped stdout/stderr, timeout-guarded (C13: the
+    /// child is `kill_on_drop`, so a timed-out call never leaks a crictl),
+    /// stdout returned as a String on exit 0.
     async fn run(&self, args: &[&str]) -> Result<String, CriError> {
         let mut cmd = Command::new(&self.bin);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output = tokio::time::timeout(self.timeout, cmd.output())
+        let output = bounded_output(&mut cmd, self.timeout, "crictl")
             .await
-            .map_err(|_| {
-                CriError::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("crictl timed out after {:?}", self.timeout),
-                ))
-            })?
-            .map_err(CriError::Spawn)?;
+            .map_err(output_error)?;
         if !output.status.success() {
             return Err(CriError::Exit {
                 code: output.status.code().unwrap_or(-1),
@@ -282,15 +318,11 @@ impl CriCtl {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let output = tokio::time::timeout(timeout, command.output())
+        // C13: same bounded shape as `run`; an exec that overruns its
+        // budget is SIGKILLed and reaped instead of orphaned.
+        let output = bounded_output(&mut command, timeout, "crictl exec")
             .await
-            .map_err(|_| {
-                CriError::Io(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("crictl exec timed out after {timeout:?}"),
-                ))
-            })?
-            .map_err(CriError::Spawn)?;
+            .map_err(output_error)?;
         // Merged output: stdout first, then stderr (documented above).
         let mut merged = output.stdout;
         merged.extend_from_slice(&output.stderr);
@@ -321,6 +353,8 @@ impl CriCtl {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     fn cri() -> CriCtl {
@@ -453,5 +487,222 @@ mod tests {
         let c2 = c.clone().with_timeout(Duration::from_secs(3));
         assert_eq!(c2.timeout, Duration::from_secs(3));
         let _ = std::fs::remove_dir_all(&dd);
+    }
+
+    // ---- item C13: bounded crictl children are killed + reaped ----
+
+    /// `CriError` mapping preserves the historical variant split.
+    #[test]
+    fn output_error_keeps_timeout_and_spawn_apart() {
+        let timed_out = output_error(io::Error::new(io::ErrorKind::TimedOut, "slow"));
+        assert!(
+            matches!(timed_out, CriError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut),
+            "a budget expiry must stay CriError::Io(TimedOut)"
+        );
+        let spawn = output_error(io::Error::new(io::ErrorKind::NotFound, "no crictl"));
+        assert!(
+            matches!(spawn, CriError::Spawn(ref e) if e.kind() == io::ErrorKind::NotFound),
+            "an exec failure must stay CriError::Spawn"
+        );
+    }
+
+    /// Pid recorded by a probe child (`echo $$ > <file>; exec sleep 30`).
+    fn probe_pid(pid_file: &Path) -> Option<u32> {
+        std::fs::read_to_string(pid_file).ok()?.trim().parse().ok()
+    }
+
+    /// `/proc/<pid>/stat` state letter (`R`/`S` = alive, `Z` = dead but
+    /// unreaped); `None` once the process is gone (reaped).
+    fn proc_state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // `pid (comm) S ...`: `comm` may contain spaces and parens, so the
+        // state is the first non-space byte after the LAST ')'.
+        let after = stat.rsplit_once(')')?.1;
+        after.trim().chars().next()
+    }
+
+    /// Poll until the pid is neither running nor sleeping (SIGKILL landed).
+    async fn wait_dead(pid: u32, budget: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            match proc_state(pid) {
+                None | Some('Z') | Some('X') => return true,
+                Some(_) if tokio::time::Instant::now() >= deadline => return false,
+                Some(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+            }
+        }
+    }
+
+    /// Poll until `/proc/<pid>` disappears: tokio's orphan-queue reaper has
+    /// `waitpid()`ed the corpse (no zombie left behind).
+    async fn wait_reaped(pid: u32, budget: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        while Path::new(&format!("/proc/{pid}")).exists() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        true
+    }
+
+    /// Write an executable fake crictl that publishes its pid then sleeps.
+    /// Created with mode 0o755 in one step: a separate `chmod` makes overlayfs
+    /// copy up the metadata, and an exec racing that copy-up answers ETXTBSY.
+    fn fake_crictl(dir: &Path, pid_file: &Path) -> PathBuf {
+        use std::os::unix::fs::OpenOptionsExt;
+        let bin = dir.join("crictl");
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(&bin)
+            .unwrap();
+        f.write_all(
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        // Flush the bytes before the exec: overlayfs answers ETXTBSY to an
+        // exec that lands inside the copy-up of a freshly written file.
+        f.sync_all().unwrap();
+        bin
+    }
+
+    /// Run one CRI call, tolerating overlayfs's ETXTBSY on a just-written
+    /// fake crictl (a metadata copy-up can still race the exec under a
+    /// parallel test run). Retrying is safe: a failed exec spawned nothing.
+    async fn retry_txtbusy<T, F, Fut>(mut call: F) -> Result<T, CriError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, CriError>>,
+    {
+        let mut attempt = 0;
+        loop {
+            match call().await {
+                Err(CriError::Spawn(ref e)) if e.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    attempt += 1;
+                    assert!(attempt < 40, "fake crictl stays ETXTBSY");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn c13_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cri-c13-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn bounded_output_returns_a_fast_child_output() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo crictl-ok")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = bounded_output(&mut cmd, Duration::from_secs(5), "probe")
+            .await
+            .expect("a fast child finishes inside its budget");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "crictl-ok");
+    }
+
+    #[tokio::test]
+    async fn bounded_output_kills_and_reaps_a_child_past_its_budget() {
+        // C13: before `kill_on_drop` the dropped future left this child
+        // running for the full 30s, holding pipes and CPU.
+        let dir = c13_dir("bounded");
+        let pid_file = dir.join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(&script)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let err = bounded_output(&mut cmd, Duration::from_millis(300), "probe")
+            .await
+            .expect_err("a 30s child must exceed a 300ms budget");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        let pid = probe_pid(&pid_file).expect("the probe recorded its pid");
+        assert!(
+            wait_dead(pid, Duration::from_secs(2)).await,
+            "the over-budget child must be SIGKILLed (C13)"
+        );
+        assert!(
+            wait_reaped(pid, Duration::from_secs(5)).await,
+            "tokio's reaper must waitpid() the killed child (C13)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn run_times_out_without_orphaning_crictl() {
+        // The `pull` path: a 30s crictl against a 300ms budget.
+        let dir = c13_dir("run");
+        let pid_file = dir.join("pid");
+        let c = CriCtl::new(
+            fake_crictl(&dir, &pid_file),
+            "unix:///nowhere.sock".to_string(),
+        )
+        .with_timeout(Duration::from_millis(300));
+        let err = retry_txtbusy(|| c.pull_image("init-pro.local/pause:0.1"))
+            .await
+            .expect_err("the fake crictl overruns its budget");
+        match err {
+            CriError::Io(ref e) => {
+                assert_eq!(e.kind(), io::ErrorKind::TimedOut, "budget expiry: {e}")
+            }
+            ref other => panic!("expected CriError::Io(TimedOut), got {other:?}"),
+        }
+        let pid = probe_pid(&pid_file).expect("the fake crictl recorded its pid");
+        assert!(
+            wait_dead(pid, Duration::from_secs(2)).await,
+            "crictl killed (C13)"
+        );
+        assert!(
+            wait_reaped(pid, Duration::from_secs(5)).await,
+            "crictl reaped (C13)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_container_times_out_without_orphaning_crictl() {
+        // The `exec` path (T4.2 Scope C, Q31) races the same budget.
+        let dir = c13_dir("exec");
+        let pid_file = dir.join("pid");
+        let c = CriCtl::new(
+            fake_crictl(&dir, &pid_file),
+            "unix:///nowhere.sock".to_string(),
+        )
+        .with_timeout(Duration::from_secs(30));
+        let words = vec!["/bin/true".to_string()];
+        let err = retry_txtbusy(|| c.exec_container("cid0", &words, Duration::from_millis(300)))
+            .await
+            .expect_err("the fake crictl overruns the exec budget");
+        match err {
+            CriError::Io(ref e) => {
+                assert_eq!(e.kind(), io::ErrorKind::TimedOut, "budget expiry: {e}")
+            }
+            ref other => panic!("expected CriError::Io(TimedOut), got {other:?}"),
+        }
+        let pid = probe_pid(&pid_file).expect("the fake crictl recorded its pid");
+        assert!(
+            wait_dead(pid, Duration::from_secs(2)).await,
+            "crictl killed (C13)"
+        );
+        assert!(
+            wait_reaped(pid, Duration::from_secs(5)).await,
+            "crictl reaped (C13)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use storage::{EmbeddedStorage, Key, KeyPrefix};
 
 use crate::client::{Client, StorageClient};
+use crate::error::ControllerError;
 use crate::object::resource_version;
 
 use super::{build, reconcile, PipelineConfig};
@@ -383,4 +384,170 @@ async fn deleting_pipeline_creates_no_build_and_writes_no_status() {
         "a draining pipeline builds nothing"
     );
     assert_eq!(stored_pipeline(&client).await["status"], json!(null));
+}
+
+/// B8 wiring: the retention pass runs BEFORE `docker build`, selects images
+/// by the `init-pro.pipeline` label, and its own failure is never fatal (the
+/// Build fails on `docker build`, exactly as before). `docker` here is a
+/// recording `/bin/sh` shim -- no daemon is involved.
+#[tokio::test]
+async fn build_prunes_pipeline_images_before_building() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("init-pro-b8-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let calls = dir.join("docker-calls.log");
+    let script = dir.join("docker");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho \"$*\" >> {}\nexit 1\n", calls.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let client = client();
+    let sp = create_pipeline(&client, "v1").await;
+    let mut child = create_build(&client, &sp, "web-v1-ab12c", "v1", "Pending").await;
+    child["spec"]["source"]["context"] = json!("/src/web");
+    child["spec"]["pipeline"] = json!("web");
+
+    let mut cfg = cfg().unwrap();
+    cfg.docker_bin = script.display().to_string();
+    build::reconcile(&client, &child, &cfg).await.unwrap();
+
+    let recorded = std::fs::read_to_string(&calls).unwrap();
+    let lines: Vec<&str> = recorded.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("images --filter label=init-pro.pipeline=default/web")),
+        "the retention pass lists the pipeline's images first: {lines:?}"
+    );
+    // The build itself still runs, labeled with the same pipeline identity.
+    let build_call = lines
+        .iter()
+        .find(|l| l.starts_with("build "))
+        .expect("docker build runs");
+    assert!(
+        build_call.contains("--label init-pro.pipeline=default/web"),
+        "build call: {build_call}"
+    );
+    // Nothing to prune (the shim printed no rows) -> no `rmi` at all.
+    assert!(!lines.iter().any(|l| l.starts_with("rmi")), "{lines:?}");
+
+    // The retention pass never fails the Build: the terminal failure is the
+    // docker build's own.
+    let stored = stored_build(&client, "web-v1-ab12c").await;
+    assert_eq!(stored["status"]["phase"], json!("Failed"));
+    let message = stored["status"]["conditions"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.starts_with("docker build failed"),
+        "message: {message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- B10: retryable transport-level push failure --------------------------
+
+/// A minimal plain (uncompressed) `docker save` archive, as the shim
+/// produces -- enough for the importer to stage one layer.
+fn write_save_fixture(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "init-pro-pipeline-retry-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = br#"[{"Config":"cfg.json","RepoTags":["team/web:r1"],"Layers":["layer.tar"]}]"#;
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, data) in [
+        ("manifest.json", &manifest[..]),
+        ("cfg.json", &config[..]),
+        ("layer.tar", b"layer-bytes"),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder.append_data(&mut header, name, data).unwrap();
+    }
+    let path = dir.join("fixture.tar");
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
+
+/// B10: a refused registry connection is a transport failure, not a verdict
+/// on the image -- the Build stays `Publishing` with `status.pushRetries`
+/// bumped and reconcile answers `Internal` (rate-limited requeue) until the
+/// cap, then finalizes `Failed` exactly once.
+#[tokio::test]
+async fn push_transport_failure_retries_until_the_cap() {
+    let fixture = write_save_fixture("b10");
+    let client = client();
+    let cfg = PipelineConfig {
+        registry_addr: "127.0.0.1:1".to_string(), // refused loopback port
+        scratch_dir: std::env::temp_dir().join("init-pro-pipeline-retry-scratch"),
+        docker_bin: "false".to_string(), // archive mode: docker is never run
+        default_timeout_seconds: 5,
+        max_image_bytes: registry::DEFAULT_MAX_IMAGE_BYTES,
+    };
+    let key = build_key("web-retry");
+    let build = json!({
+        "apiVersion": "init-pro.io/v1",
+        "kind": "Build",
+        "metadata": {"name": "web-retry", "namespace": "default"},
+        "spec": {
+            "image": {"repository": "team/web", "tag": "r1"},
+            "source": {"archive": fixture.display().to_string()},
+        },
+        "status": {"phase": "Publishing", "image": "team/web:r1"},
+    });
+    client.create(&key, build).await.unwrap();
+
+    for attempt in 1..=2u64 {
+        let err = build::reconcile(&client, &stored_build(&client, "web-retry").await, &cfg)
+            .await
+            .expect_err("transport failure must requeue, not finalize");
+        assert!(matches!(err, ControllerError::Internal(_)), "{err:?}");
+        assert!(
+            err.to_string().contains(&format!("retry {attempt}/5")),
+            "{err}"
+        );
+        let stored = stored_build(&client, "web-retry").await;
+        assert_eq!(stored["status"]["phase"], json!("Publishing"));
+        assert_eq!(stored["status"]["pushRetries"], json!(attempt));
+        let tail = stored["status"]["logTail"].as_str().unwrap();
+        assert!(
+            tail.contains(&format!("push attempt {attempt}/5 failed")),
+            "{tail}"
+        );
+    }
+
+    // Cap reached: the next transport failure is terminal, with the count
+    // in the condition message, and the terminal Build is never re-run.
+    let mut exhausted = stored_build(&client, "web-retry").await;
+    exhausted["status"]["pushRetries"] = json!(5);
+    let exhausted = client
+        .update(&key, exhausted.clone(), resource_version(&exhausted))
+        .await
+        .unwrap();
+    build::reconcile(&client, &exhausted, &cfg).await.unwrap();
+    let failed = stored_build(&client, "web-retry").await;
+    assert_eq!(failed["status"]["phase"], json!("Failed"));
+    let message = failed["status"]["conditions"][0]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("after 5 transport retries"), "{message}");
+    let revision = resource_version(&failed);
+    build::reconcile(&client, &failed, &cfg).await.unwrap();
+    assert_eq!(
+        resource_version(&stored_build(&client, "web-retry").await),
+        revision
+    );
+    let _ = std::fs::remove_dir_all(fixture.parent().unwrap());
 }

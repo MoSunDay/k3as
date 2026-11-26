@@ -13,14 +13,28 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nix::libc;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 
 /// 1 MiB per-message cap (request and upstream response alike).
 const MAX_BYTES: u64 = 1024 * 1024;
-/// Upstream write+read budget (loopback connect fails fast on its own).
+/// Upstream write+read budget.
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upstream connect budget (C7: a wedged loopback accept queue must not hold
+/// the single accept loop for the whole exchange budget).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Request-body read budget per connection (C7): connections are served
+/// inline from the single accept loop, so a runner that never half-closes
+/// is closed after this instead of wedging every later provider call.
+const CONN_READ_TIMEOUT: Duration = EXCHANGE_TIMEOUT;
+/// Reply write budget per connection (C7: a client that never drains its
+/// reply is closed after this; the drop closes the socket).
+const CONN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Backoff after a transient accept error (C7: EMFILE/ECONNABORTED must not
+/// hot-spin the loop).
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(50);
 /// Fixed rejection reason for non-loopback upstreams (Q63: no arbitrary egress).
 const LOOPBACK_MSG: &str =
     "upstream must be a loopback http URL (Q63: broker is not a generic proxy)";
@@ -129,6 +143,18 @@ pub async fn spawn_broker(
     agent: &str,
     attempt: &str,
 ) -> std::io::Result<BrokerHandle> {
+    spawn_broker_bounded(cfg, data_dir, agent, attempt, CONN_READ_TIMEOUT).await
+}
+
+/// [`spawn_broker`] with an explicit per-connection read budget (C7); the
+/// production entry point above pins it to [`CONN_READ_TIMEOUT`].
+async fn spawn_broker_bounded(
+    cfg: BrokerConfig,
+    data_dir: &Path,
+    agent: &str,
+    attempt: &str,
+    read_budget: Duration,
+) -> std::io::Result<BrokerHandle> {
     let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg);
     let up = parse_upstream(&cfg.upstream_url).map_err(invalid)?;
     if !safe_token(&cfg.credential_header) {
@@ -156,8 +182,22 @@ pub async fn spawn_broker(
             tokio::select! {
                 _ = &mut rx => break,
                 accepted = listener.accept() => match accepted {
-                    Ok((conn, _)) => serve_conn(conn, &cfg, &up, &agent, &attempt).await,
-                    Err(_) => break,
+                    Ok((conn, _)) => {
+                        serve_conn(conn, &cfg, &up, &agent, &attempt, read_budget).await
+                    }
+                    // C7: only a listener that can never accept again ends
+                    // the loop; transient errors are retried after a backoff
+                    // instead of killing the broker for the rest of the attempt.
+                    Err(e) if accept_error_is_fatal(&e) => {
+                        tracing::debug!(target: "init-pro", error = %e,
+                            "broker accept loop ended (C7)");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!(target: "init-pro", error = %e,
+                            "broker transient accept error (C7); retrying");
+                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    }
                 },
             }
         }
@@ -167,21 +207,92 @@ pub async fn spawn_broker(
     Ok(handle)
 }
 
+/// C7: should the accept loop END on this error? Fatal means the listener
+/// can never accept again (closed/invalid descriptor, not a socket).
+/// Transient conditions -- the connection vanished before accept
+/// (ECONNABORTED), fd/memory exhaustion (EMFILE/ENFILE/ENOMEM), a firewall
+/// EPERM, EPROTO, EINTR/EAGAIN -- are retried. Unknown errnos and synthetic
+/// errors stay fatal (the pre-C7 behavior) so a persistent programming error
+/// cannot hot-spin the loop.
+fn accept_error_is_fatal(err: &std::io::Error) -> bool {
+    match err.raw_os_error() {
+        Some(errno) => !matches!(
+            errno,
+            libc::EAGAIN
+                | libc::EINTR
+                | libc::ECONNABORTED
+                | libc::EMFILE
+                | libc::ENFILE
+                | libc::ENOMEM
+                | libc::EPERM
+                | libc::EPROTO
+        ),
+        None => !matches!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+        ),
+    }
+}
+
 /// One connection: read one request object (to EOF), decide, reply once.
+/// Both halves are time-bounded (C7): this runs inline in the single accept
+/// loop, so a runner that never half-closes (or never drains its reply) is
+/// closed after `read_budget` rather than wedging every later provider call.
 async fn serve_conn(
     mut conn: UnixStream,
     cfg: &BrokerConfig,
     up: &Upstream,
     agent: &str,
     attempt: &str,
+    read_budget: Duration,
 ) {
     let mut buf = Vec::new();
-    let _ = (&mut conn).take(MAX_BYTES).read_to_end(&mut buf).await;
-    let req = serde_json::from_slice::<Value>(&buf).ok().and_then(|v| {
-        let op = v.get("op")?.as_str()?.to_string();
-        Some((op, v.get("payload").cloned().unwrap_or_else(|| json!({}))))
-    });
-    let resp = match req {
+    let resp = match tokio::time::timeout(
+        read_budget,
+        (&mut conn).take(MAX_BYTES).read_to_end(&mut buf),
+    )
+    .await
+    {
+        // A read error (peer reset) keeps the pre-C7 shape: parse what we got.
+        Ok(read) => {
+            if let Err(e) = read {
+                tracing::debug!(target: "init-pro", error = %e, "broker request read failed");
+            }
+            reply_for(&buf, cfg, up, agent, attempt).await
+        }
+        Err(_) => {
+            tracing::warn!(target: "init-pro", agent, attempt, seconds = read_budget.as_secs(),
+                "broker request read timed out (C7); closing the connection");
+            json!({ "ok": false, "error": "request read timeout" })
+        }
+    };
+    let _ = tokio::time::timeout(CONN_WRITE_TIMEOUT, async {
+        conn.write_all(resp.to_string().as_bytes()).await?;
+        conn.shutdown().await
+    })
+    .await;
+}
+
+/// Wire request `{"op":..., "payload":...}` (payload defaults to `{}`), or `None`
+/// when malformed.
+fn parse_request(buf: &[u8]) -> Option<(String, Value)> {
+    let v = serde_json::from_slice::<Value>(buf).ok()?;
+    let op = v.get("op")?.as_str()?.to_string();
+    Some((op, v.get("payload").cloned().unwrap_or_else(|| json!({}))))
+}
+
+/// Decide one request and run the (single) allowlisted upstream call.
+async fn reply_for(
+    buf: &[u8],
+    cfg: &BrokerConfig,
+    up: &Upstream,
+    agent: &str,
+    attempt: &str,
+) -> Value {
+    match parse_request(buf) {
         Some((op, payload)) => match check_operation(cfg, &op) {
             BrokerDecision::Allow => {
                 log_operation(agent, attempt, &op, true);
@@ -196,9 +307,7 @@ async fn serve_conn(
             }
         },
         None => json!({ "ok": false, "error": "malformed request" }),
-    };
-    let _ = conn.write_all(resp.to_string().as_bytes()).await;
-    let _ = conn.shutdown().await;
+    }
 }
 
 /// Audit emission (the record itself is secret-free by construction).
@@ -226,9 +335,15 @@ async fn upstream_call(
         "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n{header}: {value}\r\nX-Init-Pro-Op: {op}\r\nConnection: close\r\n\r\n{body}",
         host = up.host, port = up.port, len = body.len(), header = cfg.credential_header, value = cfg.credential_value,
     );
-    let mut stream = TcpStream::connect((up.host.as_str(), up.port))
-        .await
-        .map_err(|e| format!("upstream unavailable: {e}"))?;
+    // C7: bounded connect -- loopback usually fails fast, but a full backlog
+    // must not hold the accept loop for the whole exchange budget.
+    let mut stream = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        TcpStream::connect((up.host.as_str(), up.port)),
+    )
+    .await
+    .map_err(|_| "upstream unavailable: connect timeout".to_string())?
+    .map_err(|e| format!("upstream unavailable: {e}"))?;
     let raw = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
         stream.write_all(req.as_bytes()).await?;
         stream.shutdown().await?;
@@ -398,3 +513,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)] // C7 accept-loop wedge/timeout regression cases
+#[path = "agent_broker_c7_tests.rs"]
+mod c7_tests;

@@ -6,19 +6,87 @@
 //! a length), no auth, plain HTTP. Keeping this module separate leaves
 //! `client.rs` as the protocol logic and this one as the wire layer -
 //! the same split `kubectl/src/http.rs` uses for the apiserver client.
+//!
+//! Timeouts (bug fix **B7**): a hung registry must never wedge a Build
+//! worker. Every exchange - connect, head, body, reply - is bounded by
+//! [`Deadline::remaining`] (the whole push budget, [`crate::client::PUSH_TIMEOUT`]
+//! by default), so a stalled peer surfaces as `PushError::Io("... timed
+//! out")` instead of blocking the worker forever.
 
-use std::time::Duration;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::client::PushError;
+use crate::client::{PushError, PUSH_TIMEOUT};
 
 /// Connect timeout: a refused/unroutable registry must fail fast.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Hard cap on one response (every reply here is a status + headers).
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// The wall-clock budget of one push (B7): an absolute deadline carried
+/// through every exchange so each step is bounded by what is LEFT of the
+/// overall budget rather than by a fresh per-request allowance.
+///
+/// Pure value type - no shared mutable state, no globals: the caller
+/// builds it once per push and passes it down by value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Deadline(Instant);
+
+impl Deadline {
+    /// A budget of `budget` starting now (the default push budget when
+    /// the caller has no opinion). `checked_add` so an absurd caller
+    /// budget (`Duration::MAX`) degrades to the default instead of
+    /// panicking on instant overflow.
+    pub(crate) fn after(budget: Duration) -> Self {
+        Self(
+            Instant::now()
+                .checked_add(budget)
+                .unwrap_or_else(|| Instant::now() + PUSH_TIMEOUT),
+        )
+    }
+
+    /// The crate-wide default push budget.
+    pub(crate) fn default_budget() -> Self {
+        Self::after(PUSH_TIMEOUT)
+    }
+
+    /// Time left on the budget; zero once it is spent (never panics on a
+    /// clock that moved backwards).
+    pub(crate) fn remaining(self) -> Duration {
+        self.0.saturating_duration_since(Instant::now())
+    }
+
+    /// True when the budget is already spent - the caller must not dial.
+    pub(crate) fn is_spent(self) -> bool {
+        self.remaining().is_zero()
+    }
+
+    /// `PushError::Io` for "no budget left" (same shape as a per-exchange
+    /// timeout, so callers see one failure mode).
+    pub(crate) fn exhausted(self) -> PushError {
+        PushError::Io("push budget exhausted: timed out before the next exchange".to_string())
+    }
+}
+
+/// Run `fut` under `limit`, mapping elapsed to `PushError::Io` with a
+/// "timed out" message that names the step (B7).
+async fn bounded<T, Fut>(what: &str, limit: Duration, fut: Fut) -> Result<T, PushError>
+where
+    Fut: Future<Output = Result<T, PushError>>,
+{
+    let step = what.to_string();
+    match tokio::time::timeout(limit, fut).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(PushError::Io(format!(
+            "{step}: timed out after {} ms",
+            limit.as_millis()
+        ))),
+    }
+}
 
 /// One request target: authority (`host:port`) + absolute path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,33 +161,87 @@ pub(crate) fn resolve_location(authority: &str, location: &str) -> Result<Target
     })
 }
 
-/// One HTTP/1.1 request/response on a fresh `Connection: close` socket.
+/// One HTTP/1.1 request/response on a fresh `Connection: close` socket,
+/// bounded by the default push budget ([`PUSH_TIMEOUT`]).
 pub(crate) async fn exchange(
     target: &Target,
     method: &str,
     extra: &[(&str, &str)],
     body: &[u8],
 ) -> Result<Reply, PushError> {
-    let mut stream = connect(target).await?;
-    write_head(&mut stream, target, method, extra, body.len() as u64).await?;
-    if !body.is_empty() {
-        stream
-            .write_all(body)
-            .await
-            .map_err(|e| PushError::Io(format!("send request body: {e}")))?;
+    exchange_until(target, method, extra, body, Deadline::default_budget()).await
+}
+
+/// [`exchange`] bounded by an explicit [`Deadline`] (B7): each step gets
+/// what is LEFT of the budget, so a push never spends more than the
+/// overall allowance no matter how many round-trips it makes.
+pub(crate) async fn exchange_until(
+    target: &Target,
+    method: &str,
+    extra: &[(&str, &str)],
+    body: &[u8],
+    deadline: Deadline,
+) -> Result<Reply, PushError> {
+    if deadline.is_spent() {
+        return Err(deadline.exhausted());
     }
-    stream
-        .flush()
-        .await
-        .map_err(|e| PushError::Io(format!("flush request: {e}")))?;
-    read_reply(stream).await
+    let mut stream = bounded("connect", deadline.remaining(), connect(target)).await?;
+    bounded(
+        "send request head",
+        deadline.remaining(),
+        write_head(&mut stream, target, method, extra, body.len() as u64),
+    )
+    .await?;
+    if !body.is_empty() {
+        bounded("send request body", deadline.remaining(), async {
+            stream
+                .write_all(body)
+                .await
+                .map_err(|e| PushError::Io(format!("send request body: {e}")))
+        })
+        .await?;
+    }
+    bounded("flush request", deadline.remaining(), async {
+        stream
+            .flush()
+            .await
+            .map_err(|e| PushError::Io(format!("flush request: {e}")))
+    })
+    .await?;
+    bounded("read reply", deadline.remaining(), read_reply(stream)).await
 }
 
 /// [`exchange`] with the body streamed from a file in 256 KiB windows --
 /// the A1 memory posture: a multi-GiB layer never enters RAM. The SHA-256
 /// is computed WHILE copying, so the upload verifies the staged digest at
 /// no extra IO and the returned digest is the one the server committed.
+///
+/// Bounded by an explicit [`Deadline`] (B7) - a streamed layer is always
+/// one step inside a push, so the whole body counts against the remaining
+/// budget and a layer that trickles forever is cut off instead of pinning
+/// the Build worker.
 pub(crate) async fn exchange_file(
+    target: &Target,
+    method: &str,
+    extra: &[(&str, &str)],
+    path: &std::path::Path,
+    size: u64,
+    deadline: Deadline,
+) -> Result<(Reply, String), PushError> {
+    if deadline.is_spent() {
+        return Err(deadline.exhausted());
+    }
+    bounded(
+        "stream layer body",
+        deadline.remaining(),
+        stream_file(target, method, extra, path, size),
+    )
+    .await
+}
+
+/// Streamed request body + reply, unbounded (the caller wraps it in a
+/// [`Deadline`]).
+async fn stream_file(
     target: &Target,
     method: &str,
     extra: &[(&str, &str)],
@@ -367,5 +489,75 @@ mod tests {
         assert!(resolve_location("h:1", "https://other/v2/x").is_err());
         assert!(resolve_location("h:1", "  ").is_err());
         assert!(resolve_location("h:1", "http:///v2/x").is_err());
+    }
+
+    #[test]
+    fn deadline_counts_down_and_reports_exhaustion() {
+        let d = Deadline::after(Duration::from_millis(250));
+        assert!(!d.is_spent());
+        assert!(d.remaining() <= Duration::from_millis(250));
+        // A spent budget maps to the same "timed out" Io error as a
+        // per-exchange timeout (one failure mode for the caller).
+        let spent = Deadline::after(Duration::ZERO);
+        assert!(spent.is_spent());
+        let err = spent.exhausted().to_string();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
+    /// A listener that accepts every connection and then never answers:
+    /// the reply read must give up on the deadline instead of hanging the
+    /// caller (B7). Sockets are held open so the peer never sees a FIN.
+    async fn stalled_registry() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_registry_times_out_instead_of_hanging() {
+        let (authority, acceptor) = stalled_registry().await;
+        let target = Target {
+            authority,
+            path: "/v2/".to_string(),
+        };
+        let started = Instant::now();
+        let err = exchange_until(
+            &target,
+            "GET",
+            &[],
+            b"",
+            Deadline::after(Duration::from_millis(200)),
+        )
+        .await
+        .expect_err("a stalled registry must not answer");
+        let elapsed = started.elapsed();
+        let msg = err.to_string();
+        acceptor.abort();
+        assert!(matches!(err, PushError::Io(_)), "{msg}");
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "gave up after {elapsed:?}, expected ~200ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_never_dials() {
+        let (authority, acceptor) = stalled_registry().await;
+        let target = Target {
+            authority,
+            path: "/v2/".to_string(),
+        };
+        let err = exchange_until(&target, "GET", &[], b"", Deadline::after(Duration::ZERO))
+            .await
+            .expect_err("a spent budget must fail fast");
+        acceptor.abort();
+        assert!(err.to_string().contains("timed out"), "{err}");
     }
 }

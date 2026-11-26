@@ -165,3 +165,102 @@ fn phases_mirror_and_terminate() {
     assert!(is_terminal(&json!({"status": {"phase": "Succeeded"}})));
     assert!(is_terminal(&json!({"status": {"phase": "Failed"}})));
 }
+
+// ===================== host image hygiene (B8) =====================
+// Pure argv + retention selection: no docker, no storage.
+
+fn labeled_build() -> Value {
+    let mut build = context_build();
+    build["metadata"] = json!({"name": "app-b1-ab12c", "namespace": "team"});
+    build["spec"]["pipeline"] = json!("app");
+    build
+}
+
+#[test]
+fn build_args_label_the_image_with_the_owning_pipeline() {
+    let args = build_args(&labeled_build(), "reg:5000/team/app:b1");
+    let label = args
+        .iter()
+        .position(|a| a == "--label")
+        .expect("the build carries a --label");
+    assert_eq!(args[label + 1], "init-pro.pipeline=team/app");
+    // The label rides along the rest of the invocation, never replacing it.
+    assert_eq!(args[0], "build");
+    assert!(args.contains(&"-t".to_string()));
+    assert_eq!(args.last().unwrap(), "/src/app/");
+}
+
+#[test]
+fn build_args_omit_the_label_without_a_pipeline_identity() {
+    // No metadata / spec.pipeline: nothing to select images by later.
+    let args = build_args(&context_build(), "reg:5000/team/app:b1");
+    assert!(!args.contains(&"--label".to_string()));
+    assert_eq!(image_label_value(&context_build()), None);
+    // A namespace without a pipeline (or the reverse) is still unusable.
+    let mut half = context_build();
+    half["metadata"] = json!({"namespace": "team"});
+    assert_eq!(image_label_value(&half), None);
+    let mut other = context_build();
+    other["spec"]["pipeline"] = json!("app");
+    assert_eq!(image_label_value(&other), None);
+}
+
+#[test]
+fn list_and_rmi_argv_render_the_docker_calls() {
+    assert_eq!(
+        list_images_args("team/app"),
+        vec![
+            "images",
+            "--filter",
+            "label=init-pro.pipeline=team/app",
+            "--format",
+            "{{.ID}}\t{{.Repository}}:{{.Tag}}",
+        ]
+    );
+    assert_eq!(
+        rmi_args("reg:5000/team/app:b1"),
+        vec!["rmi", "reg:5000/team/app:b1"]
+    );
+    assert_eq!(BUILD_IMAGE_RETENTION, 3);
+}
+
+#[test]
+fn prune_targets_keep_the_newest_n_and_skip_log_noise() {
+    let listing = "$ docker images --filter label=init-pro.pipeline=team/app --format ...\n\
+                   abc123\treg:5000/team/app:b4\n\
+                   def456\treg:5000/team/app:b3\n\
+                   789abc\treg:5000/team/app:b2\n\
+                   0a0b0c\treg:5000/team/app:b1\n\
+                   fff000\t<none>:<none>\n";
+    // Docker lists newest first: the three newest stay, the rest goes.
+    assert_eq!(
+        prune_targets(listing, 3),
+        vec!["reg:5000/team/app:b1".to_string(), "fff000".to_string()],
+        "the log header is skipped and an untagged row falls back to its ID"
+    );
+    // Within the retention window nothing is removed.
+    assert!(prune_targets(listing, 5).is_empty());
+    assert!(prune_targets("", 3).is_empty());
+    // A daemon warning line is ignored rather than pruned.
+    assert!(prune_targets("warning: something odd\n", 0).is_empty());
+}
+
+#[test]
+fn promoted_image_detection_keeps_the_running_copy() {
+    assert!(is_promoted("reg:5000/team/app:b1", "reg:5000/team/app:b1"));
+    // A different image, or nothing promoted yet, is prunable.
+    assert!(!is_promoted("reg:5000/team/app:b2", "reg:5000/team/app:b1"));
+    assert!(!is_promoted("reg:5000/team/app:b2", ""));
+}
+
+#[test]
+fn push_retry_counter_caps_at_max() {
+    assert_eq!(next_push_retry(&json!({})), Some(1));
+    assert_eq!(next_push_retry(&json!({"pushRetries": 0})), Some(1));
+    assert_eq!(next_push_retry(&json!({"pushRetries": 4})), Some(5));
+    assert_eq!(next_push_retry(&json!({"pushRetries": 5})), None);
+    assert_eq!(next_push_retry(&json!({"pushRetries": 9})), None);
+    // malformed counters are read as zero, never as a free pass
+    assert_eq!(next_push_retry(&json!({"pushRetries": "x"})), Some(1));
+    assert_eq!(next_push_retry(&json!({"pushRetries": -1})), Some(1));
+}

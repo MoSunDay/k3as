@@ -42,7 +42,10 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub use api::v2_router;
-pub use client::{ping, push_image, BlobBody, LayerBlob, PushError, PushImage};
+pub use client::{
+    ping, push_image, push_image_with_budget, BlobBody, LayerBlob, PushError, PushImage,
+    PUSH_TIMEOUT,
+};
 pub use policy::DEFAULT_TAG_RETENTION;
 pub use tarimg::{
     parse_docker_save, parse_docker_save_file, parse_docker_save_file_with, parse_docker_save_with,

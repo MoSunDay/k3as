@@ -7,16 +7,23 @@
 
 pub mod cas;
 pub mod config;
+pub mod disk;
 pub mod gc;
 pub mod layers;
 pub mod manifest;
 pub mod probe;
 pub mod pull;
 pub mod reference;
+pub mod stage;
 pub mod unpack;
 
 pub use cas::{ImageStore, PulledImage};
 pub use config::{merge_argv, merge_env, parse_image_config, ConfigBody, ImageConfig};
+pub use disk::{
+    classify, DiskPressure, Entry, GcPlan, InUse, RefEntry, CRITICAL_MIN_AVAILABLE,
+    CRITICAL_RATIO_PERCENT, GRACE, PRESSURE_MIN_AVAILABLE, PRESSURE_RATIO_PERCENT,
+    REF_VICTIM_LIMIT,
+};
 pub use layers::ViewPaths;
 pub use manifest::{
     parse_manifest, select_manifest, select_platform, sha256_digest, Descriptor, Manifest,

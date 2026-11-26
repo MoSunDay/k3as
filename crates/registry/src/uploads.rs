@@ -69,7 +69,35 @@ pub(crate) fn query_map(q: Option<&str>) -> HashMap<String, String> {
 
 /// Stream a request body onto the end of a staging file; returns the
 /// bytes appended (blobs are never buffered whole in memory).
+///
+/// Failure cleanup (bug fix **B9**): an interrupted or rejected body
+/// write removes the partial staging file best-effort before the error
+/// is returned, so a failed push leaves nothing behind. Session state IS
+/// the staging file, so a dropped client mid-PATCH must not leave an
+/// orphan that only the boot sweep (or the hourly sweep in gc.rs) would
+/// reclaim.
 async fn append_body(body: Body, path: &Path) -> io::Result<u64> {
+    match append_chunks(body, path).await {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            // Best-effort: the IO error is the one worth reporting, a
+            // failed unlink only delays reclamation to the next sweep.
+            if let Err(cleanup) = tokio::fs::remove_file(path).await {
+                tracing::debug!(
+                    target: "init-pro",
+                    path = %path.display(),
+                    error = %cleanup,
+                    "registry: partial upload cleanup skipped"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The append itself: open (create) the staging file, stream the body,
+/// flush. Every error path is the caller's cue to unlink.
+async fn append_chunks(body: Body, path: &Path) -> io::Result<u64> {
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -350,6 +378,52 @@ pub(crate) async fn cancel(st: &RegState, _repo: &str, uuid: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scratch uploads dir for one test (unique per process+test name).
+    async fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "init-pro-registry-uploads-{}-{name}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    /// A body whose stream errors after one chunk (the shape a client
+    /// disconnect mid-PATCH produces).
+    fn broken_body() -> Body {
+        let chunks: Vec<Result<axum::body::Bytes, std::io::Error>> = vec![
+            Ok(axum::body::Bytes::from_static(b"first-chunk")),
+            Err(std::io::Error::other("client disconnected")),
+        ];
+        Body::from_stream(tokio_stream::iter(chunks))
+    }
+
+    /// B9: a failed staging write must leave nothing behind.
+    #[tokio::test]
+    async fn a_failed_append_removes_the_partial_staging_file() {
+        let dir = scratch("failed-append").await;
+        let staged = dir.join("upload-1");
+        // An earlier chunk of the same session already landed.
+        tokio::fs::write(&staged, b"partial").await.unwrap();
+
+        let err = append_body(broken_body(), &staged)
+            .await
+            .expect_err("a broken body must fail the append");
+        assert!(err.to_string().contains("client disconnected"), "{err}");
+        assert!(
+            !staged.exists(),
+            "a failed push must not leave a partial staging file behind"
+        );
+
+        // A healthy append still works and keeps the file.
+        let ok = dir.join("upload-2");
+        let n = append_body(Body::from("hello"), &ok).await.unwrap();
+        assert_eq!(n, 5);
+        assert!(ok.exists());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 
     #[test]
     fn uuids_and_ranges() {

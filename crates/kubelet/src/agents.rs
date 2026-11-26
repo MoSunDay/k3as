@@ -13,17 +13,25 @@
 //! re-executes -- tasks MUST be idempotent. A missing runner binary keeps
 //! Agents `Pending` with `Ready=False, reason=RunnerMissing` (observable,
 //! never fatal); deletion kills the subprocess and unmounts the workspace.
+//!
+//! Long-run hardening (C14): an Agent that stays Pending (`SandboxRequired`
+//! / `SandboxUnavailable`, H2) is retried with a bounded exponential
+//! backoff instead of every scan; the `killers` slot of an attempt is a
+//! drop guard (H3) so a panicking attempt cannot pin it forever; the
+//! per-attempt sandbox dirs of a crashed kubelet are swept at boot (H4).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::{watch, Mutex};
 
 use crate::agent_exec::{dedupe_id, fail_cond, patch_if_changed, run_attempt, Written};
 use crate::agent_objects as objs;
+use crate::agent_sandbox::sweep_stale_attempt_dirs;
+use crate::agent_sandbox_plan::retry_delay;
 use crate::http::HttpJson;
 
 /// One execution attempt budget (Q37 fault surface); overridable via
@@ -96,6 +104,121 @@ type Desired = Arc<Mutex<BTreeMap<String, AgentRecord>>>;
 /// Per-Agent kill switches: `true` = keep going, `false` = die now (also
 /// guards an in-flight orphan reset so it patches once, not per beat).
 type Killers = Arc<Mutex<BTreeMap<String, watch::Sender<bool>>>>;
+/// H2 (C14): per-key Pending backoff of the run loop (keyed by
+/// `namespace/name`; see [`PendingBackoff`] for the reset rules).
+type Backoff = Arc<Mutex<BTreeMap<String, PendingBackoff>>>;
+
+/// H2 (C14): consecutive Pending outcomes of one Agent and when to retry.
+/// `object` is the object stamp ([`object_stamp`]: uid + verbatim spec)
+/// the failures were counted for: a recreated OR spec-edited object starts
+/// over (an operator fix must never wait out a 5 min cap), while the
+/// runner's own STATUS writes keep it (a resourceVersion stamp would be
+/// bumped by every such write and reset the curve each round).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingBackoff {
+    object: String,
+    failures: u32,
+    next_retry: Instant,
+}
+
+/// Bounded spin on `try_lock` for the drop path (H3): every holder of the
+/// `killers` lock in this module drops it before any `.await`.
+const SLOT_SPINS: usize = 16;
+
+/// Pure: the identity the backoff is counted for -- the uid plus the
+/// verbatim `spec` (canonical JSON: serde_json sorts keys here, so LIST
+/// and WATCH render the same bytes for the same stored spec).
+fn object_stamp(raw: &Value) -> String {
+    let uid = raw
+        .pointer("/metadata/uid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let spec = raw
+        .pointer("/spec")
+        .map(Value::to_string)
+        .unwrap_or_default();
+    format!("{uid}#{spec}")
+}
+
+/// Pure: whether the loop must skip this Pending Agent right now.
+fn backoff_active(entry: Option<&PendingBackoff>, stamp: &str, now: Instant) -> bool {
+    match entry {
+        Some(b) => b.object == stamp && now < b.next_retry,
+        None => false,
+    }
+}
+
+/// Pure: the state after one more consecutive Pending outcome (`prev`
+/// counts only when it was recorded for the same object stamp).
+fn backoff_after_failure(
+    prev: Option<&PendingBackoff>,
+    stamp: &str,
+    now: Instant,
+) -> PendingBackoff {
+    let failures = match prev {
+        Some(b) if b.object == stamp => b.failures.saturating_add(1),
+        _ => 1,
+    };
+    PendingBackoff {
+        object: stamp.to_string(),
+        failures,
+        next_retry: now + retry_delay(failures),
+    }
+}
+
+/// H3 (C14): the `killers` slot lease of one attempt. `run_task` inserts
+/// the slot and hands the guard to the attempt task; `Drop` removes the
+/// key on EVERY exit -- return, panic unwind, task cancellation -- so a
+/// panicking `run_attempt` can no longer pin the Agent out of the scan
+/// (the slot is exactly what keeps the loop from re-spawning it).
+struct SlotGuard {
+    killers: Killers,
+    key: String,
+}
+
+impl SlotGuard {
+    /// Insert the slot; returns the guard plus its kill-switch receiver.
+    async fn acquire(killers: Killers, key: &str) -> (Self, watch::Receiver<bool>) {
+        let (tx, rx) = watch::channel(true);
+        killers.lock().await.insert(key.to_string(), tx);
+        (
+            Self {
+                killers,
+                key: key.to_string(),
+            },
+            rx,
+        )
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if !release_slot(&self.killers, &self.key) {
+            tracing::debug!(target: "init-pro", agent = %self.key,
+                "killers slot release deferred to the runtime (C14)");
+        }
+    }
+}
+
+/// Synchronous best-effort removal for the drop path: a short `try_lock`
+/// spin, then a detached async removal when a runtime is live (a `Drop`
+/// cannot await). `true` = removed inline.
+fn release_slot(killers: &Killers, key: &str) -> bool {
+    for _ in 0..SLOT_SPINS {
+        if let Ok(mut slots) = killers.try_lock() {
+            slots.remove(key);
+            return true;
+        }
+        std::thread::yield_now();
+    }
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let (killers, key) = (Arc::clone(killers), key.to_string());
+        runtime.spawn(async move {
+            killers.lock().await.remove(&key);
+        });
+    }
+    false
+}
 
 /// Spawn the watch + run loops (same shape as [`crate::runner::spawn`]).
 pub fn spawn_agent_runner(
@@ -118,6 +241,14 @@ pub fn spawn_agent_runner(
     let desired: Desired = Arc::new(Mutex::new(BTreeMap::new()));
     let killers: Killers = Arc::new(Mutex::new(BTreeMap::new()));
     let written: Written = Arc::new(Mutex::new(BTreeMap::new()));
+    // H4 (C14): boot sweep BEFORE the loops start, so no attempt of this
+    // boot can race it (bounded: only `<data>/agent-sandbox/<id>` trees
+    // whose engine socket is gone; the data dir is small at boot).
+    let swept = sweep_stale_attempt_dirs(&cfg.data_dir);
+    if swept > 0 {
+        tracing::info!(target: "init-pro", swept,
+            "agent runner: removed stale sandbox attempt dirs (C14)");
+    }
     vec![
         tokio::spawn(watch_task(
             client.clone(),
@@ -274,12 +405,14 @@ async fn run_task(
     shutdown: infra::Shutdown,
 ) {
     let missing_reported: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let backoff: Backoff = Arc::new(Mutex::new(BTreeMap::new()));
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
             _ = tokio::time::sleep(RUN_PERIOD) => {}
         }
         let snapshot: Vec<AgentRecord> = desired.lock().await.values().cloned().collect();
+        prune_backoff(&backoff, &snapshot).await;
         for record in snapshot {
             let view = &record.view;
             if view.phase == objs::PHASE_RUNNING && !killers.lock().await.contains_key(&view.key) {
@@ -292,22 +425,39 @@ async fn run_task(
             if killers.lock().await.contains_key(&view.key) {
                 continue; // executing or reset in flight
             }
+            // H2 (C14): a Pending Agent that keeps failing waits out its
+            // backoff (500 ms doubling to 5 min) before the next attempt.
+            let stamp = object_stamp(&record.raw);
+            if backoff_active(backoff.lock().await.get(&view.key), &stamp, Instant::now()) {
+                continue;
+            }
             if cfg.runner_bin.is_none() {
                 report_missing_runner(&client, &written, &missing_reported, view).await;
                 continue;
             }
-            let (tx, rx) = watch::channel(true);
-            killers.lock().await.insert(view.key.clone(), tx);
+            // H3 (C14): the slot lives exactly as long as the guard below.
+            let (slot, rx) = SlotGuard::acquire(killers.clone(), &view.key).await;
             tokio::spawn(execute_one(
                 client.clone(),
                 cfg.clone(),
-                killers.clone(),
+                slot,
+                backoff.clone(),
                 written.clone(),
                 record.clone(),
                 rx,
             ));
         }
     }
+}
+
+/// H2 (C14): entries of objects that vanished from the desired map (deleted
+/// or unscheduled) never accumulate.
+async fn prune_backoff(backoff: &Backoff, snapshot: &[AgentRecord]) {
+    let live: BTreeSet<&str> = snapshot.iter().map(|r| r.view.key.as_str()).collect();
+    backoff
+        .lock()
+        .await
+        .retain(|k, _| live.contains(k.as_str()));
 }
 
 /// Reset an orphan `Running` Agent to `Pending` (at-least-once, Q37). The
@@ -357,24 +507,42 @@ async fn report_missing_runner(
     patch_if_changed(client, written, view, &body).await;
 }
 
-/// Execute one Agent to a terminal phase, then release its slot.
+/// Execute one Agent to a terminal phase, then release its slot (the
+/// `SlotGuard` does that on every exit path, H3/C14 -- including a panic
+/// inside `run_attempt`).
 async fn execute_one(
     client: Arc<HttpJson>,
     cfg: Arc<AgentRunnerConfig>,
-    killers: Killers,
+    slot: SlotGuard,
+    backoff: Backoff,
     written: Written,
     record: AgentRecord,
     mut keep_going: watch::Receiver<bool>,
 ) {
+    let view = &record.view;
     let outcome = run_attempt(&client, &cfg, &written, &record, &mut keep_going).await;
     if let Some((phase, cond)) = outcome {
-        patch_if_changed(
-            &client,
-            &written,
-            &record.view,
-            &objs::status_patch(phase, &[cond]),
-        )
-        .await;
+        patch_if_changed(&client, &written, view, &objs::status_patch(phase, &[cond])).await;
+        // H2 (C14): a Pending outcome is "retry later" (SandboxRequired /
+        // SandboxUnavailable) -> count it; anything terminal resets.
+        let mut backoff = backoff.lock().await;
+        if phase == objs::PHASE_PENDING {
+            let next = backoff_after_failure(
+                backoff.get(&view.key),
+                &object_stamp(&record.raw),
+                Instant::now(),
+            );
+            tracing::debug!(target: "init-pro", agent = %view.key, failures = next.failures,
+                retry_in = ?next.next_retry.saturating_duration_since(Instant::now()),
+                "agent stays Pending (C14 backoff)");
+            backoff.insert(view.key.clone(), next);
+        } else {
+            backoff.remove(&view.key);
+        }
     }
-    killers.lock().await.remove(&record.view.key);
+    drop(slot);
 }
+
+#[cfg(test)] // H2/H3 (C14) loop-guard cases split out (file size limit)
+#[path = "agents_tests.rs"]
+mod tests;

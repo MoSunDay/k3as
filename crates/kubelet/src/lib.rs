@@ -19,13 +19,22 @@
 //!   apiserver relay dials on `node_ip:kubelet_port`.
 //! - [`log_rotate`] — T4.6/Q39 pod-log date layout helpers + the
 //!   copytruncate rotation sweep (100 MiB / 5 generations).
+//! - [`log_retention`] -- C4 age-based retention of per-date pod-log dirs
+//!   (`STALE_LOG_DAYS`, default 7); the current date is never touched.
+//! - [`drain`] -- C2 bounded shutdown drain: every loop gets
+//!   `DRAIN_JOIN_TIMEOUT` (10s) and is aborted + named if it overstays.
 //! - [`volumes`] — pod volume materialization (emptyDir dirs +
-//!   fingerprint-refreshed configMap/secret key files, T4.2 Scope B).
+//!   fingerprint-refreshed configMap/secret key files, T4.2 Scope B) and
+//!   the C4 pod teardown: the WHOLE `<log-root>/<uid>` dir (date logs
+//!   included) is released once the sandbox is gone, uid-validated.
 //! - [`env`] + [`env_fetch`] — container env/envFrom projection
 //!   (T4.7): pure parse/resolve + the create-time fetch/event side.
 //! - [`resources`] — container resources → CRI cgroup knobs + pod QoS
 //!   classification (T4.9; upstream milliCPUToShares/milliCPUToQuota +
 //!   GetPodQOS, quantities parsed via `common`).
+//! - [`image_gc`] -- C3 disk-pressure-aware image GC seam: the sync loop
+//!   hands the backend the desired pod images once per cycle and the
+//!   builtin engine frees the CAS store when the image root fills.
 //! - [`host_mounts`] — the `init-pro.io/host-mounts` pod annotation
 //!   (T4.14/Q55): host-dir bind mounts parsed and validated purely;
 //!   bind failure is the permission verdict (node creds decide).
@@ -48,6 +57,7 @@ mod agent_sandbox_tests;
 pub mod agents;
 pub mod config;
 pub mod cri_backend;
+pub mod drain;
 pub mod engine;
 pub mod env;
 pub mod env_fetch;
@@ -56,9 +66,12 @@ pub mod framing;
 pub mod gpu;
 pub mod host_mounts;
 pub mod http;
+pub mod image_gc;
+pub mod log_retention;
 pub mod log_rotate;
 pub mod nfs_mount;
 pub mod node;
+pub(crate) mod node_status;
 pub mod objects;
 pub mod probes;
 pub mod resources;
@@ -76,6 +89,7 @@ pub use agents::spawn_agent_runner;
 pub use agents::AgentRunnerConfig;
 pub use config::{detect_outbound_ip, KubeletConfig};
 pub use cri_backend::{ContainerView, CriBackend, CriCtlBackend, SandboxView};
+pub use drain::{drain, join_bounded, DrainOutcome, DRAIN_JOIN_TIMEOUT, TASK_NAMES};
 pub use env::{
     config_error_event, parse_env, parse_env_from, resolve_env, EnvFromSource, EnvSources,
     EnvValue, EnvVar, RefKind,
@@ -95,6 +109,7 @@ pub use server::serve;
 pub use status::{build_pod_status, merge_pod_for_status, status_semantically_eq};
 pub use sync::{plan, Action, Snapshot};
 pub use volumes::{
-    cleanup_volumes, empty_dir_path, ensure_volumes, nfs_volume_path, resolve_mounts, volume_root,
+    cleanup_volumes, empty_dir_path, ensure_volumes, nfs_volume_path, pod_dir, resolve_mounts,
+    volume_root,
 };
 pub use watch::WatchConn;

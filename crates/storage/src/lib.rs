@@ -47,4 +47,4 @@ pub use embedded::EmbeddedStorage;
 pub use entry::{Revision, StoredEntry, WatchEvent};
 pub use error::StorageError;
 pub use key::{Key, KeyPrefix};
-pub use rdb_backend::RdbStorage;
+pub use rdb_backend::{compact_retaining, compaction_plan, RdbStorage, DEFAULT_RETAIN};

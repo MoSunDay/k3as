@@ -60,6 +60,13 @@ fn parse_serve(args: &[String]) -> Result<(Option<PathBuf>, server::ServeOptions
             "--log-path" => value(&mut i, "--log-path").map(|v| opts.log_path = Some(v)),
             "--mount" => value(&mut i, "--mount")
                 .and_then(|v| parse_serve_mount(&v).map(|m| opts.mounts.push(m))),
+            // H6/C14: the spawning kubelet owns a stdin pipe; EOF on it
+            // means the kubelet is gone (crash or dropped handle) and the
+            // engine must not outlive it as an orphan.
+            "--exit-on-stdin-eof" => {
+                opts.exit_on_stdin_eof = true;
+                Ok(())
+            }
             "-h" | "--help" => return Err("help requested".to_string()),
             other => Err(format!("engine serve: unexpected argument {other:?}")),
         };

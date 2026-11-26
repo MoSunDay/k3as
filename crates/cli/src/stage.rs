@@ -90,6 +90,11 @@ pub fn stage(
     // 7. Symlink rotation: old current → previous, new current → <hash>.
     rotate_symlinks(&data_dir, &current_link, &hash)?;
 
+    // C8: the rotation just orphaned the bundle the OLD `previous` pointed
+    // at. Prune it (best-effort, never the two live ones) before the lock
+    // goes, so upgrades stop leaking one hundreds-of-MB bundle each.
+    prune_stale_bundles(&data_dir, &hash);
+
     // Release flock (drop).
     drop(lock);
 
@@ -181,6 +186,69 @@ fn set_mode(path: &Path, logical: &str) {
         use std::os::unix::fs::PermissionsExt;
         let mode = if is_executable(logical) { 0o755 } else { 0o644 };
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    }
+}
+
+/// C8: `true` for a staged-bundle directory name: exactly 64 lowercase
+/// hex chars, the SHA-256 `compute_data_hash` mints from the pin file.
+/// `current`, `previous`, `.lock` and `<hash>-tmp` never match, so they
+/// are never prune candidates.
+fn is_bundle_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// C8: the bundle dirs that are stale: 64-hex entry names whose target
+/// is neither the freshly staged hash nor the `previous` symlink target.
+/// `entries` are the data-dir entry names, `keep` the paths whose
+/// `file_name` must survive; the result holds the relative entry names
+/// for the caller to join onto the data dir and remove. Non-hex names are
+/// ignored outright (never a candidate, whatever `keep` says).
+fn stale_bundles(entries: &[String], keep: &[PathBuf]) -> Vec<PathBuf> {
+    entries
+        .iter()
+        .filter(|name| is_bundle_name(name) && !keep.iter().any(|k| kept(k, name)))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// C8: `true` when `keep` names `name` (compares file names only, so an
+/// absolute or relative symlink target both work).
+fn kept(keep: &Path, name: &str) -> bool {
+    keep.file_name() == Some(std::ffi::OsStr::new(name))
+}
+
+/// C8: remove the bundles orphaned by a `current`/`previous` rotation.
+/// Kept: the new hash (`current`) and the `previous` target (the one
+/// rollback bundle k3s parity keeps around). Everything else that looks
+/// like a bundle goes; every error is logged and ignored, so staging must
+/// not fail because a prune did.
+fn prune_stale_bundles(data_dir: &Path, new_hash: &str) {
+    let entries: Vec<String> = match fs::read_dir(data_dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect(),
+        Err(_) => return,
+    };
+    // `previous` may be absent on a first stage: an empty path keeps
+    // nothing extra (its file_name() is None).
+    let previous = fs::read_link(data_dir.join("previous")).unwrap_or_default();
+    let keep = vec![PathBuf::from(new_hash), previous];
+    for stale in stale_bundles(&entries, &keep) {
+        let path = data_dir.join(&stale);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => tracing::info!(
+                target: "init-pro",
+                bundle = %stale.display(),
+                "pruned stale staged bundle (C8)"
+            ),
+            Err(e) => tracing::debug!(
+                target: "init-pro",
+                bundle = %stale.display(),
+                error = %e,
+                "stale staged bundle not pruned (C8)"
+            ),
+        }
     }
 }
 
@@ -343,5 +411,78 @@ mod tests {
     #[test]
     fn fast_path_misses_when_no_symlink() {
         assert!(!fast_path_hit(Path::new("/nonexistent/current"), "abc"));
+    }
+
+    #[test]
+    fn c8_stale_bundles_keeps_new_and_previous_only() {
+        // C8: only 64-hex names are candidates; the fresh hash and the
+        // `previous` target survive, everything else is pruned.
+        let new = "a".repeat(64);
+        let prev = "b".repeat(64);
+        let orphan = "c".repeat(64);
+        let entries = vec![
+            new.clone(),
+            prev.clone(),
+            orphan.clone(),
+            "current".to_string(),
+            "previous".to_string(),
+            ".lock".to_string(),
+            format!("{}-tmp", orphan),
+            "not-a-bundle".to_string(),
+            // Uppercase / short hex is not a bundle name.
+            "C".repeat(64),
+            "dead".to_string(),
+        ];
+        let keep = vec![PathBuf::from(&new), PathBuf::from(&prev)];
+        let stale = stale_bundles(&entries, &keep);
+        assert_eq!(stale, vec![PathBuf::from(&orphan)]);
+    }
+
+    #[test]
+    fn c8_stale_bundles_without_a_previous_keeps_only_the_new_hash() {
+        // C8: first stage (no `previous` yet) still prunes older orphans.
+        let new = "1".repeat(64);
+        let entries = vec![new.clone(), "2".repeat(64)];
+        assert_eq!(
+            stale_bundles(&entries, &[PathBuf::from(&new), PathBuf::new()]),
+            vec![PathBuf::from("2".repeat(64))]
+        );
+        // Nothing kept (defensive) -> every bundle is stale.
+        assert_eq!(
+            stale_bundles(&entries, &[]).len(),
+            2,
+            "with an empty keep list every hex bundle is stale"
+        );
+    }
+
+    #[test]
+    fn c8_prune_stale_bundles_removes_orphans_and_spares_live_ones() {
+        // C8: end-to-end over a temp data dir: the new hash dir and the
+        // `previous` target stay, the orphaned bundle goes, and non-bundle
+        // entries (current/previous links, tmp dir) are untouched.
+        let dd = std::env::temp_dir().join(format!("init-pro-stage-c8-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dd);
+        fs::create_dir_all(&dd).unwrap();
+        let new = "a".repeat(64);
+        let prev = "b".repeat(64);
+        let orphan = "c".repeat(64);
+        for name in [&new, &prev, &orphan] {
+            fs::create_dir_all(dd.join(name)).unwrap();
+            fs::write(dd.join(name).join("bin"), b"x").unwrap();
+        }
+        fs::create_dir_all(dd.join("current")).unwrap();
+        std::os::unix::fs::symlink(&prev, dd.join("previous")).unwrap();
+
+        prune_stale_bundles(&dd, &new);
+
+        assert!(dd.join(&new).is_dir(), "the freshly staged bundle stays");
+        assert!(dd.join(&prev).is_dir(), "the previous target stays");
+        assert!(!dd.join(&orphan).exists(), "the orphaned bundle is pruned");
+        assert!(dd.join("current").is_dir(), "non-hex entries are ignored");
+
+        // Idempotent: a second prune finds nothing left to remove.
+        prune_stale_bundles(&dd, &new);
+        assert!(dd.join(&new).is_dir() && dd.join(&prev).is_dir());
+        let _ = fs::remove_dir_all(&dd);
     }
 }

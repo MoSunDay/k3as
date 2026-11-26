@@ -11,6 +11,7 @@ use crate::object::resource_version;
 
 use self::fixtures::*;
 use super::abort;
+use super::fail;
 
 #[tokio::test]
 async fn roll_clones_the_stable_pair_and_publishes_step_weight() {
@@ -228,5 +229,113 @@ async fn abort_deletes_the_children_and_resets_the_split() {
     assert_eq!(
         resource_version(&stored(&client, &sp_key()).await),
         revision
+    );
+}
+
+/// Anti-churn (T8.5 bug fix): the 2s resync re-enters `roll` on a failed
+/// release forever, so the second pass must write NOTHING (an unconditional
+/// write minted a fresh `lastTransitionTime` -- and a revision -- per pass).
+#[tokio::test]
+async fn repeated_failure_passes_write_nothing() {
+    let client = client();
+    let sp = seed(&client, json!([{"weight": 100, "pauseSeconds": 0}])).await;
+    client.delete(&split_key()).await.unwrap();
+
+    roll_once(&client, &sp).await;
+    let first = stored(&client, &sp_key()).await;
+    assert_eq!(first["status"]["phase"], json!("Failed"));
+    assert_eq!(reason(&first), "TrafficSplitMissing");
+    assert_eq!(
+        first["status"]["observedTag"],
+        json!("v2"),
+        "a failed release is held, not retried forever"
+    );
+
+    // Second pass over the stored object: identical failure -> no write.
+    let revision = resource_version(&first);
+    roll_once(&client, &first).await;
+    let second = stored(&client, &sp_key()).await;
+    assert_eq!(
+        resource_version(&second),
+        revision,
+        "the resync must not mint a new revision"
+    );
+    assert_eq!(second, first, "byte-identical status");
+}
+
+/// A DIFFERENT failure still writes: the anti-churn guard compares the
+/// reason/message, it never freezes the first failure forever.
+#[tokio::test]
+async fn a_new_failure_reason_is_written() {
+    let client = client();
+    let sp = seed(&client, json!([{"weight": 100, "pauseSeconds": 0}])).await;
+    client.delete(&split_key()).await.unwrap();
+    roll_once(&client, &sp).await;
+    let first = stored(&client, &sp_key()).await;
+    assert_eq!(reason(&first), "TrafficSplitMissing");
+
+    // The split is back but the stable Deployment is gone: a new reason.
+    client.create(&split_key(), traffic_split()).await.unwrap();
+    client.delete(&stable_dep_key()).await.unwrap();
+    let revision = resource_version(&first);
+    roll_once(&client, &first).await;
+    let second = stored(&client, &sp_key()).await;
+    assert_eq!(reason(&second), "StableDeploymentMissing");
+    assert!(
+        resource_version(&second) > revision,
+        "the new failure writes"
+    );
+}
+
+/// `fail` is a no-op once the exact failure is on the object (unit level,
+/// no `roll` plumbing): same reason + message + tag -> no storage write.
+#[tokio::test]
+async fn fail_is_idempotent_for_the_same_failure() {
+    let client = client();
+    let sp = seed(&client, json!([{"weight": 100, "pauseSeconds": 0}])).await;
+    fail(
+        &client,
+        &sp_key(),
+        &sp,
+        "TrafficSplitMissing",
+        "TrafficSplit default/web does not exist",
+        Some("v2"),
+    )
+    .await
+    .unwrap();
+    let first = stored(&client, &sp_key()).await;
+    let revision = resource_version(&first);
+
+    fail(
+        &client,
+        &sp_key(),
+        &first,
+        "TrafficSplitMissing",
+        "TrafficSplit default/web does not exist",
+        Some("v2"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resource_version(&stored(&client, &sp_key()).await),
+        revision
+    );
+
+    // The guard is exact: a changed message is a new report.
+    fail(
+        &client,
+        &sp_key(),
+        &first,
+        "TrafficSplitMissing",
+        "TrafficSplit default/other does not exist",
+        Some("v2"),
+    )
+    .await
+    .unwrap();
+    let third = stored(&client, &sp_key()).await;
+    assert!(resource_version(&third) > revision);
+    assert_eq!(
+        third["status"]["conditions"][0]["message"],
+        json!("TrafficSplit default/other does not exist")
     );
 }

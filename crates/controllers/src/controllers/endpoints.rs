@@ -15,10 +15,17 @@ use crate::client::Client;
 use crate::controllers::is_terminating;
 use crate::error::ControllerError;
 use crate::id::placeholder_pod_ip;
-use crate::object::{name, namespace, pod_is_ready, selector_matches, semantic_eq};
+use crate::object::{
+    name, namespace, owner_reference, pod_is_ready, selector_matches, semantic_eq,
+};
 
 /// Reconcile one Service's Endpoints. `endpoints` is the existing object, if
 /// any (caller reads it fresh); the write happens only on change.
+///
+/// Ownership (T3.1a bug fix): the object carries a `controller: true`
+/// ownerReference pointing at its Service, so the GC sweep reaps it when the
+/// Service goes away -- without it the Endpoints outlived its Service
+/// forever (nothing else deletes the kind).
 pub async fn reconcile(
     client: &std::sync::Arc<dyn Client>,
     service: &Value,
@@ -101,12 +108,7 @@ pub async fn reconcile(
     } else {
         vec![json!({"addresses": ready, "notReadyAddresses": not_ready, "ports": ports})]
     };
-    let desired = json!({
-        "apiVersion": "v1",
-        "kind": "Endpoints",
-        "metadata": {"name": svc_name, "namespace": ns},
-        "subsets": subsets,
-    });
+    let mut desired = desired_endpoints(service, svc_name, ns, subsets);
 
     let key = Key::new("", "endpoints", ns, svc_name);
     match endpoints {
@@ -116,6 +118,9 @@ pub async fn reconcile(
             Err(e) => return Err(e),
         },
         Some(existing) => {
+            // Never fight another writer: an ownerReference that already
+            // names this Service is carried over verbatim.
+            keep_owner_references(existing, svc_name, &mut desired);
             if !semantic_eq(existing, &desired) {
                 // Conflict propagates: the worker retries (no re-delivery
                 // is guaranteed on a quiesced object).
@@ -127,6 +132,50 @@ pub async fn reconcile(
         }
     }
     Ok(())
+}
+
+/// Desired Endpoints object: Service selector membership plus the
+/// controller ownerReference of the Service (`v1`, `uid` from the Service).
+fn desired_endpoints(service: &Value, svc_name: &str, ns: &str, subsets: Vec<Value>) -> Value {
+    let uid = service
+        .pointer("/metadata/uid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    json!({
+        "apiVersion": "v1",
+        "kind": "Endpoints",
+        "metadata": {
+            "name": svc_name,
+            "namespace": ns,
+            "ownerReferences": [owner_reference(svc_name, uid, "Service", "v1")],
+        },
+        "subsets": subsets,
+    })
+}
+
+/// Carry `existing`'s ownerReferences over when they already name this
+/// Service, so a hand-curated (or GC-stamped) reference list survives the
+/// update; an absent/foreign one is replaced by the controller reference.
+fn keep_owner_references(existing: &Value, svc_name: &str, desired: &mut Value) {
+    if !owned_by_service(existing, svc_name) {
+        return; // absent or foreign: the desired controller reference wins
+    }
+    if let Some(refs) = existing.pointer("/metadata/ownerReferences").cloned() {
+        desired["metadata"]["ownerReferences"] = refs;
+    }
+}
+
+/// True when `obj` carries a `Service` ownerReference named `svc_name`
+/// (uid is not compared: the GC resolves owners by kind + namespace + name).
+fn owned_by_service(obj: &Value, svc_name: &str) -> bool {
+    obj.pointer("/metadata/ownerReferences")
+        .and_then(Value::as_array)
+        .is_some_and(|refs| {
+            refs.iter().any(|r| {
+                r.get("kind").and_then(Value::as_str) == Some("Service")
+                    && r.get("name").and_then(Value::as_str) == Some(svc_name)
+            })
+        })
 }
 
 /// Resolve one Service port to the container port Endpoints must carry
@@ -194,8 +243,13 @@ fn resource_version_of(v: &Value) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_target_port;
+    use super::{reconcile, resolve_target_port};
+    use crate::client::StorageClient;
+    use crate::controllers::gc;
+    use crate::controllers::Caches;
     use serde_json::{json, Value};
+    use std::sync::Arc;
+    use storage::{EmbeddedStorage, Key};
 
     fn pod_with_named_port() -> Value {
         json!({
@@ -248,5 +302,135 @@ mod tests {
     #[test]
     fn resolve_target_port_missing_port_is_none() {
         assert_eq!(resolve_target_port(&json!({"name": "http"}), &[]), None);
+    }
+
+    fn service() -> Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default", "uid": "svc-uid"},
+            "spec": {
+                "selector": {"app": "web"},
+                "ports": [{"port": 80, "targetPort": 8080}],
+            },
+        })
+    }
+
+    fn ep_key() -> Key {
+        Key::new("", "endpoints", "default", "web")
+    }
+
+    /// B4: a created Endpoints object is CONTROLLED by its Service, so the
+    /// existing GC sweep reaps it when the Service is deleted.
+    #[tokio::test]
+    async fn created_endpoints_carry_the_service_owner_reference() {
+        let client: Arc<dyn crate::client::Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        reconcile(&client, &service(), None).await.unwrap();
+
+        let ep = client
+            .get(&ep_key())
+            .await
+            .unwrap()
+            .expect("endpoints created");
+        let owner = &ep["metadata"]["ownerReferences"][0];
+        assert_eq!(owner["apiVersion"], json!("v1"));
+        assert_eq!(owner["kind"], json!("Service"));
+        assert_eq!(owner["name"], json!("web"));
+        assert_eq!(owner["uid"], json!("svc-uid"));
+        assert_eq!(owner["controller"], json!(true));
+        // Subsets are still the controller's business (empty: no pods).
+        assert_eq!(ep["subsets"], json!([]));
+    }
+
+    /// B4: a pre-existing Endpoints object is adopted on its next update --
+    /// the missing/foreign ownerReference is replaced, never left dangling.
+    #[tokio::test]
+    async fn existing_endpoints_are_adopted_on_update() {
+        let client: Arc<dyn crate::client::Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        client
+            .create(
+                &ep_key(),
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Endpoints",
+                    "metadata": {"name": "web", "namespace": "default"},
+                    "subsets": [{"addresses": [{"ip": "10.42.0.1"}], "ports": [{"port": 1}]}],
+                }),
+            )
+            .await
+            .unwrap();
+
+        // The worker reads the existing object fresh, then reconciles.
+        let existing = client.get(&ep_key()).await.unwrap().unwrap();
+        reconcile(&client, &service(), Some(&existing))
+            .await
+            .unwrap();
+        let ep = client.get(&ep_key()).await.unwrap().unwrap();
+        assert_eq!(
+            ep["metadata"]["ownerReferences"][0]["kind"],
+            json!("Service")
+        );
+        assert_eq!(ep["subsets"], json!([]), "converged to the desired shape");
+    }
+
+    /// B4: another writer's reference list is preserved, not clobbered.
+    #[tokio::test]
+    async fn an_existing_service_owner_reference_is_kept_verbatim() {
+        let client: Arc<dyn crate::client::Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        let mut existing = json!({
+            "apiVersion": "v1",
+            "kind": "Endpoints",
+            "metadata": {"name": "web", "namespace": "default", "ownerReferences": [
+                {"apiVersion": "v1", "kind": "Service", "name": "web", "uid": "older-uid",
+                 "controller": true},
+            ]},
+            "subsets": [{"addresses": [{"ip": "10.42.0.1"}], "ports": [{"port": 1}]}],
+        });
+        existing = client.create(&ep_key(), existing).await.unwrap();
+
+        reconcile(&client, &service(), Some(&existing))
+            .await
+            .unwrap();
+        let ep = client.get(&ep_key()).await.unwrap().unwrap();
+        assert_eq!(
+            ep["metadata"]["ownerReferences"][0]["uid"],
+            json!("older-uid"),
+            "the stored reference is not rewritten"
+        );
+    }
+
+    /// B4 end-to-end at the unit level: delete the Service, run the GC
+    /// sweep, and the Endpoints object disappears with it.
+    #[tokio::test]
+    async fn deleting_the_service_sweeps_its_endpoints() {
+        let client: Arc<dyn crate::client::Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        let svc = service();
+        let svc_key = Key::new("", "services", "default", "web");
+        client.create(&svc_key, svc.clone()).await.unwrap();
+        reconcile(&client, &svc, None).await.unwrap();
+        assert!(client.get(&ep_key()).await.unwrap().is_some());
+
+        let caches = Arc::new(Caches::new());
+        caches
+            .services
+            .replace_all(vec![("default/web".to_string(), Arc::new(svc.clone()))]);
+        gc::sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&ep_key()).await.unwrap().is_some(),
+            "a live Service keeps its Endpoints"
+        );
+
+        // The Service goes away (informer cache + storage): the sweep reaps.
+        caches.services.replace_all(vec![]);
+        client.delete(&svc_key).await.unwrap();
+        gc::sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&ep_key()).await.unwrap().is_none(),
+            "Endpoints must not outlive its Service"
+        );
     }
 }

@@ -22,11 +22,14 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-use crate::http::{exchange, exchange_file, resolve_location, Reply, Target};
+use crate::http::{
+    exchange, exchange_file, exchange_until, resolve_location, Deadline, Reply, Target,
+};
 
 /// Media type of the image config blob (docker schema 2).
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.docker.container.image.v1+json";
@@ -34,6 +37,13 @@ pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.docker.container.image.v1+j
 pub const LAYER_MEDIA_TYPE: &str = "application/vnd.docker.image.rootfs.diff.tar";
 /// Media type of a docker v2 schema-2 image manifest.
 pub const MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
+
+/// Overall wall-clock budget of ONE push (bug fix **B7**, T8.1/Q40):
+/// every blob dance plus the manifest PUT must fit inside it, so a hung
+/// registry surfaces as `PushError::Io("... timed out")` instead of
+/// pinning a Build worker forever. The per-exchange limit is whatever is
+/// LEFT of this budget, never a fresh allowance.
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Where a blob's bytes come from (A1): in-memory for tiny/synthetic
 /// payloads, on-disk for the `docker save` import path so a multi-GiB
@@ -148,13 +158,35 @@ pub async fn push_image(
     tag: &str,
     image: &PushImage,
 ) -> Result<String, PushError> {
+    push_image_with_budget(registry_addr, repo, tag, image, PUSH_TIMEOUT).await
+}
+
+/// [`push_image`] under a caller-chosen overall budget (B7). The deadline
+/// is computed once and threaded through every exchange, so a slow or dead
+/// registry fails fast with `PushError::Io` ("timed out") while a healthy
+/// one behaves exactly like [`push_image`].
+pub async fn push_image_with_budget(
+    registry_addr: &str,
+    repo: &str,
+    tag: &str,
+    image: &PushImage,
+    budget: Duration,
+) -> Result<String, PushError> {
     let authority = normalize_authority(registry_addr)?;
     validate_repo_tag(repo, tag)?;
+    let deadline = Deadline::after(budget);
 
-    let config_digest = upload_body(&authority, repo, BodyRef::Bytes(&image.config), None).await?;
+    let config_digest = upload_body(
+        &authority,
+        repo,
+        BodyRef::Bytes(&image.config),
+        None,
+        deadline,
+    )
+    .await?;
     let mut layer_digests = Vec::with_capacity(image.layers.len());
     for layer in &image.layers {
-        layer_digests.push(upload_blob(&authority, repo, &layer.body).await?);
+        layer_digests.push(upload_blob(&authority, repo, &layer.body, deadline).await?);
     }
 
     let manifest = build_manifest(image, &config_digest, &layer_digests)?;
@@ -163,11 +195,12 @@ pub async fn push_image(
         authority,
         path: format!("/v2/{repo}/manifests/{tag}"),
     };
-    let reply = exchange(
+    let reply = exchange_until(
         &target,
         "PUT",
         &[("content-type", MANIFEST_MEDIA_TYPE)],
         &manifest,
+        deadline,
     )
     .await?;
     // distribution answers 201; some proxies rewrite a PUT into a 200.
@@ -193,11 +226,25 @@ enum BodyRef<'a> {
 /// bodies stream in 256 KiB windows with the digest computed on the fly
 /// (A1), so the declared staged digest is verified against what the
 /// server actually received.
-async fn upload_blob(authority: &str, repo: &str, body: &BlobBody) -> Result<String, PushError> {
+async fn upload_blob(
+    authority: &str,
+    repo: &str,
+    body: &BlobBody,
+    deadline: Deadline,
+) -> Result<String, PushError> {
     match body {
-        BlobBody::Bytes(data) => upload_body(authority, repo, BodyRef::Bytes(data), None).await,
+        BlobBody::Bytes(data) => {
+            upload_body(authority, repo, BodyRef::Bytes(data), None, deadline).await
+        }
         BlobBody::File { path, size, digest } => {
-            upload_body(authority, repo, BodyRef::File(path, *size), Some(digest)).await
+            upload_body(
+                authority,
+                repo,
+                BodyRef::File(path, *size),
+                Some(digest),
+                deadline,
+            )
+            .await
         }
     }
 }
@@ -208,23 +255,25 @@ async fn upload_body(
     repo: &str,
     body: BodyRef<'_>,
     declared_digest: Option<&str>,
+    deadline: Deadline,
 ) -> Result<String, PushError> {
     let create = Target {
         authority: authority.to_string(),
         path: format!("/v2/{repo}/blobs/uploads/"),
     };
-    let reply = exchange(&create, "POST", &[], b"").await?;
+    let reply = exchange_until(&create, "POST", &[], b"", deadline).await?;
     expect_status(&reply, &[202])?;
     let patch = resolve_location(authority, location_of(&reply)?)?;
 
     let (reply, digest) = match body {
         BodyRef::Bytes(data) => {
             let digest = sha256_digest(data);
-            let reply = exchange(
+            let reply = exchange_until(
                 &patch,
                 "PATCH",
                 &[("content-type", "application/octet-stream")],
                 data,
+                deadline,
             )
             .await?;
             (reply, digest)
@@ -236,6 +285,7 @@ async fn upload_body(
                 &[("content-type", "application/octet-stream")],
                 path,
                 size,
+                deadline,
             )
             .await?;
             if let Some(declared) = declared_digest {
@@ -265,7 +315,7 @@ async fn upload_body(
             percent_encode_query(&digest)
         ),
     };
-    let reply = exchange(&commit, "PUT", &[], b"").await?;
+    let reply = exchange_until(&commit, "PUT", &[], b"", deadline).await?;
     expect_status(&reply, &[201])?;
     Ok(digest)
 }
@@ -474,6 +524,47 @@ mod tests {
         assert!(validate_repo_tag("demo", "").is_err());
         assert!(validate_repo_tag("Demo/App", "v1").is_err());
         assert!(validate_repo_tag("demo", "bad tag").is_err());
+    }
+
+    /// A registry that accepts the connection and then never answers: the
+    /// push must give up on its budget instead of blocking the caller
+    /// forever (B7). 200 ms is far below the 120 s default, which is the
+    /// point: the budget is the caller's, not the crate's.
+    #[tokio::test]
+    async fn push_honours_an_overall_budget_against_a_stalled_registry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let acceptor = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket); // accept, then never answer
+            }
+        });
+        let image = PushImage {
+            config: b"{}".to_vec(),
+            config_media_type: CONFIG_MEDIA_TYPE.to_string(),
+            layers: vec![LayerBlob::bytes(LAYER_MEDIA_TYPE, b"layer".to_vec())],
+        };
+        let started = std::time::Instant::now();
+        let err = push_image_with_budget(
+            &addr,
+            "demo/stalled",
+            "v1",
+            &image,
+            Duration::from_millis(200),
+        )
+        .await
+        .expect_err("a stalled registry must not be pushed into");
+        acceptor.abort();
+
+        let msg = err.to_string();
+        assert!(matches!(err, PushError::Io(_)), "{msg}");
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "push gave up after {:?}, expected ~200ms",
+            started.elapsed()
+        );
     }
 
     #[test]

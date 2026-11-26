@@ -2,6 +2,11 @@
 //! attempt over the sanitized ContainerSpec, per-attempt provider broker,
 //! four-way descendant cleanup. Fail-closed: never falls back to the
 //! legacy Q37 subprocess path.
+//!
+//! Long-run hardening (C5/C14): teardown is bounded end to end (H1), the
+//! attempt handle kills its engine on drop (H6), the per-attempt dirs are
+//! removed after the reap (H4), and repeat Pending failures log at debug
+//! (H2 -- `agents.rs` spaces the retries with the backoff curve).
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -12,15 +17,15 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::agent_broker::{spawn_broker, BrokerHandle};
-use crate::agent_exec::{fail_cond, patch_if_changed, Written};
+use crate::agent_exec::{dedupe_id, fail_cond, patch_if_changed, Written};
 use crate::agent_objects as objs;
 use crate::agent_sandbox::{
-    open_workspace_to_sandbox, prepare_sandbox_dirs, sandbox_spec, sanitize_attempt_id,
-    sanitize_env, select_sandbox, validate_hardened, SandboxInputs, SandboxSelection,
-    BROKER_TARGET,
+    open_workspace_to_sandbox, prepare_sandbox_dirs, remove_attempt_dirs, sandbox_spec,
+    sanitize_attempt_id, sanitize_env, select_sandbox, validate_hardened, SandboxInputs,
+    SandboxSelection, BROKER_TARGET,
 };
 use crate::agent_sandbox_plan::{
-    attempt_id, audit_denial_count, container_plan, decode_policy, decode_sandbox,
+    attempt_id, audit_denial_count, container_plan, decode_policy, decode_sandbox, pending_reason,
     stage_runner_into_rootfs, write_policy_file,
 };
 use crate::agents::{AgentRecord, AgentRunnerConfig};
@@ -36,12 +41,71 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// Budget for the fresh-connection Bye below (bounded so a wedged engine
 /// cannot stall teardown; the reap SIGKILL remains the backstop).
 const BYE_GRACE: Duration = Duration::from_secs(1);
+/// Bound of the drop-path reap (H6/C14): SIGKILL is already delivered when
+/// the bound expires, so an unreaped engine is init's, never a leak.
+const DROP_REAP_GRACE: Duration = Duration::from_secs(2);
+
+/// H1 (C5): every wait of [`teardown`] in one value, so the end-to-end
+/// bound is explicit (drain + 2x bye + reap) and a test can shrink it.
+/// Production callers pass [`TEARDOWN_BUDGET`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TeardownBudget {
+    /// Signal + Shutdown + the Exited/Bye drain share ONE budget: a
+    /// deadline checked between frames could never bound one wedged read.
+    drain: Duration,
+    /// The fresh-connection Bye (the connect and the reply, each).
+    bye: Duration,
+    /// Reap wait before the SIGKILL last resort (pump.rs parity).
+    reap: Duration,
+}
+
+const TEARDOWN_BUDGET: TeardownBudget = TeardownBudget {
+    drain: DRAIN_GRACE,
+    bye: BYE_GRACE,
+    reap: REAP_GRACE,
+};
+
+/// What one [`teardown`] observed. Returned as a value (not only logged)
+/// so the bounded-wait contract (H1/C5) and the dir removal (H4/C14) are
+/// testable; production callers let it drop.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TeardownReport {
+    /// The stream phase hit `budget.drain`: a wedged engine. The reap
+    /// SIGKILL (and the stdin parent tie, H6) remain the backstop.
+    drain_timed_out: bool,
+    /// The engine process was waited on by us (`false`: left to init).
+    reaped: bool,
+    /// The per-attempt dirs are gone (H4).
+    dirs_removed: bool,
+}
+
 /// What one attempt spawned: torn down on EVERY exit path (AS4).
 struct Attempt {
     id: String,
     socket: PathBuf,
+    /// Node data dir (H4/C14: locates the per-attempt dirs to remove).
+    data_dir: PathBuf,
+    /// The engine process WITH its stdin pipe (`launch::spawn_engine`):
+    /// the pipe's write end is the engine's parent tie (H6/C14) -- closing
+    /// it (the drop below) makes the engine exit even if the kill is missed.
     child: Option<Child>,
     broker: Option<BrokerHandle>,
+}
+
+/// H6/C14: a dropped `Attempt` never leaves an engine behind. Every normal
+/// path runs [`teardown`], which `take()`s the child, so this only fires
+/// on a panic or a cancelled task: SIGKILL + bounded reap, then the socket
+/// and the per-attempt dirs (H4). The broker revokes through its own Drop.
+impl Drop for Attempt {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let reaped = launch::kill_and_reap(child, DROP_REAP_GRACE);
+            tracing::warn!(target: "init-pro", attempt = %self.id, reaped,
+                "T7.7 attempt dropped without teardown (C14); engine killed");
+        }
+        let _ = std::fs::remove_file(&self.socket);
+        let _ = remove_attempt_dirs(&self.data_dir, &self.id);
+    }
 }
 
 /// The one shared teardown (AS4). With a live stream and `kill`: signal
@@ -53,18 +117,34 @@ struct Attempt {
 /// (`nsrun/src/child.rs`). After a natural `Exited` the cgroup is already
 /// cleaned but the engine CLOSES the session without draining our Shutdown
 /// frame — a fresh-connection Shutdown (below) parks it into Bye + exit.
-/// Then: reap, revoke the broker, unlink socket.
-async fn teardown(attempt: &mut Attempt, stream: Option<&mut RunStream>, kill: bool) {
+/// Then: reap, revoke the broker, unlink socket, remove the attempt dirs
+/// (H4/C14).
+///
+/// Bounded end to end (C5/H1): `RunStream::next` has no read timeout, so
+/// a deadline checked BETWEEN frames could never bound one wedged read.
+/// The whole stream phase (Signal, Shutdown, Exited/Bye drain) shares one
+/// `budget.drain` and the fresh-connection Bye is bounded by `budget.bye`;
+/// the reap (`budget.reap`, then SIGKILL) stays the backstop.
+async fn teardown(
+    attempt: &mut Attempt,
+    stream: Option<&mut RunStream>,
+    kill: bool,
+    budget: TeardownBudget,
+) -> TeardownReport {
+    let mut report = TeardownReport::default();
     if let Some(stream) = stream {
-        if kill {
-            let _ = stream.send_signal(&attempt.id, 9).await;
-        }
-        let _ = stream.send_shutdown().await;
-        let deadline = tokio::time::Instant::now() + DRAIN_GRACE; // Exited/Bye tail
-        while let Ok(Some(_)) = stream.next().await {
-            if tokio::time::Instant::now() >= deadline {
-                break;
+        let id = attempt.id.clone();
+        let drain = async {
+            if kill {
+                let _ = stream.send_signal(&id, 9).await;
             }
+            let _ = stream.send_shutdown().await;
+            while let Ok(Some(_)) = stream.next().await {} // Exited/Bye tail until EOF
+        };
+        report.drain_timed_out = tokio::time::timeout(budget.drain, drain).await.is_err();
+        if report.drain_timed_out {
+            tracing::warn!(target: "init-pro", attempt = %attempt.id,
+                "T7.7 teardown drain timed out (C5); the reap SIGKILL is the backstop");
         }
     } else if let Some(child) = attempt.child.as_mut() {
         // No session was ever established: no container to stop gently.
@@ -79,18 +159,65 @@ async fn teardown(attempt: &mut Attempt, stream: Option<&mut RunStream>, kill: b
     // Bye and exits; a busy one takes the request from its backlog.
     if let Some(child) = attempt.child.as_mut() {
         if child.try_wait().ok().flatten().is_none() {
-            if let Ok(client) = EngineClient::connect(&attempt.socket).await {
-                let _ = tokio::time::timeout(BYE_GRACE, client.shutdown()).await;
+            // C5/H1: the connect itself is bounded -- a wedged backlog must
+            // not stall teardown either.
+            if let Ok(Ok(client)) =
+                tokio::time::timeout(budget.bye, EngineClient::connect(&attempt.socket)).await
+            {
+                let _ = tokio::time::timeout(budget.bye, client.shutdown()).await;
             }
         }
     }
     if let Some(mut child) = attempt.child.take() {
-        let _ = tokio::task::spawn_blocking(move || launch::reap(&mut child, REAP_GRACE)).await;
+        // The blocking reap cannot be cancelled: it always runs to the
+        // bounded wait + SIGKILL, whatever happens to this task.
+        report.reaped = tokio::task::spawn_blocking(move || launch::reap(&mut child, budget.reap))
+            .await
+            .is_ok_and(|r| r.is_ok());
     }
     if let Some(broker) = attempt.broker.take() {
         broker.revoke().await;
     }
     let _ = std::fs::remove_file(&attempt.socket);
+    // H4/C14: the engine (and with it the sandbox mount namespace) is gone
+    // and the broker socket is revoked BEFORE the private rootfs/scratch go;
+    // the workspace is a pinned per-address NFS root outside this tree, so
+    // no umount is involved here.
+    report.dirs_removed = remove_attempt_dirs(&attempt.data_dir, &attempt.id);
+    if !report.dirs_removed {
+        tracing::debug!(target: "init-pro", attempt = %attempt.id,
+            "T7.7 attempt dirs not fully removed (C14)");
+    }
+    report
+}
+
+/// H2 (C14): `true` when the last status body written for this Agent is
+/// already Pending with this `reason` -- a REPEAT failure, logged at debug
+/// instead of warn (`agents.rs` spaces the retries out with the backoff).
+async fn is_repeat_pending(written: &Written, view: &objs::AgentView, reason: &str) -> bool {
+    written
+        .lock()
+        .await
+        .get(&dedupe_id(view))
+        .is_some_and(|body| pending_reason(body) == Some(reason))
+}
+
+/// H2 (C14): the log shape of one Pending outcome -- `warn` the first time
+/// the Agent is seen Pending with `reason` (actionable: which stack piece
+/// is missing), `debug` on every repeat. The backoff curve in `agents.rs`
+/// bounds how often this runs at all.
+async fn warn_first_pending<F: FnOnce()>(
+    written: &Written,
+    view: &objs::AgentView,
+    reason: &str,
+    warn: F,
+) {
+    if is_repeat_pending(written, view, reason).await {
+        tracing::debug!(target: "init-pro", agent = %view.key, reason,
+            "T7.7 Agent stays Pending (repeat; C14 backoff)");
+    } else {
+        warn();
+    }
 }
 
 /// Hardened-path branch of [`crate::agent_exec::run_attempt`]. `None` =
@@ -125,24 +252,32 @@ pub(crate) async fn try_hardened(
     // runner + staged HARDENED agent-runner (the gated in-process runner).
     let node_ready =
         cfg.sandbox.is_some() && cfg.runner_bin.is_some() && cfg.hardened_runner_bin.is_some();
-    if !node_ready {
-        tracing::warn!(
-            target: "init-pro", agent = %view.key,
-            sandbox_config = cfg.sandbox.is_some(),
-            runner = cfg.runner_bin.is_some(),
-            hardened_agent_runner = cfg.hardened_runner_bin.is_some(),
-            "T7.7 containment stack incomplete (Q63); hardened Agents stay Pending"
-        );
-    }
     let node_cfg = match select_sandbox(sandbox.as_ref(), node_ready, require_hardened) {
         // Node mandates hardening but this Agent has no spec.sandbox:
         // refuse BEFORE the legacy spawn could ever run (T7.7, Q63).
         SandboxSelection::RequiredRefused(msg) => {
-            return Some((objs::PHASE_PENDING, fail_cond("SandboxRequired", &msg)))
+            warn_first_pending(written, view, "SandboxRequired", || {
+                tracing::warn!(target: "init-pro", agent = %view.key,
+                    "T7.7 node mandates hardened sandboxes but the Agent has no spec.sandbox (Q63)")
+            })
+            .await;
+            return Some((objs::PHASE_PENDING, fail_cond("SandboxRequired", &msg)));
         }
-        // Stay Pending (retried by the loop); NO fallback (Q63).
+        // Stay Pending (retried by the loop); NO fallback (Q63). `Invalid`
+        // is exactly "hardened request + containment stack incomplete"
+        // (`select_sandbox`), so the stack fields belong to THIS warn.
         SandboxSelection::Invalid(msg) => {
-            return Some((objs::PHASE_PENDING, fail_cond("SandboxUnavailable", &msg)))
+            warn_first_pending(written, view, "SandboxUnavailable", || {
+                tracing::warn!(
+                    target: "init-pro", agent = %view.key,
+                    sandbox_config = cfg.sandbox.is_some(),
+                    runner = cfg.runner_bin.is_some(),
+                    hardened_agent_runner = cfg.hardened_runner_bin.is_some(),
+                    "T7.7 containment stack incomplete (Q63); hardened Agents stay Pending"
+                )
+            })
+            .await;
+            return Some((objs::PHASE_PENDING, fail_cond("SandboxUnavailable", &msg)));
         }
         SandboxSelection::NotSelected => return None, // defensive: never maps here
         SandboxSelection::Selected => match cfg.sandbox.as_ref() {
@@ -242,6 +377,7 @@ pub(crate) async fn try_hardened(
     let mut spawned = Attempt {
         id: attempt,
         socket,
+        data_dir: cfg.data_dir.clone(),
         child: None,
         broker,
     };
@@ -260,7 +396,7 @@ async fn run_engine(
 ) -> Option<(&'static str, Value)> {
     // Shared fail-closed mapping for every pre-session engine failure.
     async fn spawn_failed(spawned: &mut Attempt, msg: String) -> Option<(&'static str, Value)> {
-        teardown(spawned, None, false).await;
+        teardown(spawned, None, false, TEARDOWN_BUDGET).await;
         Some((objs::PHASE_FAILED, fail_cond("SandboxSpawnFailed", &msg)))
     }
     let (rootfs, scratch) = match prepare_sandbox_dirs(&cfg.data_dir, &spawned.id) {
@@ -320,7 +456,7 @@ async fn run_engine(
         hostname: Some(sanitize_attempt_id(&view.name)),
     });
     if let Err(e) = validate_hardened(&spec) {
-        teardown(spawned, None, false).await;
+        teardown(spawned, None, false, TEARDOWN_BUDGET).await;
         return Some((objs::PHASE_FAILED, fail_cond("SandboxSpecInvalid", &e)));
     }
     // Stale socket from a previous run of the same object id: best-effort
@@ -344,7 +480,7 @@ async fn run_engine(
     let (verdict, stderr) =
         wait_verdict(&mut stream, &spawned.id, cfg.exec_timeout, keep_going).await;
     let natural = matches!(verdict, SandboxVerdict::Exited(_));
-    teardown(spawned, Some(&mut stream), !natural).await;
+    teardown(spawned, Some(&mut stream), !natural, TEARDOWN_BUDGET).await;
     let session_note = objs::session_id_from_stderr(&stderr)
         .map(|s| format!("; session {s}"))
         .unwrap_or_default();
@@ -391,3 +527,7 @@ async fn run_engine(
         )),
     }
 }
+
+#[cfg(test)] // H1/H6 teardown-helper cases split out (file size limit)
+#[path = "agent_exec_sandbox_lifecycle_tests.rs"]
+mod lifecycle_tests;

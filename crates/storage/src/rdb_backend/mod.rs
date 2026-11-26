@@ -19,9 +19,15 @@
 //!
 //! Durability is per-write fsync (rdb `store` writes every batch with
 //! `sync = true`), and the revision + compaction watermark are restored from
-//! `meta/` on reopen. Single-node, local-directory mode only: the rdb raft /
-//! SQL layers are compiled out behind its `store` feature (Q33 mirrors the
-//! Q29 stance for SQLite -- the engine is reused, not the server).
+//! `meta/` on reopen. Compaction is two halves: the mechanism
+//! ([`watch::compact`] + [`StorageBackend::compact`], T2.2/T2.3) and the
+//! production POLICY ([`compaction_plan`] /
+//! [`RdbStorage::compact_retaining`], B3) -- the latter is driven from the
+//! server on a timer, never from a thread in here.
+//!
+//! Single-node, local-directory mode only: the rdb raft / SQL layers are
+//! compiled out behind its `store` feature (Q33 mirrors the Q29 stance for
+//! SQLite -- the engine is reused, not the server).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -36,8 +42,13 @@ use crate::entry::{Revision, StoredEntry, WatchEvent};
 use crate::error::StorageError;
 use crate::key::{validate, Key, KeyPrefix};
 
+mod compaction;
 mod keys;
+#[cfg(test)]
+mod tests;
 mod watch;
+
+pub use compaction::{compact_retaining, compaction_plan, DEFAULT_RETAIN};
 
 use keys::LogRecord;
 
@@ -113,6 +124,33 @@ impl RdbStorage {
         ops::batch_write_async(Arc::clone(&self.db), batch)
             .await
             .map_err(StorageError::Backend)
+    }
+
+    /// The current cluster revision -- the read side of the production
+    /// compaction policy (B3, T2.3/Q33). The periodic caller lives in the
+    /// server (this crate owns no runtime and spawns no threads), so it
+    /// pairs this with [`Self::compact_retaining`] on its own schedule.
+    pub async fn revision(&self) -> Result<Revision, StorageError> {
+        Ok(self.state.lock().await.revision)
+    }
+
+    /// Production compaction entry point (B3, T2.3/Q33): keep at least the
+    /// latest `retain` revisions of `log/` history and drop everything older.
+    ///
+    /// This is the retain-based front door over
+    /// [`StorageBackend::compact`], which takes an absolute watermark: the
+    /// plan is [`compaction_plan`] (pure, unit-tested), so a caller never
+    /// has to do revision arithmetic. At least `retain` revisions always
+    /// stay replayable, CAS is untouched (`obj/` records are never
+    /// compacted) and a watch that starts at or below the resulting
+    /// watermark answers [`StorageError::Compacted`] (upstream `410 Gone`)
+    /// so the client re-LISTs instead of silently missing events.
+    ///
+    /// Returns the effective watermark. A short history (or a large `retain`)
+    /// compacts nothing and reports the standing watermark, so calling this
+    /// on a timer is always safe.
+    pub async fn compact_retaining(&self, retain: u64) -> Result<Revision, StorageError> {
+        compaction::compact_retaining(self, retain).await
     }
 }
 

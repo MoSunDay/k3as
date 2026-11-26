@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{watch, Mutex};
 
 use crate::agent_objects as objs;
@@ -147,22 +148,28 @@ pub(crate) async fn run_attempt(
     let mut cmd = tokio::process::Command::new(runner);
     cmd.args(&plan.args)
         .current_dir(&plan.workdir)
+        // C6: the runner leads its own process group so the tools/subagents
+        // it spawns can be killed as a unit on timeout/cancel (kill_on_drop
+        // only ever reaches the direct child).
+        .process_group(0)
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in &plan.envs {
         cmd.env(k, v);
     }
-    let wait_fut = async move {
-        let output = cmd
-            .spawn()
-            .map_err(|e| format!("spawn {runner:?}: {e}"))?
-            .wait_with_output()
-            .await
-            .map_err(|e| format!("wait: {e}"))?;
-        Ok::<std::process::Output, String>(output)
+    // C6: spawn up front so the group id survives the wait future being
+    // dropped on timeout/cancel (the dropped future owns the Child).
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return Some((
+                objs::PHASE_FAILED,
+                fail_cond("RunnerError", &format!("spawn {runner:?}: {e}")),
+            ));
+        }
     };
-    let started = verdict(cfg, wait_fut, keep_going).await;
+    let started = wait_runner(cfg, child, keep_going).await;
     match started {
         Verdict::Cancelled => None, // deleted mid-flight
         Verdict::Timeout => Some((
@@ -203,6 +210,7 @@ pub(crate) async fn run_attempt(
 }
 
 /// How one attempt ended.
+#[derive(Debug)]
 enum Verdict {
     Done(Result<std::process::Output, String>),
     Timeout,
@@ -233,6 +241,112 @@ async fn verdict(
     match tokio::time::timeout(cfg.exec_timeout, awaited).await {
         Ok(v) => v,
         Err(_) => Verdict::Timeout,
+    }
+}
+
+/// Hard cap on kept runner output per stream (C6): only the tail matters
+/// (the session id and the failure diagnostics); mirrors
+/// `engine/agent_stream.rs` STDERR_CAP.
+const OUTPUT_CAP: usize = 64 * 1024;
+
+/// Wait for an already spawned runner under both budgets (see [`verdict`])
+/// and, on Timeout/Cancelled, SIGKILL its whole process group (C6).
+async fn wait_runner(
+    cfg: &AgentRunnerConfig,
+    mut child: tokio::process::Child,
+    keep_going: &mut watch::Receiver<bool>,
+) -> Verdict {
+    let pgid = group_of(child.id());
+    let wait_fut = async move {
+        // C6: drain both pipes concurrently, keeping only their tails, so a
+        // chatty runner cannot grow node memory without bound.
+        let (stdout, stderr) = tokio::try_join!(
+            read_tail(child.stdout.take()),
+            read_tail(child.stderr.take())
+        )
+        .map_err(|e| format!("wait: {e}"))?;
+        let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
+        Ok::<std::process::Output, String>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+    let started = verdict(cfg, wait_fut, keep_going).await;
+    if matches!(started, Verdict::Timeout | Verdict::Cancelled) {
+        // kill_on_drop signalled the direct child only; the tools and
+        // subagents it spawned share its pgid and are killed here (C6).
+        if let Some(pgid) = pgid {
+            kill_group(pgid).await;
+        }
+    }
+    started
+}
+
+/// Budget for the group-kill helper below (C6).
+const KILL_WAIT: Duration = Duration::from_secs(5);
+
+/// The runner's process-group id (C6): under `process_group(0)` the child's
+/// pgid equals its pid; `None` when no id was reported or it is not pid_t-sized.
+fn group_of(pid: Option<u32>) -> Option<i32> {
+    pid.and_then(|p| i32::try_from(p).ok())
+}
+
+/// SIGKILL a whole process group (C6) through `kill(1)` with a negated pgid
+/// (`kill -s KILL -- -<pgid>`). The crate's nix features (fs/user/mount) do
+/// not compile in `nix::sys::signal::killpg`, and the raw libc call is not
+/// allowed by the crate's code-safety lint, so the standard tool does the
+/// same job from the kubelet's own process group. Bounded + kill-on-drop; a
+/// group that is already gone is a no-op. Groups <= 1 are never ours to
+/// signal (defense in depth against a placeholder id).
+async fn kill_group(pgid: i32) {
+    if pgid <= 1 {
+        return;
+    }
+    let target = format!("-{pgid}");
+    let res = tokio::time::timeout(
+        KILL_WAIT,
+        tokio::process::Command::new("kill")
+            .args(["-s", "KILL", "--", &target])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match res {
+        Ok(Ok(out)) if out.status.success() => {}
+        Ok(Ok(out)) => tracing::debug!(target: "init-pro", pgid, status = %out.status,
+            "runner process group kill (C6): nothing left to signal or kill(1) refused"),
+        Ok(Err(e)) => tracing::warn!(target: "init-pro", pgid, error = %e,
+            "runner process group kill (C6): kill(1) unavailable; runner tools may survive the attempt"),
+        Err(_) => tracing::warn!(target: "init-pro", pgid,
+            "runner process group kill (C6) timed out"),
+    }
+}
+
+/// Read `stream` to EOF keeping only its last [`OUTPUT_CAP`] bytes (C6).
+/// `None` (no pipe) is an empty capture.
+async fn read_tail<R: AsyncRead + Unpin>(stream: Option<R>) -> std::io::Result<Vec<u8>> {
+    let (mut stream, mut chunk) = match stream {
+        Some(s) => (s, [0u8; 8192]),
+        None => return Ok(Vec::new()),
+    };
+    let mut kept = Vec::new();
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(kept);
+        }
+        push_tail(&mut kept, &chunk[..n], OUTPUT_CAP);
+    }
+}
+
+/// Append `chunk` to `kept`, keeping only the last `cap` bytes (pure; C6).
+fn push_tail(kept: &mut Vec<u8>, chunk: &[u8], cap: usize) {
+    kept.extend_from_slice(chunk);
+    let overflow = kept.len().saturating_sub(cap);
+    if overflow > 0 {
+        kept.copy_within(overflow.., 0);
+        kept.truncate(cap);
     }
 }
 
@@ -308,6 +422,27 @@ async fn mount_with_retry(addr: &str, parent: &str, root: &Path) -> Result<(), S
     }
 }
 
+/// `umount -l <root>` under a bounded wait with kill-on-drop (C6): a hung
+/// umount is abandoned after [`PROBE_WAIT`]; the caller's remount then
+/// reports the resulting failure instead of the attempt stalling forever.
+async fn lazy_umount(root: &Path) -> std::io::Result<std::process::Output> {
+    tokio::time::timeout(
+        PROBE_WAIT,
+        tokio::process::Command::new("umount")
+            .arg("-l")
+            .arg(root)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "umount -l timed out",
+        ))
+    })
+}
+
 /// Mount the agent's anyhome workspace and return its per-Agent directory.
 ///
 /// Upstream shape (Q37 coordination note): any-home's mountd resolves
@@ -374,11 +509,12 @@ pub(crate) async fn mount_workspace(
             // mount_with_retry then rebuilds a live mount in its place.
             tracing::warn!(target: "init-pro", dir = %root.display(),
                 "workspace root stale (anyhome restarted?); lazy-unmounting and remounting");
-            let _ = tokio::process::Command::new("umount")
-                .arg("-l")
-                .arg(&root)
-                .output()
-                .await;
+            // C6: bounded + kill-on-drop, so a hung umount cannot stall the
+            // attempt (the remount below reports the resulting failure).
+            if let Err(e) = lazy_umount(&root).await {
+                tracing::debug!(target: "init-pro", dir = %root.display(), error = %e,
+                    "lazy umount did not complete (C6)");
+            }
             mount_with_retry(addr, &parent, &root).await?;
         }
         RootPlan::Mount => {
@@ -392,11 +528,14 @@ pub(crate) async fn mount_workspace(
 /// the first RPC round after `mount.nfs` returns can transiently fail
 /// with EIO while anyhome's freshly restarted plane settles (F6 family);
 /// three attempts half a second apart close it. `AlreadyExists`-like
-/// outcomes are already Ok by create_dir_all semantics.
+/// outcomes are already Ok by create_dir_all semantics. Every attempt is
+/// bounded (C6): through a stale NFSv3 hard mount mkdir never errors on its
+/// own, so the timeout is what turns "hung" into a retry. The blocking-pool
+/// thread stays parked until the server answers; only the attempt moves on.
 async fn create_dir_retry(dir: &Path) -> Result<(), String> {
     let mut last = String::new();
     for attempt in 0..3u32 {
-        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+        if let Err(e) = create_dir_bounded(dir).await {
             last = format!("create {}: {e}", dir.display());
             tracing::debug!(target: "init-pro", attempt, dir = %dir.display(), error = %e,
                 "workspace prepare retrying (F6 first-write race)");
@@ -406,6 +545,18 @@ async fn create_dir_retry(dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(last)
+}
+
+/// `create_dir_all` under the bounded wait (C6).
+async fn create_dir_bounded(dir: &Path) -> std::io::Result<()> {
+    tokio::time::timeout(PROBE_WAIT, tokio::fs::create_dir_all(dir))
+        .await
+        .unwrap_or_else(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "create_dir_all timed out",
+            ))
+        })
 }
 
 /// Idempotent local scaffold mirroring the server-side keeper layout
@@ -500,3 +651,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)] // C6 legacy-exec bounded capture / process-group kill cases
+#[path = "agent_exec_c6_tests.rs"]
+mod c6_tests;
