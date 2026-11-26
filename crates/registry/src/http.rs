@@ -9,6 +9,7 @@
 
 use std::time::Duration;
 
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -99,17 +100,99 @@ pub(crate) async fn exchange(
     extra: &[(&str, &str)],
     body: &[u8],
 ) -> Result<Reply, PushError> {
-    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target.authority))
+    let mut stream = connect(target).await?;
+    write_head(&mut stream, target, method, extra, body.len() as u64).await?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .await
+            .map_err(|e| PushError::Io(format!("send request body: {e}")))?;
+    }
+    stream
+        .flush()
+        .await
+        .map_err(|e| PushError::Io(format!("flush request: {e}")))?;
+    read_reply(stream).await
+}
+
+/// [`exchange`] with the body streamed from a file in 256 KiB windows --
+/// the A1 memory posture: a multi-GiB layer never enters RAM. The SHA-256
+/// is computed WHILE copying, so the upload verifies the staged digest at
+/// no extra IO and the returned digest is the one the server committed.
+pub(crate) async fn exchange_file(
+    target: &Target,
+    method: &str,
+    extra: &[(&str, &str)],
+    path: &std::path::Path,
+    size: u64,
+) -> Result<(Reply, String), PushError> {
+    let mut stream = connect(target).await?;
+    write_head(&mut stream, target, method, extra, size).await?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| PushError::Io(format!("open layer {}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; FILE_BUF];
+    let mut copied = 0u64;
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| PushError::Io(format!("read layer {}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        stream
+            .write_all(&buf[..n])
+            .await
+            .map_err(|e| PushError::Io(format!("send layer body: {e}")))?;
+        copied += n as u64;
+        if copied > size {
+            return Err(PushError::Io(format!(
+                "layer {} grew during push (declared {size} bytes)",
+                path.display()
+            )));
+        }
+    }
+    if copied != size {
+        return Err(PushError::Io(format!(
+            "layer {} truncated during push (declared {size}, read {copied})",
+            path.display()
+        )));
+    }
+    stream
+        .flush()
+        .await
+        .map_err(|e| PushError::Io(format!("flush request: {e}")))?;
+    let reply = read_reply(stream).await?;
+    Ok((reply, format!("sha256:{:x}", hasher.finalize())))
+}
+
+/// Copy window for streamed file bodies (A1: keeps RSS flat).
+const FILE_BUF: usize = 256 * 1024;
+
+/// Connect to the target authority with a bounded connect timeout.
+async fn connect(target: &Target) -> Result<TcpStream, PushError> {
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target.authority))
         .await
         .map_err(|_| PushError::Io(format!("connect {}: timed out", target.authority)))?
         .map_err(|e| PushError::Io(format!("connect {}: {e}", target.authority)))?;
     let _ = stream.set_nodelay(true);
+    Ok(stream)
+}
 
+/// Serialize + send the request head (Content-Length framing only).
+async fn write_head(
+    stream: &mut TcpStream,
+    target: &Target,
+    method: &str,
+    extra: &[(&str, &str)],
+    content_length: u64,
+) -> Result<(), PushError> {
     let mut head = format!(
-        "{method} {} HTTP/1.1\r\nhost: {}\r\ncontent-length: {}\r\nconnection: close\r\n",
-        target.path,
-        target.authority,
-        body.len()
+        "{method} {} HTTP/1.1\r\nhost: {}\r\ncontent-length: {content_length}\r\nconnection: close\r\n",
+        target.path, target.authority
     );
     for (k, v) in extra {
         head.push_str(k);
@@ -121,18 +204,11 @@ pub(crate) async fn exchange(
     stream
         .write_all(head.as_bytes())
         .await
-        .map_err(|e| PushError::Io(format!("send request head: {e}")))?;
-    if !body.is_empty() {
-        stream
-            .write_all(body)
-            .await
-            .map_err(|e| PushError::Io(format!("send request body: {e}")))?;
-    }
-    stream
-        .flush()
-        .await
-        .map_err(|e| PushError::Io(format!("flush request: {e}")))?;
+        .map_err(|e| PushError::Io(format!("send request head: {e}")))
+}
 
+/// Read the reply up to EOF or a satisfied Content-Length.
+async fn read_reply(mut stream: TcpStream) -> Result<Reply, PushError> {
     let mut raw = Vec::with_capacity(1024);
     let mut chunk = [0u8; 16 * 1024];
     loop {

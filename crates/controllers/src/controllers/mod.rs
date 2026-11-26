@@ -92,6 +92,25 @@ impl Default for Caches {
 }
 
 impl Caches {
+    /// A2: true once every owner cache the GC consults has completed its
+    /// first LIST. Until then `gc::sweep` refuses to run: on a cold start
+    /// (or a leader election that just moved) an empty cache would look
+    /// exactly like "every owner is gone" and mass-delete live dependents.
+    pub fn is_synced(&self) -> bool {
+        [
+            &self.deployments,
+            &self.replicasets,
+            &self.services,
+            &self.statefulsets,
+            &self.daemonsets,
+            &self.workflows,
+            &self.cronworkflows,
+            &self.servicepipelines,
+        ]
+        .iter()
+        .all(|store| store.has_synced())
+    }
+
     pub fn new() -> Self {
         Self {
             deployments: Arc::new(ObjectStore::new()),

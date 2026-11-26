@@ -108,7 +108,41 @@ pub(crate) fn spawn_worker(
                     None => break,
                 },
             };
-            match reconcile_key(&client, &caches, &queue, kind, &cfg, &key, &now).await {
+            // A3: the reconcile runs in a supervised task. A panic in a
+            // reconciler used to kill this worker permanently (and with the
+            // single-worker kinds -- NodeCidr, ServiceLb, Build -- the whole
+            // controller silently died). Now the panic is contained, logged
+            // and the key requeued with backoff.
+            let task = {
+                let client = client.clone();
+                let caches = caches.clone();
+                let queue = queue.clone();
+                let cfg = cfg.clone();
+                let now = now.clone();
+                let key = key.clone();
+                tokio::spawn(async move {
+                    reconcile_key(&client, &caches, &queue, kind, &cfg, &key, &now).await
+                })
+            };
+            let outcome = match task.await {
+                Ok(outcome) => outcome,
+                Err(join) if join.is_panic() => {
+                    tracing::error!(
+                        key = %key,
+                        kind = ?kind,
+                        "reconcile panicked; worker survived and requeued the key"
+                    );
+                    queue.add_rate_limited(key.clone());
+                    queue.done(&key);
+                    continue;
+                }
+                Err(join) => {
+                    // Runtime shutdown / task abort: stop draining.
+                    tracing::debug!(key = %key, error = %join, "reconcile task dropped");
+                    break;
+                }
+            };
+            match outcome {
                 Ok(()) => {
                     queue.forget(&key);
                     queue.done(&key);

@@ -77,6 +77,10 @@ pub struct PipelineConfig {
     pub docker_bin: String,
     /// Build/save timeout when `spec.timeoutSeconds == 0` (default 900).
     pub default_timeout_seconds: u64,
+    /// A1 hardening: upper bound on the *decoded* `docker save` archive a
+    /// Build pass imports (default 8 GiB). The importer streams layers to
+    /// `<scratch>/import` so the bound guards the DISK, never the RSS.
+    pub max_image_bytes: u64,
 }
 
 /// Reconcile one `ServicePipeline` (`sp`, raw JSON).

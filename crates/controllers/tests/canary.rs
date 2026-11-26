@@ -137,6 +137,7 @@ async fn boot_env() -> Env {
             scratch_dir: tmp.join("scratch"),
             docker_bin,
             default_timeout_seconds: 30,
+            max_image_bytes: registry::DEFAULT_MAX_IMAGE_BYTES,
         }),
         ..Default::default()
     };

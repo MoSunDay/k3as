@@ -10,67 +10,184 @@
 //!
 //! Layout parsed (docker archive, not OCI image layout):
 //! `manifest.json` -> `[{Config, RepoTags, Layers}]`, plus the config
-//! JSON and every `Layers` entry as regular tar members. Memory is
-//! bounded: the unpacked archive is capped at 8 GiB and the collected
-//! config + layers at the same figure, so a hostile `.tar.gz` bomb
-//! fails with a clear error instead of exhausting RAM.
+//! JSON and every `Layers` entry as regular tar members.
+//!
+//! **A1 memory posture:** the archive is staged to disk in ONE pass with
+//! `hash-while-copy` ([`crate::tarstream`]); only `manifest.json` and the
+//! image config stay in RAM. A 4 GiB image therefore costs a bounded
+//! ~256 KiB of RSS instead of 2-3x its size, and a hostile archive that
+//! crosses `max_image_bytes` is rejected before it can fill either RAM or
+//! the disk (the staging directory is removed on drop).
 
-use std::borrow::Cow;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::client::{LayerBlob, PushImage, CONFIG_MEDIA_TYPE, LAYER_MEDIA_TYPE};
+use crate::client::{BlobBody, LayerBlob, PushImage, CONFIG_MEDIA_TYPE, LAYER_MEDIA_TYPE};
+use crate::tarstream::{self, Staging};
 
-/// Name of the docker archive index entry.
-const MANIFEST_ENTRY: &str = "manifest.json";
-/// Cap on the unpacked tar stream (compression-bomb guard).
-const MAX_UNPACKED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-/// Cap on `manifest.json` itself (a few KiB in practice).
-const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
-const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
-const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+/// Default cap on the *uncompressed* archive stream (compression-bomb and
+/// disk guard; the docker CLI saves images of this size in practice).
+pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default cap on `manifest.json` itself (a few KiB in practice).
+pub const DEFAULT_MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 
-/// One image out of a `docker save` archive, still as raw blobs.
+/// Import budget: `max_image_bytes` bounds the decoded archive, and
+/// `max_metadata_bytes` bounds `manifest.json` and the config blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportLimits {
+    pub max_image_bytes: u64,
+    pub max_metadata_bytes: u64,
+}
+
+impl Default for ImportLimits {
+    fn default() -> Self {
+        Self {
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
+        }
+    }
+}
+
+/// One layer of a staged image: a file on disk plus its size and digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerLayer {
+    /// Media type the push client advertises (uncompressed diff tar).
+    pub media_type: String,
+    /// Staged (already decoded) layer bytes on disk.
+    pub path: PathBuf,
+    /// Size in bytes.
+    pub size: u64,
+    /// `sha256:<64 hex>` over the staged bytes.
+    pub digest: String,
+}
+
+/// One image out of a `docker save` archive, layers staged on disk.
+#[derive(Debug)]
 pub struct DockerSave {
     /// `RepoTags` (`["repo:tag", ...]`); may be empty for untagged saves.
     pub repo_tags: Vec<String>,
-    /// The image config JSON blob.
+    /// The image config JSON blob (small; kept in RAM).
     pub config: Vec<u8>,
-    /// Layer tars in manifest order (bottom first, uncompressed).
-    pub layers: Vec<Vec<u8>>,
+    /// Layer tars in manifest order (bottom first, uncompressed, on disk).
+    pub layers: Vec<DockerLayer>,
+    /// Owns the staging directory; removes it on drop.
+    staging: Staging,
+}
+
+impl DockerSave {
+    /// Root of the private staging directory holding this image's layers
+    /// (exists until this value drops; useful for diagnostics/tests).
+    pub fn staging_root(&self) -> &Path {
+        self.staging.dir()
+    }
 }
 
 /// Parse a `docker save` archive held in memory (raw, gzip or zstd tar).
 ///
 /// Only the FIRST image of a multi-image archive is imported: the push
-/// API publishes one `repo:tag` per call.
+/// API publishes one `repo:tag` per call. Layers are staged under the
+/// system temp dir (see [`parse_docker_save_with`] for a custom root).
 pub fn parse_docker_save(bytes: &[u8]) -> Result<DockerSave, String> {
+    parse_docker_save_with(bytes, &std::env::temp_dir(), &ImportLimits::default())
+}
+
+/// [`parse_docker_save`] with an explicit staging root and import budget.
+pub fn parse_docker_save_with(
+    bytes: &[u8],
+    staging_root: &Path,
+    limits: &ImportLimits,
+) -> Result<DockerSave, String> {
     if bytes.is_empty() {
         return Err("docker save archive is empty".to_string());
     }
-    let tar = tar_view(bytes)?;
-    let raw_manifest = read_entry(&tar, MANIFEST_ENTRY, MAX_METADATA_BYTES)?
-        .ok_or_else(|| format!("docker save archive has no {MANIFEST_ENTRY}"))?;
+    import_reader(decode_bytes(bytes)?, staging_root, limits)
+}
+
+/// Read + parse a `docker save` archive from disk (default limits, layers
+/// staged under the system temp dir).
+pub fn parse_docker_save_file(path: &Path) -> Result<DockerSave, String> {
+    parse_docker_save_file_with(path, &std::env::temp_dir(), &ImportLimits::default())
+}
+
+/// [`parse_docker_save_file`] with an explicit staging root and budget.
+pub fn parse_docker_save_file_with(
+    path: &Path,
+    staging_root: &Path,
+    limits: &ImportLimits,
+) -> Result<DockerSave, String> {
+    import_reader(tarstream::open_compressed(path)?, staging_root, limits)
+}
+
+/// Convert a parsed archive into the push client payload using docker
+/// media types (uncompressed `diff.tar` layers, docker config JSON).
+/// The layers stay on disk: `push_image` streams them in 256 KiB windows.
+pub fn to_push_image(save: &DockerSave) -> PushImage {
+    PushImage {
+        config: save.config.clone(),
+        config_media_type: CONFIG_MEDIA_TYPE.to_string(),
+        layers: save
+            .layers
+            .iter()
+            .map(|layer| LayerBlob {
+                media_type: layer.media_type.clone(),
+                body: BlobBody::File {
+                    path: layer.path.clone(),
+                    size: layer.size,
+                    digest: layer.digest.clone(),
+                },
+            })
+            .collect(),
+    }
+}
+
+// ---- import plumbing (pure) -----------------------------------------------
+
+/// Decode an in-memory archive into a tar reader (gzip/zstd by magic).
+fn decode_bytes(bytes: &[u8]) -> Result<Box<dyn Read + '_>, String> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return Ok(Box::new(flate2::read::GzDecoder::new(bytes)));
+    }
+    if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        let decoder = zstd::stream::read::Decoder::new(bytes)
+            .map_err(|e| format!("zstd archive header: {e}"))?;
+        return Ok(Box::new(decoder));
+    }
+    Ok(Box::new(std::io::Cursor::new(bytes)))
+}
+
+/// Stage the archive, then resolve `manifest.json` into an image.
+fn import_reader<R: Read>(
+    reader: R,
+    staging_root: &Path,
+    limits: &ImportLimits,
+) -> Result<DockerSave, String> {
+    let mut staging = tarstream::stage(reader, tarstream::staging_dir(staging_root)?, limits)?;
+    let raw_manifest = staging
+        .manifest
+        .take()
+        .ok_or_else(|| format!("docker save archive has no {}", tarstream::MANIFEST_ENTRY))?;
     let doc: serde_json::Value = serde_json::from_slice(&raw_manifest)
-        .map_err(|e| format!("{MANIFEST_ENTRY} is not valid JSON: {e}"))?;
-    let images = doc
-        .as_array()
-        .ok_or_else(|| format!("{MANIFEST_ENTRY} must be a JSON array of images"))?;
+        .map_err(|e| format!("{} is not valid JSON: {e}", tarstream::MANIFEST_ENTRY))?;
+    let images = doc.as_array().ok_or_else(|| {
+        format!(
+            "{} must be a JSON array of images",
+            tarstream::MANIFEST_ENTRY
+        )
+    })?;
     let first = images
         .first()
-        .ok_or_else(|| format!("{MANIFEST_ENTRY} lists no images"))?;
+        .ok_or_else(|| format!("{} lists no images", tarstream::MANIFEST_ENTRY))?;
 
     let config_name = first["Config"]
         .as_str()
-        .map(normalize_entry_name)
+        .map(tarstream::normalize_entry_name)
         .filter(|n| !n.is_empty())
-        .ok_or_else(|| format!("{MANIFEST_ENTRY} entry has no Config path"))?;
+        .ok_or_else(|| format!("{} entry has no Config path", tarstream::MANIFEST_ENTRY))?;
     let layer_names: Vec<&str> = first["Layers"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter_map(|v| v.as_str().map(normalize_entry_name))
+                .filter_map(|v| v.as_str().map(tarstream::normalize_entry_name))
                 .collect()
         })
         .unwrap_or_default();
@@ -86,246 +203,48 @@ pub fn parse_docker_save(bytes: &[u8]) -> Result<DockerSave, String> {
         })
         .unwrap_or_default();
 
-    let config = read_entry(&tar, config_name, MAX_UNPACKED_BYTES)?
-        .ok_or_else(|| format!("docker save archive is missing config {config_name}"))?;
+    let config_entry = take_entry(&mut staging, config_name)?;
+    let config = read_bounded(&config_entry.path, limits.max_metadata_bytes)
+        .map_err(|e| format!("docker save config {config_name}: {e}"))?;
+
     let mut layers = Vec::with_capacity(layer_names.len());
     for name in layer_names {
-        let layer = read_entry(&tar, name, MAX_UNPACKED_BYTES)?
-            .ok_or_else(|| format!("docker save archive is missing layer {name}"))?;
-        layers.push(layer);
-    }
-
-    let total: u64 = config.len() as u64 + layers.iter().map(|l| l.len() as u64).sum::<u64>();
-    if total > MAX_UNPACKED_BYTES {
-        return Err(format!(
-            "docker save image exceeds the {MAX_UNPACKED_BYTES} byte import cap"
-        ));
+        let entry = take_entry(&mut staging, name)?;
+        layers.push(DockerLayer {
+            media_type: LAYER_MEDIA_TYPE.to_string(),
+            path: entry.path,
+            size: entry.size,
+            digest: entry.digest,
+        });
     }
     Ok(DockerSave {
         repo_tags,
         config,
         layers,
+        staging,
     })
 }
 
-/// Read + parse a `docker save` archive from disk.
-pub fn parse_docker_save_file(path: &Path) -> Result<DockerSave, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    parse_docker_save(&bytes)
+/// Take one staged member out of the staging map (the file itself lives on
+/// until `DockerSave` drops).
+fn take_entry(staging: &mut Staging, name: &str) -> Result<tarstream::StagedEntry, String> {
+    staging.entries.remove(name).ok_or_else(|| {
+        format!(
+            "docker save archive is missing {name} (referenced by {})",
+            tarstream::MANIFEST_ENTRY
+        )
+    })
 }
 
-/// Convert a parsed archive into the push client payload using docker
-/// media types (uncompressed `diff.tar` layers, docker config JSON).
-pub fn to_push_image(save: &DockerSave) -> PushImage {
-    PushImage {
-        config: save.config.clone(),
-        config_media_type: CONFIG_MEDIA_TYPE.to_string(),
-        layers: save
-            .layers
-            .iter()
-            .map(|data| LayerBlob {
-                media_type: LAYER_MEDIA_TYPE.to_string(),
-                data: data.clone(),
-            })
-            .collect(),
+/// Read a staged file, refusing more than `cap` bytes.
+fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut buf = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    if buf.len() as u64 > cap {
+        return Err(format!("exceeds the {cap} byte import cap"));
     }
-}
-
-// ---- tar plumbing (pure) --------------------------------------------------
-
-/// The tar stream inside `bytes`, decompressed when a gzip/zstd wrapper
-/// is detected. Borrows the input for plain tars (no copy).
-fn tar_view(bytes: &[u8]) -> Result<Cow<'_, [u8]>, String> {
-    if bytes.starts_with(&GZIP_MAGIC) {
-        return Ok(Cow::Owned(read_capped(
-            flate2::read::GzDecoder::new(bytes),
-            "gzip",
-        )?));
-    }
-    if bytes.starts_with(&ZSTD_MAGIC) {
-        let decoder = zstd::stream::read::Decoder::new(bytes)
-            .map_err(|e| format!("zstd archive header: {e}"))?;
-        return Ok(Cow::Owned(read_capped(decoder, "zstd")?));
-    }
-    Ok(Cow::Borrowed(bytes))
-}
-
-/// Read `reader` to the end, refusing more than [`MAX_UNPACKED_BYTES`].
-fn read_capped<R: Read>(reader: R, kind: &str) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    reader
-        .take(MAX_UNPACKED_BYTES + 1)
-        .read_to_end(&mut out)
-        .map_err(|e| format!("{kind} decompress: {e}"))?;
-    if out.len() as u64 > MAX_UNPACKED_BYTES {
-        return Err(format!("{kind} archive exceeds the 8 GiB import cap"));
-    }
-    Ok(out)
-}
-
-/// Strip the `./` / leading-slash noise docker's tar writer adds.
-fn normalize_entry_name(raw: &str) -> &str {
-    let mut name = raw;
-    while let Some(rest) = name.strip_prefix("./") {
-        name = rest;
-    }
-    name.trim_start_matches('/')
-}
-
-/// Fetch one regular-file member of `tar` (first match wins), bounded to
-/// `cap` bytes.
-fn read_entry(tar: &[u8], want: &str, cap: u64) -> Result<Option<Vec<u8>>, String> {
-    let mut archive = tar::Archive::new(std::io::Cursor::new(tar));
-    let entries = archive.entries().map_err(|e| format!("tar: {e}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("tar entry: {e}"))?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let path = entry
-            .path()
-            .map_err(|e| format!("tar entry path: {e}"))?
-            .to_string_lossy()
-            .into_owned();
-        if normalize_entry_name(&path) != want {
-            continue;
-        }
-        let mut buf = Vec::new();
-        entry
-            .take(cap + 1)
-            .read_to_end(&mut buf)
-            .map_err(|e| format!("tar read {want}: {e}"))?;
-        if buf.len() as u64 > cap {
-            return Err(format!("docker save entry {want} exceeds the import cap"));
-        }
-        return Ok(Some(buf));
-    }
-    Ok(None)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tar_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut out = Vec::new();
-        {
-            let mut b = tar::Builder::new(&mut out);
-            for (name, data) in entries {
-                let mut h = tar::Header::new_gnu();
-                h.set_size(data.len() as u64);
-                h.set_mode(0o644);
-                h.set_cksum();
-                b.append_data(&mut h, name, std::io::Cursor::new(*data))
-                    .unwrap();
-            }
-            b.finish().unwrap();
-        }
-        out
-    }
-
-    const CONFIG: &[u8] = br#"{"architecture":"amd64","os":"linux"}"#;
-    const LAYER: &[u8] = b"layer-tar-bytes";
-    const MANIFEST: &[u8] = br#"[{"Config":"cfg.json","RepoTags":["example.com/demo:v1"],"Layers":["layer/layer.tar"]}]"#;
-
-    fn synth(gzip: bool) -> Vec<u8> {
-        let tar = tar_with(&[
-            ("manifest.json", MANIFEST),
-            ("cfg.json", CONFIG),
-            ("layer/layer.tar", LAYER),
-        ]);
-        if !gzip {
-            return tar;
-        }
-        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::Write::write_all(&mut enc, &tar).unwrap();
-        enc.finish().unwrap()
-    }
-
-    #[test]
-    fn parses_plain_docker_save() {
-        let save = parse_docker_save(&synth(false)).unwrap();
-        assert_eq!(save.repo_tags, vec!["example.com/demo:v1".to_string()]);
-        assert_eq!(save.config, CONFIG.to_vec());
-        assert_eq!(save.layers, vec![LAYER.to_vec()]);
-
-        let image = to_push_image(&save);
-        assert_eq!(image.config_media_type, CONFIG_MEDIA_TYPE);
-        assert_eq!(image.layers.len(), 1);
-        assert_eq!(image.layers[0].media_type, LAYER_MEDIA_TYPE);
-        assert_eq!(image.layers[0].data, LAYER.to_vec());
-    }
-
-    #[test]
-    fn parses_gzip_and_zstd_wrapped_archives() {
-        let plain = parse_docker_save(&synth(false)).unwrap();
-        assert_eq!(parse_docker_save(&synth(true)).unwrap(), plain);
-
-        let tar = tar_with(&[
-            ("manifest.json", MANIFEST),
-            ("cfg.json", CONFIG),
-            ("layer/layer.tar", LAYER),
-        ]);
-        let z = zstd::stream::encode_all(std::io::Cursor::new(&tar), 3).unwrap();
-        assert_eq!(parse_docker_save(&z).unwrap(), plain);
-    }
-
-    #[test]
-    fn tolerates_dot_slash_entry_names() {
-        let tar = tar_with(&[
-            ("./manifest.json", MANIFEST),
-            ("./cfg.json", CONFIG),
-            ("./layer/layer.tar", LAYER),
-        ]);
-        assert_eq!(parse_docker_save(&tar).unwrap().layers.len(), 1);
-    }
-
-    #[test]
-    fn rejects_malformed_archives() {
-        assert!(parse_docker_save(b"").unwrap_err().contains("empty"));
-
-        let no_manifest = tar_with(&[("cfg.json", CONFIG)]);
-        assert!(parse_docker_save(&no_manifest)
-            .unwrap_err()
-            .contains("no manifest.json"));
-
-        let empty_list = tar_with(&[("manifest.json", b"[]")]);
-        assert!(parse_docker_save(&empty_list)
-            .unwrap_err()
-            .contains("no images"));
-
-        let bad_json = tar_with(&[("manifest.json", b"{not json")]);
-        assert!(parse_docker_save(&bad_json).unwrap_err().contains("JSON"));
-
-        let zero_layers = tar_with(&[
-            ("manifest.json", br#"[{"Config":"cfg.json","Layers":[]}]"#),
-            ("cfg.json", CONFIG),
-        ]);
-        assert!(parse_docker_save(&zero_layers)
-            .unwrap_err()
-            .contains("no layers"));
-
-        let missing_layer = tar_with(&[("manifest.json", MANIFEST), ("cfg.json", CONFIG)]);
-        assert!(parse_docker_save(&missing_layer)
-            .unwrap_err()
-            .contains("missing layer layer/layer.tar"));
-    }
-
-    #[test]
-    fn reads_archives_from_disk() {
-        let dir = std::env::temp_dir().join(format!(
-            "init-pro-registry-tarimg-{}-{:x}",
-            std::process::id(),
-            crate::now_millis()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("image.tar.gz");
-        std::fs::write(&path, synth(true)).unwrap();
-        let save = parse_docker_save_file(&path).unwrap();
-        assert_eq!(save.layers, vec![LAYER.to_vec()]);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let missing = parse_docker_save_file(Path::new("/nonexistent/docker-save.tar"));
-        assert!(missing.unwrap_err().contains("read"));
-    }
+    Ok(buf)
 }

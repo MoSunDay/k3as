@@ -477,6 +477,23 @@ pub(crate) fn spawn_set(
     let gc_ns_queue = queues.namespaces.clone();
     let gc_stop = stop.clone();
     handles.push(tokio::spawn(async move {
+        // A2: NEVER sweep before every owner cache finished its first LIST.
+        // A cold-started manager (fresh process, or a leader election that
+        // just moved) would otherwise read an empty cache as "all owners
+        // gone" and mass-delete live dependents. gc::sweep re-checks this
+        // per pass; waiting here also keeps the 2s cadence from starting
+        // until the caches are usable.
+        let wait_start = std::time::Instant::now();
+        while !gc_caches.is_synced() {
+            tokio::select! {
+                _ = gc_stop.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+        tracing::debug!(
+            waited_ms = wait_start.elapsed().as_millis() as u64,
+            "gc: caches synced"
+        );
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
             tokio::select! {

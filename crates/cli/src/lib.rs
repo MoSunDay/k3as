@@ -163,6 +163,7 @@ where
                         docker_bin: std::env::var("INIT_PRO_DOCKER")
                             .unwrap_or_else(|_| "docker".to_string()),
                         default_timeout_seconds: 900,
+                        max_image_bytes: pipeline_max_image_bytes(),
                     });
                     // T4.4 (Q64): the server's `--disable-network-policy`
                     // is accept-noop-warn — enforcement lives on the agent
@@ -290,6 +291,27 @@ where
             println!();
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// A1: `INIT_PRO_PIPELINE_MAX_IMAGE_BYTES` bounds the decoded size of a
+/// `docker save` archive the pipeline imports (default 8 GiB; malformed
+/// values fall back to the default with a warning).
+fn pipeline_max_image_bytes() -> u64 {
+    const DEFAULT: u64 = 8 * 1024 * 1024 * 1024;
+    match std::env::var("INIT_PRO_PIPELINE_MAX_IMAGE_BYTES") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    target: "init-pro",
+                    value = %raw,
+                    "INIT_PRO_PIPELINE_MAX_IMAGE_BYTES is not a positive integer; using the default"
+                );
+                DEFAULT
+            }
+        },
+        Err(_) => DEFAULT,
     }
 }
 

@@ -12,6 +12,7 @@ mod support;
 
 use std::io::Write as _;
 
+use registry::client::LAYER_MEDIA_TYPE;
 use registry::{parse_docker_save, to_push_image, LayerBlob, PushError, PushImage};
 
 const CONFIG: &[u8] = br#"{"architecture":"amd64","os":"linux"}"#;
@@ -121,7 +122,14 @@ async fn push_docker_save_roundtrip_is_idempotent() {
     // The plain (uncompressed) archive imports and pushes too, under its
     // own tag, and yields the same manifest digest (same content).
     let plain = parse_docker_save(&synthetic_save(false)).unwrap();
-    assert_eq!(plain.layers, save.layers);
+    // Staged paths differ per import; content identity is size + digest.
+    let shape = |s: &registry::DockerSave| {
+        s.layers
+            .iter()
+            .map(|l| (l.size, l.digest.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&plain), shape(&save));
     let plain_digest = registry::push_image(&addr, "demo/app", "v1-plain", &to_push_image(&plain))
         .await
         .unwrap();
@@ -166,10 +174,7 @@ async fn push_streams_a_layer_past_the_body_limit() {
     let image = PushImage {
         config: br#"{"architecture":"amd64","os":"linux"}"#.to_vec(),
         config_media_type: registry::client::CONFIG_MEDIA_TYPE.to_string(),
-        layers: vec![LayerBlob {
-            media_type: registry::client::LAYER_MEDIA_TYPE.to_string(),
-            data: layer,
-        }],
+        layers: vec![LayerBlob::bytes(LAYER_MEDIA_TYPE, layer)],
     };
     let digest = registry::push_image(&addr, "demo/big", "v1", &image)
         .await

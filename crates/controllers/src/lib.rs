@@ -38,6 +38,8 @@ pub(crate) mod runner_wiring;
 /// A5 split (T7.3, Q35): reconciler workers, the GC delete hook, the
 /// child -> owner enqueuer and `reconcile_key` dispatch.
 pub(crate) mod runner_worker;
+#[cfg(test)]
+mod runner_worker_tests;
 pub mod stop;
 pub mod time;
 pub mod workqueue;

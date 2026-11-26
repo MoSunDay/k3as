@@ -29,6 +29,7 @@ fn cfg() -> Option<PipelineConfig> {
         scratch_dir: std::env::temp_dir().join("init-pro-pipeline-tests"),
         docker_bin: "false".to_string(),
         default_timeout_seconds: 5,
+        max_image_bytes: registry::DEFAULT_MAX_IMAGE_BYTES,
     })
 }
 

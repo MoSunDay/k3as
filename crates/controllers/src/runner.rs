@@ -117,7 +117,7 @@ pub(crate) struct Queues {
     pub(crate) builds: Arc<WorkQueue>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Kind {
     CronWorkflow,
     Deployment,

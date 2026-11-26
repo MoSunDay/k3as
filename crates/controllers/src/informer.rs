@@ -7,6 +7,7 @@
 //! informer re-LISTs from scratch -- the upstream resync path.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -21,8 +22,14 @@ use crate::stop::Stop;
 pub type EventHandler = Arc<dyn Fn(&WatchEvent) + Send + Sync>;
 
 /// Thread-safe local cache of one resource's objects, keyed `ns/name`.
+///
+/// A2 (GC safety): `synced` records whether the reflector completed its
+/// initial LIST. A store built by hand (tests, single-purpose caches)
+/// starts synced -- the informer flips it off before every re-LIST, so a
+/// cold start can never be mistaken for "the owner does not exist".
 pub struct ObjectStore {
     items: RwLock<HashMap<String, Arc<Value>>>,
+    synced: AtomicBool,
 }
 
 impl Default for ObjectStore {
@@ -35,7 +42,23 @@ impl ObjectStore {
     pub fn new() -> Self {
         Self {
             items: RwLock::new(HashMap::new()),
+            synced: AtomicBool::new(true),
         }
+    }
+
+    /// True once the reflector's initial LIST has been applied.
+    pub fn has_synced(&self) -> bool {
+        self.synced.load(Ordering::Acquire)
+    }
+
+    /// Mark the cache as needing a fresh LIST (informer, before re-list).
+    pub(crate) fn mark_unsynced(&self) {
+        self.synced.store(false, Ordering::Release);
+    }
+
+    /// Mark the initial LIST as applied (informer, after `replace_all`).
+    pub(crate) fn mark_synced(&self) {
+        self.synced.store(true, Ordering::Release);
     }
 
     pub fn get(&self, namespace: &str, name: &str) -> Option<Arc<Value>> {
@@ -205,6 +228,9 @@ impl Informer {
         stop: Stop,
     ) {
         loop {
+            // A2: until this LIST lands, an absent owner means "not yet
+            // listed", never "deleted" -- the GC reads this flag.
+            store.mark_unsynced();
             // Phase 1: full LIST seeds the cache + initial enqueue events.
             let listed = tokio::select! {
                 _ = stop.cancelled() => return,
@@ -225,6 +251,7 @@ impl Informer {
                 items.push((object_key(&v), Arc::new(v)));
             }
             let removed = store.replace_all(items.clone());
+            store.mark_synced();
             for (k, v) in &items {
                 let ev = WatchEvent::Put(Arc::new(StoredEntry {
                     key: self.synthetic_path(k),

@@ -27,6 +27,9 @@ mod http;
 pub mod policy;
 pub mod store;
 pub mod tarimg;
+#[cfg(test)]
+mod tarimg_tests;
+pub mod tarstream;
 pub mod uploads;
 pub mod validate;
 
@@ -39,9 +42,13 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 pub use api::v2_router;
-pub use client::{ping, push_image, LayerBlob, PushError, PushImage};
+pub use client::{ping, push_image, BlobBody, LayerBlob, PushError, PushImage};
 pub use policy::DEFAULT_TAG_RETENTION;
-pub use tarimg::{parse_docker_save, parse_docker_save_file, to_push_image, DockerSave};
+pub use tarimg::{
+    parse_docker_save, parse_docker_save_file, parse_docker_save_file_with, parse_docker_save_with,
+    to_push_image, DockerLayer, DockerSave, ImportLimits, DEFAULT_MAX_IMAGE_BYTES,
+    DEFAULT_MAX_METADATA_BYTES,
+};
 
 /// Default listen address: `127.0.0.1:15000`. Port 5000 (the docker
 /// convention) collides with macOS AirPlay and 15000 keeps the family

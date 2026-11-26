@@ -163,7 +163,7 @@ async fn publish_phase(
 
     let mut log = prior_log.to_string();
     let save = if !archive.is_empty() {
-        match parse_save(PathBuf::from(&archive)).await {
+        match parse_save(PathBuf::from(&archive), cfg).await {
             Ok(save) => save,
             Err(e) => {
                 let outcome = Outcome::failed(reference, format!("docker save archive: {e}"), &log);
@@ -200,7 +200,7 @@ async fn publish_phase(
             let outcome = Outcome::failed(reference, message, &log);
             return finalize(client, key, &current, &outcome).await;
         }
-        let parsed = parse_save(tar).await;
+        let parsed = parse_save(tar, cfg).await;
         let _ = tokio::fs::remove_dir_all(&dir).await; // best effort
         match parsed {
             Ok(save) => save,
@@ -293,8 +293,21 @@ async fn finalize(
 }
 
 /// Parse a `docker save` archive off the async runtime (blocking file IO).
-async fn parse_save(path: PathBuf) -> Result<registry::DockerSave, String> {
-    match tokio::task::spawn_blocking(move || registry::parse_docker_save_file(&path)).await {
+///
+/// A1: layers are staged under `<scratch>/import` (never inside the
+/// per-build scratch dir, which the caller deletes right after this call)
+/// and streamed into the registry, so a multi-GiB image never enters RAM.
+async fn parse_save(path: PathBuf, cfg: &PipelineConfig) -> Result<registry::DockerSave, String> {
+    let staging_root = cfg.scratch_dir.join("import");
+    let limits = registry::ImportLimits {
+        max_image_bytes: cfg.max_image_bytes,
+        max_metadata_bytes: registry::DEFAULT_MAX_METADATA_BYTES,
+    };
+    match tokio::task::spawn_blocking(move || {
+        registry::parse_docker_save_file_with(&path, &staging_root, &limits)
+    })
+    .await
+    {
         Ok(result) => result,
         Err(e) => Err(format!("docker save parse task failed: {e}")),
     }

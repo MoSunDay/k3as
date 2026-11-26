@@ -68,7 +68,16 @@ pub(crate) const MANAGED_OWNER_KINDS: [&str; 8] = [
 ];
 
 /// One sweep pass: delete dependents whose managed controller owner is gone.
+///
+/// A2 guard: if ANY owner cache has not finished its first LIST, the pass
+/// is skipped entirely. Both entry points (owner-DELETE hook and the 2s
+/// backstop) land here, so a cold-started manager cannot sweep against an
+/// empty cache.
 pub async fn sweep(client: &Arc<dyn Client>, caches: &Arc<Caches>) -> Result<(), ControllerError> {
+    if !caches.is_synced() {
+        tracing::debug!("gc: caches not synced yet; skipping sweep");
+        return Ok(());
+    }
     for (group, resource) in DEPENDENT_KINDS {
         for obj in client.list(&KeyPrefix::new(group, resource, None)).await? {
             let Some(owner) = controller_of(&obj) else {
@@ -370,6 +379,53 @@ mod tests {
         assert_eq!(
             survivor.unwrap()["metadata"]["labels"]["workflows.argoproj.io/workflow"],
             "ask-wf"
+        );
+    }
+
+    /// A2 regression: on a cold start (or right after a leader move) the
+    /// owner caches have not LISTed yet. An owner that exists in storage
+    /// but is absent from the empty cache must NOT be treated as deleted.
+    #[tokio::test]
+    async fn cold_cache_never_sweeps_live_dependents() {
+        let client: Arc<dyn Client> =
+            Arc::new(StorageClient::new(Arc::new(EmbeddedStorage::new())));
+        let dep_key = Key::new("apps", "deployments", "default", "web");
+        let rs_key = Key::new("apps", "replicasets", "default", "web-1");
+        client
+            .create(
+                &dep_key,
+                json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                       "metadata": {"name": "web", "namespace": "default", "uid": "u-web"}}),
+            )
+            .await
+            .unwrap();
+        client
+            .create(
+                &rs_key,
+                json!({"apiVersion": "apps/v1", "kind": "ReplicaSet",
+                       "metadata": {"name": "web-1", "namespace": "default",
+                                    "ownerReferences": [{"kind": "Deployment", "name": "web",
+                                                         "uid": "u-web", "controller": true}]}}),
+            )
+            .await
+            .unwrap();
+
+        let caches = Arc::new(Caches::new());
+        // Simulate the informer's cold start: LIST in flight, cache empty.
+        caches.deployments.mark_unsynced();
+        sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&rs_key).await.unwrap().is_some(),
+            "A2: an unsynced cache must never delete a live dependent"
+        );
+
+        // Once the LIST has landed (and the owner really is gone), the
+        // backstop resumes normal service.
+        caches.deployments.mark_synced();
+        sweep(&client, &caches).await.unwrap();
+        assert!(
+            client.get(&rs_key).await.unwrap().is_none(),
+            "synced caches still reap dangling dependents"
         );
     }
 }

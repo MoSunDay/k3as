@@ -21,11 +21,12 @@
 //! being silently downgraded.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-use crate::http::{exchange, resolve_location, Reply, Target};
+use crate::http::{exchange, exchange_file, resolve_location, Reply, Target};
 
 /// Media type of the image config blob (docker schema 2).
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.docker.container.image.v1+json";
@@ -34,12 +35,59 @@ pub const LAYER_MEDIA_TYPE: &str = "application/vnd.docker.image.rootfs.diff.tar
 /// Media type of a docker v2 schema-2 image manifest.
 pub const MANIFEST_MEDIA_TYPE: &str = "application/vnd.docker.distribution.manifest.v2+json";
 
-/// One image layer: media type plus the raw layer tar bytes (already
-/// gzipped when the media type says so).
+/// Where a blob's bytes come from (A1): in-memory for tiny/synthetic
+/// payloads, on-disk for the `docker save` import path so a multi-GiB
+/// layer is streamed instead of resident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobBody {
+    /// Bytes held in RAM.
+    Bytes(Vec<u8>),
+    /// A staged file plus the digest computed while it was written
+    /// (`sha256:<hex>`); the push verifies the digest while streaming.
+    File {
+        path: PathBuf,
+        size: u64,
+        digest: String,
+    },
+}
+
+impl BlobBody {
+    /// Size in bytes (the manifest descriptor and Content-Length value).
+    pub fn len(&self) -> u64 {
+        match self {
+            BlobBody::Bytes(data) => data.len() as u64,
+            BlobBody::File { size, .. } => *size,
+        }
+    }
+
+    /// True when the blob carries no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// One image layer: media type plus the layer tar (already gzipped when
+/// the media type says so), in RAM or staged on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerBlob {
     pub media_type: String,
-    pub data: Vec<u8>,
+    pub body: BlobBody,
+}
+
+impl LayerBlob {
+    /// Layer size in bytes.
+    pub fn size(&self) -> u64 {
+        self.body.len()
+    }
+
+    /// Build an in-memory layer (the pre-A1 shape, kept for callers that
+    /// already hold the bytes).
+    pub fn bytes(media_type: impl Into<String>, data: Vec<u8>) -> Self {
+        Self {
+            media_type: media_type.into(),
+            body: BlobBody::Bytes(data),
+        }
+    }
 }
 
 /// The complete payload `push_image` needs: config JSON plus ordered
@@ -103,10 +151,10 @@ pub async fn push_image(
     let authority = normalize_authority(registry_addr)?;
     validate_repo_tag(repo, tag)?;
 
-    let config_digest = upload_blob(&authority, repo, &image.config).await?;
+    let config_digest = upload_body(&authority, repo, BodyRef::Bytes(&image.config), None).await?;
     let mut layer_digests = Vec::with_capacity(image.layers.len());
     for layer in &image.layers {
-        layer_digests.push(upload_blob(&authority, repo, &layer.data).await?);
+        layer_digests.push(upload_blob(&authority, repo, &layer.body).await?);
     }
 
     let manifest = build_manifest(image, &config_digest, &layer_digests)?;
@@ -133,10 +181,34 @@ pub async fn push_image(
 
 // ---- blob upload ----------------------------------------------------------
 
+/// Borrowed view of the body a blob upload streams (A1): bytes stay
+/// borrowed, files stream from disk.
+enum BodyRef<'a> {
+    Bytes(&'a [u8]),
+    File(&'a std::path::Path, u64),
+}
+
 /// Upload one blob through POST -> PATCH -> PUT?digest= and return its
-/// `sha256:<hex>` digest.
-async fn upload_blob(authority: &str, repo: &str, data: &[u8]) -> Result<String, PushError> {
-    let digest = sha256_digest(data);
+/// `sha256:<hex>` digest. In-memory bodies go out as one write; file
+/// bodies stream in 256 KiB windows with the digest computed on the fly
+/// (A1), so the declared staged digest is verified against what the
+/// server actually received.
+async fn upload_blob(authority: &str, repo: &str, body: &BlobBody) -> Result<String, PushError> {
+    match body {
+        BlobBody::Bytes(data) => upload_body(authority, repo, BodyRef::Bytes(data), None).await,
+        BlobBody::File { path, size, digest } => {
+            upload_body(authority, repo, BodyRef::File(path, *size), Some(digest)).await
+        }
+    }
+}
+
+/// Shared POST -> PATCH -> PUT?digest= skeleton.
+async fn upload_body(
+    authority: &str,
+    repo: &str,
+    body: BodyRef<'_>,
+    declared_digest: Option<&str>,
+) -> Result<String, PushError> {
     let create = Target {
         authority: authority.to_string(),
         path: format!("/v2/{repo}/blobs/uploads/"),
@@ -145,13 +217,38 @@ async fn upload_blob(authority: &str, repo: &str, data: &[u8]) -> Result<String,
     expect_status(&reply, &[202])?;
     let patch = resolve_location(authority, location_of(&reply)?)?;
 
-    let reply = exchange(
-        &patch,
-        "PATCH",
-        &[("content-type", "application/octet-stream")],
-        data,
-    )
-    .await?;
+    let (reply, digest) = match body {
+        BodyRef::Bytes(data) => {
+            let digest = sha256_digest(data);
+            let reply = exchange(
+                &patch,
+                "PATCH",
+                &[("content-type", "application/octet-stream")],
+                data,
+            )
+            .await?;
+            (reply, digest)
+        }
+        BodyRef::File(path, size) => {
+            let (reply, computed) = exchange_file(
+                &patch,
+                "PATCH",
+                &[("content-type", "application/octet-stream")],
+                path,
+                size,
+            )
+            .await?;
+            if let Some(declared) = declared_digest {
+                if computed != declared {
+                    return Err(PushError::Io(format!(
+                        "staged layer {} digest mismatch: declared {declared}, pushed {computed}",
+                        path.display()
+                    )));
+                }
+            }
+            (reply, computed)
+        }
+    };
     expect_status(&reply, &[202])?;
     // The server may hand back a fresh (still relative) Location after
     // the chunk; honour it, else commit against the PATCH target.
@@ -186,7 +283,7 @@ fn build_manifest(
         .layers
         .iter()
         .zip(layer_digests)
-        .map(|(layer, digest)| descriptor(&layer.media_type, layer.data.len(), digest))
+        .map(|(layer, digest)| descriptor(&layer.media_type, layer.body.len() as usize, digest))
         .collect();
     serde_json::to_vec(&json!({
         "schemaVersion": 2,
@@ -327,13 +424,13 @@ mod tests {
         let image = PushImage {
             config: b"{}".to_vec(),
             config_media_type: CONFIG_MEDIA_TYPE.to_string(),
-            layers: vec![LayerBlob {
-                media_type: LAYER_MEDIA_TYPE.to_string(),
-                data: b"layer".to_vec(),
-            }],
+            layers: vec![LayerBlob::bytes(LAYER_MEDIA_TYPE, b"layer".to_vec())],
         };
         let cfg_d = sha256_digest(&image.config);
-        let lyr_d = sha256_digest(&image.layers[0].data);
+        let lyr_d = match &image.layers[0].body {
+            BlobBody::Bytes(data) => sha256_digest(data),
+            BlobBody::File { digest, .. } => digest.clone(),
+        };
         let raw = build_manifest(&image, &cfg_d, std::slice::from_ref(&lyr_d)).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(v["schemaVersion"], 2);
