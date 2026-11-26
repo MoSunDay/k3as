@@ -92,6 +92,15 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
   on the real containerd stack.
 - **卡点 / Blockers** — none for v1 scope; PV binding for StatefulSet
   PVCs arrives with T6.2 (**Q22**, Pending until then).
+- **As-built (长稳清扫 2026-11-26, A2/A3/B4/B5)** — A2 GC cache-sync 门
+  (commit 13e26a2): `informer::ObjectStore` 记录各 cache 的 LIST 同步态,
+  `gc::sweep` 在所有 owner cache 同步前拒绝执行, runner 的 GC 兜底首个
+  tick 前等同步 (冷启动把全量对象误判孤儿的 mass-delete 回归钉)。A3
+  reconcile 跑在受监督 task 内: panic 收敛 + 记日志 + key 重新入队
+  (`runner_worker_tests.rs`)。B4 Endpoints 带 `controller: true` 的 Service
+  ownerRef (存量对象下次 update 收养, 外来 ref 保留——删 Service 即级联
+  GC)。B5 `DRAIN_KINDS` (25 项) 与 registry served namespaced kinds 交叉
+  核对 (`drain_table_covers_every_served_namespaced_kind`), 漏登记直接红测。
 - **依赖 / Depends on** — T1.2, T2.2
 
 ---

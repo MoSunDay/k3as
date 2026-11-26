@@ -77,6 +77,14 @@ at the crate root.
   revision continuity + watch replay across restart, controller resync
   smoke).
 - Default backend is still `EmbeddedStorage`; `rdb://` is opt-in
-  (durable-by-default is a possible future decision, not taken). Open
-  tails: policy-grade retention/compaction scheduling; the real
-  etcd-gRPC client now lives at T3.4 (HA).
+  (durable-by-default is a possible future decision, not taken).
+- Retention/compaction scheduling (long-run sweep 2026-11-26, B3): the
+  `compact(rev)` mechanism always existed but had no production caller,
+  so `log/<rev>` grew by one record per write for the life of the
+  datastore. `rdb_backend/compaction.rs` is the policy half
+  (`compaction_plan`, `compact_retaining`, `DEFAULT_RETAIN` = 1000
+  revisions kept replayable) and the server drives it for `rdb://` only,
+  every `COMPACTION_INTERVAL` 300 s (`cli/storage_dsn.rs`
+  `spawn_compaction`, joined by the server-plane drain). The embedded
+  store keeps its bounded in-memory ring and is not compacted on a timer.
+- Open tail: the real etcd-gRPC client now lives at T3.4 (HA).

@@ -16,7 +16,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T0.1 | 0 | 单一二进制 multicall crate 骨架 | done | — |
 | T0.2 | 0 | 构建与 bundling pipeline | done | T0.1 |
 | T0.2b | 0 | link_repos 钉定物化 (pin-clone bootstrap, Q38) | done | T0.2 |
-| T0.3 | 0 | 公共基础设施 crate (log/config/signal) | done | T0.1 |
+| T0.3 | 0 | 公共基础设施 crate (log/config/signal) | done (长稳清扫 2026-11-26: drain 期二次 SIGTERM/SIGINT 直接 exit 130 (infra/signal.rs, B12)) | T0.1 |
 | T0.4 | 0 | CLI: multicall + k3s 兼容 flag | done | T0.1, T0.3 |
 | T0.5 | 0 | 规划体系与文档中枢 | done | — |
 | T0.6 | 0 | 协议兼容性测试基线 (golden conformance) | done | T0.1 |
@@ -25,14 +25,14 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T1.3 | 1 | 认证授权 (T1.3a TLS+静态 token Q47 + T1.3b RBAC supported-subset, 均落地 S50) | done | T1.1 |
 | T2.1 | 2 | etcd 语义数据面（纯 Rust 实现，Q17） | done | T0.2 |
 | T2.2 | 2 | etcd v3 数据面 = APIServer storage backend | done | T2.1, T1.1 |
-| T2.3 | 2 | rdb/RocksDB 持久化后端 (kine 语义, Q33) | done | T2.2 |
-| T3.1 | 3 | kube-controller-manager 等价核心循环 | done | T1.2, T2.2 |
+| T2.3 | 2 | rdb/RocksDB 持久化后端 (kine 语义, Q33) | done (长稳清扫 2026-11-26: compaction POLICY + 周期驱动补齐 (机制自 T2.2/T2.3 在但无生产调用方; rdb:// only, 300 s, DEFAULT_RETAIN 1000, B3)) | T2.2 |
+| T3.1 | 3 | kube-controller-manager 等价核心循环 | done (长稳清扫 2026-11-26: GC cache-sync 门 (A2) + reconcile panic 受监督 (A3, commit 13e26a2); Endpoints 带 Service controller ownerRef (B4); DRAIN_KINDS × served kinds 交叉核对 (B5)) | T1.2, T2.2 |
 | T3.2 | 3 | 调度器 (kube-scheduler 等价 + extender seam) | done | T1.2, T4.1 (由 Q24 spike 满足) |
 | T3.3 | 3 | bootstrap / 证书 / token 轮转 | not-started | T1.3, T2.2 |
 | T3.4 | 3 | HA 多 server (etcd 集群 + 选举) | not-started | T2.2, T3.3 |
-| T4.1 | 4 | containerd bundling 与 CRI 实现 | done | T0.2 |
-| T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24; 心跳顺带收敛 kubelet-port 注解 1242c5f, 双节点实测 Sprint 37c) | T4.1, T3.2 |
-| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | done (Scope A flannel CNI Q34 + Scope B ServiceLB announce/L4 Q41 + **Sprint 51 Scope C**: ClusterIP 分配面 apiserver `--service-cidr` wired (Q44, 默认 10.43.0.0/16, fail-closed) + Router VIP 承载面 `clusterip.rs`/`vip.rs` loopback 别名 (Q57 折叠复用, single-node scope) + flannel host-gw 后端 F6a-F6d 实证; 两节点跨机 host-gw F7/F8 环境门控 SKIP (FLANNEL_E2E_REMOTE_NODE); netpol 归 T4.4, wireguard informational F9) | T4.2 |
+| T4.1 | 4 | containerd bundling 与 CRI 实现 | done (长稳清扫 2026-11-26: containerd spawn 致命错误分类不再无限重试 (C12) + ctr 调用 kill_on_drop 有界 (C13)) | T0.2 |
+| T4.2 | 4 | kubelet 等价 (pod 生命周期 + status) | done (Scope A+B+C, Sprint 24; 心跳顺带收敛 kubelet-port 注解 1242c5f, 双节点实测 Sprint 37c); 长稳清扫 2026-11-26: node status 语义写门 (B2), drain/body 读/pull 有界 (C2), 磁盘压力镜像 GC (C3), pod 删除残留 + 7 天日志保留 (C4) | T4.1, T3.2 |
+| T4.3 | 4 | CNI/网络 (flannel 等价 + ServiceLB L4) | done (Scope A flannel CNI Q34 + Scope B ServiceLB announce/L4 Q41 + **Sprint 51 Scope C**: ClusterIP 分配面 apiserver `--service-cidr` wired (Q44, 默认 10.43.0.0/16, fail-closed) + Router VIP 承载面 `clusterip.rs`/`vip.rs` loopback 别名 (Q57 折叠复用, single-node scope) + flannel host-gw 后端 F6a-F6d 实证; 两节点跨机 host-gw F7/F8 环境门控 SKIP (FLANNEL_E2E_REMOTE_NODE); netpol 归 T4.4, wireguard informational F9); 长稳清扫 2026-11-26: flannel 受监督重启 + NetworkUnavailable/FlannelExited 诚实上报 + 旧 bundle 清理 + drain 10 s 上界 (C8) | T4.2 |
 | T4.4 | 4 | 网络策略 (netpol 等价) | done (**Sprint 52, Q64**: upstream-1:1 `networking.k8s.io/v1` NetworkPolicy 手写类型 + discovery 注册——golden **G31 字节锁步变更**, fixture+断言+注册同 commit 原子落地 (T0.6 合并门纪律); 子集准入 (Q59): ingress/egress 隔离 + podSelector/namespaceSelector/ipBlock(cidr+except) peer + TCP/UDP 数字端口 + policyTypes k8s 默认, SCTP/命名端口/非法 peer 混排 → 422; 执行面 = agent 侧 netpol_keeper 5s 全量重生成 LIST 循环 + netpol_compile 纯函数编译 + **in-tree iptables shell** (`INIT-PRO-NPOL-FWD` FORWARD pos-1 分发链 + per-pod `INIT-PRO-NPOL-{I,E}<12hex>` 链: conntrack ACCEPT + allow + 终端 REJECT, 单次 `iptables-restore --noflush` 幂等重写 + 陈链剪枝, LIST 失败降级 WARN 停最后好程序, teardown 零残留; trafficmngr 评估后弃); Q52 builtin 节点/hostNetwork Pod 永不 policing; `--disable-network-policy` agent 默认开、server accept-noop-warn (k3s parity, t80); 证据 netpol-e2e NP0-NP4 **12/12**, all-gates gate-8) | T4.3 |
 | T4.5 | 4 | 节点注册/心跳/代理隧道 | done (注册/心跳 T4.2 Scope A 已落; **Sprint 52 隧道面, Q65**: agent 主动拨号反向中继 (长轮询, JSON-only Q10 + agent Q47 bearer token)——`tunnel/register`(心跳锚) · `tunnel/next`(server park 25s, 204 空 / 200 `{id,method,path,headers,bodyB64}`) · `tunnel/responses/{id}`; `tunnel_registry` park=活性 (LongPollGuard drop unpark) + 代际守卫 + 死泊自愈, `RELAY_TIMEOUT_SLA`=10s; `kubelet_hop::call_kubelet_relayed` **直连优先**、仅 transport 错误回退中继 (HTTP 错误状态不回退, 回退失败同 502 形状, Q31 客户端透明; 单节点姿态零变化); dialer 默认开 (退避 1s→15s, 客户端轮询帽 35s>server 25s, 重注册 SLA ≤30s), `--disable-proxy-tunnel` 退出 (t81); `--node-ip` 未设改 `detect_outbound_ip` 出向探测——node2 不再广告 127.0.0.1; 证据 acceptance-2node **16/16 两轮**: T1 exec 穿 kubelet 端口 INPUT DROP 经中继 / T2 断线重连 SLA / T3 disable 回归) | T4.2, T1.2 |
 | T4.6 | 4 | Pod 日志布局与轮转 (日期目录 + 100MB copytruncate, Q39) | done (Sprint 32) | T4.2 |
@@ -40,7 +40,7 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T4.8 | 4 | 探针补全: tcpSocket + exec (httpGet 已有; S39) | done (Sprint 39; tcpSocket connect-then-close 数字端口 + exec argv verbatim rc==0; 命名端口 IntOrString Deferred) | T4.2 |
 | T4.9 | 4 | 资源限制 → CRI linux.resources + QoS 分级 (S40) | done (Sprint 40; cpu shares/quota(-1)/period=100000 + mem limit 经 kubelet::resources 纯函数映射 upstream 惯例; status.qosClass 三级; quantity 解析 SSOT 移 common; e2e resources-e2e.sh R1-R4 容器内 cgroup 断言; capacity/eviction Deferred) | T4.2 |
 | T4.10 | 4 | kubelet 卷消费扩展: hostPath + PVC (经 bound PV 解析; S45) | not-started (S45 排期) | T4.2, T6.2 |
-| T4.11 | 4 | 内置容器引擎内核 P1: clone3/namespace + 单线程 engine + 帧协议 (无 runc/containerd, Q48) | done (P1 kernel+protocol; `engine-run`/`engine serve`) | T4.1 |
+| T4.11 | 4 | 内置容器引擎内核 P1: clone3/namespace + 单线程 engine + 帧协议 (无 runc/containerd, Q48) | done (P1 kernel+protocol; `engine-run`/`engine serve`); 长稳清扫 2026-11-26: unpack symlink 守卫 (C1), PartGuard 半写清理 (C11), engine 日志写失败降级 (C9), PDEATHSIG 重置 + 孤儿探针 (C10), engine --exit-on-stdin-eof | T4.1 |
 | T4.12 | 4 | 内置引擎 kubelet 接线 P2: `EngineBackend`/exec + `--container-engine=builtin` 真实选择 (Q49 进程池 + Q50 日志/exec 流 + Q51 探针回退) | done (Sprint 41; host-rootfs Pod 生命周期闭环, 镜像/CNI 留 T4.13) | T4.11, T4.2 |
 | T4.13 | 4 | 内置引擎镜像存储 + Pod 网络面 P3 (网络面 = host netns 共享 Q52; 镜像存储 = registry-v2 拉取 + 共享层解包 + per-container overlayfs Q53/Q54) | done (Sprint 42 网络面 Q52; Sprint 43 镜像存储 M1-M5; Q55 后镜像链降为 host 引擎下注解 opt-in, 代码保留) | T4.12, T4.3, T6.3 |
 | T4.14 | 4 | 内置引擎宿主根文件系统 (host-rootfs 默认 `--builtin-rootfs host\|image` + `init-pro.io/host-mounts`/`init-pro.io/rootfs` 注解, Q55) | done (Sprint 44, Q55) | T4.13 |
@@ -54,17 +54,17 @@ Legend & rules: see `README.md` §6 and `template/TODO.md`.
 | T5.7 | 5 | 内置 Router 作为平台配置变量 | not-started | T5.4, T4.5 |
 | T6.1 | 6 | manifest 自动部署 (HelmChart auto-deploy) | not-started | T1.2, T3.1 |
 | T6.2 | 6 | 标准 addon (T6.2a 内嵌 Cluster DNS S43/Q45 + T6.2b local-path S44/Q46; metrics-server 按 Q59 S49 决策**显式弃置**于前向支持子集外) | not-started | T6.1, T4.3 |
-| T6.3 | 6 | 内嵌 Docker Registry v2 镜像仓库（tag 保留策略，默认最近 10 + keep-forever 不计入，Q40） | done (Sprint 33; Sprint 34 hardening) | T0.3 |
+| T6.3 | 6 | 内嵌 Docker Registry v2 镜像仓库（tag 保留策略，默认最近 10 + keep-forever 不计入，Q40） | done (Sprint 33; Sprint 34 hardening); 长稳清扫 2026-11-26: docker save 流式导入 (A1, commit 13e26a2), push 客户端 deadline (B7), 残留 upload 回收 (B9) | T0.3 |
 | T7.1 | 7 | AI Agent workload (init-pro.io/v1 `Agent` 一级资源, 原生调度绑定; Q35 重写, 原 AgentWorkload→Pod 物化废弃; extender 策略面留 T7.2) | done (Phase A Sprint 26, Q35 + Phase B 节点执行 Sprint 30, Q37) | T3.2, T1.2 |
 | T7.2 | 7 | 宿主 GPU 直调调度 (标准 `nvidia.com/gpu`/`amd.com/gpu` 扩展资源, builtin host-direct 优先, 整卡逻辑独占 + 稳定设备分配, Q61) | in-progress (S47 fake-scope 全链落库: `--gpu-inventory` 清单发布、Pod-UID/container 持久账本、扩展资源调度核算、CUDA/HIP_VISIBLE_DEVICES 注入、teardown 后释放, GPU1-GPU5 单测; 真硬件 per-vendor recorded evidence 未有——GPU6 未满足, 保持开放) | T4.15, T3.2 |
 | T7.3 | 7 | argo-workflows 最小化整合 (Workflow/CronWorkflow 一级公民内置; engine+model 抽取为 link_repos/arust-workflow pin, Q42) | done (Scope A+B+C, Sprint 23; Q42 抽取 Sprint 36) | T1.2, T3.1 |
-| T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36; S54 Q66 rebase: anyhome 实体下线, 平面换底 nfsserve 直连 + 内嵌 DirFs, 语义/用户面契约不变) | done (Sprint 27, Q36; Sprint 54 rebase Q66) | T7.3, T4.2 |
+| T7.4 | 7 | anyhome 一级公民 + workspace 自动挂载 (内嵌 NFSv3 记忆面, Q36; S54 Q66 rebase: anyhome 实体下线, 平面换底 nfsserve 直连 + 内嵌 DirFs, 语义/用户面契约不变) | done (Sprint 27, Q36; Sprint 54 rebase Q66); 长稳清扫 2026-11-26: anyhome drain 10 s 上界 (B12) | T7.3, T4.2 |
 | T7.5 | 7 | anyhome Pod 级注解挂载 (init-pro.io/anyhome rw/ro + anyhome-mounts 多路径; apiserver 创建/SSA/replace defaulting + 碰撞消歧 + keeper 预建目录, Q43) | done (Sprint 35 + 36b hardening, Q43; Sprint 54 Q66 底座更换零触碰, e2e 原样复跑) | T7.4, T1.2 |
 | T7.6 | 7 | llama.cpp-first 宿主推理 (普通 Deployment → Pod + NodePort Service, 预置 llama-server/GGUF, OpenAI 兼容 API, Q62) | in-progress (S47: Recreate teardown-hold 状态机 + fake OpenAI 离线 e2e INF1/2/3/5 fake-scope 全绿 + node04 切换/回滚 runbook 与参数化清单; 真 llama-server/GGUF/整卡验收 INF6 未做, 保持开放) | T7.2, T3.1 |
-| T7.7 | 7 | Agent action interception + Linux sandbox (节点/operator default-deny 策略, 中央 tool/subagent gate, nsrun/clone3/cgroup 隔离, per-attempt provider broker, Q63) | done (S48 Stage A+B + **S49 D7 收口**: staged binary `agent-runner` 进程内 gated-registry 分发缝——wrap_registry 全量包裹(含 hallucinated/mcp__ 名)、子代理 registry 逐字继承同一 gate、广告面强制 ToolFilter::Allow、denial_audit JSONL; 节点级强制硬化开关 `--agent-require-sandbox` 封掉无 spec.sandbox 即 legacy 直跑敞口 (RequiredRefused→Pending/SandboxRequired); Q63 逐条款复核 phase-4-closure.md §8; 证据 sandbox-e2e 23/23 SA1-SA8 + workspace 1375 tests + golden 68/68; 注记: 真 provider 流量桥 broker op↔HTTP 仍 stub 级, fresh netns 下直接出网不可能——缺口为可用性非遏制) | T7.1, T4.14 |
+| T7.7 | 7 | Agent action interception + Linux sandbox (节点/operator default-deny 策略, 中央 tool/subagent gate, nsrun/clone3/cgroup 隔离, per-attempt provider broker, Q63) | done (S48 Stage A+B + **S49 D7 收口**: staged binary `agent-runner` 进程内 gated-registry 分发缝——wrap_registry 全量包裹(含 hallucinated/mcp__ 名)、子代理 registry 逐字继承同一 gate、广告面强制 ToolFilter::Allow、denial_audit JSONL; 节点级强制硬化开关 `--agent-require-sandbox` 封掉无 spec.sandbox 即 legacy 直跑敞口 (RequiredRefused→Pending/SandboxRequired); Q63 逐条款复核 phase-4-closure.md §8; 证据 sandbox-e2e 23/23 SA1-SA8 + workspace 1375 tests + golden 68/68; 注记: 真 provider 流量桥 broker op↔HTTP 仍 stub 级, fresh netns 下直接出网不可能——缺口为可用性非遏制); 长稳清扫 2026-11-26: attempt 生命周期加固 — teardown 预算/attempt 目录回收/退避/slot 守卫/exec 进程组/broker 超时/engine 随 kubelet 退出 (C5/C6/C7/C14 + H1-H6) | T7.1, T4.14 |
 | T8.1 | 8 | 镜像交付信任 + registry push client (M1; certs.d 明文 HTTP 渲染 + docker save 导入, Q38/Q40) | done (Sprint 45) | T6.3, T4.1 |
 | T8.2 | 8 | TrafficSplit 加权一键切流 (init-pro.io/v1, 短名 ts, Q57) | done (Sprint 45, Q57) | T5.4, T1.1 |
-| T8.3 | 8 | ServicePipeline/Build 内嵌 CI/CD 控制器 (M2 core, Q56) | done (Sprint 45, Q56) | T8.1, T6.3, T1.2, T3.1 |
+| T8.3 | 8 | ServicePipeline/Build 内嵌 CI/CD 控制器 (M2 core, Q56) | done (Sprint 45, Q56); 长稳清扫 2026-11-26: 宿主构建镜像保留 3 (B8) + push 传输失败可重试 5 次后 Failed (B10) | T8.1, T6.3, T1.2, T3.1 |
 | T8.4 | 8 | pipeline 面收尾: CLI flags + 进程内 e2e (M2, Q56) | done (Sprint 45, Q56) | T8.3 |
 | T8.5 | 8 | canary 发布控制器 (M3, Q58) | done (Sprint 46, Q58) | T8.2, T8.3, T8.4 |
 

@@ -134,4 +134,13 @@ k3s `pkg/deploy/` auto-deploy machinery.
   0 skipped with a live containerd; `scripts/cli-flag-parity-test.sh`
   20/0 with `live_help t-registry`; CHANGELOG Sprint 33 + 34.
 - **卡点 / Blockers** — none
+- **As-built (长稳清扫 2026-11-26, A1/B7/B9)** — A1 (commit 13e26a2)
+  `docker save` 导入流式化: `tarstream.rs` (NEW) 逐 layer 落盘
+  hash-while-copy (256 KiB 窗口, gzip/zstd 嗅探), `ImportLimits` (默认
+  8 GiB 镜像 / 4 MiB 元数据, `INIT_PRO_PIPELINE_MAX_IMAGE_BYTES`), push
+  `BlobBody::File` 从盘流式 PATCH 并复核 digest。B7 push 客户端 deadline
+  (`PUSH_TIMEOUT` 120 s 整次预算 / `CONNECT_TIMEOUT` 5 s / 响应体 32 MiB
+  上限)。B9 upload 卫生: PATCH 失败 unlink 半成品;
+  `sweep_stale_uploads` (`STALE_UPLOAD_SECS` 3600, 每轮 ≤1024 项) 随 boot
+  与每次 retention 执行。
 - **依赖 / Depends on** — T0.3

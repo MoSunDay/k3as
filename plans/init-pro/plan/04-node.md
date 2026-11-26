@@ -93,6 +93,11 @@ format.
   → CRI drained(13ms) → containerd drained`，随后 datadir shims=0
   mounts=0（对照：一次性 stopp/rmp 下 shims=1 mounts=2）。Tests: 935 →
   940（NEW `tests/sync_drain.rs` 5 例，含容器先于 sandbox 的顺序回归钉）。
+- **As-built (长稳清扫 2026-11-26, C12/C13)** — `runtime/supervisor.rs`
+  `spawn_error_is_fatal` (NotFound / PermissionDenied / InvalidInput →
+  `SuperviseExit::FatalSpawn`, 坏 bundle 不再无限重试) + `spawn_retry_plan`;
+  `runtime/cri.rs` `bounded_output` (`kill_on_drop(true)`) 给每次 `ctr`
+  调用上界, 超时映射 `CriError::Io`。
 - **依赖 / Depends on** — T0.2
 
 ---
@@ -245,6 +250,19 @@ format.
   TCP/exec 类型；imagePullSecrets（私有仓库认证）；CSI 卷；
   exec attach/port-forward 流式子协议；kubelet 监听器 TLS + authN
   （随 T1.3 安全工作面）。
+- **As-built (长稳清扫 2026-11-26, B2/C2/C3/C4)** — B2 `node_status.rs`
+  (NEW): 心跳只在 status 语义变化 (capacity/allocatable/conditions/
+  addresses) 时 PUT, 时钟字段至多 `STATUS_REFRESH_FLOOR` 300 s 刷一次,
+  transition 时间戳透传不重置。C2 `drain.rs` (NEW) `join_bounded`
+  (`DRAIN_JOIN_TIMEOUT` 10 s, `DrainOutcome::{Finished,Failed,
+  Abandoned}`); `http.rs` → `http/{mod,body,client}.rs`, body 逐读
+  `BODY_READ_TIMEOUT` 30 s; 镜像拉取 `PULL_DEADLINE` 10 min。C3 磁盘压力
+  镜像 GC: `image_gc.rs` + `engine/image/disk.rs` +
+  `engine/backend/pressure.rs` (Pressure <10% 或 <2 GiB / Critical <5% 或
+  <1 GiB, 10 min grace, Critical 每轮 ≤4 最旧未用 ref;
+  `CriBackend::image_gc` 默认 no-op + `ImageGcStats`), 每次 sync 顺带跑。
+  C4 pod 删除连 `<log-root>/<uid>` 目录一起清 (`cleanup_volumes`, uid
+  形状校验 + umount 先行); `log_retention.rs` (NEW) 7 天日期目录清扫。
 - **依赖 / Depends on** — T4.1, T3.2
 - **As-built (Sprint 37c, 2026-11-15, 双节点实机)** — heartbeat 的
   GET-modify-PUT 顺带 reconcile Node 注解 `init-pro.io/kubelet-port`
@@ -415,6 +433,12 @@ format.
   F7/F8 两节点跨机 host-gw 为 opt-in 实机证据面（环境门控）；
   `ingress_listen` CLI flag 接线（router 侧, 非本卡）已由 T5.5 S41 slice 落地
   （`server --ingress-listen`, 默认关），本卡无遗留。
+- **As-built (长稳清扫 2026-11-26, C8)** — `cli/flannel.rs`: flanneld
+  退出不再终态, 受监督重启 (250 ms 起倍增、5 s 封顶, 稳定运行 30 s 清零
+  streak); `flannel_keeper.rs`: 下线期间 node 打
+  `NetworkUnavailable=True (FlannelExited)`, 恢复即清, keeper 周期 5 s
+  (3 次失败后 30 s); `stage.rs` `prune_stale_bundles` 清理旧 bundle;
+  drain `FLANNEL_DRAIN_TIMEOUT` 10 s 上界。测试 `flannel_tests.rs` (NEW)。
 - **依赖 / Depends on** — T4.2
 
 ---

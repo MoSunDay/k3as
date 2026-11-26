@@ -458,6 +458,9 @@ inference track.
   注入链/kubelet 消费面) 零改动——A1/P2/K1 验收原样复跑通过 (S54:
   anyhome-e2e 7/0)。D1 约束保留但 rationale 改写为 link-graph hygiene
   (Q66)。详见 decisions.md Q36 supersede 注记 + Q66。
+- **长稳清扫注记 (2026-11-26, B12)** — server drain 中 anyhome NFS 平面的
+  join 加 `ANYHOME_DRAIN_TIMEOUT` 10 s 上界 (超时 abort + WARN, 不再让一个
+  挂住的 NFS 连接拖死整个 drain); 用户面契约不变。
 
 ## T7.5 — anyhome Pod 级注解挂载 (init-pro.io/anyhome + anyhome-mounts; Q43)
 
@@ -667,4 +670,14 @@ inference track.
   (S48 已在本机 root + cgroup v2 特权真跑一次; 未来复跑仍需同类宿主)；
   不得以缺少外部 provider、真实凭证或网络服务作为测试依赖，也不得用
   host-direct/containerd 结果冒充 sandbox 证据。
+- **As-built (长稳清扫 2026-11-26, C5/C6/C7/C14 + H1–H6)** — attempt
+  生命周期加固 (gate/策略语义不变): `agent_exec_sandbox.rs`
+  `TeardownBudget` (drain 5 s / bye 1 s / reap 5 s) + `Attempt` Drop
+  kill+reap; `agent_sandbox_plan.rs` per-attempt 目录 + 开机
+  `sweep_stale_attempt_dirs`, `retry_delay` 500 ms 起倍增封顶 5 min;
+  `agents.rs` `SlotGuard` / `PendingBackoff` (pending Agent 不再每轮重
+  转)。`agent_exec.rs`: 独立进程组 `kill_group` + 输出尾部 `OUTPUT_CAP`
+  64 KiB。`agent_broker.rs`: accept 致命错误分类 + 50 ms 重试, conn 读
+  10 s / 写 5 s, 上游 connect 3 s。`engine/launch.rs`: engine 日志 1 MiB
+  封顶, stdin 管道 + `--exit-on-stdin-eof` (kubelet 死则 engine 自退)。
 - **依赖 / Depends on** — T7.1, T4.14

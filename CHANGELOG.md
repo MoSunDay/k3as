@@ -7,6 +7,153 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sweep — 长稳确认 + Bug 清扫 (P-A / P-B / P-C, 非 sprint; 无 TODO 状态变化) (2026-11-26)
+
+**Goal:** 用户批准的「k3as 长稳确认 + Bug 清扫 + e2e 分层补全」计划的前三批:
+P-A (P0) + P-B (server 侧 P1, B2–B12) + P-C (node 侧 P1, C1–C14 +
+Agent attempt 生命周期 H1–H6)。目标是在**不改任何用户面契约、不翻 TODO
+状态**的前提下清掉天级长稳运行会积累 / 挂死 / 泄漏的缺陷形态: 无界缓冲
+与无 deadline 的 IO、"失败即终态"的子进程、每心跳的冗余写、永不回收的
+残留文件、无上界的 drain。P-D (P2 加固) / P-E (e2e 分层) / P-F (soak)
+为后续批次, 各自单独收口。commits: **13e26a2** (P-A) + **b723406** (P-B/P-C 代码 +
+测试) + 本条收口 (docs 锁步覆盖 A+B+C; P-A commit 本身未带文档)。
+
+**Changes**
+- **P-A (commit 13e26a2)**
+  - A1 registry `docker save` 导入流式化: `tarstream.rs` (NEW) 把 layer
+    逐个落盘 (hash-while-copy, 256 KiB 窗口, gzip/zstd 嗅探), 峰值 RSS 与
+    镜像大小解耦; `ImportLimits` 封顶 (默认 8 GiB 镜像 / 4 MiB 元数据,
+    `INIT_PRO_PIPELINE_MAX_IMAGE_BYTES` 贯通 `PipelineConfig`); push 侧
+    `BlobBody::File` 从磁盘流式发 PATCH 并复核 staged digest。
+  - A2 GC cache-sync 门: `ObjectStore` 记录 informer 同步态, `gc::sweep`
+    在所有 owner cache LIST 完成前拒绝执行 (冷启动把全量对象误判为孤儿
+    的 mass-delete 回归测试); runner GC 兜底首个 tick 前先等同步。
+  - A3 reconcile 受监督: 每次 reconcile 跑在受监督 task 里, panic 被收敛、
+    记日志并重新入队 (worker 存活回归测试)。
+- **P-B — server / 控制面 (B2–B12)**
+  - B2 node status 写放大: 心跳每次都 PUT 整个 status; 现在 `kubelet/
+    node_status.rs` (NEW) `StatusGate` 只在语义变化 (capacity/allocatable/
+    conditions/addresses) 时写, 时钟字段变化至多 `STATUS_REFRESH_FLOOR`
+    300 s 刷一次, transition 时间戳透传不被心跳重置。
+  - B3 rdb 历史无界增长: compaction 机制自 T2.2/T2.3 就在
+    (`watch::compact` + `StorageBackend::compact`), 但生产路径从无调用方,
+    `log/<rev>` 每次写一条、随库龄线性增长。补上缺失的 POLICY 半边:
+    `storage/rdb_backend/compaction.rs` (NEW) `compaction_plan` /
+    `compact_retaining` (`DEFAULT_RETAIN` 1000 条, 纯函数可单测); server 侧
+    `storage_dsn.rs` `spawn_compaction` 仅 `rdb://` 启用 (embedded 已是有界
+    内存环)、每 `COMPACTION_INTERVAL` 300 s 一轮并随 server plane drain。
+    watermark 之下的 watch 起点按既有 T2.3 语义答 `StorageError::Compacted`
+    (etcd `ErrCompacted` / 410, 客户端重新 LIST)——本批只把这一契约写进
+    模块文档。
+  - B4 Endpoints 无 owner 而活得比 Service 久: endpoints 控制器给对象打
+    `controller: true` 的 Service ownerRef (收养存量对象, 保留外来 ref)。
+  - B5 namespace drain 表漂移: `DRAIN_KINDS` (25 项) 与 registry 实际
+    served namespaced kinds 交叉核对 (`drain_table_covers_every_served_
+    namespaced_kind`), 新增 kind 漏登记直接红测。
+  - B6 Router gateway 每次 fold 都重编译 + 热加载: 配置 `fingerprint()` +
+    `ApplyLedger::{needs_apply,record}`, `FoldOutcome::{Unchanged,Applied,
+    Failed}`; apply 失败保留上一个好的 generation 并在下次 fold 重试。
+  - B7 registry push 客户端无 deadline: 整次 push `PUSH_TIMEOUT` 120 s
+    预算 (`push_image_with_budget`), HTTP 层 `CONNECT_TIMEOUT` 5 s +
+    响应体 `MAX_RESPONSE_BYTES` 32 MiB, blob 走磁盘 (`BlobBody::File`)。
+  - B8 pipeline 构建产物 / 宿主镜像只增不减: `prune_before_build`
+    (`BUILD_IMAGE_RETENTION` 3, `init-pro.pipeline` 标签归属) +
+    `prune_after_push` (非当前 promoted 镜像即从宿主 docker 卸下)。
+  - B9 registry 残留 upload: PATCH 失败即 unlink 半成品; `sweep_stale_
+    uploads` (`STALE_UPLOAD_SECS` 3600, 单轮 ≤ 1024 项) 随每次 retention
+    与 boot 执行。
+  - B10 pipeline push 传输失败即 Failed: `PushError::Io` 改可重试,
+    `MAX_PUSH_RETRIES` 5 (`status.pushRetries`), 超限才 Failed; server
+    drain 顺序改 controller-manager 先停后 join (不再与新 Build 竞争);
+    canary 同一失败只在 status 写一次 (`failure_recorded`)。
+  - B11 apiserver 意外退出 server 仍 0 退出: `runtime_server.rs` serve
+    task 返回 `io::Result`, Err 触发 `server_failure` → drain 完成后
+    非零退出 (`api_exit`)。
+  - B12 drain 期二次信号被吞 / anyhome drain 无上界: `infra/signal.rs`
+    `SignalAction` 第二次 SIGTERM/SIGINT 直接 `exit(130)`;
+    `ANYHOME_DRAIN_TIMEOUT` 10 s 超时 abort + WARN。
+- **P-C — node / kubelet / agent (C1–C14, H1–H6)**
+  - C1 镜像解包 symlink 穿越: `unpack.rs` `guard_ancestors`。
+  - C2 kubelet 无上界等待: `drain.rs` (NEW) `join_bounded`
+    (`DRAIN_JOIN_TIMEOUT` 10 s, `DrainOutcome`); `http.rs` 拆为 `http/`
+    (`body.rs` `BODY_READ_TIMEOUT` 30 s 逐读 deadline); 镜像拉取
+    `PULL_DEADLINE` 10 min。
+  - C3 磁盘压力镜像 GC: `image_gc.rs` + `engine/image/disk.rs` +
+    `engine/backend/pressure.rs` (从 `backend.rs` 拆出) — Pressure
+    (<10% 或 <2 GiB) / Critical (<5% 或 <1 GiB), 10 min grace, Critical
+    每轮最多 4 个最旧未用 ref; `CriBackend::image_gc` 默认 no-op +
+    `ImageGcStats`; 每次 sync 顺带跑。
+  - C4 pod 删除残留 + 日志只增: `cleanup_volumes` 连 `<log-root>/<uid>`
+    一起清 (uid 形状校验 + umount 先行); `log_retention.rs` (NEW) 7 天
+    日期目录清扫。
+  - C5/C14 + H1–H6 Agent attempt 生命周期: `agent_exec_sandbox.rs`
+    `TeardownBudget` (drain 5 s / bye 1 s / reap 5 s) + `Attempt` Drop
+    kill+reap; `agent_sandbox_plan.rs` `attempt_dir` / 开机
+    `sweep_stale_attempt_dirs`, `retry_delay` 500 ms→5 min 封顶;
+    `agents.rs` `SlotGuard` / `PendingBackoff` (pending Agent 不再每轮重
+    转); `engine/launch.rs` engine 日志 1 MiB 封顶 + stdin 管道 +
+    `--exit-on-stdin-eof` (engine `StdinTie`, kubelet 死则 engine 自退,
+    不再孤儿)。
+  - C6 exec 子进程残留 / 输出无界: `agent_exec.rs` 独立进程组
+    (`kill_group`) + `OUTPUT_CAP` 64 KiB `read_tail`。
+  - C7 provider broker accept/conn 可挂: `agent_broker.rs`
+    `accept_error_is_fatal` + accept 重试 50 ms + 读 10 s / 写 5 s /
+    上游 connect 3 s。
+  - C8 flannel 退出即终态 / 状态不诚实 / 旧 bundle 堆积: `cli/flannel.rs`
+    受监督重启 (250 ms 起倍增、5 s 封顶, 稳定 30 s 清零);
+    `flannel_keeper.rs` 下线打 `NetworkUnavailable=True (FlannelExited)`
+    恢复即清, keeper 5 s (3 次失败后 30 s); `stage.rs`
+    `prune_stale_bundles`; drain `FLANNEL_DRAIN_TIMEOUT` 10 s。
+  - C9 engine 日志写失败杀会话: `engine/session.rs` `LogSink` 降级继续。
+  - C10 父死后的孤儿子进程: `nsrun/child.rs` PDEATHSIG 作为 exec 前最后
+    一步重置 + `parent_gate` 孤儿探针 (父已亡 → exit 124, 不 exec)。
+  - C11 半写 part 文件: `engine/image/{cas,stage}.rs` `PartGuard` (所有
+    退出路径含 panic 删除) + `ImageStore::open` 时 `sweep_part_files`。
+  - C12 containerd spawn 坏包无限重试: `runtime/supervisor.rs`
+    `spawn_error_is_fatal` (NotFound/PermissionDenied/InvalidInput →
+    `SuperviseExit::FatalSpawn`)。
+  - C13 `ctr` 调用无上界: `runtime/cri.rs` `bounded_output`
+    (`kill_on_drop`)。
+- **文件拆分 (行数上限)**: `kubelet/http.rs` → `http/{mod,body,client}.rs`;
+  `engine/backend.rs` → `+ backend/pressure.rs`; `volumes.rs` 测试 →
+  `volumes/`; 新测试文件按职责分文件 (`*_tests.rs`)。
+- **测试**: 1514 → **1673** (+159; A: runner_worker_tests / tarimg_tests /
+  gc 冷启动; B: node_status / storage_dsn / compaction / flannel_tests /
+  endpoints / namespace / pipeline; C: drain / http / volumes / log_
+  retention / image_gc / disk / pressure / agent_{broker,exec,sandbox,
+  sandbox_plan,agents} / launch / supervisor / cri / nsrun / session)。
+- **文档 (SSOT)**: 本条 + `features/changelog.md` (按 feature 卡的 delta) +
+  `plans/init-pro/index.md` T0.3/T2.3/T3.1/T4.1/T4.2/T4.3/T4.11/T6.3/T7.4/
+  T7.7/T8.3 行注记 + 对应 `plan/*.md` 卡 "As-built (长稳清扫)" 条目;
+  feature 卡现状表述同步: `storage-layer.md` (B3 关闭 "policy-grade
+  retention/compaction scheduling" open tail), `builtin-engine.md` (C10
+  PDEATHSIG 末步重置 + C14 socket 自清理), `registry.md` (B7/B9),
+  `controllers.md` (A2/B4), `kubelet.md` (B2), `router-data-plane.md`
+  (B6), `containerd-runtime.md` (C12/C13)。decisions.md 不动 (无决策文本
+  被推翻)。
+
+**门禁** (P-A/P-B/P-C 合并工作树, `scripts/all-gates.sh` 完整跑 —
+`RESULT: PASS`, 27 行 0 FAIL / 3 SKIP, battery 712s): fmt (member-scope)
+✓; build --locked ✓; workspace tests **1673/0** (S54/S41 基线 1514 + 本批
+159); clippy --all-targets -D warnings ✓; unsafe-audit ✓; engine-
+singlethread ✓; golden **75 PASS + 6 SKIP** (SKIP 均为宿主 cni0 共存门:
+G24/G25-G26/G30/G29/G60-G66/G80-G82, 与 S54 基线同 posture);
+cli-flag-parity **32/0**; domain e2e battery **全量真跑**: multicall-
+selftest ✓; apiserver-discovery-parity ✓; graceful-shutdown ✓;
+engine-selftest **33/33**; builtin-runtime-e2e **19 OK**; durability-e2e
+**D1–D4** (7 OK); registry-e2e **7 OK + 1 SKIP** (R7 containerd pull leg
+默认关); anyhome-e2e **7/0**; agent-exec-e2e **9/0**; resources-e2e
+**12/0**; builtin-image-e2e **17 OK** (I1–I8b); builtin-hostroot-e2e
+**32 OK** (H1–H8 + HD1–HD5); sandbox-e2e **23/23** (SA1–SA8); auth-e2e
+**7/7**。
+- **SKIP (环境性, 非本批引入)**: service-traffic-e2e / flannel-e2e /
+  netpol-e2e —— 宿主 `cni0` 持 10.244.0.1 (在役 node04 租户 agent 的
+  host-gw CNI 状态; S40c 共存门按设计 SKIP-not-fail, 与 S54
+  "netpol-e2e/acceptance-2node 环境性未跑" 同 posture, 未触碰在役 agent)。
+  本批 C8 (flannel 受监督重启) / B2 (node status) 的运行时证据因此只有
+  单测 + golden 控制面; 待 node04 退役或换机后复跑三套件。
+- 计数: **43 done / 4 in-progress / 7 not-started**（无 TODO 状态变化）。
+
 ## Slice — `--ingress-listen`: openrusty Ingress 网关监听旗标接线 (T5.5 S41 slice As-built, 非 sprint) (2026-11-25)
 
 **Goal:** S41 已落地 Ingress 网关 (router gateway: `networking.k8s.io/v1`

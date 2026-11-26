@@ -103,10 +103,18 @@ raw stdio frames, then `Exited`; `Ping` → `Pong`; `Shutdown` → `Bye`.
 - **Parent-death backstop.** The child arms `PR_SET_PDEATHSIG = SIGKILL`
   (re-armed after the credential switch), so a `SIGKILL`ed engine takes
   its container down in ~5 ms. That path leaks the cgroup directory -
-  there is nothing left to remove it.
+  there is nothing left to remove it. Long-run sweep C10: PDEATHSIG is
+  re-armed again as the LAST setup step before exec, and a `parent_gate`
+  probe refuses to exec at all when the parent is already gone
+  (`PARENT_GONE_EXIT` 124) - a parent that died between the first arming
+  and exec can no longer leave an orphan.
 - **Socket ownership.** A live engine's socket is never unlinked: a
   second `engine serve` on the same path refuses with exit 1. Only a
-  stale socket (dead owner, so `connect` fails) is replaced.
+  stale socket (dead owner, so `connect` fails) is replaced. Exception
+  (long-run sweep C14/H6): with `engine serve --exit-on-stdin-eof` (the
+  kubelet always passes it and keeps the engine's stdin piped) the engine
+  notices EOF when its kubelet dies, exits and unlinks its own socket, so
+  no orphaned engine outlives the kubelet.
 - **Exit codes.**
 
   | Code | Meaning |

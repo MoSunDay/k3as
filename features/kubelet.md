@@ -40,7 +40,9 @@ apiserver relay -> kubelet listener -> crictl (golden G30), with
    sandbox/container create/start/stop/remove; then a status pass
    PUTting `pods/status` only when semantically changed.
 3. **node** — registers the Node object and heartbeats the
-   `kube-node-lease` Lease.
+   `kube-node-lease` Lease; node `status` is PUT only on a semantic
+   change (capacity/allocatable/conditions/addresses), with clock-only
+   changes refreshed at most every 300 s (B2, long-run sweep).
 4. **local logs+exec listener** — since T4.2 Scope C (Q31): a plain-HTTP
    server on `<node-ip>:<kubelet-port>` (`server.rs`) serving
    `/pods/{pod_uid}/containers/{container}/log|exec`; the apiserver

@@ -23,6 +23,9 @@ independently as an ingress gateway. Lives in `crates/router/`.
   -> `RouteTable` compiler, nodeport + Ingress gateways as openrusty
   `AppState`s, live endpoint/Ingress changes applied via openrusty's
   in-memory reload (`reload::apply_config` / `RouteConfig.host`).
+  Since the long-run sweep (B6) each fold fingerprints the compiled
+  config against an `ApplyLedger`: an unchanged fold skips compile +
+  reload, and a failed apply keeps the last good generation.
 - T5.6 (in progress) - NodePort service plane (Sprint 18, Q28; now on
   the openrusty plane): the kube-proxy-equivalent lives here — see the
   dedicated section below. LB VIP scope remains.

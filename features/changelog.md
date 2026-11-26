@@ -4,6 +4,95 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- registry: long-run sweep P-A/P-B (2026-11-26, non-sprint; T6.3/T8.1) —
+  A1 (commit 13e26a2) streamed `docker save` import: `tarstream.rs` stages
+  each layer to disk with hash-while-copy (256 KiB window, gzip/zstd
+  sniff) so peak RSS no longer scales with image size; `ImportLimits`
+  (default 8 GiB image / 4 MiB metadata, `INIT_PRO_PIPELINE_MAX_IMAGE_BYTES`
+  wired through `PipelineConfig`); `BlobBody::File` streams push PATCH
+  bodies from disk and re-verifies the staged digest. B7 push-client
+  deadlines: whole-push `PUSH_TIMEOUT` 120 s, `CONNECT_TIMEOUT` 5 s,
+  `MAX_RESPONSE_BYTES` 32 MiB. B9 upload hygiene: a failed PATCH unlinks
+  its partial staging file; `sweep_stale_uploads` (3600 s, <=1024 entries
+  per pass) runs at boot and on every retention pass.
+- controllers: long-run sweep P-A/P-B (2026-11-26; T3.1) — A2 GC
+  cache-sync gate (`ObjectStore` records informer sync; `gc::sweep` refuses
+  to run until every owner cache has LISTed; the runner GC backstop waits
+  for sync before its first tick — cold-start mass-delete regression
+  test). A3 supervised reconcile (a panic is contained, logged and the key
+  requeued). B4 Endpoints objects carry a `controller: true` Service
+  ownerReference (existing objects adopted on update, foreign refs
+  preserved). B5 `DRAIN_KINDS` (25 entries) cross-validated against the
+  registry's served namespaced kinds (`drain_table_covers_every_served_
+  namespaced_kind`).
+- delivery-plane: long-run sweep P-B (2026-11-26; T8.3/T8.5) — B8 host
+  image retention: `prune_before_build` keeps the newest
+  `BUILD_IMAGE_RETENTION` (3) `init-pro.pipeline`-labelled images,
+  `prune_after_push` drops the just-built image unless it is the promoted
+  one. B10 push transport failures are retryable (`PushError::Io`,
+  `MAX_PUSH_RETRIES` 5 via `status.pushRetries`, Failed only at the cap);
+  canary writes a given failure to status once (`failure_recorded`);
+  server drain stops the controller-manager first and joins it last.
+- storage-layer: long-run sweep P-B (2026-11-26; T2.3) — B3 production
+  compaction: `rdb_backend/compaction.rs` (`compaction_plan`,
+  `compact_retaining`, `DEFAULT_RETAIN` 1000); the server runs it every
+  `COMPACTION_INTERVAL` 300 s for `rdb://` only (`storage_dsn.rs`
+  `spawn_compaction`, joined by the server-plane drain). Before, the
+  mechanism (`watch::compact` + `StorageBackend::compact`) had no
+  production caller, so `log/<rev>` grew forever; the pre-existing
+  `StorageError::Compacted` (etcd `ErrCompacted` / 410) answer for a watch
+  starting below the watermark is unchanged and now documented.
+- router-data-plane: long-run sweep P-B (2026-11-26; T5.4) — B6 change
+  detection: the compiled gateway config is fingerprinted and an
+  `ApplyLedger` records the serving generation; `FoldOutcome::
+  {Unchanged,Applied,Failed}` — unchanged folds skip compile + hot reload,
+  a failed apply keeps the last good generation and retries next fold.
+- kubelet: long-run sweep P-B/P-C (2026-11-26; T4.2) — B2 node-status
+  write amplification: `node_status.rs` `StatusGate` PUTs only on a
+  semantic change, clock-only changes at most every
+  `STATUS_REFRESH_FLOOR` 300 s, transition timestamps carried over. C2
+  bounded waits: `drain.rs` `join_bounded` (10 s, `DrainOutcome`), `http/`
+  body reads under a 30 s per-read deadline, image pulls under a 10 min
+  `PULL_DEADLINE`. C3 disk-pressure image GC (`image_gc.rs`,
+  `engine/image/disk.rs`, `engine/backend/pressure.rs`: Pressure <10% or
+  <2 GiB, Critical <5% or <1 GiB, 10 min grace, at most 4 oldest unused
+  refs per Critical pass; `CriBackend::image_gc` default no-op). C4 pod
+  delete now removes `<log-root>/<uid>` too (`cleanup_volumes`) and
+  `log_retention.rs` sweeps 7-day-old log date dirs. `http.rs` split into
+  `http/{mod,body,client}.rs` at the size cap.
+- agent / kubelet: long-run sweep P-C (2026-11-26; T7.7) — C5/C14 + H1-H6
+  attempt lifecycle: `TeardownBudget` (drain 5 s / bye 1 s / reap 5 s) and
+  an `Attempt` Drop guard that kills + reaps; per-attempt dirs
+  (`attempt_dir`, boot `sweep_stale_attempt_dirs`); `retry_delay` 500 ms
+  doubling to a 5 min cap; `agents.rs` `SlotGuard`/`PendingBackoff` (a
+  pending Agent is no longer re-spun every loop); engine log capped at
+  1 MiB; engine stdin is piped and `--exit-on-stdin-eof` makes the engine
+  exit when its kubelet dies (no orphans). C6 exec children run in their
+  own process group (`kill_group`), output tails capped at 64 KiB. C7
+  broker: fatal accept errors classified, 50 ms accept retry, 10 s read /
+  5 s write / 3 s upstream-connect timeouts.
+- containerd-runtime: long-run sweep P-C (2026-11-26; T4.1) — C12
+  `supervisor.rs` `spawn_error_is_fatal` (NotFound / PermissionDenied /
+  InvalidInput -> `SuperviseExit::FatalSpawn`, no infinite retry on a
+  broken bundle); C13 `cri.rs` `bounded_output` (`kill_on_drop`) bounds
+  every `ctr` call.
+- builtin-engine: long-run sweep P-C (2026-11-26; T4.11) — C1 `unpack.rs`
+  `guard_ancestors` symlink-traversal guard; C11 `PartGuard` removes
+  half-written `part-` files on every exit path (incl. panic) plus a boot
+  `sweep_part_files`; C9 `engine/session.rs` `LogSink` degrades instead of
+  killing the session when a log write fails; `engine serve
+  --exit-on-stdin-eof` (`StdinTie`); C10 `nsrun/child.rs` re-arms
+  PR_SET_PDEATHSIG as the last pre-exec step and `parent_gate` exits 124
+  without exec'ing when the parent is already gone.
+- multicall-cli / anyhome / apiserver: long-run sweep P-B/P-C
+  (2026-11-26; T4.3/T7.4/T0.3) — C8 flannel is a supervised restart loop
+  (250 ms doubling to 5 s, streak reset after a 30 s stable run); the
+  condition keeper sets `NetworkUnavailable=True (FlannelExited)` while
+  down and clears it on recovery (5 s period, 30 s after 3 failures);
+  `stage.rs` prunes stale flannel bundles; flannel and anyhome drains are
+  bounded at 10 s. B11 an apiserver serve error triggers the server's
+  drain and a non-zero exit. B12 `infra/signal.rs`: a second SIGTERM/SIGINT
+  during drain exits 130 immediately.
 - router-data-plane / cli: S41 slice (2026-11-25, non-sprint; T5.5) —
   `server --ingress-listen <addr:port>` (env `INIT_PRO_INGRESS_LISTEN`)
   wires `ServerCmd.ingress_listen` → `ServerBind` →

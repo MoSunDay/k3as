@@ -135,4 +135,14 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
   (flipping to durable-by-default is a possible future decision, NOT
   taken); the real etcd-gRPC client is re-scoped to T3.4 (Q17 supersede
   note).
+- **As-built (长稳清扫 2026-11-26, B3)** — 生产 compaction: 机制
+  (`watch::compact` + `StorageBackend::compact`) 自 T2.2/T2.3 就在, 但生产
+  路径从无调用方, `log/<rev>` 随库龄线性增长。补上 POLICY 半边:
+  `rdb_backend/compaction.rs` (NEW) `compaction_plan` (saturating, 纯函数) /
+  `compact_retaining` (`DEFAULT_RETAIN` 1000); server 侧
+  `cli/storage_dsn.rs` `spawn_compaction` 仅 `rdb://` 启用 (embedded 已是
+  有界内存环), 每 `COMPACTION_INTERVAL` 300 s 一轮 (首轮在 boot 后一个
+  interval), 任务由 server plane drain 回收。watermark 之下的 watch 起点按
+  既有 T2.3 语义答 `StorageError::Compacted` (etcd `ErrCompacted` / 410,
+  客户端重新 LIST)——本批只把该契约写进模块文档, 行为不变。
 - **依赖 / Depends on** — T2.2

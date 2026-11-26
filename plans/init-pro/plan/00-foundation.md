@@ -194,6 +194,10 @@ conformance golden gate (T0.6, Q59)** that every later TODO must keep green.
 - **状态 / Status** — done
 - **证据 / Evidence** — `infra` crate: `config` (5 precedence tests), `signal` (`Shutdown` + `install`), `logging` (`tracing` + `--debug`; 4 idempotency/env tests asserting no-panic across debug true/false + `RUST_LOG` set/unset); `scripts/graceful-shutdown-test.sh` asserts server drains on SIGTERM within a deadline.
 - **卡点 / Blockers** — none
+- **As-built (长稳清扫 2026-11-26, B12)** — `signal.rs` `SignalAction::
+  {Trigger,ForceExit}` + `action_for(count)`: drain 进行中收到第二次
+  SIGTERM/SIGINT 不再被吞, 直接 `exit(130)` (长稳 drain 卡死时的运维逃生
+  口); 首次信号行为不变。
 - **依赖 / Depends on** — T0.1
 
 ---

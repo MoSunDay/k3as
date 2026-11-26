@@ -168,6 +168,13 @@ Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
   node posture; multi-node build distribution explicitly out of scope); no
   multi-arch or build-cache knobs in v1; a failed tag is held, so a retry means
   a new tag.
+- **As-built (长稳清扫 2026-11-26, B8/B10)** — B8 宿主镜像保留:
+  `prune_before_build` 保留最新 `BUILD_IMAGE_RETENTION` (3) 张
+  `init-pro.pipeline` 标签镜像, `prune_after_push` 推送后卸下非 promoted
+  的刚构建镜像。B10 push 传输失败 (`PushError::Io`) 改可重试
+  (`MAX_PUSH_RETRIES` 5, `status.pushRetries`, 超限才 Failed); canary
+  同一失败 status 只写一次 (`failure_recorded`); server drain 顺序
+  controller-manager 先停后 join (不再与新 Build 竞争退出)。
 - **依赖 / Depends on** — T8.1 (push client + `docker save` importer), T6.3
   (embedded registry), T1.2 (apiserver CAS), T3.1 (informer/workqueue
   framework).

@@ -33,6 +33,10 @@ the spike ADR, Q25 the as-built ADR, Q26 the CRI-client strategy
 - Boot gate: socket health via UnixStream poll before "healthy".
 - Backoff `base << restarts`, capped at 5 s; STABLE_AFTER 30 s resets
   the ladder (kill -9 rebirth is covered by integration test).
+- Fatal spawn errors (long-run sweep C12): NotFound / PermissionDenied /
+  InvalidInput end the loop as `SuperviseExit::FatalSpawn` instead of
+  retrying a broken bundle forever; every `ctr` call runs under
+  `bounded_output` (`kill_on_drop`, C13).
 - Drain = SIGKILL + bounded 10 s wait. Deliberately **no SIGTERM**:
   containerd child-reaping is not guaranteed for a foreign runtime
   (k3s kills the tree too).

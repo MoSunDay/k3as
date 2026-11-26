@@ -82,6 +82,15 @@ completed engine track; it does not reopen T4.11–T4.14.
     `--pids-max` 任一即硬错误；过 start gate 之后的容器侧失败以
     **125** + fd 2 消息上报 (127 = exec 目标不存在，126 = EACCES/EISDIR)。
 - **卡点 / Blockers** — none
+- **As-built (长稳清扫 2026-11-26, C1/C9/C10/C11/H6)** — `nsrun/child.rs`:
+  PR_SET_PDEATHSIG 作为 exec 前最后一步重置 + `parent_gate` 孤儿探针
+  (父已亡 → `PARENT_GONE_EXIT` 124, 不 exec)。engine: `session.rs`
+  `LogSink` 日志写失败降级继续 (不再杀会话); `server.rs` `StdinTie` +
+  `serve --exit-on-stdin-eof` (stdin EOF 即退出并 unlink socket——kubelet
+  死则 engine 自退, 不再孤儿)。kubelet 侧镜像链: `unpack.rs`
+  `guard_ancestors` symlink 守卫; `cas.rs`/`stage.rs` `PartGuard` 半写
+  part 文件在所有退出路径 (含 panic) 删除 + `ImageStore::open`
+  `sweep_part_files`。
 - **依赖 / Depends on** — T4.1 (CRI 形状), T0.1 (multicall 派发)
 
 ---

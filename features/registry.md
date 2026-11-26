@@ -60,6 +60,13 @@ patterns excluded from the count. Decision: Q40; card: T6.3; detail in
   `Docker-Content-Digest`.
 - Shutdown drain is bounded at 10 s; on timeout the registry listener
   is aborted with a warn, so a stalled upload cannot wedge SIGTERM.
+- Upload hygiene (long-run sweep 2026-11-26, B9): a failed PATCH unlinks
+  its partial staging file, and `sweep_stale_uploads` drops upload
+  sessions idle for more than 1 h (at most 1024 entries per pass) at boot
+  and on every retention pass.
+- Push client (B7, same sweep): the in-process V2 push runs under a
+  whole-push `PUSH_TIMEOUT` of 120 s with a 5 s connect timeout and a
+  32 MiB response cap; blob bodies stream from disk (`BlobBody::File`).
 
 ## Evidence
 
