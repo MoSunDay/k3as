@@ -174,10 +174,10 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
     （其中 balancer/proxy/conn/config/tls 随 Q32 删除，route/ingress
     保留）。Sprint 25: golden 39/39（G31 新增）; service-traffic
     ST1–ST6 6/6 在 openrusty 面上。
-- **卡点 / Blockers** — `ingress_listen` CLI flag unwired (debt); TLS
-    termination surface is narrower than the Lua era (rustls/SNI swap
-    documented per-module in the router crate); full live-informer
-    reload path is T5.5.
+- **卡点 / Blockers** — TLS termination surface is narrower than the Lua
+    era (rustls/SNI swap documented per-module in the router crate); full
+    live-informer reload path is T5.5. The `ingress_listen` CLI flag
+    unwiring (Sprint 25 debt) was cleared by the S41 slice.
 - **依赖 / Depends on** — T5.2, T5.3, T1.1
 
 ---
@@ -204,7 +204,7 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
   - **S41 slice — ingress_listen CLI 接线（快赢; 已落 2026-11-25, 实际
     落点与验收见下方 As-built）**: 原设想 infra config 增字段 +
     `--ingress-listen <addr:port>` 从 noop 表转 wired (parity 快照 +1) +
-    `runtime.rs` 透传（现状 `NodePortConfig::default()`
+    `runtime.rs` 透传（接线前现状 `NodePortConfig::default()`
     断链）。golden 处置: `realtraffic.sh` G70–G72 从 "钉死无监听" 翻转
     为 "带旗标正向断言 + 不带旗标保留一个负面变体"，verdict 台账与
     `golden/README.md` 行同 sprint 更新（G70 双向钉死纪律）。T5.5

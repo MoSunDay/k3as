@@ -17,7 +17,8 @@ Ingress host 精确匹配 x path 路由, 由 Ingress 集 + 实时 Endpoints 编�
 把它接到 nodePort service-plane 线程; 默认关 (用户面姿态零变化), 与
 `--disable-kube-proxy` 互斥 (Table B fatal——网关骑在该平面上)。T5.5
 整体状态不翻转 (informer 级数据源/drain 仍在卡内)。commits: **90aaac7**
-(代码 + 测试 + 脚本) + 本条收口 (CHANGELOG + index/plan 锁步)。
+(代码 + 测试 + 脚本) + `8143ec6` / `f7deef8` / 本条收口 (docs 锁步:
+CHANGELOG + index/plan/features)。
 
 **Changes**
 - **旗标 (cli)**: `ServerCmd.ingress_listen: Option<String>`
