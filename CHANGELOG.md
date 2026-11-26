@@ -179,18 +179,21 @@ commits: **2ee3eeb** (P-D/P-E/P-F 代码 + 测试 + 脚本) + 本条收口 (docs
   与 P-A `A1–A3`、P-C `C1–C14` 同名, kubelet `K1–K9` 仅裸 `D:` 标签 (K10
   有标号); 下一批前置: 统一改带批次前缀 (`P-D A1`) 的标签。(2) 中 A7
   上限为常量非旗标 (`app.rs` `MAX_IN_FLIGHT` 1024 / `REQUEST_TIMEOUT`
-  1800 s), 且在途计数把隧道长轮询 (25 s park, `tunnel_registry.rs`
-  `LONG_POLL_TIMEOUT`) 与 watch 流一并计入 — 大量 parked agent / watch
-  会挤占普通请求的 1024 配额 (503 load-shed); 后续: 长连接不计入或改
-  旗标分池。(3) 低 watch `timeoutSeconds=0` → 预算 0 s 立即结束流
+  1800 s); 在途许可只量到响应产生 (`app.rs` `hardened()` 全局限额层,
+  watch 流交回分块 body 即释放, 不随流时长占用), 持续占位者仅隧道长轮询
+  (25 s park, `tunnel_registry.rs` `LONG_POLL_TIMEOUT`) — 大量 parked
+  agent 会挤占普通请求的 1024 配额 (503 load-shed); 后续: 长轮询不计入
+  或改旗标分池。(3) 低 watch `timeoutSeconds=0` → 预算 0 s 立即结束流
   (`collection.rs`); 上游语义 (0 = 缺省窗口) 未核实, 后续对齐。(4) 低
   A8 agent 侧 401 处理 — **收尾已核实 (代码路径)**: `cli/tunnel_dialer.rs`
   `poll_next` 对 204/200 以外一律 `Err` → `run()` 告警 + 退避 (健康后首发
   1 s, 上限 15 s) → 循环头 `register()` 旋转 token 后再 park (自愈); 服务端
   `tunnel/register` 不校验 Node 对象存在 (`or_default()` 重建单项, 路由在
   authn/authz 对之内), 故 Node 删除 → `forget` 后 re-register 不依赖
-  kubelet 重建 Node; 与验收 T2 (SIGSTOP/SIGCONT 掉隧道 ≤30 s 自愈) 走同一
-  `Err` 分支; 显式 "apiserver 重启 → 401 → re-register" e2e 留作后续
+  kubelet 重建 Node; 与验收 T2 (SIGSTOP/SIGCONT 掉隧道 ≤30 s 自愈) 同属
+  park 自愈路径 — T2 在 SIGCONT 后视客户端 35 s 上限 (`POLL_CLIENT_CAP`)
+  是否已到落 `Err` 或 `Ok(None)` (204), 两臂均回循环头 `register()`;
+  显式 "apiserver 重启 → 401 → re-register" e2e 留作后续
   (验收脚本 T4)。(5) 低 coverage 证据模式对环境条件子检查脆弱 (无
   `SKIP <id>` token 的套件, CI 只跑结构模式)。(6) 低 文件红线:
   `scripts/delivery-e2e.sh` 399/400 (下一批前置: 拆分),
