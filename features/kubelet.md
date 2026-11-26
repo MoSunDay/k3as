@@ -52,6 +52,13 @@ apiserver relay -> kubelet listener -> crictl (golden G30), with
    <attempt>.log` (date pinned at plan time); a 60s sweep copytruncates
    any live file >= 100 MiB (5 generations retained, `log_rotate.rs`),
    never touching the `volumes/` sibling tree.
+6. **bounded re-LIST + teardown (P-D, same sweep)** — the pod watch and
+   the Agent watch back off their re-LIST pause 500 ms doubling to 5 min
+   (`watch_backoff.rs`, K10; a cycle that ran >= 60 s resets the
+   counter); the agent's shutdown bounds the kubelet drain
+   (`stopp`+`rmp`) at 20 s (C6); kubelet HTTP body reads carry a byte cap
+   and `RawBody` parses the chunk size as hex (RFC 7230, K7); probe
+   period/timeout/threshold are clamped to >= 1 (K9).
 
 ## Status model
 

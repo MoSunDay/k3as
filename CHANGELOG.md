@@ -7,6 +7,192 @@ milestones in `plans/init-pro/`.
 Test counts cited below are the **fresh** `cargo test --workspace` output at
 the time of the entry (passed / failed), included so the numbers stay auditable.
 
+## Sweep — 长稳确认 + Bug 清扫 (P-D / P-E / P-F, 非 sprint; 无 TODO 状态变化) (2026-11-26)
+
+**Goal:** 「k3as 长稳确认 + Bug 清扫 + e2e 分层补全」计划的后三批, 承接上一条
+P-A/P-B/P-C: **P-D** (P2 加固: 清掉 P-A/B/C 评审时记下的 OPEN/deferred 加固项,
+五组 —— apiserver/controllers、registry/pipeline、router/storage、kubelet、
+cli/runtime/engine), **P-E** (e2e 分层补全: `e2e/cases.toml` 用例登记册 +
+机器覆盖门禁 + Layer 8 delivery 套件进 battery), **P-F** (soak: 把"天级长稳"
+的日常证据压成 45 s 的 battery 档)。P-E/P-F 用真流量跑出了 **3 个真实缺陷**
+(pipeline ×2、apiserver watch ×1), 一并修复。与前三批同样**不改任何用户面
+契约、不翻 TODO 状态**。**范围说明**: P-D/P-E/P-F 没有落盘的批准条目清单,
+条目由 P-A/B/C 子任务评审的 OPEN 项与 e2e 盘点推导而来 (子任务报告), 本条
+即是其成文清单; K1–K9 的编号为本条所定 (代码注释只带 `D:` 标记, K10 除外)。
+commits: **2ee3eeb** (P-D/P-E/P-F 代码 + 测试 + 脚本) + 本条收口 (docs 锁步)。
+
+**Changes**
+- **P-D — P2 加固**
+  - **ALPHA — apiserver / controllers (A1–A8)**
+    - A1 分页游标错序: LIST 按 `mod_revision` 序切片却用 key 游标 (limit=1
+      可在一条上打转 / 跳条); `collection.rs` 先按 key 排序再分页。
+    - A2 node_cidr `/0`: `u32::MAX << 32` debug panic + 独占 `end = base+2^32`
+      回绕到 base (walk 永不返回) + `used_subnets` 对 `/0` panic; 掩码按
+      主机位、walk 按地址数有界。
+    - A3 GC 误删 PVC: `DEPENDENT_KINDS` 去掉 PVC (9 项; 上游 Retain)。
+    - A4 GC owner 只比 name: 删后重建的同名 owner 让旧 dependent 永生 →
+      比 uid (uid 为空回退 kind+name)。
+    - A5 leadership 丢失: worker set 被 abort, in-flight key 永久
+      `processing` → `WorkQueue::reset_processing` + runner
+      `release_inflight` 把 key 放回 dirty。
+    - A6 informer re-LIST 固定 50 ms (apiserver 宕机 ≈560 req/s) → 50 ms
+      倍增封顶 5 s (`relist_delay`), 收到事件即重置; pause 可被 Stop 打断。
+    - A7 apiserver 无 deadline / 无并发上限: `app.rs` `hardened()` 最外层
+      `TimeoutLayer` (`REQUEST_TIMEOUT` 1800 s → 504) + 并发上限
+      (`MAX_IN_FLIGHT` 1024, 超出 load-shed → 503); 两种错误体都是
+      `metav1.Status`。
+    - A8 隧道注册表 (T4.5/Q65): 未认证 park 先 `or_default()` 建节点项再查
+      token (任意节点名可撑大表) → `get_mut` 查找; Node 对象删除即
+      `forget_node_tunnel` (token/generation/parked 请求随节点消失)。
+  - **BETA — registry / pipeline (B1–B4)**
+    - B1 registry index 子镜像只被 digest 引用 → 永不 GC: manifest DELETE 与
+      tag retention 走 `gc::delete_with_children` / `prune_index_children`
+      (`MAX_INDEX_DEPTH` 3), 孤儿子镜像与其 blob 级联回收, 带 tag 的子镜像
+      保留。
+    - B2 blob DELETE 可掏空活镜像 → 被引用答 409 `BLOB_REFERENCED`
+      (`store::referenced_blob_digests`), 孤儿 blob 仍 202。
+    - B3 pipeline executor `wait_with_output` 无界缓冲子进程输出 → 管道 8 KiB
+      边读边丢, 每流只留末尾 `OUTPUT_CAP` 256 KiB。
+    - B4 pipeline scratch 目录 (`<scratch>/<ns>/<build>/`, `import/`) 在
+      panic/SIGKILL 后泄漏 → `pipeline/scratch.rs` (NEW) `sweep_due`
+      (`SCRATCH_TTL` 24 h, `SWEEP_INTERVAL` 10 min, 随 reconcile)。
+  - **GAMMA — router / storage (G1–G3)**
+    - G1 `router/serve.rs` 连接卫生: JoinSet 跟踪每个连接, `MAX_CONNS` 4096
+      (超出直接断流), `HEADER_READ_TIMEOUT` 30 s, at-cap 告警限频 1 s,
+      shutdown 先停 accept 再 abort + `DRAIN_GRACE` 2 s。
+    - G2 nodePort/ClusterIP bind 失败只记一次 → 记录 cause + `RETRY_TICK`
+      5 s 重试直到端口释放 (nodeport.rs / clusterip.rs)。
+    - G3 rdb 同步扫描 (LIST `obj/`、watch replay `log/`、compaction range) 跑在
+      reactor 线程 → `rdb_backend/scan.rs` (NEW) `spawn_blocking` twin (纯
+      `&Store` 函数, 锁语义不变)。
+  - **DELTA-1 — kubelet (K1–K10)**
+    - K1 镜像解包与 GC 竞态: 解包写 `.tmp-<hex>-<pid>` staging 目录再 rename
+      发布, GC sweep / 磁盘压力清扫对其不可见 (`engine/image/layers.rs`)。
+    - K2 GC sweep 与 usage walk 是全树 `std::fs` 遍历却跑在 tokio worker →
+      `gc_offload` / `usage_offload` (blocking pool), `CriBackend::image_gc`
+      改 async。
+    - K3 manifest 拉取无界 → `MAX_MANIFEST_BYTES` 4 MiB (Content-Length 预检
+      + 流式封顶)。
+    - K4 in-flight 拉取锁表按 ref 永久增长 → `Weak` 条目, 只随在飞 ref 有界。
+    - K5 engine 启动失败留下活 `Child` (zombie 到 kubelet 退出) →
+      `engine/launch.rs` `settle` kill + 有界 reap (`ABANDON_GRACE` 5 s,
+      reap 走 blocking pool)。
+    - K6 GPU vendor CLI (`nvidia-smi`/`rocm-smi`) 卡死每心跳泄漏一个进程 →
+      `gpu/inventory.rs` `TOOL_TIMEOUT` 3 s + `kill_on_drop`。
+    - K7 kubelet HTTP body 无字节上限 → `http/body.rs` `read_to_end_capped`;
+      `RawBody` chunk-size 按十六进制解析 (RFC 7230; 原按十进制)。
+    - K8 NFS helper exec 无上界 (`mount.nfs` 可在内核里卡几分钟) →
+      `nfs_mount.rs` `MOUNT_TIMEOUT` 30 s + `kill_on_drop`, `ETXTBSY` 重试
+      sleep 在 runtime 上。
+    - K9 probe period/timeout/threshold 0 → 钳到 1 (上游 ≥1), 饱和不回绕。
+    - K10 watch re-LIST 固定 500 ms → `kubelet/watch_backoff.rs` (NEW)
+      `watch_pause` 500 ms 倍增到 5 min, 周期 ≥60 s 即重置 (pod watch 与
+      Agent watch 共用)。
+  - **DELTA-2 — cli / runtime / engine (C1–C7)**
+    - C1 engine boot probe: 预算到点后的 kill/reap 无上界且在 async worker
+      上阻塞轮询 → `cli/engine_probe.rs` `spawn_blocking` + `REAP` 5 s /
+      `live()` 300 ms。
+    - C2 containerd 临时配置携带 Secret env → `runtime/cri.rs`
+      `O_EXCL` + 0600 + nonce 重试。
+    - C3 `cli/anyhome_vfs.rs` FSMap 重列目录 stat 竞态 (ENOENT) panic → 跳过。
+    - C4 `cli/anyhome_keeper.rs` 心跳在 worker 线程上 mkdir/write →
+      `spawn_blocking`。
+    - C5 `engine/server.rs` 退出路径留下 `<socket>.pause-rootfs` + socket →
+      共享 `teardown`。
+    - C6 agent 退出时 kubelet drain (`stopp`+`rmp`) 无上界 →
+      `cli/runtime.rs` `KUBELET_DRAIN_TIMEOUT` 20 s。
+    - C7 `runtime/tests/cri_integration.rs` 关闭竞态 (shutdown 抢在
+      supervisor 100 ms `wait_socket` 之前) → 等 `ever_healthy` 再触发。
+- **P-E — e2e 分层补全**
+  - `e2e/cases.toml` + `e2e/cases.d/*.toml` (NEW, 按层 10 份): 每个验证脚本
+    一条 suite 记录 (runner = battery/golden/gate/ci/manual/unwired/tool,
+    TODO 覆盖, case id, skip 条件) —— 46 套件 / 310 case id (battery 22 +
+    golden 15 shard + 其余); `e2e/README.md` 增 "Case registry" 节;
+    `golden/README.md` 清单行改为事实 (100 个 case id, G01–G113, 15 shard)。
+  - `scripts/e2e-coverage.sh` (NEW): 三向一致性 —— BATTERY ↔ 登记册 (双向),
+    index.md done TODO ↔ 覆盖套件或显式豁免 (weak-only 只报告不致命),
+    `--logs` 下每个声明的 case id 必须出现在该套件门禁日志的 OK/SKIP token
+    中 (SKIP 套件按 Q25 计 skipped, battery 已 FAIL 的套件不重复报告)。
+    现状: 43 done → 35 covered / 2 weak-only (T0.2 ci `stage-fresh-dir`,
+    T4.5 manual `acceptance-2node`) / 6 exempt (T0.2b/T0.5/T4.6/T5.1/T5.2/
+    T5.3) / 0 uncovered。
+  - `scripts/all-gates.sh`: 门禁重排为 1–11 (9 = e2e-coverage, `--no-e2e`
+    下结构模式; 10 = flag-parity; 11 = SSOT 手动行), BATTERY 扩到 22
+    (+`delivery-e2e.sh` / `probe-e2e.sh` / `pod-env-e2e.sh` /
+    `inference-fake-e2e.sh` / `soak-e2e.sh`), `BATTERY_ENV=(SOAK_SECONDS=45)`,
+    失败套件经 `E2E_FAILED_SCRIPTS` 交给门禁 9 去重。
+  - `scripts/delivery-e2e.sh` (NEW, 399 行) DL1–DL10: 真实 `init-pro server`
+    (registry + pipeline 默认开) + curl/python3 + 只给 server 进程的 fake
+    docker shim (`INIT_PRO_DOCKER`), 全离线; boot / build / publish /
+    promote / re-build / split / canary promote / abort / invalid /
+    archive + restart。
+  - CI (`.github/workflows/ci.yml`): `e2e registry — cases.toml parity +
+    done-TODO coverage (structural)` step。
+- **P-F — soak**: `scripts/soak-e2e.sh` (NEW, 365 行) SK1–SK7: rdb 数据面 +
+  registry + pipeline 持续 churn (≥ SOAK_SECONDS/2 轮, 0 错), RSS (+64 MiB) /
+  fd (+32 且 <1024) / 线程 (+16) 采样, SIGTERM 20 s 内退出, 重启后 keeper
+  ConfigMap / 首个 bump 的 registry tag / `status.observedTag` 存活; 独立
+  默认 600 s, battery 档 `SOAK_SECONDS=45`。
+- **P-E/P-F 实跑发现并修复的缺陷**
+  1. pipeline `latest_build` 按名字序取"最新" Build: `b9-*` 压过 `b10-*`,
+     同 tag 反复判定为"新 Build" → 新一轮 create (soak 观察 ~34 Build/s
+     风暴); `plan.rs` `latest_build_for_tag` 先按 `/spec.image/tag` 过滤
+     再取最新 (`latest_build` 保留给跨 tag 用途)。
+  2. pipeline `hold_failure` "已上报"只比 `lastBuild.name`, 而 create_build
+     在 Building 阶段就打 lastBuild → 子 Build Failed 后 SP 卡在 Building
+     永不 Failed; 现在要求 `phase == Failed` 且同名。
+  3. apiserver watch 忽略 `timeoutSeconds` → `collection.rs`
+     `ListParams.timeout_seconds` (cap `MAX_WATCH_SECONDS` 3600),
+     `do_watch` 到点服务端结束流 (200)。
+- **e2e 脚本适配 (随 B2 与真流量校正)**: `builtin-image-e2e.sh` I8a 改为
+  "被引用 blob DELETE → 409; manifest DELETE → 202; 之后 blob DELETE →
+  202/409; pod 从 CAS 运行" (`lib/builtin-image-lib.sh` +
+  `registry_manifest_digest` / `delete_registry_manifest`); `agent-exec-e2e.sh`
+  G1 冷启动轮询预算 30 s → 60 s。
+- **文件拆分 (行数上限)**: NEW `controllers/pipeline/scratch.rs` (+ `scratch/
+  tests.rs`), `storage/rdb_backend/scan.rs`, `kubelet/watch_backoff.rs`;
+  `scripts/delivery-e2e.sh` 399 / `soak-e2e.sh` 365 / `e2e-coverage.sh` 251。
+- **测试**: 1673 → **1735** (+62: apiserver 12 = A1/A7/A8 + watch timeout,
+  controllers 20 = A2–A6 + B3/B4 + E/F 修复 2, registry 6 = B1/B2, router
+  6 = G1/G2, storage 2 = G3, kubelet 11 = K1–K10, cli 3 = C1/C3, runtime
+  1 = C2, engine 1 = C5)。
+- **文档 (SSOT)**: 本条 + `features/changelog.md` (按 feature 卡的 delta,
+  新增 `e2e-gates` 伪卡) + `plans/init-pro/index.md` T0.6/T1.2/T2.3/T3.1/
+  T4.1/T4.2/T4.5/T4.8/T4.11/T4.12/T4.13/T5.4/T6.3/T7.1/T7.2/T7.4/T8.1–T8.5
+  行注记 + 对应 `plan/*.md` 卡 "As-built (长稳清扫 2026-11-26, P-D/P-E)"
+  条目; feature 卡现状表述同步: `controllers.md` (A2–A6), `kubelet.md`
+  (K7/K9/K10/C6), `registry.md` (B1/B2), `router-data-plane.md` (G1/G2),
+  `storage-layer.md` (G3), `builtin-engine.md` (C5/K1–K5), `containerd-
+  runtime.md` (C2), `discovery-api.md` (A1/A7/watch timeout),
+  `anyhome-pod-mounts.md` (C3/C4/K8)。decisions.md 不动 (无决策文本被推翻)。
+- **后续 (本批未处理, 记录为 follow-up)**: apiserver `/readyz` 未路由
+  (delivery-e2e 以 discovery 代替探活); create 不打 `creationTimestamp`
+  (pipeline 已不依赖); `start_container` 在 `settle` 之后错误路径仍可能
+  留孤儿 engine child; `http::get_raw` head 循环无上界; `/pod/<ns>/<name>`
+  目录无 GC (A5 by design); containerd 继承 agent 全量 env; RocksDB 同步
+  点读仍在 async 路径; `golden/suites/nodes.sh` 532 行超新文件上限;
+  `pick_port` 在 e2e 脚本间重复 (×14+2, 待抽 `scripts/lib/`); soak 的 watch
+  drain 仍兼用客户端 `-m 2`。
+
+**门禁** (P-D/P-E/P-F 最终工作树, `scripts/all-gates.sh` 完整跑 —
+`RESULT: PASS`, gates=11 / 33 行 0 FAIL / 3 SKIP, battery 870s): fmt
+(member-scope) ✓; build --locked ✓; workspace tests **1735/0** (上一条 1673
++ 本批 62); clippy --all-targets -D warnings ✓; unsafe-audit ✓; engine-
+singlethread ✓; golden **75 PASS + 6 SKIP** (g24/G25-G26/G30/G29/G60-G66/
+G80-G82, 宿主 cni0 共存门, posture 同前); battery 22 行: 19 PASS
+(multicall-selftest, discovery-parity, graceful-shutdown, engine-selftest
+33/0, builtin-runtime B1-B13+N1-N5, durability D1-D4, registry 7/0/1,
+**delivery-e2e DL1-DL10**, anyhome A1+P2-P5, agent-exec G1-G6, resources,
+**probe-e2e**, **pod-env-e2e**, builtin-image I1-I8 (含重做的 I8a),
+builtin-hostroot H1-H8+HD1-HD5, sandbox 23 OK, **inference-fake-e2e 11/0**,
+auth A1-A7, **soak-e2e SK1-SK7** (45 s 档: 36 轮 churn 0 错, RSS 66→70M,
+fd 25→25, 线程 56→56, SIGTERM 0 s 退出, 重启存活)) + 3 SKIP (service-traffic
+/ flannel / netpol: 宿主 cni0); **e2e-coverage 门禁 9 PASS** (46 套件 /
+310 case id; BATTERY 22 对齐; 19 e2e 脚本 + 15 golden shard 全登记; 43 done
+TODO → 35 covered / 2 weak-only / 6 exempt / 0 uncovered; 证据模式 31 套件
+日志核对 + 3 skipped); flag-parity **32/32**; SSOT 行手动 (本条)。日志
+`/tmp/init-pro-all-gates.ZKOJvL` (KEEP_LOGS=1)。)
+
 ## Sweep — 长稳确认 + Bug 清扫 (P-A / P-B / P-C, 非 sprint; 无 TODO 状态变化) (2026-11-26)
 
 **Goal:** 用户批准的「k3as 长稳确认 + Bug 清扫 + e2e 分层补全」计划的前三批:

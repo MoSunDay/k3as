@@ -1,5 +1,30 @@
 # e2e/ — manifest-driven end-to-end suites
 
+## Case registry (`cases.toml` + `cases.d/*.toml`, batch E of the 长稳清扫)
+
+`cases.toml` is the SSOT for the e2e battery layout; the suites live one file
+per layer in `cases.d/` (`l0-foundation` ... `l8-delivery`, plus
+`xc-longrun`). `scripts/e2e-coverage.sh` (all-gates gate 9) keeps it honest in
+three directions:
+
+1. **registry <-> runner parity** — every `BATTERY` entry of
+   `scripts/all-gates.sh` is a `runner = "battery"` suite and vice versa; every
+   `scripts/*-e2e.sh` and `scripts/golden/suites/*.sh` on disk is registered.
+2. **registry <-> SSOT coverage** — every `done` TODO in
+   `plans/init-pro/index.md` maps to a covering suite (battery/golden/gate) or
+   carries a `[coverage_exemptions]` entry with a reason; `ci`/`manual`/
+   `unwired` runners only count as *weak* coverage (reported, never fatal).
+3. **registry <-> evidence** (`--logs <all-gates log dir>`) — every declared
+   case id must appear as an OK/SKIP token in the suite's gate log, so a
+   renamed or removed case cannot linger in the registry. Suites whose log
+   leads with SKIP are counted as skipped (Q25); suites that FAILED in the
+   battery are judged by their own row (`E2E_FAILED_SCRIPTS`), never twice.
+
+`scripts/e2e-coverage.sh --list` prints the registry grouped by layer. The
+manifest is a deliberately simple line-oriented TOML subset (strings, arrays,
+`[[suite]]`) because the dev hosts' python3 is 3.10 (no `tomllib`); keep new
+records in that shape.
+
 ## service-traffic e2e (`scripts/service-traffic-e2e.sh`, Sprint 18 / S6)
 
 Boots a real single-node cluster (server + agent over the bundled

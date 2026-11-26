@@ -178,6 +178,12 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
     era (rustls/SNI swap documented per-module in the router crate); full
     live-informer reload path is T5.5. The `ingress_listen` CLI flag
     unwiring (Sprint 25 debt) was cleared by the S41 slice.
+- **As-built (长稳清扫 2026-11-26, P-D G1/G2)** — G1 `serve.rs` 连接卫生:
+  JoinSet 跟踪连接, `MAX_CONNS` 4096 (超出直接断流), header 读超时 30 s,
+  at-cap 告警限频 1 s, shutdown 先停 accept 再 abort + `DRAIN_GRACE` 2 s。
+  G2 nodePort/ClusterIP bind 失败记录 cause 并每 `RETRY_TICK` 5 s 重试,
+  直到端口释放。
+
 - **依赖 / Depends on** — T5.2, T5.3, T1.1
 
 ---

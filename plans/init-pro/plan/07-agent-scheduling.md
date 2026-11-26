@@ -121,6 +121,9 @@ inference track.
   竞态可致重复 spawn（Q37 at-least-once 容忍，但浪费进程/争用
   workspace）；`patch_if_changed` 先记后发 — 早期失败路径一次 patch 失败
   即永久压制；写回缓存无淘汰，DELETED 不清理。见 plan/04 遗留发现 F4。
+- **As-built (长稳清扫 2026-11-26, P-D K10)** — Agent watch 的 re-LIST
+  退避与 pod watch 共用 `kubelet/watch_backoff.rs` (500 ms 倍增到 5 min)。
+
 - **依赖 / Depends on** — T3.2, T1.2
 
 ---
@@ -181,6 +184,10 @@ inference track.
 - **卡点 / Blockers** — 真实 NVIDIA/AMD 验收需要操作者预装驱动和硬件；
   `*_VISIBLE_DEVICES` 只做逻辑选择，不是 Agent 或跨租户安全边界。节点必须
   专属单一租户；Agent action containment 由独立的 Q63/T7.7 提供。
+- **As-built (长稳清扫 2026-11-26, P-D K6)** — `gpu/inventory.rs` vendor
+  CLI (`nvidia-smi`/`rocm-smi`) 探测 `TOOL_TIMEOUT` 3 s + `kill_on_drop`:
+  卡死的 helper 随超时 future 被 SIGKILL, 不再每心跳泄漏一个进程。
+
 - **依赖 / Depends on** — T4.15, T3.2
 
 ---
@@ -444,6 +451,13 @@ inference track.
   语义检索需上游 embedder）；A5 删除/GC 需 owner 模型（见上，非本 TODO
   阻塞）；D1 令 Agent 执行无法进 server 进程 —— Phase B 必须走节点侧
   （B1）/ 新子命令（B2），与 Q35 记录一致
+- **As-built (长稳清扫 2026-11-26, P-D C3/C4 + K8)** — C3 `anyhome_vfs.rs`
+  FSMap 重列目录时 stat 竞态 (ENOENT) 跳过该子项而非 panic。C4
+  `anyhome_keeper.rs` 心跳的 mkdir/write 走 `spawn_blocking`。K8
+  `nfs_mount.rs` 每次 helper exec `MOUNT_TIMEOUT` 30 s + `kill_on_drop`
+  (`ETXTBSY` 重试 sleep 在 runtime 上), 卡在内核里的 `mount.nfs` 被杀并
+  报 `TimedOut`。
+
 - **依赖 / Depends on** — T7.3, T4.2
 - **S54 rebase 注记 (Q66, 2026-11-25)** — anyhome 实体下线, 本 TODO
   语义与验收口径不变: `link_repos/any-home` (RealFs/MemoryDb/

@@ -175,6 +175,18 @@ Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
   (`MAX_PUSH_RETRIES` 5, `status.pushRetries`, 超限才 Failed); canary
   同一失败 status 只写一次 (`failure_recorded`); server drain 顺序
   controller-manager 先停后 join (不再与新 Build 竞争退出)。
+- **As-built (长稳清扫 2026-11-26, P-D B3/B4 + P-E/F 修复 + P-F soak)** —
+  B3 executor 子进程输出边读边丢 (`READ_CHUNK` 8 KiB), 每流只留末尾
+  `OUTPUT_CAP` 256 KiB。B4 `pipeline/scratch.rs` 清扫 panic/SIGKILL 遗留的
+  scratch 目录 (`SCRATCH_TTL` 24 h, `SWEEP_INTERVAL` 10 min, 随 reconcile)。
+  P-E/F 实跑发现并修复: (1) `latest_build` 按名字序取"最新" Build, `b9-*`
+  压过 `b10-*` 导致同 tag 反复触发新 Build (soak 观察 ~34 Build/s 风暴) →
+  `latest_build_for_tag` 先按 `/spec/image/tag` 过滤; (2) `hold_failure`
+  "已上报"只比 `lastBuild.name`, 而 create_build 在 Building 阶段就打
+  lastBuild → SP 卡在 Building 永不 Failed, 现在要求 `phase == Failed`
+  且同名。P-F `scripts/soak-e2e.sh` SK1–SK7 (rdb + registry + pipeline 持续
+  churn, RSS/fd/线程采样, SIGTERM 20 s, 重启存活; battery 档 45 s)。
+
 - **依赖 / Depends on** — T8.1 (push client + `docker save` importer), T6.3
   (embedded registry), T1.2 (apiserver CAS), T3.1 (informer/workqueue
   framework).
@@ -213,6 +225,13 @@ Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
   `scripts/cli-flag-parity-test.sh`.
 - **卡点 / Blockers** — the e2e deliberately uses archive mode (no docker
   daemon in CI); context mode is covered by the executor unit seams only.
+- **As-built (长稳清扫 2026-11-26, P-E)** — `scripts/delivery-e2e.sh`
+  (DL1–DL10): 真实 `init-pro server` (registry + pipeline 默认开) + curl/
+  python3 + fake docker shim, 全离线; build/promote/re-build/split/canary
+  promote+abort/invalid/archive+restart 十项, 纳入 all-gates battery。
+  e2e 清单机器化: `e2e/cases.toml` + `e2e/cases.d/*.toml` (46 套件 / 310
+  case id) + `scripts/e2e-coverage.sh` 门禁 (all-gates 第 9 道)。
+
 - **依赖 / Depends on** — T8.3.
 
 ---
@@ -272,6 +291,12 @@ Decisions: **Q56** (ServicePipeline/Build), **Q57** (TrafficSplit), **Q58**
   ~6s) and `cargo test --workspace --locked` **1241 passed / 0 failed** (85
   suites); `scripts/all-gates.sh` **gates=10, fails=0** (golden 51/0).
 - **卡点 / Blockers** — none.
+- **As-built (长稳清扫 2026-11-26, P-E)** — delivery-e2e DL7–DL9 钉住
+  promote (`<target.deployment>-canary` + `<stableService>-canary` →
+  Promoted, weights 100/0, stable image 切新)、abort (`spec.release.abort`
+  → Aborted, 子对象回收, weights 100/0, observedTag/image 不动) 与
+  invalid (weight 150 → Failed + Ready=False/ReleaseInvalid)。
+
 - **依赖 / Depends on** — T8.2, T8.3, T8.4.
 
 ---

@@ -42,3 +42,9 @@ apiserver REST face (T1.2b/T1.2c, `crates/apiserver/src/lib.rs`).
 - Discovery responses still come from the static `SchemaRegistry`; stored
   resources are served by the CRUD face, e.g. pods collection list -> 200
   (G06, T1.2b).
+- Long-run hardening (P-D A1/A7 + P-E/F fix, 2026-11-26): LIST sorts by
+  storage key before slicing a key cursor (an RV-ordered list re-served
+  or skipped entries); the whole router is wrapped in a 1800 s request
+  timeout (504) and a 1024 in-flight cap with load-shed (503), errors in
+  the `metav1.Status` envelope; watch honours `timeoutSeconds` (capped at
+  3600) and ends the stream server-side.

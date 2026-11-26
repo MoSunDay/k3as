@@ -78,6 +78,14 @@ complete Kubernetes API coverage.
 - **证据 / Evidence** — Sprint 10: T1.2a discovery handlers landed (T0.6 golden 4/4). Sprint 10.5: T1.2b REST CRUD + watch landed in `crates/apiserver/` — `api_app()` builds the full router (discovery + CRUD + watch routes) over `Arc<dyn StorageBackend>`; `AppState` resolves resource paths, `collection.rs` (create/list/watch), `item.rs` (get/replace/delete/patch). Handlers: resourceVersion CAS on PUT/DELETE (409 on stale), strategic-merge/merge/JSON PATCH, namespace auto-injection, key-cursor list pagination, live-watch chunked stream (ADDED/MODIFIED/DELETED). 15 apiserver integration tests + 1 watch streaming test (real TCP). `cli/runtime.rs` constructs `EmbeddedStorage` and passes it to `serve()`. Server-side apply field-manager = T1.2c (next). Sprint 11: T1.2c server-side apply landed — `crates/api/src/apply/` (`field_set.rs` FieldTree/FieldsV1 extraction keyed by merge-key; `mod.rs` `apply_object` merge/conflict/prune + `get_managed_fields`/`set_managed_fields` round-trip) + `crates/apiserver/src/apply.rs` (PUT/PATCH dispatch on `application/apply-patch+yaml`: 201 create / 200 update (CAS) / 409 conflict / `force` ownership steal). +15 tests (8 api + 7 apiserver); golden G13/G14 → 14/14. T1.2 → done.
 - **卡点 / Blockers** — Server-side apply field-manager complexity; opt-in
     scope for v1.
+- **As-built (长稳清扫 2026-11-26, P-D A1/A7 + P-E/F 修复)** — A1 分页:
+  LIST 曾按 `mod_revision` 序切片却用 key 游标 (重发/漏发), 现在先按 key
+  排序再分页 (`collection.rs`)。A7 请求硬化: `hardened()` 最外层
+  `TimeoutLayer` (`REQUEST_TIMEOUT` 1800 s → 504) + 并发上限
+  (`MAX_IN_FLIGHT` 1024, 超出 load-shed → 503), 错误体为 `metav1.Status`。
+  watch `timeoutSeconds` (上限 `MAX_WATCH_SECONDS` 3600) 由服务端到点结束
+  流 (200), 不再只靠客户端断开。
+
 - **依赖 / Depends on** — T1.1, T2.2
 
 ---

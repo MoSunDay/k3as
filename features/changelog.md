@@ -4,6 +4,66 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- e2e-gates (registry + coverage gate + battery; `e2e/README.md` "Case
+  registry"): long-run sweep P-E (2026-11-26; T0.6/T8.4) — `e2e/cases.toml`
+  + `e2e/cases.d/*.toml` register every verification script (46 suites /
+  310 case ids: 22 battery, 15 golden shards, ci/manual/gate/tool kinds)
+  with TODO coverage and exemptions; `scripts/e2e-coverage.sh` (all-gates
+  gate 9) checks registry <-> BATTERY parity, done-TODO coverage (35
+  covered / 2 weak-only / 6 exempt / 0 uncovered) and, with `--logs`, that
+  every declared case id appears in the gate log. BATTERY grows to 22
+  (+delivery-e2e, probe-e2e, pod-env-e2e, inference-fake-e2e, soak-e2e at
+  `SOAK_SECONDS=45`); failed scripts are handed to gate 9 via
+  `E2E_FAILED_SCRIPTS`; CI runs the structural check.
+- apiserver: long-run sweep P-D/P-E/P-F (2026-11-26; T1.2/T4.5) — A1 LIST
+  sorts by storage key before slicing a key cursor; A7 the whole router
+  is wrapped in a 1800 s request timeout (504) and a 1024 in-flight cap
+  with load-shed (503), errors as `metav1.Status`; A8 the tunnel registry
+  no longer inserts a node entry before the token check and forgets a
+  Node's tunnel state on Node delete; E/F fix: watch `timeoutSeconds` is
+  honoured server-side (capped at `MAX_WATCH_SECONDS` 3600).
+- controllers: long-run sweep P-D (2026-11-26; T3.1) — A2 node_cidr `/0`
+  no longer panics (`u32::MAX << 32`) nor wraps the exclusive end bound;
+  A3 PVCs leave the GC sweep universe (`DEPENDENT_KINDS` 9, upstream
+  Retain); A4 owner identity compares the uid; A5 an aborted worker set
+  releases its in-flight keys (`WorkQueue::reset_processing`,
+  `release_inflight`); A6 informer re-LIST backs off 50 ms doubling to 5 s.
+- registry: long-run sweep P-D (2026-11-26; T6.3) — B1 index children
+  referenced by digest only are cascaded on manifest DELETE and by tag
+  retention (`delete_with_children`, `prune_index_children`, depth 3); B2
+  a referenced blob answers DELETE with 409 `BLOB_REFERENCED`.
+- delivery-plane: long-run sweep P-D/P-E/P-F (2026-11-26; T8.3/T8.5) — B3
+  executor output is streamed and capped (last 256 KiB per stream); B4
+  `pipeline/scratch.rs` sweeps leaked scratch dirs (24 h TTL, 10 min
+  cadence). Found by the new e2e/soak runs and fixed: `latest_build_for_tag`
+  picks the newest Build of the SAME tag (name-order `b9` > `b10` stormed
+  ~34 Builds/s); `hold_failure` requires `phase == Failed` (a Build stamped
+  at creation stuck the pipeline in Building); canary failure status follows
+  the same rule. `scripts/delivery-e2e.sh` (DL1-DL10, real server + fake
+  docker shim) and `scripts/soak-e2e.sh` (SK1-SK7) join the battery.
+- router-data-plane: long-run sweep P-D (2026-11-26; T5.4) — G1 connection
+  hygiene (`JoinSet`, cap 4096, header read timeout 30 s, rate-limited
+  at-cap warn, 2 s drain grace); G2 nodePort/ClusterIP bind failures are
+  logged with their cause and retried every 5 s.
+- storage-layer: long-run sweep P-D (2026-11-26; T2.3) — G3 LIST / watch
+  replay / compaction range scans run under `spawn_blocking`
+  (`rdb_backend/scan.rs`).
+- kubelet: long-run sweep P-D (2026-11-26; T4.2/T4.8) — K1 `.tmp-<hex>-<pid>`
+  unpack staging dirs are invisible to GC/pressure sweeps; K2 GC + usage
+  walks off the async workers; K3 manifest pull cap 4 MiB; K4 in-flight
+  pull lock table is `Weak`-bounded; K7 body read byte cap + hex
+  chunk-size; K9 probe knobs clamped >= 1; K10 re-LIST backoff
+  (`watch_backoff.rs`, 500 ms to 5 min); C6 agent-exit kubelet drain 20 s.
+- builtin-engine: long-run sweep P-D (2026-11-26; T4.11/T4.12/T4.13/T7.2) —
+  C1 boot probe reaps on the blocking pool with bounded waits; C5 every
+  `engine serve` exit path removes the socket and pause rootfs; K5 an
+  engine that never binds is killed + reaped (5 s); K6 vendor GPU CLI
+  probes run under a 3 s budget with `kill_on_drop`.
+- containerd-runtime: long-run sweep P-D (2026-11-26; T4.1) — C2 the temp
+  containerd config is created `O_EXCL` 0600 with a nonce retry.
+- anyhome-pod-mounts: long-run sweep P-D (2026-11-26; T7.4) — C3 FSMap
+  relist skips a child that raced away; C4 keeper beat I/O on the blocking
+  pool; K8 NFS helper execs bounded at 30 s with `kill_on_drop`.
 - registry: long-run sweep P-A/P-B (2026-11-26, non-sprint; T6.3/T8.1) —
   A1 (commit 13e26a2) streamed `docker save` import: `tarstream.rs` stages
   each layer to disk with hash-while-copy (256 KiB window, gzip/zstd

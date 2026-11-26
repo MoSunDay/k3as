@@ -145,4 +145,8 @@ APIServer (T1.2) sits on. Per Q1, etcd is **bundled into the single binary**
   interval), 任务由 server plane drain 回收。watermark 之下的 watch 起点按
   既有 T2.3 语义答 `StorageError::Compacted` (etcd `ErrCompacted` / 410,
   客户端重新 LIST)——本批只把该契约写进模块文档, 行为不变。
+- **As-built (长稳清扫 2026-11-26, P-D G3)** — `rdb_backend/scan.rs`: LIST
+  (`obj/` 前缀)、watch replay (`log/`)、compaction range 三处同步 RocksDB
+  迭代移到 `spawn_blocking` (纯 `&Store` 函数 + async 包装, 锁语义不变)。
+
 - **依赖 / Depends on** — T2.2

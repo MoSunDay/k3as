@@ -101,6 +101,15 @@ bootstrap/HA machinery that turn "API + storage" into a working cluster.
   ownerRef (存量对象下次 update 收养, 外来 ref 保留——删 Service 即级联
   GC)。B5 `DRAIN_KINDS` (25 项) 与 registry served namespaced kinds 交叉
   核对 (`drain_table_covers_every_served_namespaced_kind`), 漏登记直接红测。
+- **As-built (长稳清扫 2026-11-26, P-D A2–A6)** — A2 `node_cidr` `/0`:
+  `u32::MAX << 32` debug panic 与独占 `end` 回绕 (walk 永不返回) 修正, 掩码
+  按主机位、walk 按地址数有界。A3 GC 不再把 PVC 当 dependent 删除
+  (`DEPENDENT_KINDS` 9 项; 上游 Retain)。A4 GC owner 身份比 uid (uid 为空
+  回退 kind+name)。A5 leadership 丢失 abort worker set 时
+  `WorkQueue::reset_processing` 把 in-flight key 放回 dirty, 不再永久
+  `processing`。A6 informer re-LIST 由固定 50 ms 改为 50 ms 倍增封顶 5 s
+  (`relist_delay`, 收到事件即重置)。
+
 - **依赖 / Depends on** — T1.2, T2.2
 
 ---

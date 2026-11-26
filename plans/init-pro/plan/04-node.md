@@ -98,6 +98,10 @@ format.
   `SuperviseExit::FatalSpawn`, 坏 bundle 不再无限重试) + `spawn_retry_plan`;
   `runtime/cri.rs` `bounded_output` (`kill_on_drop(true)`) 给每次 `ctr`
   调用上界, 超时映射 `CriError::Io`。
+- **As-built (长稳清扫 2026-11-26, P-D C2)** — `runtime/cri.rs` 临时
+  containerd 配置 (携带 Secret env) 改 `O_EXCL` + 0600 创建, 名字冲突走
+  nonce 重试, 绝不写穿已存在的路径。
+
 - **依赖 / Depends on** — T0.2
 
 ---
@@ -263,6 +267,14 @@ format.
   `CriBackend::image_gc` 默认 no-op + `ImageGcStats`), 每次 sync 顺带跑。
   C4 pod 删除连 `<log-root>/<uid>` 目录一起清 (`cleanup_volumes`, uid
   形状校验 + umount 先行); `log_retention.rs` (NEW) 7 天日期目录清扫。
+- **As-built (长稳清扫 2026-11-26, P-D K7/K9/K10 + C6)** — K10 watch
+  re-LIST 由固定 500 ms 改为 `watch_backoff.rs` 的 500 ms 倍增封顶 5 min
+  (周期 ≥60 s 即重置; pod watch 与 Agent watch 共用)。K7 kubelet HTTP body
+  读带上限 (`read_to_end_capped`), `RawBody` chunk-size 按 RFC 7230
+  十六进制解析 (原按十进制)。K9 probe period/timeout/threshold 钳到 ≥1
+  (饱和不回绕)。C6 agent 退出时 kubelet drain (`stopp`+`rmp`) 20 s 上界
+  (`KUBELET_DRAIN_TIMEOUT`)。
+
 - **依赖 / Depends on** — T4.1, T3.2
 - **As-built (Sprint 37c, 2026-11-15, 双节点实机)** — heartbeat 的
   GET-modify-PUT 顺带 reconcile Node 注解 `init-pro.io/kubelet-port`
@@ -560,6 +572,11 @@ format.
 - **卡点 / Blockers** — none（卡面收口）。记录在案: exec 流式不穿
   隧道（单请求/响应 = Q31 范围, standing）; 中继跳加长轮询交接延迟;
   隧道永不承重（处处直连优先）; 无 mTLS（Q21 明文前提）。
+- **As-built (长稳清扫 2026-11-26, P-D A8)** — `tunnel_registry.rs`: 未认证
+  park 曾先 `or_default()` 建节点项再查 token (任意节点名可撑大注册表),
+  改 `get_mut` 查找; Node 对象删除即 `forget_node_tunnel` (token/
+  generation/parked 请求随节点消失)。
+
 - **依赖 / Depends on** — T4.2, T1.2
 
 ---
@@ -676,6 +693,10 @@ format.
   echo 镜像 8080 + wfstep, 紧凑探针参数, restartCount 数值断言);
   golden 73/73 (用户双节点集群下线后的权威全电池补录); parity 22/22
 - **卡点 / Blockers** — none
+- **As-built (长稳清扫 2026-11-26, P-D K9)** — `probes.rs` period/timeout/
+  threshold 钳到 `1..=u32::MAX` (上游要求 ≥1, 0 会让 tracker 空转;
+  `initialDelaySeconds` 仍允许 0)。
+
 - **依赖 / Depends on** — T4.2
 
 ---

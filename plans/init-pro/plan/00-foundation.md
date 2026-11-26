@@ -346,4 +346,10 @@ conformance golden gate (T0.6, Q59)** that every later TODO must keep green.
     Pending)。teardown 应增补 `cni0`/`flannel.1` 归属感知清理; 操作规约
     已记 F11 (跑前停 agent + 删 bridge, 跑后复删再启动)。
     2026-11-16 复核: 停后未沉降首跑 69/4 假阴性, 沉降 1–2 min 后同树同二进制 73/0 — 规约补「停后等沉降」一条 (F11)。
+- **As-built (长稳清扫 2026-11-26, P-E)** — golden 清单进入机器登记册: 15 个
+  shard / 100 个 case id (G01–G113) 以 `runner = "golden"` 逐条登记在
+  `e2e/cases.d/*.toml`; `scripts/e2e-coverage.sh` (all-gates 门禁 9) 校验
+  登记册 ↔ `all-gates.sh` BATTERY ↔ index.md done-TODO 覆盖 ↔ 门禁日志里
+  实际出现的 case id (`--logs`); `golden/README.md` 清单行按事实重写。
+
 - **依赖 / Depends on** — T0.1

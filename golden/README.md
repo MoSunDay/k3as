@@ -15,8 +15,12 @@ timestamps/uids/resourceVersions in discovery payloads).
 
 ## Cases
 
-Current inventory: G01-G31 (39 PASS sites; multi-leg cases G25/G26/G30 emit one
-verdict per leg). SKIP policy (Q25): a missing build prerequisite (vendored
+Current inventory: 100 case ids spanning G01-G113 across the 15 shard
+scripts under `scripts/golden/suites/` (multi-leg cases G25/G26/G30 emit one
+verdict per leg; the last full run on the dev host closed 75 PASS + 6 SKIP
+under the foreign-cni0 posture below). The registry of shards and case ids is
+machine-checked by `scripts/e2e-coverage.sh` (all-gates gate 9) against
+`e2e/cases.d/*.toml`. SKIP policy (Q25): a missing build prerequisite (vendored
 containerd bundle, `cc`) SKIPs the whole case rather than failing it — a
 build-configuration state is not a conformance break.
 

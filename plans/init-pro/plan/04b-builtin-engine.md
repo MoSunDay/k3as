@@ -91,6 +91,11 @@ completed engine track; it does not reopen T4.11–T4.14.
   `guard_ancestors` symlink 守卫; `cas.rs`/`stage.rs` `PartGuard` 半写
   part 文件在所有退出路径 (含 panic) 删除 + `ImageStore::open`
   `sweep_part_files`。
+- **As-built (长稳清扫 2026-11-26, P-D K5)** — `engine/launch.rs` `settle`:
+  engine 子进程在预算内不 bind 时 kill + 有界 reap (`ABANDON_GRACE` 5 s,
+  `reap`/`kill_and_reap` 走 blocking pool), 启动失败不再留下活 `Child`
+  (zombie 直到 kubelet 退出)。
+
 - **依赖 / Depends on** — T4.1 (CRI 形状), T0.1 (multicall 派发)
 
 ---
@@ -162,6 +167,10 @@ completed engine track; it does not reopen T4.11–T4.14.
   (SIGKILL/SIGSTOP 例外; E10→137 证明 128+WTERMSIG 映射), E11/B8
   温和停止走 trap 路径; exec 面落在协议脚本 B6/B7 (原计划 E10);
   探针失败回退由 `engine_probe` 单测覆盖; e2e 级注入 Sprint 43 收口裁定不再排期 (Q51 决策面已单测覆盖, 'N4' 名已被 Sprint 42 网络面占用——见 CHANGELOG Sprint 43)。
+- **As-built (长稳清扫 2026-11-26, P-D C1)** — `cli/engine_probe.rs`: 预算
+  到点后的 kill/reap 改 `spawn_blocking` + 有界 (`REAP` 5 s), 预清理
+  liveness 检查 `live()` 300 ms 上限, 不再在 tokio worker 上阻塞轮询。
+
 - **依赖 / Depends on** — T4.11, T4.2
 
 ---
@@ -231,6 +240,15 @@ completed engine track; it does not reopen T4.11–T4.14.
   `-D warnings` 0；golden 73/0 (g24 registry.k8s.io 离线 SKIP, Q25)；
   builtin-image-e2e I1-I8 双跑全绿；runtime-e2e + parity 23/23。
 - **卡点 / Blockers** — none
+- **As-built (长稳清扫 2026-11-26, P-D C5 + K1–K4)** — C5 `engine/server.rs`
+  所有退出路径共享 `teardown`: 删 socket 与 `<socket>.pause-rootfs`
+  (pause 子进程 drop 即 reap)。K1 镜像解包写 `.tmp-<hex>-<pid>` staging
+  目录再 rename 发布, GC/压力清扫对其不可见 (`layers.rs`)。K2 GC sweep 与
+  usage walk 走 blocking pool (`gc_offload`/`usage_offload`,
+  `CriBackend::image_gc` 改 async)。K3 manifest 拉取 `MAX_MANIFEST_BYTES`
+  4 MiB (Content-Length 预检 + 流式封顶)。K4 in-flight 拉取锁表条目改
+  `Weak`, 只随在飞 ref 有界。
+
 - **依赖 / Depends on** — T4.12, T4.3, T6.3
 
 ## T4.14 — 内置引擎宿主根文件系统 (host-rootfs 默认 + host-mounts 注解)

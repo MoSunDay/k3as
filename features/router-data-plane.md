@@ -25,7 +25,12 @@ independently as an ingress gateway. Lives in `crates/router/`.
   in-memory reload (`reload::apply_config` / `RouteConfig.host`).
   Since the long-run sweep (B6) each fold fingerprints the compiled
   config against an `ApplyLedger`: an unchanged fold skips compile +
-  reload, and a failed apply keeps the last good generation.
+  reload, and a failed apply keeps the last good generation. P-D
+  (G1/G2, same sweep): the ingress listener tracks every connection in a
+  `JoinSet` (cap `MAX_CONNS` 4096, header read timeout 30 s, at-cap warn
+  rate-limited to 1/s, 2 s drain grace on shutdown), and a failed
+  nodePort/ClusterIP bind is logged with its cause and retried every
+  `RETRY_TICK` 5 s until the port frees.
 - T5.6 (in progress) - NodePort service plane (Sprint 18, Q28; now on
   the openrusty plane): the kube-proxy-equivalent lives here — see the
   dedicated section below. LB VIP scope remains.

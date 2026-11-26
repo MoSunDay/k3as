@@ -23,7 +23,11 @@ extra paths. Decision: Q43; card: T7.5; detail in
 - `crates/cli/src/anyhome_keeper.rs`: the keeper beat adds a third
   page - LIST pods, filter by annotation, `mkdir -p /pod/<ns>/<name>`
   and each custom server path (`anyhome.rs::prepare_fs_roots` also
-  creates the `pod/` root). Deletion stays ignored (A5).
+  creates the `pod/` root). Deletion stays ignored (A5). Long-run
+  hardening (P-D C3/C4/K8, 2026-11-26): the beat's mkdir/write runs on
+  the blocking pool, an FSMap relist skips a child whose stat raced away
+  (ENOENT) instead of panicking, and every NFS helper exec is bounded at
+  `MOUNT_TIMEOUT` 30 s with `kill_on_drop`.
 - kubelet: zero change - the generic `nfs` volume + `readOnly`
   (volume-level OR mount-level) from Sprint 20 does the work; `ro` is
   client-enforced (CRI readonly bind), same trust model as native k8s

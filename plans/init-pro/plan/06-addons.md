@@ -143,4 +143,11 @@ k3s `pkg/deploy/` auto-deploy machinery.
   上限)。B9 upload 卫生: PATCH 失败 unlink 半成品;
   `sweep_stale_uploads` (`STALE_UPLOAD_SECS` 3600, 每轮 ≤1024 项) 随 boot
   与每次 retention 执行。
+- **As-built (长稳清扫 2026-11-26, P-D B1/B2)** — B1 多架构 index 的子
+  manifest 只被 digest 引用, 过去永不 GC: manifest DELETE 与 tag retention
+  走 `delete_with_children` / `prune_index_children` (`MAX_INDEX_DEPTH` 3),
+  孤儿子镜像与其 blob 级联回收 (带 tag 的子镜像保留)。B2 被引用 blob 的
+  DELETE 答 409 `BLOB_REFERENCED` (`referenced_blob_digests`), 不再能掏空
+  活镜像。
+
 - **依赖 / Depends on** — T0.3

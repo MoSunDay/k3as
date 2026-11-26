@@ -115,6 +115,17 @@ raw stdio frames, then `Exited`; `Ping` → `Pong`; `Shutdown` → `Bye`.
   kubelet always passes it and keeps the engine's stdin piped) the engine
   notices EOF when its kubelet dies, exits and unlinks its own socket, so
   no orphaned engine outlives the kubelet.
+- **Exit-path teardown (P-D C5, same sweep).** Every way out of
+  `engine serve` shares one teardown: the socket file and the
+  `<socket>.pause-rootfs` tree are removed (dropping the pause child reaps
+  it). On the kubelet side (`engine/launch.rs`, K5) an engine that never
+  binds within `SOCKET_WAIT` is killed and reaped within `ABANDON_GRACE`
+  5 s (off the async workers), so a boot failure never leaves a live
+  `Child` behind; image unpack publishes by rename from a
+  `.tmp-<hex>-<pid>` staging dir that no GC/pressure sweep can see (K1),
+  GC and usage walks run on the blocking pool (K2), manifest pulls cap at
+  `MAX_MANIFEST_BYTES` 4 MiB (K3) and the in-flight pull lock table holds
+  `Weak` entries only (K4).
 - **Exit codes.**
 
   | Code | Meaning |

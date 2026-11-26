@@ -37,6 +37,10 @@ the spike ADR, Q25 the as-built ADR, Q26 the CRI-client strategy
   InvalidInput end the loop as `SuperviseExit::FatalSpawn` instead of
   retrying a broken bundle forever; every `ctr` call runs under
   `bounded_output` (`kill_on_drop`, C13).
+- Temp config hygiene (P-D C2, same sweep): the per-launch containerd
+  config (it carries Secret envs) is created `O_EXCL` with mode 0600 and
+  a nonce retry on a name collision, never written through an existing
+  path.
 - Drain = SIGKILL + bounded 10 s wait. Deliberately **no SIGTERM**:
   containerd child-reaping is not guaranteed for a foreign runtime
   (k3s kills the tree too).

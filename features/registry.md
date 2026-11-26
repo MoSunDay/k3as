@@ -67,6 +67,12 @@ patterns excluded from the count. Decision: Q40; card: T6.3; detail in
 - Push client (B7, same sweep): the in-process V2 push runs under a
   whole-push `PUSH_TIMEOUT` of 120 s with a 5 s connect timeout and a
   32 MiB response cap; blob bodies stream from disk (`BlobBody::File`).
+- Index children + blob references (P-D, B1/B2, same sweep): deleting an
+  index manifest (or dropping it through tag retention) cascades over the
+  platform children it named by digest (`delete_with_children`,
+  `MAX_INDEX_DEPTH` 3) and their orphaned blobs; a tagged child survives.
+  A blob still referenced by any manifest answers `DELETE` with 409
+  `BLOB_REFERENCED` instead of hollowing a live image.
 
 ## Evidence
 

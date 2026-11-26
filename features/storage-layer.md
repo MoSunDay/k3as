@@ -87,4 +87,9 @@ at the crate root.
   every `COMPACTION_INTERVAL` 300 s (`cli/storage_dsn.rs`
   `spawn_compaction`, joined by the server-plane drain). The embedded
   store keeps its bounded in-memory ring and is not compacted on a timer.
+- Blocking-pool scans (P-D, G3, same sweep): the synchronous RocksDB
+  iterators behind LIST (`obj/` prefix), watch replay (`log/`) and the
+  compaction range scan run under `spawn_blocking` (`rdb_backend/scan.rs`),
+  never on the reactor thread; the pure `&Store` functions and the locking
+  contract are unchanged.
 - Open tail: the real etcd-gRPC client now lives at T3.4 (HA).
