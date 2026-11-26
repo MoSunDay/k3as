@@ -413,7 +413,8 @@ format.
   `status/conditions → type` + `patch_json_strategic` 单写条件）；
   遗留归他卡：netpol = T4.4（S52 收口, Q64）；wireguard backend informational（F9）；
   F7/F8 两节点跨机 host-gw 为 opt-in 实机证据面（环境门控）；
-  `ingress_listen` CLI flag 接线仍归 T5.5/T5.7（router 侧, 非本卡）。
+  `ingress_listen` CLI flag 接线（router 侧, 非本卡）已由 T5.5 S41 slice 落地
+  （`server --ingress-listen`, 默认关），本卡无遗留。
 - **依赖 / Depends on** — T4.2
 
 ---
