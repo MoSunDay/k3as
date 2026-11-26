@@ -174,6 +174,30 @@ commits: **2ee3eeb** (P-D/P-E/P-F 代码 + 测试 + 脚本) + 本条收口 (docs
   `pick_port` 在 e2e 脚本间重复 (×14+2, 待抽 `scripts/lib/`); soak 的 watch
   drain 仍兼用客户端 `-m 2`。
 
+- **评审遗留 (2026-11-26 提交后评审 + 2026-11-27 收尾登记; 均非阻断,
+  编号以本条为准)**: (1) 中 代码注释标签撞号 — P-D 的 `A1–A8`/`C1–C7`
+  与 P-A `A1–A3`、P-C `C1–C14` 同名, kubelet `K1–K9` 仅裸 `D:` 标签 (K10
+  有标号); 下一批前置: 统一改带批次前缀 (`P-D A1`) 的标签。(2) 中 A7
+  上限为常量非旗标 (`app.rs` `MAX_IN_FLIGHT` 1024 / `REQUEST_TIMEOUT`
+  1800 s), 且在途计数把隧道长轮询 (25 s park, `tunnel_registry.rs`
+  `LONG_POLL_TIMEOUT`) 与 watch 流一并计入 — 大量 parked agent / watch
+  会挤占普通请求的 1024 配额 (503 load-shed); 后续: 长连接不计入或改
+  旗标分池。(3) 低 watch `timeoutSeconds=0` → 预算 0 s 立即结束流
+  (`collection.rs`); 上游语义 (0 = 缺省窗口) 未核实, 后续对齐。(4) 低
+  A8 agent 侧 401 处理 — **收尾已核实 (代码路径)**: `cli/tunnel_dialer.rs`
+  `poll_next` 对 204/200 以外一律 `Err` → `run()` 告警 + 退避 (健康后首发
+  1 s, 上限 15 s) → 循环头 `register()` 旋转 token 后再 park (自愈); 服务端
+  `tunnel/register` 不校验 Node 对象存在 (`or_default()` 重建单项, 路由在
+  authn/authz 对之内), 故 Node 删除 → `forget` 后 re-register 不依赖
+  kubelet 重建 Node; 与验收 T2 (SIGSTOP/SIGCONT 掉隧道 ≤30 s 自愈) 走同一
+  `Err` 分支; 显式 "apiserver 重启 → 401 → re-register" e2e 留作后续
+  (验收脚本 T4)。(5) 低 coverage 证据模式对环境条件子检查脆弱 (无
+  `SKIP <id>` token 的套件, CI 只跑结构模式)。(6) 低 文件红线:
+  `scripts/delivery-e2e.sh` 399/400 (下一批前置: 拆分),
+  `kubelet/engine/backend.rs` 796/800, `kubelet/objects.rs` 792,
+  `kubelet/sync.rs` 791, `cli/runtime.rs` 790。评审结论: 可上线 (有条件) —
+  cni0-free 节点跑 3 个 SKIP 套件 + ≥1 h soak (用户侧)。
+
 **门禁** (P-D/P-E/P-F 最终工作树, `scripts/all-gates.sh` 完整跑 —
 `RESULT: PASS`, gates=11 / 33 行 0 FAIL / 3 SKIP, battery 870s): fmt
 (member-scope) ✓; build --locked ✓; workspace tests **1735/0** (上一条 1673
@@ -192,6 +216,16 @@ fd 25→25, 线程 56→56, SIGTERM 0 s 退出, 重启存活)) + 3 SKIP (service
 TODO → 35 covered / 2 weak-only / 6 exempt / 0 uncovered; 证据模式 31 套件
 日志核对 + 3 skipped); flag-parity **32/32**; SSOT 行手动 (本条)。日志
 `/tmp/init-pro-all-gates.ZKOJvL` (KEEP_LOGS=1)。)
+
+**收尾补遗 (2026-11-27, docs-only; 代码树仍为 `2ee3eeb`, 门禁不重跑)**:
+(1) 独立 soak 默认档 `scripts/soak-e2e.sh` (SOAK_SECONDS=600, 采样 30 s,
+battery 之外独立端口) **PASS — SK1–SK7 7/7, 601 s, EXIT=0**: churn 476 轮
+0 错 (32→33 Build children, 无 tag 双子, 末 tag b466), RSS 70→85M (19
+样本, 界 +64M; 前半程 +9M / 后半程 +6M, 增速放缓), fd 25→25, 线程 53→53,
+SIGTERM 0 s 退出 exit 0, 重启存活 (keeper + registry newest-N 10 标签 +
+keep b1); 日志 `/tmp/soak600.log` (宿主本地)。(2) A8 agent 侧 401 路径
+核实结论见上 "评审遗留 (4)"。(3) ≥1 h soak 与 cni0-free 节点套件仍为
+上线条件 (用户侧), 本补遗不改变评审结论。
 
 ## Sweep — 长稳确认 + Bug 清扫 (P-A / P-B / P-C, 非 sprint; 无 TODO 状态变化) (2026-11-26)
 

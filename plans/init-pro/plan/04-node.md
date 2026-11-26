@@ -576,6 +576,10 @@ format.
   park 曾先 `or_default()` 建节点项再查 token (任意节点名可撑大注册表),
   改 `get_mut` 查找; Node 对象删除即 `forget_node_tunnel` (token/
   generation/parked 请求随节点消失)。
+  agent 侧 (`cli/tunnel_dialer.rs`) park 401 → `poll_next` Err → 退避 →
+  `register()` 旋转 token 自愈 (与 T2 掉隧道同一分支; `tunnel/register`
+  不校验 Node 存在, Node 删除后不依赖 kubelet 重建); 收尾 2026-11-27
+  代码路径核实, 600 s 独立 soak PASS 见 CHANGELOG 收尾补遗。
 
 - **依赖 / Depends on** — T4.2, T1.2
 
