@@ -37,8 +37,10 @@ Ingress host 精确匹配 x path 路由, 由 Ingress 集 + 实时 Endpoints 编�
   翻转 + verdict 台账 (本片未动 golden; `realtraffic.sh` 仅头注释更新,
   该 suite 起 server 不带旗标, 默认姿态钉死不变)。
 - **文档 (SSOT)**: `features/router-data-plane.md` Deferred 列表移除该
-  项并记旗标; `plans/init-pro/plan/05-ingress-lua.md` As-built;
-  `plans/init-pro/index.md` T5.5 行同步 (S41 slice 已落, 整体 not-started)。
+  项并记旗标; `plans/init-pro/plan/05-ingress-lua.md` As-built (T5.4/T5.5/
+  T5.7 的 "flag unwired" 现状表述同步清除); `plans/init-pro/index.md` T5.5
+  行同步 (S41 slice 已落, 整体 not-started); `features/changelog.md` 顶部
+  记 router-data-plane 条目。
 
 **As-built (双节点实测)**: node02 `k3as-server.service` 加
 `--ingress-listen 0.0.0.0:80` → 日志 `ingress gateway up addr=0.0.0.0:80`;
@@ -47,6 +49,12 @@ REST 创建 Ingress `default/code-grapher` (hosts `192.168.31.57` +
 生效; :80 按 Host 路由 200 (页面/`/api/health`/静态资源), `/ws/events`
 101, 未匹配 Host 404, 既有 `echo.k3as.local` 不受影响, NodePort 30080
 保留。网关绑定失败 (如端口占用) 仅 WARN 并禁用网关, server 继续。
+
+**部署二进制**: node02 (server + node-agent) 现役 `41435ea` + 本片的
+**release 构建** (sha256 `a25b8165…`; 集群首次 release 上线), 非 main
+HEAD; node04 agent 未动 (仍为旧 debug `1eac9422`, 兼容)。main 另含
+`f63be2e` parkToken 等——若从 main 重建部署, 须**同时升级两端 agent**
+(旧 agent 对新 apiserver 隧道会 401)。
 
 **门禁**: fmt (member-scope) ✓; build --locked ✓; workspace tests
 **1514/0** (S54 基线 1511 + 本片 3); clippy --all-targets -D warnings ✓;

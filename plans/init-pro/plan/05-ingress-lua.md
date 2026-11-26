@@ -153,8 +153,9 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
   - The 503-on-empty-Endpoints gate wraps both gateway kinds (ST5).
   - NodePort ServiceLB plane (Q28) ported onto the openrusty plane;
     `NodePortConfig.ingress_listen: Option<SocketAddr>` (default `None`)
-    exists for the Ingress listener but the **CLI flag is not wired yet**
-    (debt, see T5.5/T5.7).
+    exists for the Ingress listener; its CLI flag is wired by the S41
+    slice (2026-11-25: `server --ingress-listen <addr:port>`, default
+    OFF — see T5.5 As-built).
 
 - **验收手段 / Acceptance**
   - Apply an Ingress; `curl` the host → routed to the right Service; a
@@ -198,11 +199,12 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
     upstream change (replaces "long-lived cosocket drain"); shared-dict
     equivalent state (openrusty has none in v1); dynamic cert issuance /
     TLS reload equivalent.
-  - Wire the `NodePortConfig.ingress_listen` CLI flag (currently
-    default-`None` and unwired — T5.4 debt).
-  - **S41 slice — ingress_listen CLI 接线（快赢）**: infra config 增
-    字段 + `--ingress-listen <addr:port>` 从 noop 表转 wired (parity
-    快照 +1) + `runtime.rs` 透传（现状 `NodePortConfig::default()`
+  - Wire the `NodePortConfig.ingress_listen` CLI flag — done by the S41
+    slice below (default stays `None`).
+  - **S41 slice — ingress_listen CLI 接线（快赢; 已落 2026-11-25, 实际
+    落点与验收见下方 As-built）**: 原设想 infra config 增字段 +
+    `--ingress-listen <addr:port>` 从 noop 表转 wired (parity 快照 +1) +
+    `runtime.rs` 透传（现状 `NodePortConfig::default()`
     断链）。golden 处置: `realtraffic.sh` G70–G72 从 "钉死无监听" 翻转
     为 "带旗标正向断言 + 不带旗标保留一个负面变体"，verdict 台账与
     `golden/README.md` 行同 sprint 更新（G70 双向钉死纪律）。T5.5
@@ -228,8 +230,10 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
 
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
-- **卡点 / Blockers** — `ingress_listen` flag unwired (recorded Sprint 25);
-    shared-dict/drain/cert equivalents must be re-shaped for openrusty.
+- **卡点 / Blockers** — shared-dict/drain/cert equivalents must be
+    re-shaped for openrusty; golden G70–G72 with-flag positive variant +
+    verdict ledger outstanding (S41 slice follow-up). The `ingress_listen`
+    flag unwiring (recorded Sprint 25) was cleared by the S41 slice.
 - **依赖 / Depends on** — T5.4
 
 ---
@@ -306,6 +310,7 @@ targets, `state::from_config`, `reload::apply_config`, `RouteConfig.host`).
 - **状态 / Status** — not-started
 - **证据 / Evidence** — —
 - **卡点 / Blockers** — Scope of "platform policy extension" — keep v1
-    read-only from non-Router code. Shares the T5.5 openrusty-reload /
-    `ingress_listen` unwiring debt (Sprint 25).
+    read-only from non-Router code. Shares the T5.5 openrusty-reload
+    debt (Sprint 25; its `ingress_listen` CLI-unwiring part was cleared
+    by the S41 slice).
 - **依赖 / Depends on** — T5.4, T4.5

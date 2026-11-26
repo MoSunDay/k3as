@@ -4,6 +4,22 @@ Feature-centric deltas, reverse chronological. NOT a duplicate of
 `CHANGELOG.md` (which is sprint-centric with auditable test counts); this
 ties changes to feature cards. Detailed per-sprint history: `CHANGELOG.md`.
 
+- router-data-plane / cli: S41 slice (2026-11-25, non-sprint; T5.5) —
+  `server --ingress-listen <addr:port>` (env `INIT_PRO_INGRESS_LISTEN`)
+  wires `ServerCmd.ingress_listen` → `ServerBind` →
+  `NodePortConfig.ingress_listen`, so `init-pro server` starts the
+  openrusty Ingress gateway (host exact-match x path routes compiled from
+  networking.k8s.io/v1 Ingress + live Endpoints) instead of always running
+  with `NodePortConfig::default()` (`ingress_listen: None`). Default OFF;
+  init-pro extension flag (not in the k3s noop table —
+  `--disable-proxy-tunnel` precedent; parity `live_help t55-ingress`);
+  Table B fatal with `--disable-kube-proxy` (gateway rides the
+  nodeport-plane thread); malformed addr fatal; bind failure only WARNs
+  and disables the gateway. Clears the Sprint 25 "ingress_listen CLI flag
+  unwired" debt. Tests 1511 → 1514. Deployed (release build) on the
+  2-node cluster: node02 `--ingress-listen 0.0.0.0:80`, Ingress
+  `default/code-grapher` routed by Host — details in the CHANGELOG Slice
+  entry. Follow-up: golden G70–G72 with-flag variant + verdict ledger.
 - builtin-hostroot: Sprint 44 (2026-11-19) — T4.14 host-rootfs default
   (**Q55**): `--builtin-rootfs host|image` (default **host**; env
   `INIT_PRO_BUILTIN_ROOTFS`) — host mode runs containers on the host
