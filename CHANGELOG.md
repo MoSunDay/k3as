@@ -227,8 +227,26 @@ battery 之外独立端口) **PASS — SK1–SK7 7/7, 601 s, EXIT=0**: churn 476
 样本, 界 +64M; 前半程 +9M / 后半程 +6M, 增速放缓), fd 25→25, 线程 53→53,
 SIGTERM 0 s 退出 exit 0, 重启存活 (keeper + registry newest-N 10 标签 +
 keep b1); 日志 `/tmp/soak600.log` (宿主本地)。(2) A8 agent 侧 401 路径
-核实结论见上 "评审遗留 (4)"。(3) ≥1 h soak 与 cni0-free 节点套件仍为
-上线条件 (用户侧), 本补遗不改变评审结论。
+核实结论见上 "评审遗留 (4)"。(3) 上线条件闭环 (2026-11-27 晚, 用户授权后
+代理执行; docs-only): `main` 已 push (`11cbb19..829c7f4`, 7 commits);
+**≥1 h soak FAIL — SOAK_SECONDS=3600, 3602 s, EXIT=1, 6/7**: SK1 boot ✓;
+SK2 churn 2867 轮 (≥1800) 0 错 (192 bumps → 193 Build children, 无 tag
+双子, 末 tag b2866); **SK3 memory ✗ — RSS 51→138M (+87M > 界 +64M)**, 119
+样本全程线性 (前/后半程 1.50 / 1.51M/min, ≈32 KB/轮, 无平台 — (1) 的
+「增速放缓」是 600 s 短窗假象); SK4 fd 25→25 ✓; SK5 线程 55→55 ✓; SK6
+SIGTERM 0 s exit 0 ✓; SK7 重启存活 ✓ (keeper + newest-N 10 标签 + keep
+b1, observedTag=b2866); 日志 `/tmp/soak3600.log` (宿主本地; systemd 瞬态
+单元 `k3as-soak3600` — 后台进程无法跨工具调用存活, 故挂 PID 1 跑满)。
+每轮 churn = ConfigMap create+patch+delete + Deployment replicas patch, 每
+15 轮 pipeline bump (Build + archive 推送 + status CAS), 每 10 轮 2 s watch
+drain (客户端预算关流)。**下一批前置 (阻断上线): RSS 线性增长定性** —
+候选 (a) watch drain 后服务端 watcher/缓冲未释放 (~286 次, ~300 KB/次
+量级); (b) rdb 修订历史内存索引 / RocksDB block+index/filter 随数据集增长
+(≥4 写/轮, ~7.5 KB/修订量级); (c) apiserver 对象缓存; 以「churn 不开
+watch」与「二次 1 h 看 cache 封顶」两组对照切分。cni0-free 节点套件
+(service-traffic / flannel / netpol) 仍待资源: 宿主 node04 为活集群节点
+(cni0 `10.244.0.1/24`, agent 在用), 三套件共存门按 `10.42` 前缀判定必
+SKIP, 不可删 cni0。评审结论改为 **not ready** (SK3 未过; 代码树不变)。
 
 ## Sweep — 长稳确认 + Bug 清扫 (P-A / P-B / P-C, 非 sprint; 无 TODO 状态变化) (2026-11-26)
 
